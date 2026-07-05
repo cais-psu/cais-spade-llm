@@ -16,12 +16,11 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
 
 
 @dataclass
 class ClickState:
-    pixel: Optional[Tuple[int, int]] = None
+    pixel: tuple[int, int] | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,7 +79,7 @@ def list_devices(rs) -> None:
         print(f"  {index}. {name} | serial={serial} | firmware={firmware}")
 
 
-def deproject_pixel(depth_frame, rs, pixel: Tuple[int, int]) -> Optional[Tuple[float, float, float, float]]:
+def deproject_pixel(depth_frame, rs, pixel: tuple[int, int]) -> tuple[float, float, float, float] | None:
     x, y = pixel
     width = depth_frame.get_width()
     height = depth_frame.get_height()
@@ -97,7 +96,7 @@ def deproject_pixel(depth_frame, rs, pixel: Tuple[int, int]) -> Optional[Tuple[f
     return depth_m, point_m[0], point_m[1], point_m[2]
 
 
-def print_location(depth_frame, rs, pixel: Tuple[int, int], label: str) -> None:
+def print_location(depth_frame, rs, pixel: tuple[int, int], label: str) -> None:
     location = deproject_pixel(depth_frame, rs, pixel)
     x, y = pixel
 

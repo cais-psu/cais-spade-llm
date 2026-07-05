@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 import json
 import os
+import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import InitVar, dataclass, field
+from functools import lru_cache
 from pathlib import Path
-import xml.etree.ElementTree as ET
-from typing import Any, Dict, Mapping, Optional
+from typing import Any
 
 from cais_spade_llm.product.order import load_product_order_file
 
@@ -23,14 +24,14 @@ class ProductProfile:
     """Static product configuration and read-only product-domain helpers."""
 
     name: str
-    product_specification_file: Optional[str] = None
-    product_order_file: Optional[str] = None
-    product_geometry_file: Optional[str] = None
-    safety_file: Optional[str] = None
-    instruction_override: Optional[str] = None
-    precomputed_bundle: Optional[Dict[str, Any]] = None
+    product_specification_file: str | None = None
+    product_order_file: str | None = None
+    product_geometry_file: str | None = None
+    safety_file: str | None = None
+    instruction_override: str | None = None
+    precomputed_bundle: dict[str, Any] | None = None
     robot_env: str = ""
-    product_geometry: Dict[str, Any] = field(default_factory=dict)
+    product_geometry: dict[str, Any] = field(default_factory=dict)
     logger: InitVar[Any | None] = None
 
     def __post_init__(self, logger: Any | None) -> None:
@@ -55,7 +56,7 @@ class ProductProfile:
 
     @staticmethod
     def read_safety_file(
-        safety_file: Optional[str],
+        safety_file: str | None,
         *,
         logger: Any | None = None,
     ) -> str:
@@ -76,7 +77,7 @@ class ProductProfile:
                 logger.exception(f"[Product] Failed to read safety file: {exc}")
         return ""
 
-    def read_spec_text(self, *, logger: Any | None = None) -> Optional[str]:
+    def read_spec_text(self, *, logger: Any | None = None) -> str | None:
         """Return instruction text: prefer explicit override, then spec file."""
         return self.read_spec_file(
             self.product_specification_file,
@@ -86,11 +87,11 @@ class ProductProfile:
 
     @staticmethod
     def read_spec_file(
-        product_specification_file: Optional[str],
+        product_specification_file: str | None,
         *,
-        instruction_override: Optional[str] = None,
+        instruction_override: str | None = None,
         logger: Any | None = None,
-    ) -> Optional[str]:
+    ) -> str | None:
         if instruction_override:
             text = instruction_override.strip()
             if text:
@@ -113,20 +114,20 @@ class ProductProfile:
                     logger.exception(f"[Product] Failed to read spec: {exc}")
         return None
 
-    def extract_requirement_text(self, *, logger: Any | None = None) -> Optional[str]:
+    def extract_requirement_text(self, *, logger: Any | None = None) -> str | None:
         """Load requirement text from the configured product specification file."""
         return self.extract_requirement_file(self.product_specification_file, logger=logger)
 
-    def read_product_order(self, *, logger: Any | None = None) -> Optional[Dict[str, Any]]:
+    def read_product_order(self, *, logger: Any | None = None) -> dict[str, Any] | None:
         """Load product-order JSON if configured."""
         return self.read_product_order_file(self.product_order_file, logger=logger)
 
     @staticmethod
     def read_product_order_file(
-        product_order_file: Optional[str],
+        product_order_file: str | None,
         *,
         logger: Any | None = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         if not product_order_file:
             return None
         try:
@@ -150,10 +151,10 @@ class ProductProfile:
 
     @staticmethod
     def extract_requirement_file(
-        product_specification_file: Optional[str],
+        product_specification_file: str | None,
         *,
         logger: Any | None = None,
-    ) -> Optional[str]:
+    ) -> str | None:
         if not product_specification_file:
             return None
 
@@ -179,11 +180,11 @@ class ProductProfile:
 
     @staticmethod
     def load_product_geometry(
-        geometry_file: Optional[str],
+        geometry_file: str | None,
         *,
-        robot_env: Optional[str] = None,
+        robot_env: str | None = None,
         logger: Any | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Load product geometry JSON, selecting the configured environment block."""
         if not geometry_file:
             return {}
@@ -217,8 +218,8 @@ class ProductProfile:
         self,
         part_name: str,
         *,
-        product_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        product_geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Extract placement geometry for a single part from loaded product geometry."""
         geometry = self.product_geometry if product_geometry is None else product_geometry
         return self.geometry_for_part_from_geometry(part_name, geometry)
@@ -226,8 +227,8 @@ class ProductProfile:
     @staticmethod
     def geometry_for_part_from_geometry(
         part_name: str,
-        product_geometry: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        product_geometry: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not product_geometry:
             return {}
         board = product_geometry.get("assembly_board", {})

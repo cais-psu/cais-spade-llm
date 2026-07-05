@@ -25,8 +25,8 @@ def _primitive_summary(
     effects: dict[str, Any],
 ) -> str:
     base = description or "Bridge primitive"
-    pre_keys = ", ".join(sorted(str(key) for key in preconditions.keys())) if preconditions else ""
-    effect_keys = ", ".join(sorted(str(key) for key in effects.keys())) if effects else ""
+    pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
+    effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
     detail_parts: list[str] = []
     if pre_keys:
         detail_parts.append(f"pre: {pre_keys}")
@@ -1097,7 +1097,7 @@ def _preview_pick_targets_output(
         "z": 0.0,
     }
     current_pose = (
-        _normalized_xyz_pose((((grounding_context or {}).get("resource") or {}).get("current_pose")))
+        _normalized_xyz_pose(((grounding_context or {}).get("resource") or {}).get("current_pose"))
         or _normalized_xyz_pose(dict((snapshot.get("resource_facets") or {}).get("manipulator") or {}).get("current_pose"))
         or {"x": 0.0, "y": 0.0, "z": 0.0}
     )

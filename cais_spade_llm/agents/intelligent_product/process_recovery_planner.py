@@ -7,7 +7,7 @@ import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from cais_spade_llm.prompts import build_replan_prompt
 
@@ -2493,7 +2493,7 @@ class ProcessRecoveryPlanner:
         function_owner_agent is replaced by capable_agents: [resource1, resource2, ...]
         so the LLM sees each capability once and knows which resources can execute it.
         """
-        seen: Dict[str, Dict[str, Any]] = {}
+        seen: dict[str, dict[str, Any]] = {}
         for row in catalog:
             fn = row.get("function")
             if not fn:

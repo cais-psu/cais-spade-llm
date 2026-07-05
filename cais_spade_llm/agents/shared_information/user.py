@@ -2,11 +2,15 @@
 
 # agents/shared_information/user.py
 from __future__ import annotations
-import json, logging
+
+import json
+import logging
+
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
+
 
 class User(Agent):
     """Minimal operator agent that tracks inbox messages and task statuses."""

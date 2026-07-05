@@ -11,22 +11,26 @@ import os
 import re
 import select
 import shlex
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any
 
-from cais_spade_llm.ui import digital_twin
+from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
+    DEFAULT_BRIDGE_RUNTIME_DATA_DIR,
+)
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
 from cais_spade_llm.bundles.models import (
     BUNDLE_STATUS_DRAFT,
@@ -34,14 +38,10 @@ from cais_spade_llm.bundles.models import (
     BUNDLE_STATUS_STALE,
     BUNDLE_STATUS_VERIFIED,
     atomic_json_write,
-    slug,
     sha256_file,
     sha256_text,
+    slug,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
-    DEFAULT_BRIDGE_RUNTIME_DATA_DIR,
-)
-from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.product.order import (
     derive_ordering_constraints_from_safety,
     geometry_slot_names,
@@ -49,6 +49,7 @@ from cais_spade_llm.product.order import (
     validate_product_order,
 )
 from cais_spade_llm.product.profile import ProductProfile
+from cais_spade_llm.ui import digital_twin
 
 log = logging.getLogger("ui.bridge")
 
@@ -102,7 +103,7 @@ def _legacy_safety_preview_dir() -> Path:
 class SystemBridge:
     """Singleton that owns the SPADE lifecycle and exposes agent state to the UI."""
 
-    _instance: Optional[SystemBridge] = None
+    _instance: SystemBridge | None = None
     _HW_IP_DEFAULTS = {
         "xarm6": "192.168.1.240",
         "ur5e": "192.168.1.172",
@@ -337,7 +338,7 @@ class SystemBridge:
         self.cca = None
 
         # Embedded XMPP server process.
-        self._xmpp_proc: Optional[subprocess.Popen] = None
+        self._xmpp_proc: subprocess.Popen | None = None
         self._xmpp_host: str = "127.0.0.1"
         self._xmpp_port: int = 5222
         self._gazebo_reset_pose_cache: dict[str, tuple[float, float, float, float, float, float]] | None = None
@@ -346,8 +347,8 @@ class SystemBridge:
         self.system_running: bool = False
         self._starting: bool = False
         self._stopping: bool = False
-        self.last_error: Optional[str] = None
-        self.last_notice: Optional[str] = None
+        self.last_error: str | None = None
+        self.last_notice: str | None = None
         self._safety_preview_failures: dict[str, dict[str, Any]] = {}
 
         # Configuration (set from UI before start).
@@ -387,7 +388,7 @@ class SystemBridge:
 
         # ROS2 subprocess tracking.
         self._ros2_procs: dict[str, subprocess.Popen] = {}
-        self._teleop_server_proc: Optional[subprocess.Popen] = None
+        self._teleop_server_proc: subprocess.Popen | None = None
         self._teleop_server_ros_domain_id: int | None = None
         self._teleop_server_lock = threading.Lock()
         self._digital_twin_sim_modes: dict[str, str] = {
@@ -405,7 +406,7 @@ class SystemBridge:
         self._ur5e_controller_status_cache: dict[str, dict[str, Any]] = {}
         self._ur5e_controller_auto_repair_last_attempt: dict[str, float] = {}
         self._gazebo_prewarm_lock = threading.Lock()
-        self._gazebo_prewarm_thread: Optional[threading.Thread] = None
+        self._gazebo_prewarm_thread: threading.Thread | None = None
         self._gazebo_prewarm_pending: set[str] = set()
         self._gazebo_prewarm_controllers: dict[str, Any] = {}
         self._gazebo_prewarm_cancel = threading.Event()
@@ -426,7 +427,7 @@ class SystemBridge:
         self._agent_creator_cached: Any | None = None
         self._agent_creator_prefetch_started: bool = False
         self._agent_creator_prefetch_lock = threading.Lock()
-        self._agent_creator_prefetch_thread: Optional[threading.Thread] = None
+        self._agent_creator_prefetch_thread: threading.Thread | None = None
         self._agent_runtime_loop: asyncio.AbstractEventLoop | None = None
         self._agent_runtime_thread: threading.Thread | None = None
         self._agent_runtime_lock = threading.Lock()
@@ -4444,9 +4445,7 @@ class SystemBridge:
             for entry in bridge_runtime_dir.iterdir():
                 if entry.name in reserved_dirs:
                     continue
-                if entry.is_file() and entry.suffix.lower() in {".txt", ".json", ".md"}:
-                    entries_to_archive.append(entry)
-                elif entry.is_dir() and run_dir_pattern.match(entry.name):
+                if entry.is_file() and entry.suffix.lower() in {".txt", ".json", ".md"} or entry.is_dir() and run_dir_pattern.match(entry.name):
                     entries_to_archive.append(entry)
             if entries_to_archive:
                 archive.mkdir(parents=True, exist_ok=True)
@@ -9671,11 +9670,11 @@ class SystemBridge:
 
         try:
             from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
-                GazeboPickPlaceController,
                 UR5E_JOINT_NAMES,
                 UR5E_JOINT_STATES_TOPIC,
                 XARM6_JOINT_NAMES,
                 XARM6_JOINT_STATES_TOPIC,
+                GazeboPickPlaceController,
             )
         except Exception:
             log.exception("Gazebo prewarm failed importing controller modules for %s", robot_key)
@@ -10015,11 +10014,7 @@ class SystemBridge:
             self._kill_stale_gazebo_helpers()
             self._force_kill_gazebo_core(reason="prelaunch_restart")
 
-        if name == "hardware_ur5e_moveit":
-            err = self._start_ur5e_rtde_trajectory_server("hardware_ur5e_rtde_trajectory_server")
-            if err:
-                return f"UR5e RTDE trajectory server is not ready: {err}"
-        elif name == "hardware_dual_robots_moveit":
+        if name == "hardware_ur5e_moveit" or name == "hardware_dual_robots_moveit":
             err = self._start_ur5e_rtde_trajectory_server("hardware_ur5e_rtde_trajectory_server")
             if err:
                 return f"UR5e RTDE trajectory server is not ready: {err}"
@@ -10265,11 +10260,11 @@ class SystemBridge:
 
         try:
             from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
-                GazeboPickPlaceController,
                 UR5E_JOINT_NAMES,
                 UR5E_JOINT_STATES_TOPIC,
                 XARM6_JOINT_NAMES,
                 XARM6_JOINT_STATES_TOPIC,
+                GazeboPickPlaceController,
             )
         except Exception as exc:
             return None, False, f"{robot_key}: controller import failed ({exc})"

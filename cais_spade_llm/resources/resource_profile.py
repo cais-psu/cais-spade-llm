@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
-
+from typing import Any
 
 FacetBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 OccupancyBuilder = Callable[[Any, dict[str, Any]], dict[str, Any]]

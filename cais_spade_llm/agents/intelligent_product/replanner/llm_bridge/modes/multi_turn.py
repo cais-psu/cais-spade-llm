@@ -23,6 +23,11 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_s
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_grounding_compiler import (
     compile_grounded_outline_task,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
+    expected_snapshot_from_bridge_snapshot,
+    extract_step_output,
+    validate_and_project_steps_with_trace,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_state import (
     _apply_outline_task_effects,
     _build_outline_task_type_lookup,
@@ -30,11 +35,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
     _outline_task_predecessors,
     _task_findings_block_projected_state,
     infer_outline_predecessors,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
-    expected_snapshot_from_bridge_snapshot,
-    extract_step_output,
-    validate_and_project_steps_with_trace,
 )
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
@@ -4112,28 +4112,27 @@ async def _handle_finalize_phase(
 
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_outline_generation import (
-    _projected_outline_validation_context,
-    _handle_outline_single_pass,
     _handle_outline_incremental,
-    _handle_outline_incremental_validated,
     _handle_outline_incremental_candidates_validated,
+    _handle_outline_incremental_validated,
     _handle_outline_phase,
+    _handle_outline_single_pass,
+    _projected_outline_validation_context,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+    _accepted_program_row,
     _active_primitive_outline_event,
+    _handle_primitive_generation_phase,
     _missing_primitive_outline_events,
-    _primitive_feedback_row,
     _primitive_catalog_for_resource,
+    _primitive_feedback_row,
+    _primitive_grounding_context,
     _primitive_resource_sequence_findings,
     _primitive_start_snapshot,
-    _primitive_grounding_context,
     _validate_single_event_primitive_steps,
-    _accepted_program_row,
     build_primitive_generation_prompt_context,
     generate_primitive_batch_with_llm_agent,
-    _handle_primitive_generation_phase,
 )
-
 
 _PHASE_HANDLERS = {
     "grounding": _handle_grounding_phase,

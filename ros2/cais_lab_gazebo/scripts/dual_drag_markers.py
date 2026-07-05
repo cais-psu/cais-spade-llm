@@ -13,23 +13,28 @@ from pathlib import Path
 import rclpy
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
-from interactive_markers.menu_handler import MenuHandler
 from interactive_markers.interactive_marker_server import InteractiveMarkerServer
-from moveit_msgs.msg import DisplayTrajectory, RobotState, RobotTrajectory
+from interactive_markers.menu_handler import MenuHandler
 from moveit_msgs.action import ExecuteTrajectory
+from moveit_msgs.msg import DisplayTrajectory, RobotState, RobotTrajectory
 from moveit_msgs.srv import GetCartesianPath, GetStateValidity
 from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
-from visualization_msgs.msg import InteractiveMarker, InteractiveMarkerControl, InteractiveMarkerFeedback, Marker
+from visualization_msgs.msg import (
+    InteractiveMarker,
+    InteractiveMarkerControl,
+    InteractiveMarkerFeedback,
+    Marker,
+)
 
 try:
-    from keyboard_teleop import KeyboardTeleop, ROBOTS, wait_for_joint_positions
+    from keyboard_teleop import ROBOTS, KeyboardTeleop, wait_for_joint_positions
 except Exception:
     import sys
 
     sys.path.append(str(Path(__file__).resolve().parent))
-    from keyboard_teleop import KeyboardTeleop, ROBOTS, wait_for_joint_positions
+    from keyboard_teleop import ROBOTS, KeyboardTeleop, wait_for_joint_positions
 
 
 UR5E_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"

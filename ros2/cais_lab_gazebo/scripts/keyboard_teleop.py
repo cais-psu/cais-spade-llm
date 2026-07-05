@@ -50,18 +50,16 @@ import tty
 from pathlib import Path
 
 import rclpy
-from rclpy.node import Node
-from rclpy.action import ActionClient
-from rclpy.callback_groups import ReentrantCallbackGroup
-
-from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+import tf2_ros
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
-
-import tf2_ros
+from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 try:
     from control_msgs.action import FollowJointTrajectory, GripperCommand

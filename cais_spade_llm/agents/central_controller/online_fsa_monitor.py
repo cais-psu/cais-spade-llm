@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 class OnlineFsaMonitor:
@@ -17,13 +17,13 @@ class OnlineFsaMonitor:
     This is NOT the safety monitor; it is the execution monitor.
     """
 
-    def __init__(self, fsa: Dict[str, Any]) -> None:
+    def __init__(self, fsa: dict[str, Any]) -> None:
         self.logger = logging.getLogger("OnlineFsaMonitor")
         self.fsa = fsa or {}
 
         A = (self.fsa or {}).get("A") or {}
-        self.current_state: Optional[str] = A.get("x0")
-        self.transitions: List[Dict[str, Any]] = A.get("Tr") or []
+        self.current_state: str | None = A.get("x0")
+        self.transitions: list[dict[str, Any]] = A.get("Tr") or []
         self._all_states: set[str] = {
             str(state)
             for state in (A.get("X") or [])
@@ -31,8 +31,8 @@ class OnlineFsaMonitor:
         }
 
         # Build (from_state, event) -> transition map
-        self._tr_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._from_map: Dict[str, List[Dict[str, Any]]] = {}
+        self._tr_map: dict[tuple[str, str], dict[str, Any]] = {}
+        self._from_map: dict[str, list[dict[str, Any]]] = {}
         self._all_task_ids: set[str] = set()
         for tr in self.transitions:
             key = (tr.get("from"), tr.get("event"))
@@ -48,20 +48,20 @@ class OnlineFsaMonitor:
         history_dir = Path("cais_spade_llm/monitor/history")
         history_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = history_dir / "online_fsa_trace.jsonl"
-        self.last_event: Optional[Dict[str, Any]] = None
+        self.last_event: dict[str, Any] | None = None
         # Track task outcomes for higher-level replanning context.
         self.completed_task_ids: set[str] = set()
         self.failed_task_ids: set[str] = set()
 
-    def matches_fsa(self, fsa: Dict[str, Any]) -> bool:
+    def matches_fsa(self, fsa: dict[str, Any]) -> bool:
         """Return True when the provided FSA is structurally identical."""
         return (self.fsa or {}) == (fsa or {})
 
-    def has_state(self, state: Optional[str]) -> bool:
+    def has_state(self, state: str | None) -> bool:
         """Return True when *state* exists in this monitor's FSA."""
         return bool(state) and str(state) in self._all_states
 
-    def runtime_progress_snapshot(self) -> Dict[str, List[str]]:
+    def runtime_progress_snapshot(self) -> dict[str, list[str]]:
         """Return the current runtime prefix as task-id lists."""
         return {
             "completed_task_ids": sorted(str(task_id) for task_id in self.completed_task_ids),
@@ -69,7 +69,7 @@ class OnlineFsaMonitor:
             "failed_task_ids": sorted(str(task_id) for task_id in self.failed_task_ids),
         }
 
-    def filter_task_ids(self, task_ids: List[str] | None) -> List[str]:
+    def filter_task_ids(self, task_ids: list[str] | None) -> list[str]:
         """Keep task ids that still exist in this FSA."""
         return [
             str(task_id).strip()
@@ -77,7 +77,7 @@ class OnlineFsaMonitor:
             if str(task_id).strip() and str(task_id).strip() in self._all_task_ids
         ]
 
-    def restore_from_prior_monitor(self, prior_monitor: "OnlineFsaMonitor" | None) -> bool:
+    def restore_from_prior_monitor(self, prior_monitor: OnlineFsaMonitor | None) -> bool:
         """Carry over live runtime state from *prior_monitor* when the state still exists."""
         if prior_monitor is None or not self.has_state(prior_monitor.current_state):
             return False
@@ -106,9 +106,9 @@ class OnlineFsaMonitor:
     def restore_runtime_progress(
         self,
         *,
-        completed_task_ids: List[str] | None = None,
-        running_task_ids: List[str] | None = None,
-        failed_task_ids: List[str] | None = None,
+        completed_task_ids: list[str] | None = None,
+        running_task_ids: list[str] | None = None,
+        failed_task_ids: list[str] | None = None,
     ) -> None:
         """Replay the executed runtime prefix into a fresh monitor for a repaired FSA."""
         A = (self.fsa or {}).get("A") or {}
@@ -149,7 +149,7 @@ class OnlineFsaMonitor:
                     task_id,
                 )
 
-    def _log_event(self, record: Dict[str, Any]) -> None:
+    def _log_event(self, record: dict[str, Any]) -> None:
         try:
             with self.history_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
@@ -230,7 +230,7 @@ class OnlineFsaMonitor:
         self.last_event = record
         self._log_event(record)
 
-    def _parse_state(self, state: str) -> Dict[str, Dict[str, Any]]:
+    def _parse_state(self, state: str) -> dict[str, dict[str, Any]]:
         """
         Parse a plan FSA state string into per-resource info.
         Example state:
@@ -252,7 +252,7 @@ class OnlineFsaMonitor:
             }
           }
         """
-        result: Dict[str, Dict[str, Any]] = {}
+        result: dict[str, dict[str, Any]] = {}
         if not state:
             return result
 
@@ -280,7 +280,7 @@ class OnlineFsaMonitor:
                 }
         return result
 
-    def _reachable_from_state(self, start_state: Optional[str]) -> tuple[set[str], set[str]]:
+    def _reachable_from_state(self, start_state: str | None) -> tuple[set[str], set[str]]:
         """
         Return (reachable_task_ids, reachable_states) from a given state.
         """
@@ -288,7 +288,7 @@ class OnlineFsaMonitor:
 
     def _reachable_from_state_filtered(
         self,
-        start_state: Optional[str],
+        start_state: str | None,
         *,
         blocked_events: set[str],
     ) -> tuple[set[str], set[str]]:
@@ -298,7 +298,7 @@ class OnlineFsaMonitor:
         """
         reachable_tasks: set[str] = set()
         reachable_states: set[str] = set()
-        queue: List[str] = [start_state] if start_state else []
+        queue: list[str] = [start_state] if start_state else []
         while queue:
             s = queue.pop(0)
             if not s or s in reachable_states:
@@ -315,7 +315,7 @@ class OnlineFsaMonitor:
                     queue.append(nxt)
         return reachable_tasks, reachable_states
 
-    def _next_task_ids_from_state(self, state: Optional[str]) -> List[str]:
+    def _next_task_ids_from_state(self, state: str | None) -> list[str]:
         """
         Tasks whose START transitions are enabled from the given state.
         """
@@ -325,7 +325,7 @@ class OnlineFsaMonitor:
             if tr.get("task_id") and str(tr.get("event", "")).endswith(".start")
         })
 
-    def running_task_ids_from_state(self, state: Optional[str] = None) -> List[str]:
+    def running_task_ids_from_state(self, state: str | None = None) -> list[str]:
         """
         Task IDs currently marked as running in a plan FSA state.
         """
@@ -355,8 +355,8 @@ class OnlineFsaMonitor:
     def build_replan_context(
         self,
         *,
-        failure_event: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        failure_event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Gather online replanning context using the current plan FSA state.
 
@@ -373,7 +373,7 @@ class OnlineFsaMonitor:
 
         # Optional: descendants of the failed task in the FSA.
         # These are "relevant tasks" to focus on during replanning.
-        failed_task_descendant_ids: List[str] = []
+        failed_task_descendant_ids: list[str] = []
         failed_task_id = None
         if failure_event:
             failed_task_id = (

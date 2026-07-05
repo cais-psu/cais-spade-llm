@@ -19,7 +19,6 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-
 PART_MAP = {
     "SG": "gear_small",
     "MG": "gear_medium",

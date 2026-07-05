@@ -17,7 +17,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from ament_index_python import get_package_share_directory, get_package_prefix
+from ament_index_python import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     AppendEnvironmentVariable,
@@ -30,12 +30,12 @@ from launch.actions import (
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from launch.event_handlers import OnProcessExit
-from uf_ros_lib.uf_robot_utils import get_xacro_content, generate_ros2_control_params_temp_file
+from uf_ros_lib.uf_robot_utils import generate_ros2_control_params_temp_file, get_xacro_content
 
 ROBOT_BASE_Y = 0.50
 CONTROLLER_MANAGER_TIMEOUT_SEC = '60.0'

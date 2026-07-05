@@ -12,7 +12,6 @@ from cais_spade_llm.resources.resource_primitives import (
 )
 from cais_spade_llm.resources.resource_profile import get_resource_profile
 
-
 _DEFAULT_CANDIDATE_BOUND = 5
 
 
@@ -1582,11 +1581,11 @@ def _primitive_catalog_description_for_prompt(raw_entry: dict[str, Any]) -> str:
         summary_parts.append(f"{primitive_kind} primitive")
     if preconditions:
         summary_parts.append(
-            "preconditions: " + ", ".join(sorted(str(key) for key in preconditions.keys()))
+            "preconditions: " + ", ".join(sorted(str(key) for key in preconditions))
         )
     if effects:
         summary_parts.append(
-            "effects: " + ", ".join(sorted(str(key) for key in effects.keys()))
+            "effects: " + ", ".join(sorted(str(key) for key in effects))
         )
     if summary_parts:
         return "; ".join(summary_parts)
@@ -1656,7 +1655,7 @@ def _primitive_signature_card(
             ]
             if not required:
                 params = dict(entry.get("params") or {})
-                required = [str(key).strip() for key in params.keys() if str(key).strip()]
+                required = [str(key).strip() for key in params if str(key).strip()]
             signatures.append(f"{name}({','.join(required)})")
         if signatures:
             lines.append(f"- {resource_jid}: " + "; ".join(signatures))

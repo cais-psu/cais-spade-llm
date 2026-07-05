@@ -18,7 +18,6 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-
 ARM_JOINTS = [
     "shoulder_pan_joint",
     "shoulder_lift_joint",

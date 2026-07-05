@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.process_recovery_planner import (
     ProcessRecoveryPlanner,
@@ -18,16 +19,16 @@ from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bid
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import (
     LlmBridgeReplannerMixin,
 )
-from cais_spade_llm.prompts import (
-    build_requirement_parse_prompt,
-    build_task_expansion_prompt,
-)
 from cais_spade_llm.product.order import (
     derive_ordering_constraints_from_safety,
     part_place_geometry,
     validate_product_order,
 )
 from cais_spade_llm.product.profile import ProductProfile
+from cais_spade_llm.prompts import (
+    build_requirement_parse_prompt,
+    build_task_expansion_prompt,
+)
 
 
 class ProcessPlanner(LlmBridgeReplannerMixin):
@@ -41,12 +42,12 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self.product_agent = product_agent
         self.resource_agents = list(resource_agents)
         self.logger = product_agent.logger
-        self.nodes: List[Dict[str, Any]] = []
-        self.phase_to_node: Dict[str, Dict[str, Any]] = {}
-        self.global_fsa: Optional[Dict[str, Any]] = None
-        self.last_bridge_debug: Dict[str, Any] = {}
-        self.product_order_runtime: Dict[str, Any] = {}
-        self.last_product_order_artifact: Dict[str, Any] = {}
+        self.nodes: list[dict[str, Any]] = []
+        self.phase_to_node: dict[str, dict[str, Any]] = {}
+        self.global_fsa: dict[str, Any] | None = None
+        self.last_bridge_debug: dict[str, Any] = {}
+        self.product_order_runtime: dict[str, Any] = {}
+        self.last_product_order_artifact: dict[str, Any] = {}
         self.recovery_planner = ProcessRecoveryPlanner(self)
         self.recovery_planner.bind_methods()
 
@@ -373,7 +374,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             "product_bidding": deepcopy(row["product_bidding"]),
         }
 
-    def recompile_committed_product_order_fsa(self) -> Optional[Dict[str, Any]]:
+    def recompile_committed_product_order_fsa(self) -> dict[str, Any] | None:
         """Compile the active-window FSA for currently executable product-order task nodes."""
         active_nodes = self.active_product_order_fsa_nodes()
         if not active_nodes:
@@ -1557,7 +1558,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         # OPTIONAL: fill in trivial per-requirement chains
         # for tasks that have no predecessors/successors at all.
         # This keeps things backwards-compatible if the LLM omits edges.
-        by_req: Dict[str, List[Dict[str, Any]]] = {}
+        by_req: dict[str, list[dict[str, Any]]] = {}
         for n in new_nodes:
             rid = n.get("requirement_id")
             by_req.setdefault(rid, []).append(n)
@@ -1635,9 +1636,9 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
     # ------------------------------------------------------------------ #
     # Scheduling helpers
     # ------------------------------------------------------------------ #
-    def _extract_conflict_task_ids(self, violations: list[dict], *, source: str) -> Set[str]:
+    def _extract_conflict_task_ids(self, violations: list[dict], *, source: str) -> set[str]:
         """Normalize offline/online feedback into a conflict task ID set."""
-        conflict_task_ids: Set[str] = set()
+        conflict_task_ids: set[str] = set()
 
         def _add_ids(values: Any) -> None:
             if isinstance(values, (list, tuple, set)):
@@ -1687,7 +1688,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                             conflict_task_ids.add(str(rt["id"]))
 
         return conflict_task_ids
-    def _ensure_graph_consistency(self, nodes: Optional[List[Dict[str, Any]]] = None) -> None:
+    def _ensure_graph_consistency(self, nodes: list[dict[str, Any]] | None = None) -> None:
         """
         Helper to ensure that if A lists B as a predecessor, 
         B lists A as a successor (and vice versa).
@@ -1735,7 +1736,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         except (TypeError, ValueError):
             return 10**9
 
-    def _task_order_key_within_requirement(self, node: Dict[str, Any]) -> tuple[int, str]:
+    def _task_order_key_within_requirement(self, node: dict[str, Any]) -> tuple[int, str]:
         return (
             self._task_sequence_index_key(node.get("sequence_index")),
             str(node.get("id", "")),
@@ -1743,15 +1744,15 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def _ordered_requirement_resource_tasks(
         self,
-        tasks: List[Dict[str, Any]],
-        node_map: Dict[str, Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        tasks: list[dict[str, Any]],
+        node_map: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         if len(tasks) <= 1:
             return list(tasks)
 
         task_ids = {str(task.get("id", "")) for task in tasks if task.get("id")}
-        local_successors: Dict[str, List[str]] = {tid: [] for tid in task_ids}
-        indegree: Dict[str, int] = {tid: 0 for tid in task_ids}
+        local_successors: dict[str, list[str]] = {tid: [] for tid in task_ids}
+        indegree: dict[str, int] = {tid: 0 for tid in task_ids}
 
         for task in tasks:
             tid = str(task.get("id", ""))
@@ -1772,7 +1773,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             [tid for tid, degree in indegree.items() if degree == 0],
             key=lambda tid: self._task_order_key_within_requirement(node_map[tid]),
         )
-        ordered_ids: List[str] = []
+        ordered_ids: list[str] = []
 
         while ready:
             tid = ready.pop(0)
@@ -1796,7 +1797,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def _normalize_same_resource_chains(
         self,
-        nodes: Optional[List[Dict[str, Any]]] = None,
+        nodes: list[dict[str, Any]] | None = None,
     ) -> None:
         """
         Rewrite tasks sharing the same resource_jid into one strict local chain.
@@ -1819,7 +1820,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         if not node_map:
             return
 
-        resource_to_requirements: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
+        resource_to_requirements: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(dict)
         for task in task_nodes:
             resource_jid = str(task.get("resource_jid", "")).strip()
             if not resource_jid:
@@ -1835,8 +1836,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 requirement_groups.items(),
                 key=lambda item: self._requirement_order_key(item[0]),
             )
-            local_chain: List[Dict[str, Any]] = []
-            local_task_ids: Set[str] = set()
+            local_chain: list[dict[str, Any]] = []
+            local_task_ids: set[str] = set()
 
             for _requirement_id, requirement_tasks in ordered_requirements:
                 ordered_tasks = self._ordered_requirement_resource_tasks(
@@ -1879,13 +1880,13 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
         self._ensure_graph_consistency(working_nodes)
 
-    def _validate_task_graph(self, nodes: Optional[List[Dict[str, Any]]] = None) -> None:
+    def _validate_task_graph(self, nodes: list[dict[str, Any]] | None = None) -> None:
         """Reject invalid task graphs before FSA compilation or execution."""
         working_nodes = nodes if nodes is not None else self.nodes
         tasks = [n for n in working_nodes if n.get("type") == "task"]
         node_map = {n["id"]: n for n in tasks}
-        successors: Dict[str, List[str]] = {nid: [] for nid in node_map}
-        indegree: Dict[str, int] = {nid: 0 for nid in node_map}
+        successors: dict[str, list[str]] = {nid: [] for nid in node_map}
+        indegree: dict[str, int] = {nid: 0 for nid in node_map}
 
         for nid, node in node_map.items():
             for pid in node.get("predecessors", []) or []:
@@ -1900,7 +1901,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     indegree[nid] += 1
 
         q = deque(sorted(nid for nid, degree in indegree.items() if degree == 0))
-        visited: List[str] = []
+        visited: list[str] = []
 
         while q:
             nid = q.popleft()
@@ -1926,15 +1927,15 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
     def _extract_task_cycle(
         self,
-        node_map: Dict[str, Dict[str, Any]],
-        successors: Dict[str, List[str]],
-    ) -> List[str]:
+        node_map: dict[str, dict[str, Any]],
+        successors: dict[str, list[str]],
+    ) -> list[str]:
         """Return one cycle path for diagnostics, e.g. A -> B -> A."""
-        color: Dict[str, int] = {nid: 0 for nid in node_map}
-        stack: List[str] = []
-        stack_index: Dict[str, int] = {}
+        color: dict[str, int] = {nid: 0 for nid in node_map}
+        stack: list[str] = []
+        stack_index: dict[str, int] = {}
 
-        def _dfs(nid: str) -> List[str]:
+        def _dfs(nid: str) -> list[str]:
             color[nid] = 1
             stack_index[nid] = len(stack)
             stack.append(nid)
@@ -1960,19 +1961,19 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                     return cycle
         return []
 
-    def _find_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+    def _find_node(self, node_id: str) -> dict[str, Any] | None:
         """Return the first node with the matching id (or None)."""
         for n in self.nodes:
             if n.get("id") == node_id:
                 return n
         return None
 
-    def next_ready_task(self) -> Optional[Dict[str, Any]]:
+    def next_ready_task(self) -> dict[str, Any] | None:
         """Select the next task whose predecessors are all satisfied."""
         ready_nodes = self.graph_ready_task_nodes()
         return ready_nodes[0] if ready_nodes else None
 
-    def graph_ready_task_nodes(self) -> list[Dict[str, Any]]:
+    def graph_ready_task_nodes(self) -> list[dict[str, Any]]:
         """Return pending task nodes whose DAG predecessors are completed."""
         def _pred_satisfied(status: Any) -> bool:
             s = str(status) if status else ""
@@ -1984,7 +1985,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 return False
             return _pred_satisfied(pred.get("status"))
 
-        ready_nodes: list[Dict[str, Any]] = []
+        ready_nodes: list[dict[str, Any]] = []
         for node in self.nodes:
             if node.get("type") != "task":
                 continue
@@ -2025,7 +2026,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
     # ------------------------------------------------------------------ #
     # Build Global FSA
     # ------------------------------------------------------------------ #
-    def compile_global_fsa(self) -> Dict[str, Any]:
+    def compile_global_fsa(self) -> dict[str, Any]:
         """Compile the task DAG into a global plan FSA for offline/online monitoring."""
 
         # ---- extract task nodes ----
@@ -2044,8 +2045,8 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 token = token.split("@", 1)[0]
             return token.lower()
 
-        tool_meta_by_resource_fn: Dict[tuple[str, str], dict[str, Any]] = {}
-        fallback_tool_meta_by_fn: Dict[str, dict[str, Any]] = {}
+        tool_meta_by_resource_fn: dict[tuple[str, str], dict[str, Any]] = {}
+        fallback_tool_meta_by_fn: dict[str, dict[str, Any]] = {}
         for row in tools_catalog:
             if not isinstance(row, dict):
                 continue
@@ -2078,7 +2079,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             return catalog_meta
 
         # ---- deterministic per-resource local order ----
-        res_to_tasks: Dict[str, List[str]] = defaultdict(list)
+        res_to_tasks: dict[str, list[str]] = defaultdict(list)
         for t in tasks:
             res = t.get("resource_jid")
             if not res:
@@ -2094,7 +2095,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
 
         resources = sorted(res_to_tasks.keys())
 
-        pos: Dict[str, Dict[str, int]] = {
+        pos: dict[str, dict[str, int]] = {
             res: {tid: i for i, tid in enumerate(res_to_tasks[res])}
             for res in resources
         }

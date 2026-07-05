@@ -19,11 +19,12 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +88,16 @@ def _normalize_reasoning_effort_for_model(model_name: str, effort: str) -> str:
         return "none"
     return normalized_effort
 
+from cais_spade_llm.agents.central_controller.central_controller_agent import (
+    CentralControllerAgent,
+)
+from cais_spade_llm.agents.central_controller.online_safety_monitor import (
+    OnlineSafetyMonitor,
+)
+from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
+    _validate_grounded_rule_result,
+    generate_recovery_safety_bundle,
+)
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.product_agent import (
     ProductAgent,
@@ -96,8 +107,13 @@ from cais_spade_llm.agents.intelligent_product.product_agent import (
 from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
     ProductRecoveryController,
 )
-from cais_spade_llm.agents.central_controller.central_controller_agent import (
-    CentralControllerAgent,
+from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
+    build_failure_event,
+    failure_context_from_scenario_config,
+    load_failure_scenario_config,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
+    write_bridge_artifacts,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
     snapshot_matches_expected,
@@ -109,23 +125,8 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
     _resolve_context_ref,
     generate_primitive_batch_with_llm_agent,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
-    write_bridge_artifacts,
-)
 from cais_spade_llm.resources.resource_primitives import (
     get_resource_bridge_snapshot,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
-    build_failure_event,
-    failure_context_from_scenario_config,
-    load_failure_scenario_config,
-)
-from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
-    generate_recovery_safety_bundle,
-    _validate_grounded_rule_result,
-)
-from cais_spade_llm.agents.central_controller.online_safety_monitor import (
-    OnlineSafetyMonitor,
 )
 
 
@@ -2242,7 +2243,7 @@ def _build_live_style_failure_payload(
     failed_resource_jid = str(failed_task.get("resource_jid") or "xarm6@localhost").strip()
     failed_function_name = str(failed_task.get("function_name") or "").strip()
     scenario_config = load_failure_scenario_config("lg_slippage")
-    drop_pose = deepcopy((dict(scenario_config.get("injection") or {}).get("drop_pose") or {}))
+    drop_pose = deepcopy(dict(scenario_config.get("injection") or {}).get("drop_pose") or {})
     return build_failure_event(
         failed_task_id=FAILED_TASK_ID,
         failed_resource_jid=failed_resource_jid,
@@ -7530,9 +7531,7 @@ async def run_case3_bridge_dryrun(
 
     if stop_before_primitive_generation and _dryrun_outline_approval_reached(
         multi_turn_session
-    ):
-        await _collect_dryrun_recovery_safety_generation(wait=True)
-    elif _dryrun_primitive_program_ready_payload(
+    ) or _dryrun_primitive_program_ready_payload(
         prepared_bridge_request,
         multi_turn_session=multi_turn_session,
     ):

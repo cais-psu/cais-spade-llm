@@ -1,16 +1,25 @@
 """Shared base class for all SPADE agents that communicate via an OpenAI-powered LLM."""
 
 from __future__ import annotations
-import os, json, time, asyncio, logging
-from pathlib import Path
-from typing import Any, Callable, Optional, Dict, List, Iterable
 
+import asyncio
+import json
+import logging
+import os
+import time
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
 from openai import OpenAI  # REST client for GPT models.
 from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 
-from cais_spade_llm.function_analyzer import FunctionAnalyzer  # Introspects agent methods for tool schemas.
-from cais_spade_llm.prompts import PROMPT_MAS_AGENT, BASE_INSTRUCTIONS, ROLE_BLOCKS
-from dotenv import load_dotenv
+from cais_spade_llm.function_analyzer import (
+    FunctionAnalyzer,  # Introspects agent methods for tool schemas.
+)
+from cais_spade_llm.prompts import BASE_INSTRUCTIONS, PROMPT_MAS_AGENT, ROLE_BLOCKS
+
 load_dotenv()
 
 _client = OpenAI()  # Single shared client so we reuse HTTP sessions and rate-limit buckets.
@@ -78,8 +87,8 @@ class LlmAgent(Agent):
     """Mixin-style agent that wires logging, tool analysis, and LLM access into SPADE agents."""
 
     # Shared tool catalogue cache so every agent has access to the same tool metadata.
-    _TOOLS_CATALOG: List[Dict[str, Any]] | None = None
-    _TOOLS_BY_FUNC: Dict[str, Dict[str, Any]] | None = None
+    _TOOLS_CATALOG: list[dict[str, Any]] | None = None
+    _TOOLS_BY_FUNC: dict[str, dict[str, Any]] | None = None
     _TOOLS_CATALOG_PATH: Path = Path("cais_spade_llm/initialization/tools.json")
 
     def __init__(
@@ -87,12 +96,12 @@ class LlmAgent(Agent):
         jid: str,
         password: str,
         *,
-        name: Optional[str] = None,
+        name: str | None = None,
         agent_role: str = "",
-        model: Optional[str] = None,
-        non_function_model: Optional[str] = None,
-        instructions: Optional[str] = None,
-        function_names: Optional[List[str]] = None,
+        model: str | None = None,
+        non_function_model: str | None = None,
+        instructions: str | None = None,
+        function_names: list[str] | None = None,
     ) -> None:
         """Capture metadata that every LLM-aware agent needs (identity, prompts, and available tools)."""
         super().__init__(jid, password)
@@ -157,7 +166,7 @@ class LlmAgent(Agent):
 
         # tools registry
         self.function_analyzer = FunctionAnalyzer()
-        self.executables: Dict[str, Callable[..., Any]] = {}
+        self.executables: dict[str, Callable[..., Any]] = {}
         if function_names:
             # Only register methods that physically exist on the subclass to prevent runtime failures.
             for fn in function_names:
@@ -165,7 +174,7 @@ class LlmAgent(Agent):
                     self.executables[fn] = getattr(self, fn)
 
         # Cached JSON schema definitions consumed by OpenAI's tool-calling interface.
-        self.function_info: List[Dict[str, Any]] = []
+        self.function_info: list[dict[str, Any]] = []
         self._rebuild_tool_schemas()
 
         # System prompt includes base role instructions plus any user overrides.
@@ -177,7 +186,7 @@ class LlmAgent(Agent):
 
     @staticmethod
     def _build_agent_instructions(
-        *, agent_name: str, agent_role: str, overrides: Optional[str] = None
+        *, agent_name: str, agent_role: str, overrides: str | None = None
     ) -> str:
         """Compose the system prompt: base instructions + role-specific block + optional overrides."""
         base = PROMPT_MAS_AGENT + "\n" + BASE_INSTRUCTIONS  # Shared prologue for every agent.
@@ -219,18 +228,18 @@ class LlmAgent(Agent):
         }
 
     @property
-    def tools_catalog(self) -> List[Dict[str, Any]]:
+    def tools_catalog(self) -> list[dict[str, Any]]:
         self.__class__._load_shared_tools_catalogue()
         return LlmAgent._TOOLS_CATALOG or []
 
     @property
-    def tools_by_func(self) -> Dict[str, Dict[str, Any]]:
+    def tools_by_func(self) -> dict[str, dict[str, Any]]:
         self.__class__._load_shared_tools_catalogue()
         return LlmAgent._TOOLS_BY_FUNC or {}
 
     def _rebuild_tool_schemas(self) -> None:
         """Convert bound executable methods into JSON schema definitions for tool calling."""
-        tools: List[Dict[str, Any]] = []
+        tools: list[dict[str, Any]] = []
         for fn_name, fn in self.executables.items():
             try:
                 analyzed = self.function_analyzer.analyze_function(fn)
@@ -266,7 +275,7 @@ class LlmAgent(Agent):
     # Resource capability helpers (shared by product/controller agents)
     # ------------------------------------------------------------------ #
     def _capability_catalogue(
-        self, resource_agents: Optional[Iterable[Any]] = None
+        self, resource_agents: Iterable[Any] | None = None
     ) -> dict[str, set[str]]:
         """
         Build a map of capability -> set of values across resource agents.
@@ -284,7 +293,7 @@ class LlmAgent(Agent):
         return caps
 
     def _static_caps_overview(
-        self, resource_agents: Optional[Iterable[Any]] = None
+        self, resource_agents: Iterable[Any] | None = None
     ) -> str:
         """Human-friendly string summarizing capabilities for prompt grounding."""
         caps = self._capability_catalogue(resource_agents)
@@ -296,16 +305,16 @@ class LlmAgent(Agent):
 
     async def ask_llm(
         self,
-        prompt: str | Dict[str, Any],
+        prompt: str | dict[str, Any],
         *,
         with_functions: bool = True,
         force_tool: bool = False,
         temperature: float = 0.0,
-    ) -> Dict[str, Any] | str:
+    ) -> dict[str, Any] | str:
         """Call the configured LLM, optionally exposing this agent's tool catalogue to force tool selection."""
         def _call():
             """Blocking helper executed in a thread so SPADE behaviours stay async friendly."""
-            msgs: List[Dict[str, Any]] = []
+            msgs: list[dict[str, Any]] = []
             if self.instructions:
                 msgs.append({"role": "system", "content": self.instructions})
             # Allow callers to send either raw text or structured dicts (the latter is auto-serialized).
@@ -362,11 +371,11 @@ class LlmAgent(Agent):
         self,
         prompt: str,
         *,
-        response_format: Dict[str, Any],
-        tools: List[Dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, Dict[str, Any]], Any] | None = None,
+        response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
         max_tool_rounds: int = 3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Call LLM with structured output + optional tool use (v3 bridge).
 
         Parameters
@@ -389,14 +398,14 @@ class LlmAgent(Agent):
         dict:
             The parsed structured response from the LLM.
         """
-        def _call() -> Dict[str, Any]:
-            msgs: List[Dict[str, Any]] = []
+        def _call() -> dict[str, Any]:
+            msgs: list[dict[str, Any]] = []
             if self.instructions:
                 msgs.append({"role": "system", "content": self.instructions})
             msgs.append({"role": "user", "content": prompt})
 
             for _ in range(max_tool_rounds + 1):
-                kwargs: Dict[str, Any] = {
+                kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": msgs,
                     "reasoning_effort": self.reasoning_effort,

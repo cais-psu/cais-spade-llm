@@ -8,13 +8,13 @@ from __future__ import annotations
 import inspect
 import json
 import typing
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
-from typing import Union, Iterable
+from typing import Union
 
-import yaml                                 # ← NEW
-from collections import defaultdict
+import yaml  # ← NEW
+
 
 @dataclass
 class VariableDescription:
@@ -43,7 +43,7 @@ class FunctionAnalyzer:
         origin = typing.get_origin(py_type)
 
         # list[...] / List[...]
-        if origin in (list, typing.List):
+        if origin in (list, list):
             elem = typing.get_args(py_type)[0] if typing.get_args(py_type) else str
             return {
                 "type": "array",
@@ -55,7 +55,7 @@ class FunctionAnalyzer:
             return {"type": "array", "items": {"type": "string"}}
 
         # dict / Dict[...] → opaque object
-        if origin in (dict, typing.Dict) or py_type is dict:
+        if origin in (dict, dict) or py_type is dict:
             return {"type": "object"}
 
         # primitive

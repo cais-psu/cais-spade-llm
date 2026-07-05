@@ -6,9 +6,9 @@ from .gazebo_pick_place_controller import (
 from .hardware_pick_place_controller import (
     HardwarePickPlaceController,
     UR5eHardwareController,
-    XArm6HardwareController,
     UR5eRG2GripperController,
     UR5eRG2GripperControllerSettings,
+    XArm6HardwareController,
 )
 
 __all__ = [

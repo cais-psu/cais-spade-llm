@@ -213,7 +213,7 @@ def _launch_section(bridge: SystemBridge) -> None:
                     ur5e_ping.set_text(_format_ping("UR5e", ur5e_entry))
                     xarm_ping_icon.props(f"color={_ping_color(xarm_entry)}")
                     ur5e_ping_icon.props(f"color={_ping_color(ur5e_entry)}")
-                    all_ok = all((hw_links.get(r, {}).get("reachable", False) for r in ("xarm6", "ur5e")))
+                    all_ok = all(hw_links.get(r, {}).get("reachable", False) for r in ("xarm6", "ur5e"))
                     if all_ok:
                         hw_warning.set_visibility(False)
                     else:

@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-    build_multi_turn_session_seed,
-    execute_multi_turn_bridge,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_adapter import (
     adapt_bridge_resource_snapshot,
     bridge_resource_capabilities,
     resolve_bridge_resource_type,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
+    build_multi_turn_session_seed,
+    execute_multi_turn_bridge,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
@@ -28,6 +28,7 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
 )
+
 
 class BridgeSessionMixin:
     @staticmethod
@@ -473,13 +474,7 @@ class BridgeSessionMixin:
             ).lower()
 
             matches = False
-            if rule_id and rule_id in active_rule_id_set:
-                matches = True
-            elif rule_resource_tokens and resource_tokens.intersection(rule_resource_tokens):
-                matches = True
-            elif destination and destination in location_tokens:
-                matches = True
-            elif any(part_token in search_blob for part_token in part_tokens):
+            if rule_id and rule_id in active_rule_id_set or rule_resource_tokens and resource_tokens.intersection(rule_resource_tokens) or destination and destination in location_tokens or any(part_token in search_blob for part_token in part_tokens):
                 matches = True
 
             if not matches:
@@ -1191,7 +1186,7 @@ class BridgeSessionMixin:
                     or dict(snapshot.get("resource_core") or {}).get("resource_type")
                     or entry.get("resource_type")
                     or dict(entry.get("resource_core") or {}).get("resource_type")
-                    or dict((entry.get("bridge_snapshot") or {})).get("resource_type")
+                    or dict(entry.get("bridge_snapshot") or {}).get("resource_type")
                     or "resource"
                 ),
                 snapshot=snapshot,
@@ -2770,7 +2765,7 @@ class BridgeSessionMixin:
             output_schema = dict(raw_item.get("output_schema") or {})
             output_fields = [
                 str(field).strip()
-                for field in output_schema.keys()
+                for field in output_schema
                 if str(field).strip()
             ]
             if output_fields:
@@ -2967,7 +2962,7 @@ class BridgeSessionMixin:
         prepared_bridge_request["grounding_context"] = deepcopy(grounding_context)
 
         normalized_part_tracker = deepcopy(part_tracker)
-        normalized_parts_ctx = dict((grounding_context.get("parts") or {}))
+        normalized_parts_ctx = dict(grounding_context.get("parts") or {})
         for part_name in sorted(
             {
                 str(name).strip()

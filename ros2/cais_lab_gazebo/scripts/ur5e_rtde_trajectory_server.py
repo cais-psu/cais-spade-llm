@@ -10,8 +10,9 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import rclpy
 from control_msgs.action import FollowJointTrajectory
@@ -20,7 +21,6 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
-
 
 ARM_JOINTS = [
     "shoulder_pan_joint",

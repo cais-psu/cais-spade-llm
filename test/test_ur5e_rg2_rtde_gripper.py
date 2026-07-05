@@ -9,22 +9,21 @@ from types import SimpleNamespace
 import pytest
 
 from cais_spade_llm.resources.robot.hardware_pick_place_controller import (
-    HardwarePickPlaceController,
     TAUGHT_FUNCTIONS_ROOT,
+    HardwarePickPlaceController,
     UR5eRG2GripperController,
     UR5eRG2GripperControllerSettings,
 )
 from cais_spade_llm.resources.robot.robot_tasks import execute_robot_task
 from cais_spade_llm.ui.bridge import SystemBridge
-from ros2.cais_lab_gazebo.scripts import digital_twin_sync
-from ros2.cais_lab_gazebo.scripts import ur5e_rtde_trajectory_server
+from ros2.cais_lab_gazebo.scripts import digital_twin_sync, ur5e_rtde_trajectory_server
 from ros2.cais_lab_gazebo.scripts.ur5e_rg2_rtde_gripper import (
     _build_arg_parser,
     _default_status_path,
     _force_for_position,
     _normalize_xmlrpc_path,
-    _rg2_status_payload,
     _resolve_backend,
+    _rg2_status_payload,
     _settle_sec_for_position,
     _width_mm_from_position,
     _xmlrpc_url,
@@ -1364,9 +1363,9 @@ def test_digital_twin_snapshot_worker_accumulates_interleaved_joint_states() -> 
 
 
 def test_ur5e_gazebo_mirror_uses_smoothing_helpers() -> None:
-    assert digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC == pytest.approx(0.12)
-    assert digital_twin_sync.UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC == pytest.approx(0.05)
-    assert digital_twin_sync.UR5E_MIRROR_MIN_JOINT_DELTA_RAD == pytest.approx(0.0010)
+    assert pytest.approx(0.12) == digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC
+    assert pytest.approx(0.05) == digital_twin_sync.UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC
+    assert pytest.approx(0.0010) == digital_twin_sync.UR5E_MIRROR_MIN_JOINT_DELTA_RAD
     assert digital_twin_sync._mirror_point_time_sec("ur5e") == pytest.approx(
         digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC
     )
@@ -1438,14 +1437,14 @@ def test_ur5e_gazebo_mirror_uses_smoothing_helpers() -> None:
 def test_dual_replay_timing_defaults_are_stable_slow() -> None:
     from cais_spade_llm.ui.bridge import SystemBridge
 
-    assert digital_twin_sync.REPLAY_SPEED_SCALE == pytest.approx(1.0)
-    assert digital_twin_sync.DEFAULT_REPLAY_WAYPOINT_DURATION_SEC == pytest.approx(2.0)
-    assert digital_twin_sync.MAX_REPLAY_JOINT_VEL_DEG_S == pytest.approx(25.0)
-    assert digital_twin_sync.UR5E_REPLAY_MAX_JOINT_VEL_DEG_S == pytest.approx(10.0)
-    assert digital_twin_sync.MOVE_GROUP_REPLAY_VELOCITY_SCALING == pytest.approx(0.25)
-    assert SystemBridge._DIGITAL_TWIN_REPLAY_SPEED_SCALE == pytest.approx(1.0)
-    assert SystemBridge._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC == pytest.approx(2.0)
-    assert SystemBridge._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S == pytest.approx(25.0)
+    assert pytest.approx(1.0) == digital_twin_sync.REPLAY_SPEED_SCALE
+    assert pytest.approx(2.0) == digital_twin_sync.DEFAULT_REPLAY_WAYPOINT_DURATION_SEC
+    assert pytest.approx(25.0) == digital_twin_sync.MAX_REPLAY_JOINT_VEL_DEG_S
+    assert pytest.approx(10.0) == digital_twin_sync.UR5E_REPLAY_MAX_JOINT_VEL_DEG_S
+    assert pytest.approx(0.25) == digital_twin_sync.MOVE_GROUP_REPLAY_VELOCITY_SCALING
+    assert pytest.approx(1.0) == SystemBridge._DIGITAL_TWIN_REPLAY_SPEED_SCALE
+    assert pytest.approx(2.0) == SystemBridge._DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC
+    assert pytest.approx(25.0) == SystemBridge._DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S
 
 
 def test_snapshot_worker_init_failure_returns_detailed_message(monkeypatch) -> None:
@@ -2539,12 +2538,12 @@ def test_digital_twin_sync_ur5e_defaults_to_rtde_action_and_balanced_mirror() ->
         digital_twin_sync.ROBOTS["ur5e"]["hardware_trajectory_action"]
         == "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
     )
-    assert digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC == pytest.approx(0.12)
-    assert digital_twin_sync.UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC == pytest.approx(0.05)
-    assert digital_twin_sync.UR5E_MIRROR_MIN_JOINT_DELTA_RAD == pytest.approx(0.0010)
-    assert digital_twin_sync.MIRROR_POINT_TIME_SEC == pytest.approx(0.1)
-    assert digital_twin_sync.MIRROR_MIN_PUBLISH_PERIOD_SEC == pytest.approx(0.0)
-    assert digital_twin_sync.MIRROR_MIN_JOINT_DELTA_RAD == pytest.approx(0.0)
+    assert pytest.approx(0.12) == digital_twin_sync.UR5E_MIRROR_POINT_TIME_SEC
+    assert pytest.approx(0.05) == digital_twin_sync.UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC
+    assert pytest.approx(0.0010) == digital_twin_sync.UR5E_MIRROR_MIN_JOINT_DELTA_RAD
+    assert pytest.approx(0.1) == digital_twin_sync.MIRROR_POINT_TIME_SEC
+    assert pytest.approx(0.0) == digital_twin_sync.MIRROR_MIN_PUBLISH_PERIOD_SEC
+    assert pytest.approx(0.0) == digital_twin_sync.MIRROR_MIN_JOINT_DELTA_RAD
     assert digital_twin_sync._mirror_point_time_sec("ur5e") == pytest.approx(0.12)
     assert digital_twin_sync._mirror_min_publish_period_sec("ur5e") == pytest.approx(0.05)
     assert digital_twin_sync._mirror_min_joint_delta_rad("ur5e") == pytest.approx(0.0010)

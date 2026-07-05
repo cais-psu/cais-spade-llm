@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from nicegui import ui
 
-
 _COLORS = {
     "idle": "grey",
     "at_pick": "blue",

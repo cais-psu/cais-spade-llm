@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Automatic IFRA LinkAttacher bridge for xArm6 + UR5e grippers."""
 
+import importlib
 import math
 import os
 import sys
-import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -110,7 +109,7 @@ class AutoLinkAttacher(Node):
 
         # Preferred link order for ATTACH/DETACH. xarm uses link6 as the stable
         # fixed joint owner; ur5e keeps its configured fallback order.
-        self.attach_link_candidates: Dict[str, List[str]] = {
+        self.attach_link_candidates: dict[str, list[str]] = {
             # link_tcp/link_eef are not exposed as Gazebo physics links in this setup.
             # Use link6 as the fixed joint owner so released parts are not pinned to one finger.
             'xarm': [
@@ -156,17 +155,17 @@ class AutoLinkAttacher(Node):
         else:
             self.get_logger().warn('gazebo_msgs/ModelStates not available; using static/fallback part poses')
 
-        self.joint_positions: Dict[str, float] = {}
+        self.joint_positions: dict[str, float] = {}
         self.part_positions = self._load_part_positions()
 
-        self.xarm_closed: Optional[bool] = None
-        self.ur5e_closed: Optional[bool] = None
-        self.attached_by_robot: Dict[str, Optional[str]] = {
+        self.xarm_closed: bool | None = None
+        self.ur5e_closed: bool | None = None
+        self.attached_by_robot: dict[str, str | None] = {
             'xarm': None,
             'ur5e': None,
         }
-        self.attached_owner_by_model: Dict[str, str] = {}
-        self.attached_link_by_robot: Dict[str, Optional[str]] = {
+        self.attached_owner_by_model: dict[str, str] = {}
+        self.attached_link_by_robot: dict[str, str | None] = {
             'xarm': None,
             'ur5e': None,
         }
@@ -174,15 +173,15 @@ class AutoLinkAttacher(Node):
         self.open_counts = {'xarm': 0, 'ur5e': 0}
 
         self.pending_future = None
-        self.pending_action: Optional[str] = None
-        self.pending_robot: Optional[str] = None
-        self.pending_model: Optional[str] = None
-        self.pending_link: Optional[str] = None
+        self.pending_action: str | None = None
+        self.pending_robot: str | None = None
+        self.pending_model: str | None = None
+        self.pending_link: str | None = None
 
         self.ready_logged = False
         self.create_timer(0.10, self._timer_cb)
 
-    def _load_part_positions(self) -> Dict[str, Tuple[float, float, float]]:
+    def _load_part_positions(self) -> dict[str, tuple[float, float, float]]:
         positions = dict(DEFAULT_PART_POSES)
         try:
             world_path = Path(get_package_share_directory('xarm_gazebo')) / 'worlds' / 'table.world'
@@ -219,11 +218,11 @@ class AutoLinkAttacher(Node):
         if updated:
             self.model_states_available = True
 
-    def _lookup_robot_pose(self, robot_key: str) -> Optional[Tuple[float, float, float]]:
+    def _lookup_robot_pose(self, robot_key: str) -> tuple[float, float, float] | None:
         link_name = self.pose_links[robot_key]
         return self._lookup_link_pose(link_name)
 
-    def _lookup_link_pose(self, link_name: str) -> Optional[Tuple[float, float, float]]:
+    def _lookup_link_pose(self, link_name: str) -> tuple[float, float, float] | None:
         try:
             tf_msg = self.tf_buffer.lookup_transform(
                 self.world_frame,
@@ -235,7 +234,7 @@ class AutoLinkAttacher(Node):
         t = tf_msg.transform.translation
         return (t.x, t.y, t.z)
 
-    def _find_nearest_part(self, point: Tuple[float, float, float]) -> Tuple[Optional[str], float]:
+    def _find_nearest_part(self, point: tuple[float, float, float]) -> tuple[str | None, float]:
         nearest_name = None
         nearest_dist = float('inf')
         for model_name, model_pos in self.part_positions.items():
@@ -259,7 +258,7 @@ class AutoLinkAttacher(Node):
         self.attach_link_index[robot_key] = next_idx
         return True
 
-    def _resolve_attach_candidate(self, robot_key: str) -> Tuple[Optional[str], float, str]:
+    def _resolve_attach_candidate(self, robot_key: str) -> tuple[str | None, float, str]:
         attach_threshold = (
             self.attach_distance_threshold_ur5e if robot_key == 'ur5e' else self.attach_distance_threshold
         )

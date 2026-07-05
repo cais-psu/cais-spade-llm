@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 _RECOVER_LG_V1 = "recover_lg_v1"
 _RECOVER_LG_V1_ALIASES = frozenset(
     {

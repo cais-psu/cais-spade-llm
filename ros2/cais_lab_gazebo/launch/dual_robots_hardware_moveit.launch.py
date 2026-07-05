@@ -22,7 +22,6 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from uf_ros_lib.uf_robot_utils import get_xacro_content
 
-
 ROBOT_BASE_Y = 0.50
 RG2_PREFIX = "ur5e_rg2_"
 RG2_MAX_VELOCITY = 0.40

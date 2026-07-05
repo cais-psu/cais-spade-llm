@@ -10,14 +10,14 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any
 
 from spade.message import Message
 
-from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.central_controller.online_safety_monitor import (
     OnlineSafetyMonitor,
 )
@@ -29,6 +29,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artif
 from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
     build_preprogrammed_bridge_proposal,
 )
+from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.product.profile import ProductProfile
 
 _UNSET = object()
@@ -1144,7 +1145,7 @@ class ProductRecoveryController:
                 enriched["part_geometry"] = part_geometry
         return enriched
 
-    def _runtime_safety_fast_path_monitor(self) -> Optional[OnlineSafetyMonitor]:
+    def _runtime_safety_fast_path_monitor(self) -> OnlineSafetyMonitor | None:
         logic_path_value = getattr(
             self,
             "safety_logic_path",
@@ -1187,7 +1188,7 @@ class ProductRecoveryController:
             monitor = cache.get("monitor")
             return monitor if isinstance(monitor, OnlineSafetyMonitor) else None
 
-        def _store_monitor(monitor: Optional[OnlineSafetyMonitor]) -> Optional[OnlineSafetyMonitor]:
+        def _store_monitor(monitor: OnlineSafetyMonitor | None) -> OnlineSafetyMonitor | None:
             cache["cache_key"] = cache_key
             cache["monitor"] = monitor
             return monitor
@@ -1227,7 +1228,7 @@ class ProductRecoveryController:
         self,
         task_node: dict[str, Any],
         params: dict[str, Any],
-    ) -> Optional[dict[str, list[str]]]:
+    ) -> dict[str, list[str]] | None:
         monitor = self._runtime_safety_fast_path_monitor()
         if monitor is None:
             return None
@@ -1256,7 +1257,7 @@ class ProductRecoveryController:
         self,
         task_node: dict[str, Any],
         params: dict[str, Any],
-    ) -> Optional[bool]:
+    ) -> bool | None:
         ap_sets = self._runtime_safety_ap_sets_for_task(task_node, params)
         if ap_sets is None:
             return None
@@ -1392,9 +1393,7 @@ class ProductRecoveryController:
         elif not recovery_safety_task:
             if active_validation_policy == "no_validation" and bridge_dispatch_session:
                 return params
-            if not bool(getattr(self, "safety_text_has_requirements", False)):
-                params.setdefault("start_safety_mode", "fast_path")
-            elif self._runtime_safety_task_ap_empty(task_node, params) is True:
+            if not bool(getattr(self, "safety_text_has_requirements", False)) or self._runtime_safety_task_ap_empty(task_node, params) is True:
                 params.setdefault("start_safety_mode", "fast_path")
         return params
 
@@ -2481,8 +2480,8 @@ class ProductRecoveryController:
             return
 
         try:
-            from datetime import datetime, timezone
             import json
+            from datetime import datetime, timezone
 
             payload = {
                 "part_tracker": self.part_tracker,
@@ -2617,8 +2616,8 @@ class ProductRecoveryController:
             self.logger.exception("[Product] Failed to persist resource state.")
 
     def _get_part_transition(
-        self, function_name: str, task_node: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        self, function_name: str, task_node: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Look up the part_transition map, preferring node-level for bridge macros."""
         # Prefer node-level part_transition (set by bridge macro proposals).
         if task_node and task_node.get("part_transition"):
@@ -2629,7 +2628,7 @@ class ProductRecoveryController:
 
     def _tracked_part_name_for_task(
         self,
-        task_node: Optional[Dict[str, Any]],
+        task_node: dict[str, Any] | None,
     ) -> str:
         """Resolve the canonical part name for one task node, including bridge macros."""
         if not isinstance(task_node, dict):
@@ -2649,11 +2648,11 @@ class ProductRecoveryController:
         part_name: str,
         function_name: str,
         status: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         resource_jid: str,
         task_id: str,
-        task_node: Optional[Dict[str, Any]] = None,
-        observations: Optional[Dict[str, Any]] = None,
+        task_node: dict[str, Any] | None = None,
+        observations: dict[str, Any] | None = None,
     ) -> None:
         """Generic interpreter: applies the part_transition declared in each function's docstring."""
         transition_map = self._get_part_transition(function_name, task_node=task_node)
@@ -2666,7 +2665,7 @@ class ProductRecoveryController:
             return
 
         self.part_tracker.setdefault(part_name, {"state": "unknown", "location": None})
-        entry: Dict[str, Any] = {"state": transition["state"]}
+        entry: dict[str, Any] = {"state": transition["state"]}
 
         if "location_template" in transition:
             entry["location"] = transition["location_template"].format(
@@ -2784,7 +2783,7 @@ class ProductRecoveryController:
     def _reactivate_blocked_tasks(
         self,
         *,
-        candidate_task_ids: Optional[set[str]] = None,
+        candidate_task_ids: set[str] | None = None,
     ) -> int:
         """
         Convert blocked tasks back to pending so they can be retried after
@@ -3830,7 +3829,7 @@ class ProductRecoveryController:
                 }
                 unexpected_params = sorted(
                     str(param_name).strip()
-                    for param_name in params.keys()
+                    for param_name in params
                     if str(param_name).strip()
                     and str(param_name).strip() not in allowed_params
                 )
@@ -6982,7 +6981,7 @@ class ProductRecoveryController:
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
         bridge_debug = deepcopy(
-            (prepared_bridge_request.get("bridge_debug") or self.runtime_recovery.get("bridge_debug") or {})
+            prepared_bridge_request.get("bridge_debug") or self.runtime_recovery.get("bridge_debug") or {}
         )
         fixture_replay_payload = self._compact_fixture_replay_status(
             bridge_debug.get("fixture_replay")
@@ -8582,7 +8581,7 @@ class ProductRecoveryController:
             else 0.0
         )
         cached_bundle = deepcopy(
-            ((self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(scenario_key) or {})
+            (self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(scenario_key) or {}
         )
         if isinstance(cached_bundle.get("proposal"), dict):
             normalized = deepcopy(cached_bundle["proposal"])

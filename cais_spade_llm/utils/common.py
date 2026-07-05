@@ -7,7 +7,7 @@ import os
 
 def load_json_data(file_path):
     """Load and return JSON from a file path."""
-    with open(file_path, "r") as file:
+    with open(file_path) as file:
         return json.load(file)
 
 
@@ -26,7 +26,7 @@ def load_specification(file_path):
     try:
         current_directory = os.getcwd()
         spec_path = current_directory + file_path
-        with open(spec_path, "r") as file:
+        with open(spec_path) as file:
             return file.read()
     except FileNotFoundError:
         return "File not found."

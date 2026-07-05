@@ -6,18 +6,15 @@ import csv
 import os
 from pathlib import Path
 
-
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/cais_spade_llm_matplotlib")
 Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
 
 import matplotlib
 
-
 matplotlib.use("Agg")
 
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
-
 
 SCRIPT_PATH = Path(__file__).resolve()
 EXPERIMENTS_DIR = SCRIPT_PATH.parents[1]

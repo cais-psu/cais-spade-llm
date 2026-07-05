@@ -7,9 +7,9 @@ resolution, semantic projection, event facts, output extraction, and validation.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
-import re
 
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
@@ -17,7 +17,6 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_field_value,
     resource_snapshot_set_field,
 )
-
 
 _MISSING = object()
 _KNOWN_CONTEXT_ROOTS = {"resource", "resources", "parts", "bridge_resources", "event_facts"}

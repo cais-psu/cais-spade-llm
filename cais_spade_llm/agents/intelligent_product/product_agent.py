@@ -8,25 +8,26 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any
 
-from spade.behaviour import OneShotBehaviour, CyclicBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 from spade.template import Template
 
+from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
+from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
+    ProductRecoveryController,
+)
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.shared_information.local_dispatch import (
     send_agent_message,
     send_agent_message_sync,
-)
-from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
-from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
-    ProductRecoveryController,
 )
 from cais_spade_llm.product.order import validate_product_order
 from cais_spade_llm.product.profile import ProductProfile
@@ -93,16 +94,16 @@ class ProductAgent(LlmAgent):
         password: str,
         *,
         name: str,
-        resource_jids: Optional[Iterable[str]] = None,
-        resource_agents: Optional[Iterable[Any]] = None,
-        product_order_file: Optional[str] = None,
-        product_specification_file: Optional[str] = None,
-        product_geometry_file: Optional[str] = None,
-        safety_file: Optional[str] = None,
-        instruction_override: Optional[str] = None,
-        cca_jid: Optional[str] = None,
-        camera: Optional["CameraModule"] = None,
-        precomputed_bundle: Optional[Dict[str, Any]] = None,
+        resource_jids: Iterable[str] | None = None,
+        resource_agents: Iterable[Any] | None = None,
+        product_order_file: str | None = None,
+        product_specification_file: str | None = None,
+        product_geometry_file: str | None = None,
+        safety_file: str | None = None,
+        instruction_override: str | None = None,
+        cca_jid: str | None = None,
+        camera: CameraModule | None = None,
+        precomputed_bundle: dict[str, Any] | None = None,
         **kw,
     ) -> None:
         """
@@ -130,7 +131,7 @@ class ProductAgent(LlmAgent):
         self.product_specification_file = self.product_profile.product_specification_file
         self.product_order_file = self.product_profile.product_order_file
         self.product_geometry_file = self.product_profile.product_geometry_file
-        self.product_geometry: Dict[str, Any] = dict(self.product_profile.product_geometry)
+        self.product_geometry: dict[str, Any] = dict(self.product_profile.product_geometry)
         self.safety_file = self.product_profile.safety_file
         self.safety_logic_path = Path("cais_spade_llm/safety/cca_safety_logic.json")
         self.robot_env = self.product_profile.robot_env
@@ -728,7 +729,7 @@ class ProductAgent(LlmAgent):
     
 
 
-    def _geometry_for_part(self, part_name: str) -> Dict[str, Any]:
+    def _geometry_for_part(self, part_name: str) -> dict[str, Any]:
         """Compatibility wrapper for ProductProfile per-part geometry lookup."""
         profile = getattr(self, "product_profile", None)
         if isinstance(profile, ProductProfile):
@@ -756,7 +757,7 @@ class ProductAgent(LlmAgent):
         msg.body = json.dumps(body)
         return msg
 
-    def _build_product_state(self) -> Dict[str, Any]:
+    def _build_product_state(self) -> dict[str, Any]:
         """
         Build product-specific state for replanning context.
 
@@ -768,7 +769,7 @@ class ProductAgent(LlmAgent):
         - Execution timeline
         - Requirements progress
         """
-        requirements_status: Dict[str, Dict[str, Any]] = {}
+        requirements_status: dict[str, dict[str, Any]] = {}
         task_nodes = [n for n in self.process_planner.nodes if n.get("type") == "task"]
 
         # Seed from explicit requirement nodes when available.
@@ -833,14 +834,14 @@ class ProductAgent(LlmAgent):
             ),
         }
 
-    def _extract_requirement_text(self) -> Optional[str]:
+    def _extract_requirement_text(self) -> str | None:
         """Compatibility wrapper for ProductProfile requirement text loading."""
         return ProductProfile.extract_requirement_file(
             self.product_specification_file,
             logger=self.logger,
         )
 
-    def _load_product_order(self) -> Optional[Dict[str, Any]]:
+    def _load_product_order(self) -> dict[str, Any] | None:
         """Compatibility wrapper for ProductProfile product-order JSON loading."""
         profile = getattr(self, "product_profile", None)
         if isinstance(profile, ProductProfile):
@@ -1313,7 +1314,7 @@ class ProductAgent(LlmAgent):
     # --------------------------------------------------------------------- #
     class _Kickoff(OneShotBehaviour):
         async def run(self):
-            agent: "ProductAgent" = self.agent
+            agent: ProductAgent = self.agent
             retries_used = 0
             used_precomputed = False
             max_retries = 3
@@ -1557,7 +1558,7 @@ class ProductAgent(LlmAgent):
         """Background behaviour that listens for acknowledgements from resource agents."""
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
@@ -1688,7 +1689,7 @@ class ProductAgent(LlmAgent):
         """Handle online replan requests from the CCA."""
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
@@ -1744,7 +1745,7 @@ class ProductAgent(LlmAgent):
         """Handle runtime plan_safety_result replies from CCA."""
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
@@ -1885,7 +1886,7 @@ class ProductAgent(LlmAgent):
         """Requeue blocked tasks after CCA clears a transient safety block."""
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
@@ -1918,7 +1919,7 @@ class ProductAgent(LlmAgent):
         """Handle recovery_safety_generated replies from CCA."""
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
@@ -1938,7 +1939,7 @@ class ProductAgent(LlmAgent):
         """
 
         async def run(self):
-            agent: "ProductAgent" = self.agent  # type: ignore
+            agent: ProductAgent = self.agent  # type: ignore
 
             # No resources? nothing to do
             if not agent.resource_jids:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +21,9 @@ class CameraModule:
 
     def __init__(
         self,
-        mock_observations: Optional[Dict[str, Dict[str, float]]] = None,
+        mock_observations: dict[str, dict[str, float]] | None = None,
         use_ros2: bool = False,
-        backend: Optional[str] = None,
+        backend: str | None = None,
         ros2_timeout_sec: float = 5.0,
         ros2_call_retries: int = 2,
     ) -> None:
@@ -32,7 +32,7 @@ class CameraModule:
             use_ros2=use_ros2,
             mock_observations=mock_observations,
         )
-        self._mock_observations: Dict[str, Optional[Dict[str, float]]] = mock_observations or {}
+        self._mock_observations: dict[str, dict[str, float] | None] = mock_observations or {}
         self._use_ros2 = self._backend == "gazebo_gt"
         self._ros2_timeout = ros2_timeout_sec
         self._ros2_call_retries = max(1, int(ros2_call_retries))
@@ -53,9 +53,9 @@ class CameraModule:
     @staticmethod
     def _resolve_backend(
         *,
-        backend: Optional[str],
+        backend: str | None,
         use_ros2: bool,
-        mock_observations: Optional[Dict[str, Dict[str, float]]],
+        mock_observations: dict[str, dict[str, float]] | None,
     ) -> str:
         aliases = {
             "ros2": "gazebo_gt",
@@ -123,7 +123,7 @@ class CameraModule:
             self._init_ros2()
         return bool(self._ros2_node and self._legacy_detect_part_client and self._legacy_detect_all_client)
 
-    def observe(self, part_name: str) -> Optional[Dict[str, Any]]:
+    def observe(self, part_name: str) -> dict[str, Any] | None:
         if self._backend == "mock":
             return self._mock_observations.get(part_name)
         if self._backend == "none":
@@ -134,14 +134,15 @@ class CameraModule:
             return self._observe_ros2_trigger(part_name)
         return None
 
-    def _observe_ros2_trigger(self, part_name: str) -> Optional[Dict[str, Any]]:
+    def _observe_ros2_trigger(self, part_name: str) -> dict[str, Any] | None:
         if not (self._legacy_detect_part_client and self._Trigger):
             return None
 
         import rclpy
 
         try:
-            from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterType, ParameterValue
+            from rcl_interfaces.msg import Parameter as ParameterMsg
+            from rcl_interfaces.msg import ParameterType, ParameterValue
             from rcl_interfaces.srv import SetParameters
 
             # Legacy protocol: set target_part parameter then call Trigger.
@@ -190,7 +191,7 @@ class CameraModule:
             logger.exception("CameraModule: /detect_part Trigger call failed")
             return None
 
-    def observe_all(self) -> Dict[str, Dict[str, float]]:
+    def observe_all(self) -> dict[str, dict[str, float]]:
         if self._backend == "mock":
             return {k: v for k, v in self._mock_observations.items() if v is not None}
         if self._backend == "none":
@@ -201,7 +202,7 @@ class CameraModule:
             return self._observe_all_ros2_trigger()
         return {}
 
-    def _observe_physical(self, part_name: str) -> Optional[Dict[str, Any]]:
+    def _observe_physical(self, part_name: str) -> dict[str, Any] | None:
         """Call direct physical perception module (non-ROS path)."""
         try:
             from resources.sensor.physical.detect_part_service import detect_part
@@ -211,7 +212,7 @@ class CameraModule:
             logger.exception("CameraModule: physical detect_part call failed")
             return None
 
-    def _observe_all_physical(self) -> Dict[str, Dict[str, float]]:
+    def _observe_all_physical(self) -> dict[str, dict[str, float]]:
         """Call direct physical perception module (non-ROS path)."""
         try:
             from resources.sensor.physical.detect_all_service import detect_all
@@ -222,7 +223,7 @@ class CameraModule:
             logger.exception("CameraModule: physical detect_all call failed")
             return {}
 
-    def _observe_all_ros2_trigger(self) -> Dict[str, Dict[str, float]]:
+    def _observe_all_ros2_trigger(self) -> dict[str, dict[str, float]]:
         if not (self._legacy_detect_all_client and self._Trigger):
             return {}
 
@@ -242,7 +243,7 @@ class CameraModule:
                 return {}
 
             detections = json.loads(result.message)
-            parsed: Dict[str, Dict[str, float]] = {}
+            parsed: dict[str, dict[str, float]] = {}
             for d in detections:
                 parsed[str(d["part_name"])] = {
                     "x": float(d["x"]) * 1000.0,

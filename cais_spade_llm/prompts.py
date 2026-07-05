@@ -3,7 +3,7 @@
 # prompts.py
 import json
 from textwrap import dedent
-from typing import Any, Dict
+from typing import Any
 
 # ----------------------------------------------------------------------
 # Core agent instructions
@@ -200,7 +200,6 @@ SAFETY CONSTRAINTS:
 {refinement_section}
 """)
 
-import json
 from textwrap import dedent
 
 # ----------------------------------------------------------------------
@@ -1160,7 +1159,7 @@ def build_replan_prompt(
     # Optional: de-duplicate offline violations by rule id so we show at most
     # one entry per violated_rule_id to the LLM.
     if source != "online":
-        by_rule: Dict[str, Dict[str, Any]] = {}
+        by_rule: dict[str, dict[str, Any]] = {}
         for v in violations:
             rid = v.get("violated_rule_id")
             if rid and rid not in by_rule:

@@ -3,24 +3,24 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional
 
-import logging
 from cais_spade_llm import utils
 
 _log = logging.getLogger(__name__)
 _REQ_DIR = Path("cais_spade_llm/specification/products/requirements")
 _ORDER_DIR = Path("cais_spade_llm/specification/products/orders")
 
-from cais_spade_llm.agents.shared_information.user import User
+from cais_spade_llm.agents.central_controller.central_controller_agent import CentralControllerAgent
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
 from cais_spade_llm.agents.resource_agent.printing_agent import PrintingAgent
 from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
-from cais_spade_llm.agents.central_controller.central_controller_agent import CentralControllerAgent
+from cais_spade_llm.agents.shared_information.user import User
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _CAMERA_LOCK = threading.Lock()
@@ -34,7 +34,7 @@ ROBOT_ENV = os.environ.get("ROBOT_ENV", "gazebo").strip().lower()
 # Values: "dry_run", "simulation", "physical".
 _EXECUTION_MODE_OVERRIDE = os.environ.get("EXECUTION_MODE", "").strip().lower() or None
 
-def _normalize_camera_backend(raw: Optional[str]) -> str:
+def _normalize_camera_backend(raw: str | None) -> str:
     explicit = str(raw or "").strip().lower()
     if explicit in {"none", "mock", "gazebo_gt", "yolo"}:
         return explicit
@@ -65,9 +65,9 @@ _CAMERA = _build_camera(_CAMERA_BACKEND)
 
 def configure_runtime(
     *,
-    robot_env: Optional[str] = None,
-    execution_mode: Optional[str] = None,
-    perception_backend: Optional[str] = None,
+    robot_env: str | None = None,
+    execution_mode: str | None = None,
+    perception_backend: str | None = None,
 ) -> None:
     """Refresh runtime globals without requiring module reload."""
     global ROBOT_ENV, _EXECUTION_MODE_OVERRIDE, _CAMERA_BACKEND, _CAMERA
@@ -253,7 +253,7 @@ def create_product_agents(
     product_requirement_file: str | None = None,
     product_order_file: str | None = None,
     safety_file_override: object = _UNSET_OVERRIDE,
-) -> List[ProductAgent]:
+) -> list[ProductAgent]:
     """
     Build ProductAgent instances from JSON manifests.
 
@@ -271,7 +271,7 @@ def create_product_agents(
     # JIDs for all resource agents; used when a product doesn't specify explicit targets.
     all_ra_jids = [str(r.jid) for r in resource_agents]
 
-    agents: List[ProductAgent] = []
+    agents: list[ProductAgent] = []
     for init_file in product_init_list:
         raw = utils.load_json_data(init_file)
         for meta in _flat_or_nested_config(raw):

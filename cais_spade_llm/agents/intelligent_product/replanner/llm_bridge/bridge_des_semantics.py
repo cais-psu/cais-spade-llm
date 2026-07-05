@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
-
+from typing import Any
 
 BridgeProjector = Callable[..., tuple["BridgeEventProjection", list[str]]]
 BridgeProgressPolicy = Callable[..., tuple[int, dict[str, Any]]]

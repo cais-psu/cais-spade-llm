@@ -9,7 +9,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
     transition_multi_turn_phase,
 )
 
-
 __all__ = [
     "build_multi_turn_bridge_proposal",
     "build_multi_turn_session_seed",

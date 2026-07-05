@@ -5,25 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Optional, Iterable, Dict, List, Set, Tuple
+from typing import Any
 
-from spade.behaviour import OneShotBehaviour, CyclicBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 from spade.template import Template
 
-from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
+from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
+
+# Import the updated monitor
+from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+from cais_spade_llm.agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
+from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
 )
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
-# Import the updated monitor
-from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
-from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
-from cais_spade_llm.agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
-from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
+from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
+
 
 class CentralControllerAgent(LlmAgent):
     """
@@ -39,9 +42,9 @@ class CentralControllerAgent(LlmAgent):
         password: str,
         *,
         name: str,
-        resource_agents: Optional[Iterable[Any]] = None,
+        resource_agents: Iterable[Any] | None = None,
         safety_file: str | None = None,
-        precomputed_bundle: Optional[dict[str, Any]] = None,
+        precomputed_bundle: dict[str, Any] | None = None,
         **kw: Any,
     ) -> None:
         """Initialize controller state, safety logic, and monitoring scaffolding."""
@@ -55,18 +58,18 @@ class CentralControllerAgent(LlmAgent):
         base_safety_dir = Path("cais_spade_llm/safety")
         self.safety_logic_path = base_safety_dir / f"{name}_safety_logic.json"
 
-        self.safety_logic: Optional[SafetyLogic] = None
+        self.safety_logic: SafetyLogic | None = None
         if self.safety_file:
             self.safety_logic = SafetyLogic(self, self.safety_file)
 
         self.safety_rules: list[dict[str, Any]] = []
         
         # We use the NEW OnlineSafetyMonitor
-        self.safety_monitor: Optional[OnlineSafetyMonitor] = None
+        self.safety_monitor: OnlineSafetyMonitor | None = None
 
         # Runtime Plan FSA monitor
-        self.plan_fsa_monitor: Optional[OnlineFsaMonitor] = None
-        self.online_supervisor: Optional[OnlineSafetySupervisor] = None
+        self.plan_fsa_monitor: OnlineFsaMonitor | None = None
+        self.online_supervisor: OnlineSafetySupervisor | None = None
         self.runtime_supervisor_mode: str = "reactive"
         
         # NOTE: self.running_aps is removed; the monitor tracks it now.
@@ -75,7 +78,7 @@ class CentralControllerAgent(LlmAgent):
         self.recovery_safety_scopes: dict[str, dict[str, Any]] = {}
         # Stores the most recent task failure event so plan_block replans can
         # include the root-cause failure context, not just the blocked task's event.
-        self.last_failure_event: Optional[dict[str, Any]] = None
+        self.last_failure_event: dict[str, Any] | None = None
 
         self.logger.info(
             "CentralControllerAgent '%s' initialized. safety_file=%s",
@@ -94,7 +97,7 @@ class CentralControllerAgent(LlmAgent):
         return self.safety_monitor is not None
 
     @staticmethod
-    def _plan_recovery_task_ids(plan: Optional[dict[str, Any]]) -> set[str]:
+    def _plan_recovery_task_ids(plan: dict[str, Any] | None) -> set[str]:
         if not isinstance(plan, dict):
             return set()
         recovery_task_ids: set[str] = set()
@@ -121,7 +124,7 @@ class CentralControllerAgent(LlmAgent):
     def _filter_recovery_safety_validation_violations(
         cls,
         violations: list[dict[str, Any]],
-        plan: Optional[dict[str, Any]],
+        plan: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], int]:
         recovery_task_ids = cls._plan_recovery_task_ids(plan)
         if not recovery_task_ids:
@@ -246,7 +249,7 @@ class CentralControllerAgent(LlmAgent):
     def _recovery_safety_monitor_for_scope(
         self,
         recovery_safety_scope_id: str,
-    ) -> Optional[OnlineSafetyMonitor]:
+    ) -> OnlineSafetyMonitor | None:
         scope_id = str(recovery_safety_scope_id or "").strip()
         if not scope_id:
             return None
@@ -741,7 +744,7 @@ class CentralControllerAgent(LlmAgent):
         marked_states: set,
         next_task_ids: list,
         any_running: bool,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Classify why replanning is needed based on FSA state (completion path only).
         Task-failure replanning is handled separately via the safety monitor.
@@ -766,7 +769,7 @@ class CentralControllerAgent(LlmAgent):
         self,
         *,
         policy: dict[str, Any],
-        runtime_context: Optional[dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
         skip_revalidation: bool,
     ) -> str:
         supported_modes = {"preventive", "reactive", "truly_reactive"}
@@ -809,10 +812,10 @@ class CentralControllerAgent(LlmAgent):
         self,
         *,
         validator: PlanSafetyValidator,
-        fsa: Dict[str, Any],
-        plan: Optional[Dict[str, Any]],
+        fsa: dict[str, Any],
+        plan: dict[str, Any] | None,
         plan_fsa_monitor: OnlineFsaMonitor,
-        runtime_context: Optional[dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
         skip_revalidation: bool,
     ) -> None:
         policy = (
@@ -826,7 +829,7 @@ class CentralControllerAgent(LlmAgent):
             skip_revalidation=skip_revalidation,
         )
 
-        winning_set_data: Optional[Dict[str, Any]] = None
+        winning_set_data: dict[str, Any] | None = None
         if supervisor_mode != "truly_reactive":
             winning_set_data = validator.compute_winning_set(
                 fsa=fsa,
@@ -849,7 +852,7 @@ class CentralControllerAgent(LlmAgent):
         product_jid: str,
         reason: str,
         event: dict[str, Any],
-        safety_info: Optional[dict[str, Any]],
+        safety_info: dict[str, Any] | None,
     ) -> Message:
         """Build a structured replanning request message for a ProductAgent."""
         plan_ctx = {}
@@ -1127,7 +1130,7 @@ class CentralControllerAgent(LlmAgent):
             return tuple(sorted(ds.items()))
 
         def _all_state_aps(rsa: dict[str, frozenset[str]]) -> frozenset[str]:
-            result: Set[str] = set()
+            result: set[str] = set()
             for labels in rsa.values():
                 result |= labels
             return frozenset(result)
@@ -1602,7 +1605,7 @@ class CentralControllerAgent(LlmAgent):
         """
 
         async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
 
             msg = await self.receive(timeout=0.5)
             if not msg:
@@ -1655,10 +1658,10 @@ class CentralControllerAgent(LlmAgent):
             event: dict[str, Any],
             task_id: str,
             resource_jid: str,
-            product_jid: Optional[str],
+            product_jid: str | None,
             recovery_safety_scope_id: str,
         ) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
             monitor = (
                 agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
                 if recovery_safety_scope_id
@@ -1860,10 +1863,10 @@ class CentralControllerAgent(LlmAgent):
             status: str,
             resource_jid: str,
             function_name: str,
-            product_jid: Optional[str],
+            product_jid: str | None,
             recovery_safety_scope_id: str,
         ) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
             monitor = (
                 agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
                 if recovery_safety_scope_id
@@ -1989,7 +1992,7 @@ class CentralControllerAgent(LlmAgent):
             resources must always receive allow/block only as a response to a
             fresh safety_check request for that task attempt.
             """
-            agent: "CentralControllerAgent" = self.agent # type: ignore
+            agent: CentralControllerAgent = self.agent # type: ignore
             
             if not agent.blocked_tasks or not agent.safety_monitor:
                 return
@@ -2087,7 +2090,7 @@ class CentralControllerAgent(LlmAgent):
 
     class _RecoverySafetyGeneration(CyclicBehaviour):
         async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
 
             msg = await self.receive(timeout=0.5)
             if not msg:
@@ -2146,7 +2149,7 @@ class CentralControllerAgent(LlmAgent):
 
     class _InitCCA(OneShotBehaviour):
         async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
 
             safety_logic = agent.safety_logic
             if not safety_logic:
@@ -2244,7 +2247,7 @@ class CentralControllerAgent(LlmAgent):
         """
 
         async def run(self) -> None:
-            agent: "CentralControllerAgent" = self.agent  # type: ignore
+            agent: CentralControllerAgent = self.agent  # type: ignore
 
             msg = await self.receive(timeout=0.5)
             if not msg:

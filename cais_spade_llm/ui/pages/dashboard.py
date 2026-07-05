@@ -6,9 +6,10 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 from nicegui import context, ui
 
@@ -16,7 +17,6 @@ from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
 from cais_spade_llm.ui.components.robot_status_card import render_robot_status_card
-
 
 # Execution mode labels → internal values.
 _MODE_MAP = {
@@ -818,7 +818,7 @@ def render(bridge: SystemBridge) -> None:
                 signature = ("bundle_gate", text)
                 if getattr(bundle_gate_banner, "_cais_bundle_gate_signature", None) == signature:
                     return
-                setattr(bundle_gate_banner, "_cais_bundle_gate_signature", signature)
+                bundle_gate_banner._cais_bundle_gate_signature = signature
                 bundle_gate_banner.clear()
                 if not text:
                     return
@@ -1399,15 +1399,9 @@ def render(bridge: SystemBridge) -> None:
                 for key, label in stages:
                     color = "grey"
                     if status == "resolved":
-                        if key == "des_search":
-                            color = "green"
-                        elif key == "bridge_ready" and str(
+                        if key == "des_search" or key == "bridge_ready" and str(
                             recovery.get("bridge_approval_state", "none") or "none"
-                        ).strip().lower() in {"ready", "pending", "approved"}:
-                            color = "green"
-                        elif key == "llm_bridge" and used_bridge:
-                            color = "green"
-                        elif key == "validating":
+                        ).strip().lower() in {"ready", "pending", "approved"} or key == "llm_bridge" and used_bridge or key == "validating":
                             color = "green"
                     elif status == key:
                         if key == "human_required":
@@ -1416,13 +1410,7 @@ def render(bridge: SystemBridge) -> None:
                             color = "orange"
                         else:
                             color = "blue"
-                    elif key == "des_search" and status in {"bridge_ready", "llm_bridge", "validating", "human_required"}:
-                        color = "green"
-                    elif key == "bridge_ready" and status in {"llm_bridge", "validating", "human_required"}:
-                        color = "green"
-                    elif key == "llm_bridge" and used_bridge and status in {"validating", "human_required"}:
-                        color = "green"
-                    elif key == "validating" and status == "human_required":
+                    elif key == "des_search" and status in {"bridge_ready", "llm_bridge", "validating", "human_required"} or key == "bridge_ready" and status in {"llm_bridge", "validating", "human_required"} or key == "llm_bridge" and used_bridge and status in {"validating", "human_required"} or key == "validating" and status == "human_required":
                         color = "green"
                     badges.append((label, color))
                 return badges
@@ -2128,11 +2116,11 @@ def render(bridge: SystemBridge) -> None:
                             if status == "bridge_ready":
                                 if bridge_mode == "pre_ran":
                                     ui.label(
-                                        (
+                                        
                                             "Pre-ran mode is selected. If a valid archived run is selected, it will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep Recovery Safety Check enabled for recovery_safety runtime enforcement. Use the button below only to reload it manually while paused."
                                             if validation_policy == "validated"
                                             else "Pre-ran mode is selected with No Recovery Safety Check. If a valid archived run is selected, it will auto-load, run the ordinary CCA runtime plan validation on the merged nominal + recovery plan before execution, and keep recovery_safety runtime enforcement disabled. Use the button below only to reload it manually while paused."
-                                        )
+                                        
                                     ).classes("text-xs text-orange-700 mt-2")
                                     if selected_archive_label:
                                         ui.label(
@@ -2884,7 +2872,7 @@ def _check_prerequisites(
     def _replace_banner(signature: tuple[Any, ...], render_body: Callable[[], None] | None) -> None:
         if getattr(banner, "_cais_prereq_signature", None) == signature:
             return
-        setattr(banner, "_cais_prereq_signature", signature)
+        banner._cais_prereq_signature = signature
         banner.clear()
         if render_body is None:
             return

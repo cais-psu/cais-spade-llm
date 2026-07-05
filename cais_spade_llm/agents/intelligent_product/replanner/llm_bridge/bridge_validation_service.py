@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable
+from typing import Any
 
 from cais_spade_llm.agents.central_controller.outline_macro_safety import (
     validate_outline_macro_cca_constraints,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_des_semantics import (
-    BridgeEventProjection,
     BridgeEventInstance,
+    BridgeEventProjection,
     BridgeValidationContext,
     BridgeValidationFinding,
     BridgeValidationResult,
-    ProcessSchema,
-    build_outline_task_row,
     build_bridge_validation_context,
+    build_outline_task_row,
     parse_bridge_event_instance,
     validate_bridge_event_instance,
 )
@@ -27,7 +27,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_
     _outline_task_predecessors,
     _task_findings_block_projected_state,
 )
-
 
 ProgressEvaluator = Callable[..., tuple[int, dict[str, Any]]]
 

@@ -1,7 +1,7 @@
 """Persistent verified bundle helpers."""
 
-from .bundle_store import BundleStore
 from .bundle_compiler import BundleCompiler
+from .bundle_store import BundleStore
 
 __all__ = ["BundleStore", "BundleCompiler"]
 

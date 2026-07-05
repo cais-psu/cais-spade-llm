@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict, deque
 from copy import deepcopy
-import json
-import re
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 
@@ -51,24 +50,24 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def __init__(
         self,
-        rules: List[Dict[str, Any]],
-        dfa_map: Dict[str, str],
-        tools_catalog: Optional[List[Dict[str, Any]]] = None,
+        rules: list[dict[str, Any]],
+        dfa_map: dict[str, str],
+        tools_catalog: list[dict[str, Any]] | None = None,
     ) -> None:
         # BaseSafetyChecker signature is (dfa_map, rules)
         super().__init__(dfa_map, rules, tools_catalog=tools_catalog)
-        self.rule_lookup: Dict[str, Dict[str, Any]] = {r["id"]: r for r in rules if r.get("id")}
+        self.rule_lookup: dict[str, dict[str, Any]] = {r["id"]: r for r in rules if r.get("id")}
 
     # ------------------------------------------------------------------ #
     # PUBLIC ENTRY POINT
     # ------------------------------------------------------------------ #
     def validate_plan_fsa(
         self,
-        fsa: Dict[str, Any],
-        plan: Optional[Dict[str, Any]] = None,
+        fsa: dict[str, Any],
+        plan: dict[str, Any] | None = None,
         product_jid: str | None = None,
-        runtime_context: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        runtime_context: dict[str, Any] | None = None,
+    ) -> tuple[bool, list[dict[str, Any]]]:
         """
         Validate a compiled FSA against all DFA safety rules.
 
@@ -101,7 +100,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         task_meta_lookup = self._build_transition_task_lookup(enabled, task_lookup)
         initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
-        all_violations: List[Dict[str, Any]] = []
+        all_violations: list[dict[str, Any]] = []
 
         for rule in self.safety_rules:
             rule_id = rule.get("id")
@@ -112,7 +111,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if not dfa:
                 continue
 
-            aps_for_rule: Set[str] = set(dfa.get("ap_symbols", []))
+            aps_for_rule: set[str] = set(dfa.get("ap_symbols", []))
             if not aps_for_rule:
                 continue
             start_plan_state, start_q, start_resource_states = (
@@ -149,11 +148,11 @@ class PlanSafetyValidator(BaseSafetyChecker):
     # Backward-compatible alias kept during the validator rename migration.
     def validate_fsa_offline(
         self,
-        fsa: Dict[str, Any],
-        plan: Optional[Dict[str, Any]] = None,
+        fsa: dict[str, Any],
+        plan: dict[str, Any] | None = None,
         product_jid: str | None = None,
-        runtime_context: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        runtime_context: dict[str, Any] | None = None,
+    ) -> tuple[bool, list[dict[str, Any]]]:
         return self.validate_plan_fsa(
             fsa=fsa,
             plan=plan,
@@ -163,11 +162,11 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def validate_active_window_fsa(
         self,
-        fsa: Dict[str, Any],
-        plan: Optional[Dict[str, Any]] = None,
+        fsa: dict[str, Any],
+        plan: dict[str, Any] | None = None,
         product_jid: str | None = None,
-        runtime_context: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        runtime_context: dict[str, Any] | None = None,
+    ) -> tuple[bool, list[dict[str, Any]]]:
         """Validate an active executable FSA window against each safety DFA."""
         A = (fsa or {}).get("A") or {}
         Tr = A.get("Tr") or []
@@ -187,7 +186,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         task_lookup = self._build_task_lookup(plan)
         task_meta_lookup = self._build_transition_task_lookup(enabled, task_lookup)
         initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
-        all_violations: List[Dict[str, Any]] = []
+        all_violations: list[dict[str, Any]] = []
 
         for rule in self.safety_rules:
             rule_id = rule.get("id")
@@ -198,7 +197,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if not dfa:
                 continue
 
-            aps_for_rule: Set[str] = set(dfa.get("ap_symbols", []))
+            aps_for_rule: set[str] = set(dfa.get("ap_symbols", []))
             if not aps_for_rule:
                 continue
 
@@ -238,8 +237,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
     # ------------------------------------------------------------------ #
     # INDEXING
     # ------------------------------------------------------------------ #
-    def _index_enabled(self, transitions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        enabled: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    def _index_enabled(self, transitions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        enabled: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for t in transitions:
             frm = t.get("from")
             if frm is None:
@@ -247,14 +246,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
             enabled[str(frm)].append(t)
         return enabled
 
-    def _build_task_lookup(self, plan: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _build_task_lookup(self, plan: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
         """
         Build task_id -> node dict from DAG plan (optional).
         """
         if not plan:
             return {}
         nodes = plan.get("nodes") or []
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for n in nodes:
             nid = n.get("id")
             if nid:
@@ -262,7 +261,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         return out
 
     @staticmethod
-    def _merge_task_metadata(dest: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_task_metadata(dest: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
         for key in ("task_id", "resource_jid", "function_name", "in_state", "out_state"):
             value = src.get(key)
             if value is None:
@@ -280,10 +279,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _build_transition_task_lookup(
         self,
-        enabled: Dict[str, List[Dict[str, Any]]],
-        task_lookup: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        out: Dict[str, Dict[str, Any]] = {}
+        enabled: dict[str, list[dict[str, Any]]],
+        task_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
 
         for task_id, node in task_lookup.items():
             out[str(task_id)] = self._merge_task_metadata({}, dict(node))
@@ -305,12 +304,12 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _transition_task_meta(
         self,
-        transition: Dict[str, Any],
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        transition: dict[str, Any],
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
         task_id = str(transition.get("task_id") or "").strip()
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         if task_id and task_id in task_meta_lookup:
             self._merge_task_metadata(meta, task_meta_lookup[task_id])
         if task_id and task_id in task_lookup:
@@ -322,8 +321,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
             meta["params"] = {}
         return meta
 
-    def _running_tasks_from_state(self, x: str) -> List[Dict[str, str]]:
-        running: List[Dict[str, str]] = []
+    def _running_tasks_from_state(self, x: str) -> list[dict[str, str]]:
+        running: list[dict[str, str]] = []
         for match in self._RUNNING_TASK_RE.finditer(str(x or "")):
             running.append(
                 {
@@ -337,10 +336,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
     def _running_event_aps_from_state(
         self,
         x: str,
-        aps_for_rule: Set[str],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-    ) -> FrozenSet[str]:
-        sigma: Set[str] = set()
+        aps_for_rule: set[str],
+        task_meta_lookup: dict[str, dict[str, Any]],
+    ) -> frozenset[str]:
+        sigma: set[str] = set()
         for item in self._running_tasks_from_state(x):
             meta = dict(task_meta_lookup.get(item["task_id"]) or {})
             resource_jid = str(meta.get("resource_jid") or item["resource_jid"] or "").strip()
@@ -353,10 +352,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _state_aps_for_resources(
         self,
-        resource_states: Dict[str, Dict[str, Any]],
-        aps_for_rule: Set[str],
-    ) -> FrozenSet[str]:
-        sigma: Set[str] = set()
+        resource_states: dict[str, dict[str, Any]],
+        aps_for_rule: set[str],
+    ) -> frozenset[str]:
+        sigma: set[str] = set()
         for resource_jid, payload in (resource_states or {}).items():
             current_state = str((payload or {}).get("current_state") or "").strip()
             if not current_state:
@@ -368,9 +367,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
     def _running_event_aps_from_state_all(
         self,
         x: str,
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-    ) -> FrozenSet[str]:
-        sigma: Set[str] = set()
+        task_meta_lookup: dict[str, dict[str, Any]],
+    ) -> frozenset[str]:
+        sigma: set[str] = set()
         for item in self._running_tasks_from_state(x):
             meta = dict(task_meta_lookup.get(item["task_id"]) or {})
             resource_jid = str(meta.get("resource_jid") or item["resource_jid"] or "").strip()
@@ -383,9 +382,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _state_aps_for_resources_all(
         self,
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> FrozenSet[str]:
-        sigma: Set[str] = set()
+        resource_states: dict[str, dict[str, Any]],
+    ) -> frozenset[str]:
+        sigma: set[str] = set()
         for resource_jid, payload in (resource_states or {}).items():
             current_state = str((payload or {}).get("current_state") or "").strip()
             if not current_state:
@@ -396,12 +395,12 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _initial_resource_states(
         self,
-        enabled: Dict[str, List[Dict[str, Any]]],
+        enabled: dict[str, list[dict[str, Any]]],
         x0: str,
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        resource_states: Dict[str, Dict[str, Any]] = {}
-        owner_to_jid: Dict[str, str] = {}
+        task_meta_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        resource_states: dict[str, dict[str, Any]] = {}
+        owner_to_jid: dict[str, str] = {}
         default_domain = "localhost"
 
         for meta in task_meta_lookup.values():
@@ -435,9 +434,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _resource_state_signature(
         self,
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> Tuple[Tuple[str, str, str], ...]:
-        items: List[Tuple[str, str, str]] = []
+        resource_states: dict[str, dict[str, Any]],
+    ) -> tuple[tuple[str, str, str], ...]:
+        items: list[tuple[str, str, str]] = []
         for resource_jid, payload in sorted((resource_states or {}).items()):
             current_state = str((payload or {}).get("current_state") or "").strip()
             params = dict((payload or {}).get("params") or {})
@@ -449,21 +448,21 @@ class PlanSafetyValidator(BaseSafetyChecker):
             items.append((str(resource_jid), current_state, state_token))
         return tuple(items)
 
-    def _ordered_rule_ids(self) -> List[str]:
+    def _ordered_rule_ids(self) -> list[str]:
         return sorted(str(rule_id) for rule_id in self.dfas.keys())
 
     def _joint_transition_successor(
         self,
         *,
         x: str,
-        q_vec: Tuple[str, ...],
-        rule_ids: List[str],
-        rule_ap_sets: Dict[str, Set[str]],
-        transition: Dict[str, Any],
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> Tuple[Tuple[str, ...], Tuple[str, ...], Dict[str, Dict[str, Any]], Dict[str, FrozenSet[str]]]:
+        q_vec: tuple[str, ...],
+        rule_ids: list[str],
+        rule_ap_sets: dict[str, set[str]],
+        transition: dict[str, Any],
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        resource_states: dict[str, dict[str, Any]],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, dict[str, Any]], dict[str, frozenset[str]]]:
         event_name = str(transition.get("event") or "").strip()
         meta = self._transition_task_meta(transition, task_lookup, task_meta_lookup)
         resource_jid = str(meta.get("resource_jid") or "").strip()
@@ -516,9 +515,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
         else:
             sigma_all = frozenset(running_before_all | persistent_before_all | candidate_event_aps_all)
 
-        checked_vec: List[str] = []
-        committed_vec: List[str] = []
-        sigma_by_rule: Dict[str, FrozenSet[str]] = {}
+        checked_vec: list[str] = []
+        committed_vec: list[str] = []
+        sigma_by_rule: dict[str, frozenset[str]] = {}
 
         for idx, rule_id in enumerate(rule_ids):
             sigma_rule = frozenset(ap for ap in sigma_all if ap in rule_ap_sets.get(rule_id, set()))
@@ -539,9 +538,9 @@ class PlanSafetyValidator(BaseSafetyChecker):
         self,
         *,
         x: str,
-        q_vec: Tuple[str, ...],
-        Xm: Set[str],
-        rule_ids: List[str],
+        q_vec: tuple[str, ...],
+        Xm: set[str],
+        rule_ids: list[str],
     ) -> bool:
         if x not in Xm:
             return False
@@ -563,10 +562,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def compute_winning_set(
         self,
-        fsa: Dict[str, Any],
-        plan: Optional[Dict[str, Any]] = None,
-        runtime_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        fsa: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        runtime_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Build the reachable joint product graph and compute its winning set.
 
@@ -597,7 +596,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         initial_resource_states = self._initial_resource_states(enabled, x0, task_meta_lookup)
 
         rule_ids = self._ordered_rule_ids()
-        rule_ap_sets: Dict[str, Set[str]] = {
+        rule_ap_sets: dict[str, set[str]] = {
             rule_id: set(self.dfas.get(rule_id, {}).get("ap_symbols", []))
             for rule_id in rule_ids
         }
@@ -621,21 +620,21 @@ class PlanSafetyValidator(BaseSafetyChecker):
             self._resource_state_signature(start_payload),
         )
 
-        state_payloads: Dict[
-            Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]],
-            Dict[str, Dict[str, Any]],
+        state_payloads: dict[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]],
+            dict[str, dict[str, Any]],
         ] = {start_state: start_payload}
-        product_graph: Dict[
-            Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]],
-            List[Dict[str, Any]],
+        product_graph: dict[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]],
+            list[dict[str, Any]],
         ] = defaultdict(list)
-        reverse_graph: Dict[
-            Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]],
-            List[Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]]],
+        reverse_graph: dict[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]],
+            list[tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]]],
         ] = defaultdict(list)
-        state_meta: Dict[
-            Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]],
-            Dict[str, Any],
+        state_meta: dict[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]],
+            dict[str, Any],
         ] = {
             start_state: {
                 "plan_state": start_plan_state,
@@ -646,7 +645,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
         queue = deque([start_state])
         seen = {start_state}
-        accepting_states: Set[Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]]] = set()
+        accepting_states: set[tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]]] = set()
 
         while queue:
             node = queue.popleft()
@@ -680,7 +679,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
                 )
 
                 violates = False
-                violated_rule_ids: List[str] = []
+                violated_rule_ids: list[str] = []
                 for idx, rule_id in enumerate(rule_ids):
                     violation_state = str(self.dfas.get(rule_id, {}).get("violation_state") or "").strip()
                     if violation_state and checked_vec[idx] == violation_state:
@@ -727,7 +726,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
                     )
                     break
 
-        winning_set: Set[Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]]] = set()
+        winning_set: set[tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]]] = set()
         backward = deque(accepting_states)
         while backward:
             node = backward.popleft()
@@ -751,8 +750,8 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _runtime_progress_task_ids(
         self,
-        runtime_context: Optional[Dict[str, Any]],
-    ) -> Tuple[List[str], List[str], List[str]]:
+        runtime_context: dict[str, Any] | None,
+    ) -> tuple[list[str], list[str], list[str]]:
         if not isinstance(runtime_context, dict):
             return [], [], []
         completed_task_ids = [
@@ -776,14 +775,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
         self,
         *,
         rule_id: str,
-        aps_for_rule: Set[str],
-        enabled: Dict[str, List[Dict[str, Any]]],
+        aps_for_rule: set[str],
+        enabled: dict[str, list[dict[str, Any]]],
         x0: str,
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        initial_resource_states: Dict[str, Dict[str, Any]],
-        runtime_context: Optional[Dict[str, Any]],
-    ) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        initial_resource_states: dict[str, dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
+    ) -> tuple[str, str, dict[str, dict[str, Any]]]:
         current_q, current_resource_states = self._restore_rule_start_from_safety_event_history(
             rule_id=rule_id,
             aps_for_rule=aps_for_rule,
@@ -849,11 +848,11 @@ class PlanSafetyValidator(BaseSafetyChecker):
         self,
         *,
         rule_id: str,
-        aps_for_rule: Set[str],
-        task_lookup: Dict[str, Dict[str, Any]],
-        initial_resource_states: Dict[str, Dict[str, Any]],
-        runtime_context: Optional[Dict[str, Any]],
-    ) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+        aps_for_rule: set[str],
+        task_lookup: dict[str, dict[str, Any]],
+        initial_resource_states: dict[str, dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
         dfa = self.dfas.get(rule_id) or {}
         current_q = str(dfa.get("initial") or "1")
         current_resource_states = deepcopy(initial_resource_states)
@@ -864,7 +863,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
         if not isinstance(history, list) or not history:
             return current_q, current_resource_states
 
-        running_task_aps: Dict[str, Set[str]] = {}
+        running_task_aps: dict[str, set[str]] = {}
         violation_state = str(dfa.get("violation_state") or "").strip()
 
         for event in history:
@@ -893,7 +892,7 @@ class PlanSafetyValidator(BaseSafetyChecker):
             if not resource_jid or not function_name:
                 continue
 
-            running_before: Set[str] = set()
+            running_before: set[str] = set()
             for aps in running_task_aps.values():
                 running_before.update(aps)
             persistent_before = set(self._state_aps_for_resources(current_resource_states, aps_for_rule))
@@ -954,14 +953,14 @@ class PlanSafetyValidator(BaseSafetyChecker):
         self,
         *,
         rule_id: str,
-        aps_for_rule: Set[str],
-        enabled: Dict[str, List[Dict[str, Any]]],
+        aps_for_rule: set[str],
+        enabled: dict[str, list[dict[str, Any]]],
         x0: str,
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        initial_resource_states: Dict[str, Dict[str, Any]],
-        runtime_context: Optional[Dict[str, Any]],
-    ) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        initial_resource_states: dict[str, dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
+    ) -> tuple[str, str, dict[str, dict[str, Any]]]:
         completed_task_ids, running_task_ids, failed_task_ids = (
             self._runtime_progress_task_ids(runtime_context)
         )
@@ -1028,15 +1027,15 @@ class PlanSafetyValidator(BaseSafetyChecker):
     def _restore_runtime_joint_start(
         self,
         *,
-        rule_ids: List[str],
-        rule_ap_sets: Dict[str, Set[str]],
-        enabled: Dict[str, List[Dict[str, Any]]],
+        rule_ids: list[str],
+        rule_ap_sets: dict[str, set[str]],
+        enabled: dict[str, list[dict[str, Any]]],
         x0: str,
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        initial_resource_states: Dict[str, Dict[str, Any]],
-        runtime_context: Optional[Dict[str, Any]],
-    ) -> Tuple[str, Tuple[str, ...], Dict[str, Dict[str, Any]]]:
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        initial_resource_states: dict[str, dict[str, Any]],
+        runtime_context: dict[str, Any] | None,
+    ) -> tuple[str, tuple[str, ...], dict[str, dict[str, Any]]]:
         completed_task_ids, running_task_ids, failed_task_ids = (
             self._runtime_progress_task_ids(runtime_context)
         )
@@ -1106,12 +1105,12 @@ class PlanSafetyValidator(BaseSafetyChecker):
         rule_id: str,
         q: str,
         x: str,
-        transition: Dict[str, Any],
-        aps_for_rule: Set[str],
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> Tuple[str, str, Dict[str, Dict[str, Any]], FrozenSet[str]]:
+        transition: dict[str, Any],
+        aps_for_rule: set[str],
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        resource_states: dict[str, dict[str, Any]],
+    ) -> tuple[str, str, dict[str, dict[str, Any]], frozenset[str]]:
         event_name = str(transition.get("event") or "").strip()
         meta = self._transition_task_meta(transition, task_lookup, task_meta_lookup)
         resource_jid = str(meta.get("resource_jid") or "").strip()
@@ -1177,16 +1176,16 @@ class PlanSafetyValidator(BaseSafetyChecker):
     def _check_rule_on_fsa_product(
         self,
         rule_id: str,
-        rule: Dict[str, Any],
+        rule: dict[str, Any],
         x0: str,
         initial_q: str | None,
-        Xm: Set[str],
-        enabled: Dict[str, List[Dict[str, Any]]],
-        aps_for_rule: Set[str],
-        task_lookup: Dict[str, Dict[str, Any]],
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-        initial_resource_states: Dict[str, Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        Xm: set[str],
+        enabled: dict[str, list[dict[str, Any]]],
+        aps_for_rule: set[str],
+        task_lookup: dict[str, dict[str, Any]],
+        task_meta_lookup: dict[str, dict[str, Any]],
+        initial_resource_states: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         """
         Explore reachable (x,q) states and detect any violation.
         """
@@ -1204,16 +1203,16 @@ class PlanSafetyValidator(BaseSafetyChecker):
         start_state_payload = deepcopy(initial_resource_states)
         start_sig = self._resource_state_signature(start_state_payload)
         start = (str(x0), str(q0), start_sig)
-        parent: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Optional[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]]] = {start: None}
-        parent_edge: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Optional[Dict[str, Any]]] = {start: None}
-        state_payloads: Dict[Tuple[str, str, Tuple[Tuple[str, str, str], ...]], Dict[str, Dict[str, Any]]] = {
+        parent: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], tuple[str, str, tuple[tuple[str, str, str], ...]] | None] = {start: None}
+        parent_edge: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, Any] | None] = {start: None}
+        state_payloads: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], dict[str, dict[str, Any]]] = {
             start: start_state_payload
         }
 
         stack = deque([start])
-        seen: Set[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]] = {start}
+        seen: set[tuple[str, str, tuple[tuple[str, str, str], ...]]] = {start}
 
-        violations: List[Dict[str, Any]] = []
+        violations: list[dict[str, Any]] = []
 
         while stack:
             node = stack.pop()
@@ -1311,20 +1310,20 @@ class PlanSafetyValidator(BaseSafetyChecker):
 
     def _reconstruct_trace(
         self,
-        end_state: Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
-        parent: Dict[
-            Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
-            Optional[Tuple[str, str, Tuple[Tuple[str, str, str], ...]]],
+        end_state: tuple[str, str, tuple[tuple[str, str, str], ...]],
+        parent: dict[
+            tuple[str, str, tuple[tuple[str, str, str], ...]],
+            tuple[str, str, tuple[tuple[str, str, str], ...]] | None,
         ],
-        parent_edge: Dict[
-            Tuple[str, str, Tuple[Tuple[str, str, str], ...]],
-            Optional[Dict[str, Any]],
+        parent_edge: dict[
+            tuple[str, str, tuple[tuple[str, str, str], ...]],
+            dict[str, Any] | None,
         ],
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Reconstruct witness as a list of plant transitions (dicts) along the product path.
         """
-        path: List[Dict[str, Any]] = []
+        path: list[dict[str, Any]] = []
         cur = end_state
         while True:
             pe = parent_edge.get(cur)
@@ -1343,10 +1342,10 @@ class PlanSafetyValidator(BaseSafetyChecker):
     def _build_fsa_violation_entry(
         self,
         rule_id: str,
-        rule: Dict[str, Any],
-        ap_defs: Dict[str, str],
-        witness: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        rule: dict[str, Any],
+        ap_defs: dict[str, str],
+        witness: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """
         Build a violation entry including a witness transition sequence.
 

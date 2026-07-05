@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from copy import deepcopy
-import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFsaMonitor
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 
-
-ProductState = Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str, str], ...]]
+ProductState = tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]]
 
 
 class OnlineSafetySupervisor:
@@ -26,11 +25,11 @@ class OnlineSafetySupervisor:
     def __init__(
         self,
         *,
-        winning_set_data: Optional[Dict[str, Any]] = None,
+        winning_set_data: dict[str, Any] | None = None,
         fsa_monitor: OnlineFsaMonitor,
         safety_monitor: OnlineSafetyMonitor,
         enforcement_mode: str = "preventive",
-        plan: Optional[Dict[str, Any]] = None,
+        plan: dict[str, Any] | None = None,
     ) -> None:
         self.logger = logging.getLogger("OnlineSafetySupervisor")
         self.fsa = fsa_monitor
@@ -42,21 +41,21 @@ class OnlineSafetySupervisor:
         self.plan = dict(plan or {})
 
         winning_payload = dict(winning_set_data or {})
-        self.W: Set[ProductState] = set(winning_payload.get("W") or set())
-        self.graph: Dict[ProductState, List[Dict[str, Any]]] = dict(
+        self.W: set[ProductState] = set(winning_payload.get("W") or set())
+        self.graph: dict[ProductState, list[dict[str, Any]]] = dict(
             winning_payload.get("product_graph") or {}
         )
-        self.accepting_states: Set[ProductState] = set(
+        self.accepting_states: set[ProductState] = set(
             winning_payload.get("accepting_states") or set()
         )
-        self.rule_ids: List[str] = list(
+        self.rule_ids: list[str] = list(
             winning_payload.get("rule_ids")
             or sorted(str(rule_id) for rule_id in self.safety.dfas.keys())
         )
 
         fsa_payload = (self.fsa.fsa or {}).get("A") or {}
         self._enabled = self._index_enabled(list(fsa_payload.get("Tr") or []))
-        self._marked_states: Set[str] = set(
+        self._marked_states: set[str] = set(
             str(x) for x in (fsa_payload.get("Xm") or []) if str(x).strip()
         )
         self._task_lookup = self._build_task_lookup(self.plan)
@@ -64,7 +63,7 @@ class OnlineSafetySupervisor:
             self._enabled,
             self._task_lookup,
         )
-        self._rule_ap_sets: Dict[str, Set[str]] = {
+        self._rule_ap_sets: dict[str, set[str]] = {
             rule_id: set(self.safety.dfas.get(rule_id, {}).get("ap_symbols", []))
             for rule_id in self.rule_ids
         }
@@ -76,11 +75,11 @@ class OnlineSafetySupervisor:
                 str(fsa_payload.get("x0") or ""),
                 self._task_meta_lookup,
             )
-        self.base_resource_states: Dict[str, Dict[str, Any]] = deepcopy(base_resource_states)
+        self.base_resource_states: dict[str, dict[str, Any]] = deepcopy(base_resource_states)
 
     @staticmethod
-    def _index_enabled(transitions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        enabled: Dict[str, List[Dict[str, Any]]] = {}
+    def _index_enabled(transitions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        enabled: dict[str, list[dict[str, Any]]] = {}
         for transition in transitions:
             from_state = str(transition.get("from") or "").strip()
             if not from_state:
@@ -88,8 +87,8 @@ class OnlineSafetySupervisor:
             enabled.setdefault(from_state, []).append(transition)
         return enabled
 
-    def _build_task_lookup(self, plan: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        out: Dict[str, Dict[str, Any]] = {}
+    def _build_task_lookup(self, plan: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
         for node in (plan or {}).get("nodes") or []:
             task_id = str(node.get("id") or "").strip()
             if task_id:
@@ -97,7 +96,7 @@ class OnlineSafetySupervisor:
         return out
 
     @staticmethod
-    def _merge_task_metadata(dest: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_task_metadata(dest: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
         for key in ("task_id", "resource_jid", "function_name", "in_state", "out_state"):
             value = src.get(key)
             if value is None:
@@ -115,10 +114,10 @@ class OnlineSafetySupervisor:
 
     def _build_transition_task_lookup(
         self,
-        enabled: Dict[str, List[Dict[str, Any]]],
-        task_lookup: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        out: Dict[str, Dict[str, Any]] = {}
+        enabled: dict[str, list[dict[str, Any]]],
+        task_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
 
         for task_id, node in task_lookup.items():
             out[str(task_id)] = self._merge_task_metadata({}, dict(node))
@@ -138,9 +137,9 @@ class OnlineSafetySupervisor:
 
         return out
 
-    def _transition_task_meta(self, transition: Dict[str, Any]) -> Dict[str, Any]:
+    def _transition_task_meta(self, transition: dict[str, Any]) -> dict[str, Any]:
         task_id = str(transition.get("task_id") or "").strip()
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         if task_id and task_id in self._task_meta_lookup:
             self._merge_task_metadata(meta, self._task_meta_lookup[task_id])
         if task_id and task_id in self._task_lookup:
@@ -154,12 +153,12 @@ class OnlineSafetySupervisor:
 
     def _initial_resource_states(
         self,
-        enabled: Dict[str, List[Dict[str, Any]]],
+        enabled: dict[str, list[dict[str, Any]]],
         x0: str,
-        task_meta_lookup: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        resource_states: Dict[str, Dict[str, Any]] = {}
-        owner_to_jid: Dict[str, str] = {}
+        task_meta_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        resource_states: dict[str, dict[str, Any]] = {}
+        owner_to_jid: dict[str, str] = {}
         default_domain = "localhost"
 
         for meta in task_meta_lookup.values():
@@ -193,9 +192,9 @@ class OnlineSafetySupervisor:
 
     def _resource_state_signature(
         self,
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> Tuple[Tuple[str, str, str], ...]:
-        items: List[Tuple[str, str, str]] = []
+        resource_states: dict[str, dict[str, Any]],
+    ) -> tuple[tuple[str, str, str], ...]:
+        items: list[tuple[str, str, str]] = []
         for resource_jid, payload in sorted((resource_states or {}).items()):
             current_state = str((payload or {}).get("current_state") or "").strip()
             params = dict((payload or {}).get("params") or {})
@@ -207,7 +206,7 @@ class OnlineSafetySupervisor:
             items.append((str(resource_jid), current_state, state_token))
         return tuple(items)
 
-    def _merged_resource_states(self) -> Dict[str, Dict[str, Any]]:
+    def _merged_resource_states(self) -> dict[str, dict[str, Any]]:
         merged = deepcopy(self.base_resource_states)
         for resource_jid, payload in (getattr(self.safety, "resource_states", {}) or {}).items():
             merged[str(resource_jid)] = {
@@ -216,10 +215,10 @@ class OnlineSafetySupervisor:
             }
         return merged
 
-    def _current_q_vector(self) -> Tuple[str, ...]:
+    def _current_q_vector(self) -> tuple[str, ...]:
         return tuple(str(self.safety.current_states.get(rule_id, "1")) for rule_id in self.rule_ids)
 
-    def _current_safety_state_map(self) -> Dict[str, str]:
+    def _current_safety_state_map(self) -> dict[str, str]:
         return {rule_id: str(self.safety.current_states.get(rule_id, "1")) for rule_id in self.rule_ids}
 
     def current_product_state(self) -> ProductState:
@@ -228,8 +227,8 @@ class OnlineSafetySupervisor:
         resource_sig = self._resource_state_signature(self._merged_resource_states())
         return (x, q_vec, resource_sig)
 
-    def _pending_rule_ids(self, q_vec: Tuple[str, ...]) -> List[str]:
-        pending: List[str] = []
+    def _pending_rule_ids(self, q_vec: tuple[str, ...]) -> list[str]:
+        pending: list[str] = []
         for idx, rule_id in enumerate(self.rule_ids):
             accepting_states = set(
                 str(s) for s in (self.safety.dfas.get(rule_id, {}).get("accepting_states") or [])
@@ -241,16 +240,16 @@ class OnlineSafetySupervisor:
                 pending.append(rule_id)
         return pending
 
-    def _violated_rule_ids(self, q_vec: Tuple[str, ...]) -> List[str]:
-        violated: List[str] = []
+    def _violated_rule_ids(self, q_vec: tuple[str, ...]) -> list[str]:
+        violated: list[str] = []
         for idx, rule_id in enumerate(self.rule_ids):
             violation_state = str(self.safety.dfas.get(rule_id, {}).get("violation_state") or "").strip()
             if violation_state and q_vec[idx] == violation_state:
                 violated.append(rule_id)
         return violated
 
-    def _running_tasks_from_state(self, x: str) -> List[Dict[str, str]]:
-        running: List[Dict[str, str]] = []
+    def _running_tasks_from_state(self, x: str) -> list[dict[str, str]]:
+        running: list[dict[str, str]] = []
         parsed = self.fsa._parse_state(x or "")
         for resource_jid, info in parsed.items():
             if str(info.get("status") or "") != "running":
@@ -271,8 +270,8 @@ class OnlineSafetySupervisor:
     def _running_event_aps_from_state_all(
         self,
         x: str,
-    ) -> Set[str]:
-        sigma: Set[str] = set()
+    ) -> set[str]:
+        sigma: set[str] = set()
         for item in self._running_tasks_from_state(x):
             meta = dict(self._task_meta_lookup.get(item["task_id"]) or {})
             resource_jid = str(meta.get("resource_jid") or item["resource_jid"] or "").strip()
@@ -285,9 +284,9 @@ class OnlineSafetySupervisor:
 
     def _state_aps_for_resources_all(
         self,
-        resource_states: Dict[str, Dict[str, Any]],
-    ) -> Set[str]:
-        sigma: Set[str] = set()
+        resource_states: dict[str, dict[str, Any]],
+    ) -> set[str]:
+        sigma: set[str] = set()
         for resource_jid, payload in (resource_states or {}).items():
             current_state = str((payload or {}).get("current_state") or "").strip()
             if not current_state:
@@ -300,11 +299,11 @@ class OnlineSafetySupervisor:
         self,
         product_state: ProductState,
         *,
-        resource_states: Dict[str, Dict[str, Any]],
+        resource_states: dict[str, dict[str, Any]],
         include_violating: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         x, q_vec, _ = product_state
-        edges: List[Dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
 
         for transition in self._enabled.get(x, []):
             x2 = str(transition.get("to") or "").strip()
@@ -370,9 +369,9 @@ class OnlineSafetySupervisor:
             else:
                 sigma_all = frozenset(running_before_all | persistent_before_all | candidate_event_aps_all)
 
-            checked_vec: List[str] = []
-            committed_vec: List[str] = []
-            violated_rule_ids: List[str] = []
+            checked_vec: list[str] = []
+            committed_vec: list[str] = []
+            violated_rule_ids: list[str] = []
             for idx, rule_id in enumerate(self.rule_ids):
                 sigma_rule = frozenset(
                     ap for ap in sigma_all if ap in self._rule_ap_sets.get(rule_id, set())
@@ -416,10 +415,10 @@ class OnlineSafetySupervisor:
     def _online_bfs_analysis(
         self,
         *,
-        start: Optional[ProductState] = None,
-        resource_states: Optional[Dict[str, Dict[str, Any]]] = None,
-        root_pending_rule_ids: Optional[Set[str]] = None,
-    ) -> Dict[str, Any]:
+        start: ProductState | None = None,
+        resource_states: dict[str, dict[str, Any]] | None = None,
+        root_pending_rule_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         start_state = start or self.current_product_state()
         start_resource_states = deepcopy(resource_states or self._merged_resource_states())
         start_pending = set(root_pending_rule_ids or self._pending_rule_ids(start_state[1]))
@@ -432,7 +431,7 @@ class OnlineSafetySupervisor:
             }
         )
 
-        analysis: Dict[str, Any] = {
+        analysis: dict[str, Any] = {
             "start_pending_rule_ids": sorted(start_pending),
             "immediate_edges": immediate_edges,
             "immediate_start_task_ids": immediate_start_task_ids,
@@ -443,10 +442,10 @@ class OnlineSafetySupervisor:
             return analysis
 
         queue = deque([(start_state, deepcopy(start_resource_states))])
-        seen: Set[ProductState] = {start_state}
-        parent: Dict[ProductState, Optional[ProductState]] = {start_state: None}
-        parent_edge: Dict[ProductState, Optional[Dict[str, Any]]] = {start_state: None}
-        target: Optional[ProductState] = None
+        seen: set[ProductState] = {start_state}
+        parent: dict[ProductState, ProductState | None] = {start_state: None}
+        parent_edge: dict[ProductState, dict[str, Any] | None] = {start_state: None}
+        target: ProductState | None = None
 
         while queue:
             node, node_resource_states = queue.popleft()
@@ -480,7 +479,7 @@ class OnlineSafetySupervisor:
         if target is None:
             return analysis
 
-        trace: List[Dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
         cur = target
         while cur != start_state:
             edge = parent_edge.get(cur)
@@ -499,16 +498,16 @@ class OnlineSafetySupervisor:
     def _reachability_basis(self) -> str:
         return "on_the_fly_bfs" if self.enforcement_mode == "truly_reactive" else "winning_set"
 
-    def _safe_edges_from(self, product_state: ProductState) -> List[Dict[str, Any]]:
+    def _safe_edges_from(self, product_state: ProductState) -> list[dict[str, Any]]:
         edges = list(self.graph.get(product_state, []))
         return [edge for edge in edges if edge.get("successor") in self.W]
 
-    def _truly_reactive_safe_next_task_ids(self, analysis: Dict[str, Any]) -> List[str]:
+    def _truly_reactive_safe_next_task_ids(self, analysis: dict[str, Any]) -> list[str]:
         start_pending = set(analysis.get("start_pending_rule_ids") or [])
         if not start_pending:
             return list(analysis.get("immediate_start_task_ids") or [])
 
-        discharge_task_ids: Set[str] = set()
+        discharge_task_ids: set[str] = set()
         for edge in analysis.get("immediate_edges") or []:
             event_name = str(edge.get("event") or "").strip()
             task_id = str(edge.get("task_id") or "").strip()
@@ -531,7 +530,7 @@ class OnlineSafetySupervisor:
 
         return sorted(discharge_task_ids)
 
-    def safe_next_task_ids(self, *, analysis: Optional[Dict[str, Any]] = None) -> List[str]:
+    def safe_next_task_ids(self, *, analysis: dict[str, Any] | None = None) -> list[str]:
         current = self.current_product_state()
         if self.enforcement_mode == "truly_reactive":
             if self._violated_rule_ids(current[1]):
@@ -548,10 +547,10 @@ class OnlineSafetySupervisor:
 
     def _serialize_hint_trace(
         self,
-        trace: List[Dict[str, Any]],
+        trace: list[dict[str, Any]],
         *,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         serialized = [
             {
                 "task_id": edge.get("task_id"),
@@ -569,9 +568,9 @@ class OnlineSafetySupervisor:
     def safe_suffix_hint(
         self,
         *,
-        limit: Optional[int] = None,
-        analysis: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+        analysis: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         start = self.current_product_state()
         if self.enforcement_mode == "truly_reactive":
             if self._violated_rule_ids(start[1]):
@@ -588,11 +587,11 @@ class OnlineSafetySupervisor:
             return []
 
         queue = deque([start])
-        parent: Dict[ProductState, Optional[ProductState]] = {start: None}
-        parent_edge: Dict[ProductState, Optional[Dict[str, Any]]] = {start: None}
-        seen: Set[ProductState] = {start}
+        parent: dict[ProductState, ProductState | None] = {start: None}
+        parent_edge: dict[ProductState, dict[str, Any] | None] = {start: None}
+        seen: set[ProductState] = {start}
 
-        target: Optional[ProductState] = None
+        target: ProductState | None = None
         while queue:
             node = queue.popleft()
             if node in self.accepting_states:
@@ -610,7 +609,7 @@ class OnlineSafetySupervisor:
         if target is None:
             return []
 
-        trace: List[Dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
         cur = target
         while cur != start:
             edge = parent_edge.get(cur)
@@ -623,12 +622,12 @@ class OnlineSafetySupervisor:
         trace.reverse()
         return self._serialize_hint_trace(trace, limit=limit)
 
-    def classify(self, *, event_kind: Optional[str] = None) -> Dict[str, Any]:
+    def classify(self, *, event_kind: str | None = None) -> dict[str, Any]:
         current = self.current_product_state()
         x, q_vec, _ = current
         violated_rule_ids = self._violated_rule_ids(q_vec)
         pending_rule_ids = self._pending_rule_ids(q_vec)
-        truly_reactive_analysis: Optional[Dict[str, Any]] = None
+        truly_reactive_analysis: dict[str, Any] | None = None
         if self.enforcement_mode == "truly_reactive" and not violated_rule_ids:
             truly_reactive_analysis = self._online_bfs_analysis()
         safe_next_task_ids = self.safe_next_task_ids(analysis=truly_reactive_analysis)
@@ -707,7 +706,7 @@ class OnlineSafetySupervisor:
         }
         return diagnosis
 
-    def check_candidate(self, event: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    def check_candidate(self, event: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         current = self.current_product_state()
         diagnosis = self.classify()
         if diagnosis["status"] == "violated":

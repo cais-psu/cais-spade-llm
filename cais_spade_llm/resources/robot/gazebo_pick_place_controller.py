@@ -540,19 +540,18 @@ class GazeboPickPlaceController:
 
         try:
             import rclpy
+            import tf2_ros
+            from builtin_interfaces.msg import Duration
+            from gazebo_msgs.srv import GetEntityState, SetEntityState
+            from geometry_msgs.msg import Pose
+            from moveit_msgs.action import ExecuteTrajectory
+            from moveit_msgs.srv import GetCartesianPath
             from rclpy.action import ActionClient
             from rclpy.callback_groups import ReentrantCallbackGroup
             from rclpy.executors import MultiThreadedExecutor
-
-            from std_srvs.srv import Trigger
-            from moveit_msgs.action import ExecuteTrajectory
-            from moveit_msgs.srv import GetCartesianPath
-            from gazebo_msgs.srv import GetEntityState, SetEntityState
-            from geometry_msgs.msg import Pose
-            from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-            from builtin_interfaces.msg import Duration
             from sensor_msgs.msg import JointState
-            import tf2_ros
+            from std_srvs.srv import Trigger
+            from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
         except Exception:
             logger.exception(
                 "[%s] ROS2 imports failed. Is the ROS2 environment sourced?",

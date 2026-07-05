@@ -12,6 +12,7 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity,
     resource_snapshot_field_value,
 )
+from cais_spade_llm.resources.robot import UR5eGazeboController, XArm6GazeboController
 from cais_spade_llm.resources.robot.robot_primitives import (
     ROBOT_COMPILER_MAP,
     ROBOT_EVENT_FACT_CONTRACT_MAP,
@@ -25,7 +26,6 @@ from cais_spade_llm.resources.robot.robot_primitives import (
     robot_capability_decompositions,
     robot_primitive_sequence_validator,
 )
-from cais_spade_llm.resources.robot import UR5eGazeboController, XArm6GazeboController
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,6 @@ from nicegui import ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 
-
 # Workspace boundaries (mm) from robot configs.
 _WORKSPACES = {
     "xarm6": {"x_min": -150, "x_max": 650, "y_min": -800, "y_max": -400, "color": "rgba(33, 150, 243, 0.15)"},

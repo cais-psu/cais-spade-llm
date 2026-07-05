@@ -6,14 +6,12 @@ import asyncio
 import os
 import time
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any
 
-from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
-from cais_spade_llm.resources.robot.robot_tasks import (
-    execute_robot_task,
-    resolve_robot_task_names,
-    robot_task_names,
-    robot_task_registry,
+from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
+    build_failure_event,
+    failure_context_from_scenario_config,
+    load_failure_scenario_config,
 )
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.resources.robot import (
@@ -22,10 +20,12 @@ from cais_spade_llm.resources.robot import (
     XArm6GazeboController,
     XArm6HardwareController,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
-    build_failure_event,
-    failure_context_from_scenario_config,
-    load_failure_scenario_config,
+from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
+from cais_spade_llm.resources.robot.robot_tasks import (
+    execute_robot_task,
+    resolve_robot_task_names,
+    robot_task_names,
+    robot_task_registry,
 )
 
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
@@ -82,16 +82,16 @@ class RobotAgent(ResourceAgent):
         super().__init__(jid, password, name=name, **kw)
 
         self.agent_name = name
-        self._held_part: Optional[str] = None
+        self._held_part: str | None = None
 
         # Runtime state tracking for replanning context
         self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed (placed = at destination, part released)
-        self._position: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
+        self._position: dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"
-        self._bridge_pose_ref: Optional[str] = None
+        self._bridge_pose_ref: str | None = None
         # Shared task execution context threaded across task-level functions.
         # `_pick_ctx` remains as a temporary compatibility alias.
-        self._task_ctx: Dict[str, Any] = {}
+        self._task_ctx: dict[str, Any] = {}
         # Use pre-initialized controller (from Gazebo prewarm) if available,
         # to avoid paying the ROS2 init cost again on first task.
         if self._injected_controller is not None:
@@ -215,19 +215,19 @@ class RobotAgent(ResourceAgent):
         return f"{ref}@{self._jid_domain()}"
 
     @property
-    def _pick_ctx(self) -> Dict[str, Any]:
+    def _pick_ctx(self) -> dict[str, Any]:
         """Compatibility alias for older code paths that still reference `_pick_ctx`."""
         return self._task_ctx
 
     @_pick_ctx.setter
-    def _pick_ctx(self, value: Dict[str, Any]) -> None:
+    def _pick_ctx(self, value: dict[str, Any]) -> None:
         self._task_ctx = value if isinstance(value, dict) else {}
 
     async def _execute_registered_robot_task(
         self,
         task_name: str,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Execute a registry-backed robot task through the generic DSL runtime."""
         return await execute_robot_task(self, task_name, **kwargs)
 
@@ -309,7 +309,7 @@ class RobotAgent(ResourceAgent):
         function_name: str,
         checkpoint: str,
         part_name: str = "",
-        call_args: Dict[str, Any] | None = None,
+        call_args: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         function_token = str(function_name or "").strip().lower()
         checkpoint_token = str(checkpoint or "").strip().lower()
@@ -415,7 +415,7 @@ class RobotAgent(ResourceAgent):
         return None
 
     @staticmethod
-    def _resolve_effect_ref(ref: str, effect_context: Dict[str, Any]) -> Any:
+    def _resolve_effect_ref(ref: str, effect_context: dict[str, Any]) -> Any:
         path = [segment for segment in str(ref or "").split(".") if segment]
         if not path:
             raise ValueError("effect ref is empty")
@@ -434,7 +434,7 @@ class RobotAgent(ResourceAgent):
                 current = getattr(current, segment)
         return deepcopy(current)
 
-    def _resolve_effect_value(self, value: Any, effect_context: Dict[str, Any]) -> Any:
+    def _resolve_effect_value(self, value: Any, effect_context: dict[str, Any]) -> Any:
         if isinstance(value, dict):
             if set(value.keys()) == {"ref"}:
                 return self._resolve_effect_ref(str(value.get("ref") or ""), effect_context)
@@ -448,11 +448,11 @@ class RobotAgent(ResourceAgent):
 
     def _scenario_error_result(
         self,
-        match: Dict[str, Any],
+        match: dict[str, Any],
         *,
         message: str,
-        effect_context: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        effect_context: dict[str, Any],
+    ) -> dict[str, Any]:
         scenario_id = str(match.get("scenario_id") or "").strip() or "unknown_scenario"
         detail = f"Failure scenario '{scenario_id}' is misconfigured: {message}"
         self.logger.error("[Robot] %s", detail)
@@ -479,10 +479,10 @@ class RobotAgent(ResourceAgent):
     async def _apply_failure_effect(
         self,
         *,
-        match: Dict[str, Any],
-        effect: Dict[str, Any],
-        effect_context: Dict[str, Any],
-    ) -> Dict[str, Any] | None:
+        match: dict[str, Any],
+        effect: dict[str, Any],
+        effect_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
         effect_type = str(effect.get("type") or "").strip()
         if not effect_type:
             raise ValueError("effect is missing type")
@@ -626,8 +626,8 @@ class RobotAgent(ResourceAgent):
         function_name: str,
         checkpoint: str,
         part_name: str = "",
-        call_args: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any] | None:
+        call_args: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         match = self._match_failure_scenario(
             function_name=function_name,
             checkpoint=checkpoint,
@@ -645,7 +645,7 @@ class RobotAgent(ResourceAgent):
         )
         self._triggered_failure_scenarios.add(str(match.get("trigger_key") or "").strip())
 
-        effect_context: Dict[str, Any] = {
+        effect_context: dict[str, Any] = {
             "agent": self,
             "task_ctx": self._task_ctx,
             "call_args": deepcopy(call_args or {}),
@@ -779,12 +779,12 @@ class RobotAgent(ResourceAgent):
         message: str,
         *,
         step: str,
-        observations: Optional[Dict[str, Any]] = None,
-        failure_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        observations: dict[str, Any] | None = None,
+        failure_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         detail = str(message or "task failed")
         self.logger.error("[Robot] %s failed: %s", step, detail)
-        failure_observations: Dict[str, Any] = {"step": step}
+        failure_observations: dict[str, Any] = {"step": step}
         if isinstance(observations, dict):
             failure_observations.update(observations)
         context_payload = deepcopy(failure_context if isinstance(failure_context, dict) else {})
@@ -802,8 +802,8 @@ class RobotAgent(ResourceAgent):
     async def _execute_controller_helper(
         self,
         helper_name: str,
-        params: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """Execute a controller-only helper that is not exposed as a bridge primitive."""
         if self.execution_mode == "dry_run":
             self.logger.debug("[Robot] dry_run helper: %s", helper_name)
@@ -852,7 +852,7 @@ class RobotAgent(ResourceAgent):
         function_name: str,
         taught_function_name: str,
         step_name: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Execute one user-taught function step through the hardware controller."""
         if self.execution_mode == "dry_run":
             return {"success": True, "message": f"Simulated taught function step: {step_name}"}
@@ -928,8 +928,8 @@ class RobotAgent(ResourceAgent):
     async def execute_bridge_observation(
         self,
         primitive: str,
-        params: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute one planner-approved observation/generation primitive."""
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             extract_step_output,
@@ -986,8 +986,8 @@ class RobotAgent(ResourceAgent):
     def _inject_current_pick_ctx_for_place_targets(
         self,
         primitive: str,
-        params: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """Thread the current held-part pick context into generated place-target steps."""
         normalized = dict(params or {})
         if str(primitive or "").strip() != "compute_place_targets":
@@ -1009,7 +1009,7 @@ class RobotAgent(ResourceAgent):
         return normalized
 
     @staticmethod
-    def _normalized_xyz_pose(value: Any) -> Dict[str, float] | None:
+    def _normalized_xyz_pose(value: Any) -> dict[str, float] | None:
         if not isinstance(value, dict) or not {"x", "y", "z"} <= set(value.keys()):
             return None
         try:
@@ -1024,9 +1024,9 @@ class RobotAgent(ResourceAgent):
     def _inject_observed_pose_for_pick_targets(
         self,
         primitive: str,
-        params: Dict[str, Any],
-        macro_context: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        params: dict[str, Any],
+        macro_context: dict[str, Any],
+    ) -> dict[str, Any]:
         """Thread product-provided observed pose into generated recovery pick-target steps."""
         normalized = dict(params or {})
         if str(primitive or "").strip() != "compute_pick_targets":
@@ -1093,8 +1093,8 @@ class RobotAgent(ResourceAgent):
     def _normalize_simulation_release_part_params(
         self,
         primitive: str,
-        params: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """Make simulated Gazebo releases tolerate detach flakiness after the gripper opens."""
         normalized = dict(params or {})
         if str(primitive or "").strip() != "release_part":
@@ -1109,9 +1109,9 @@ class RobotAgent(ResourceAgent):
     def _remember_pick_targets_from_macro_step(
         self,
         primitive: str,
-        params: Dict[str, Any],
-        step_result: Dict[str, Any],
-        macro_context: Dict[str, Any],
+        params: dict[str, Any],
+        step_result: dict[str, Any],
+        macro_context: dict[str, Any],
     ) -> None:
         """Keep generated macro pick context current for subsequent place targets."""
         if str(primitive or "").strip() != "compute_pick_targets":
@@ -1131,7 +1131,7 @@ class RobotAgent(ResourceAgent):
         if not part_name:
             return
 
-        context: Dict[str, Any] = {"part_name": part_name}
+        context: dict[str, Any] = {"part_name": part_name}
         for key in (
             "model_name",
             "tx",
@@ -1174,9 +1174,9 @@ class RobotAgent(ResourceAgent):
     async def _stabilize_recovery_release_if_needed(
         self,
         primitive: str,
-        params: Dict[str, Any],
-        step_result: Dict[str, Any],
-        event_facts: Dict[str, Any],
+        params: dict[str, Any],
+        step_result: dict[str, Any],
+        event_facts: dict[str, Any],
     ) -> None:
         """Snap direct bridge releases into assembly slot depth when geometry says inserted."""
         if str(primitive or "").strip() != "release_part":
@@ -1242,24 +1242,20 @@ class RobotAgent(ResourceAgent):
         macro_name: str,
         primitive_steps: list,
         *,
-        expected_start_state: Optional[str] = None,
-        expected_snapshot: Optional[Dict[str, Any]] = None,
-        product_jid: Optional[str] = None,
-        task_id: Optional[str] = None,
-        in_state: Optional[str] = None,
-        out_state: Optional[str] = None,
+        expected_start_state: str | None = None,
+        expected_snapshot: dict[str, Any] | None = None,
+        product_jid: str | None = None,
+        task_id: str | None = None,
+        in_state: str | None = None,
+        out_state: str | None = None,
         **context: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Execute a bridge-generated recovery macro as an ordered primitive sequence.
 
         This method is registered in self.executables for runtime dispatch
         but is excluded from function_names and the shared tools catalog.
         It is only callable through bridge-approved recovery macro tasks.
         """
-        from cais_spade_llm.resources.resource_profile import (
-            get_resource_profile_for_agent,
-            resource_snapshot_set_field,
-        )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
@@ -1272,6 +1268,10 @@ class RobotAgent(ResourceAgent):
         from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
             sync_agent_from_bridge_snapshot,
+        )
+        from cais_spade_llm.resources.resource_profile import (
+            get_resource_profile_for_agent,
+            resource_snapshot_set_field,
         )
 
         self.logger.info(
@@ -1376,7 +1376,7 @@ class RobotAgent(ResourceAgent):
             }
 
         # Execute each primitive step sequentially.
-        results: list[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         event_facts: dict[str, Any] = {}
         resource_type = str(
             dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
@@ -1602,8 +1602,8 @@ class RobotAgent(ResourceAgent):
         return self.bridge_execution_primitive_catalog()
 
     async def _execute_primitive(
-        self, primitive: str, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, primitive: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
         if self.execution_mode == "dry_run":
             self.logger.debug("[Robot] dry_run primitive: %s", primitive)
@@ -1674,7 +1674,7 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def get_bridge_snapshot(self) -> Dict[str, Any]:
+    def get_bridge_snapshot(self) -> dict[str, Any]:
         """Return the current primitive-level bridge snapshot for this robot."""
         from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
@@ -1688,7 +1688,7 @@ class RobotAgent(ResourceAgent):
 
     def _is_pose_in_workspace(
         self,
-        pose: Dict[str, Any],
+        pose: dict[str, Any],
     ) -> tuple[bool, str]:
         """Check if a Cartesian pose falls within this robot's workspace bounds.
 
@@ -1728,13 +1728,13 @@ class RobotAgent(ResourceAgent):
         event_instance: Any | None = None,
         schema: Any | None = None,
         projection: Any | None = None,
-        part_context: Dict[str, Any],
-        bridge_snapshot: Dict[str, Any],
+        part_context: dict[str, Any],
+        bridge_snapshot: dict[str, Any],
         operation_kind: str = "",
         part_name: str | None = None,
-        grounded_action: Dict[str, Any] | None = None,
+        grounded_action: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Workspace-aware feasibility check for bridge recovery events.
 
         Uses the canonical bridge event instance plus typed projection rather
@@ -1744,7 +1744,7 @@ class RobotAgent(ResourceAgent):
         """
         from copy import deepcopy
 
-        evidence: Dict[str, Any] = {
+        evidence: dict[str, Any] = {
             "part_context": deepcopy(part_context),
             "bridge_snapshot": deepcopy(bridge_snapshot),
             "resource_jid": str(getattr(self, "jid", "") or ""),
@@ -1772,7 +1772,7 @@ class RobotAgent(ResourceAgent):
             projection_part_name = str(getattr(projection, "part_name", "") or "").strip()
             part_name = str(part_name or projection_part_name or "").strip() or None
             end_state = dict(getattr(projection, "end_state", {}) or {})
-            source_ref: Dict[str, Any] = {
+            source_ref: dict[str, Any] = {
                 "location": str(
                     getattr(event_instance, "object_bindings", {}).get("source_location")
                     or ""
@@ -2046,7 +2046,7 @@ class RobotAgent(ResourceAgent):
                     "evidence": evidence,
                 }
 
-        target_pose: Dict[str, Any] | None = None
+        target_pose: dict[str, Any] | None = None
         source_location = str(
             source_ref.get("location") or target_info.get("source_location") or ""
         ).strip()
@@ -2118,7 +2118,7 @@ class RobotAgent(ResourceAgent):
             "evidence": evidence,
         }
 
-    def _snapshot_state(self) -> Dict[str, Any]:
+    def _snapshot_state(self) -> dict[str, Any]:
         """Robot-specific state snapshot (override)."""
         controller_ready = True
         if self.execution_mode != "dry_run":

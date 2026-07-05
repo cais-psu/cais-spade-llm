@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 from copy import deepcopy
 from typing import Any
-import inspect
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_adapter import (
     adapt_bridge_resource_snapshot,
@@ -27,8 +27,8 @@ def primitive_summary(
     effects: dict[str, Any],
 ) -> str:
     base = description or "Bridge primitive"
-    pre_keys = ", ".join(sorted(str(key) for key in preconditions.keys())) if preconditions else ""
-    effect_keys = ", ".join(sorted(str(key) for key in effects.keys())) if effects else ""
+    pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
+    effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
     detail_parts: list[str] = []
     if pre_keys:
         detail_parts.append(f"pre: {pre_keys}")
@@ -289,15 +289,15 @@ def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any
     profile = get_resource_profile_for_agent(resource_agent)
 
     current_state = resource_snapshot_field_value(snapshot, "current_state", profile=profile)
-    setattr(resource_agent, "_current_state", current_state)
+    resource_agent._current_state = current_state
 
     current_location = resource_snapshot_field_value(snapshot, "current_location", profile=profile)
     if hasattr(resource_agent, "_current_location") or current_location is not None:
-        setattr(resource_agent, "_current_location", current_location)
+        resource_agent._current_location = current_location
 
     availability = resource_snapshot_availability(snapshot, profile=profile)
     if hasattr(resource_agent, "_availability") or availability:
-        setattr(resource_agent, "_availability", availability)
+        resource_agent._availability = availability
 
     for field, target in dict(profile.sync_map or {}).items():
         value = resource_snapshot_field_value(snapshot, str(field), profile=profile)

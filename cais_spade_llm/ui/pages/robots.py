@@ -9,7 +9,6 @@ from nicegui import ui
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.status_badge import status_badge
 
-
 _PHASES = ["idle", "at_pick", "picked", "positioned", "placed"]
 
 # Friendly labels for ROS2 processes.

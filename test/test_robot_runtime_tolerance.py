@@ -10,6 +10,10 @@ from pathlib import Path
 import pytest
 
 from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+    GazeboPickPlaceController,
+    _gazebo_timing_scale_from_env,
+)
 from cais_spade_llm.resources.robot.robot_primitives import (
     _compile_place_macro,
     _compile_release_macro,
@@ -18,10 +22,6 @@ from cais_spade_llm.resources.robot.robot_primitives import (
 from cais_spade_llm.resources.robot.robot_tasks import (
     execute_robot_task,
     robot_task_capability_decompositions,
-)
-from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
-    GazeboPickPlaceController,
-    _gazebo_timing_scale_from_env,
 )
 
 

@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .gazebo_pick_place_controller import (
-    GazeboPickPlaceController,
     UR5E_JOINT_NAMES,
     UR5E_JOINT_STATES_TOPIC,
     UR5E_TRAJECTORY_TOPIC,
     XARM6_JOINT_NAMES,
     XARM6_JOINT_STATES_TOPIC,
+    GazeboPickPlaceController,
 )
 
 TAUGHT_FUNCTIONS_ROOT = Path(__file__).resolve().parent / "taught_functions"
@@ -69,7 +70,7 @@ class UR5eRG2GripperControllerSettings:
         config: dict[str, Any] | None,
         *,
         hostname: str | None = None,
-    ) -> "UR5eRG2GripperControllerSettings":
+    ) -> UR5eRG2GripperControllerSettings:
         gripper = dict(config or {})
         rtde = dict(gripper.get("rtde") or {})
         resolved_hostname = (
@@ -142,7 +143,7 @@ class UR5eRG2GripperController:
         settings: UR5eRG2GripperControllerSettings,
         *,
         rtde_factory: Callable[..., Any] | None = None,
-    ) -> "UR5eRG2GripperController":
+    ) -> UR5eRG2GripperController:
         return cls(
             hostname=settings.hostname,
             open_position=settings.open_position,

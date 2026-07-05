@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def simulate_catalog_transition(
     goal_state: str = "",
     reachability: list[str] | None = None,
     staging_areas: dict | None = None,
-) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """
     Simulate one exact catalog-backed task from a modeled search state.
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # Mermaid class-name → status mapping.
 _STATUS_CLASS = {
     "pending_validation": "pending_validation",

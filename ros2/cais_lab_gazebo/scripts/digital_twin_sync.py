@@ -11,12 +11,10 @@ import multiprocessing as mp
 import os
 import queue
 import signal
-import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
-
 
 ROBOTS: dict[str, dict[str, Any]] = {
     "xarm6": {
@@ -588,8 +586,8 @@ def _observed_completion_worker(
     result_queue: mp.Queue,
 ) -> None:
     rclpy = _init_ros_domain(domain_id)
-    from sensor_msgs.msg import JointState
     from rclpy.node import Node
+    from sensor_msgs.msg import JointState
 
     class ObservedCompletionNode(Node):
         def __init__(self) -> None:

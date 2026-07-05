@@ -161,7 +161,7 @@ def run_interactive(node, robot_name, save_path):
         if save_path:
             save_to_json(save_path, name, positions, robot_name=robot_name)
         else:
-            print(f'  (use --save or --output to persist)')
+            print('  (use --save or --output to persist)')
 
     return saved
 

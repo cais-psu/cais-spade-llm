@@ -10,7 +10,6 @@ import pytest
 
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 
-
 TOOLS_CATALOG = [
     {
         "function": "place_insert",

@@ -6,7 +6,7 @@ import asyncio
 from contextlib import nullcontext
 from pathlib import Path
 
-from nicegui import ui, app
+from nicegui import app, ui
 from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
 
@@ -52,7 +52,7 @@ def _patch_nicegui_lifecycle() -> None:
     original_drawer_init = NiceGUIDrawer.__init__
 
     def _safe_drawer_init(self, side, **kwargs):
-        if kwargs.get("value", None) is None:
+        if kwargs.get("value") is None:
             kwargs["value"] = True
         return original_drawer_init(self, side, **kwargs)
 
@@ -127,7 +127,7 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import dashboard, control, safety, resources, products
+    from cais_spade_llm.ui.pages import control, dashboard, products, resources, safety
 
     @ui.page("/")
     def index_page():

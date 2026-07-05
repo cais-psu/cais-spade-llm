@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
-def detect_part(part_name: str) -> Optional[dict[str, Any]]:
+def detect_part(part_name: str) -> dict[str, Any] | None:
     """
     Direct physical perception entrypoint for a single part.
 

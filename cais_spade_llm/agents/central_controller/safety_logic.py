@@ -5,13 +5,14 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
-from copy import deepcopy
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 import json
 import re
 import shutil
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 from urllib.parse import quote
+
 try:
     from ltlf2dfa.parser.ltlf import LTLfParser
 except Exception:  # pragma: no cover - dependency may be absent in lightweight test envs
@@ -23,10 +24,11 @@ except Exception:  # pragma: no cover - dependency may be absent in lightweight 
     Source = None  # type: ignore[assignment]
 
 from cais_spade_llm.prompts import (
-    build_safety_parse_prompt,
-    build_safety_logic_prompt,
     build_safety_interpretation_prompt,
+    build_safety_logic_prompt,
+    build_safety_parse_prompt,
 )
+
 
 class SafetyLogic:
     """
@@ -49,18 +51,18 @@ class SafetyLogic:
         self.structured_safety_path: Path = self.safety_file.with_suffix(".json")
 
         # Parsed structured rules (NL -> rules)
-        self.rules: List[Dict[str, Any]] = []
+        self.rules: list[dict[str, Any]] = []
 
         # Raw logic from LLM: rule_id -> {"aps": [full___str...], "ltlf": "..."}
-        self.logic_raw: Dict[str, Dict[str, Any]] = {}
+        self.logic_raw: dict[str, dict[str, Any]] = {}
 
         # Optional combined safety spec: {"aps": {label: full}, "formula": "φ_safety"}
-        self.global_safety_spec: Dict[str, Any] = {}
+        self.global_safety_spec: dict[str, Any] = {}
         self.preview_interpretation_summary: str = ""
         self.safety_text_sha256: str = ""
 
         # store one DFA (DOT string) per rule
-        self.rule_dfas: Dict[str, str] = {}
+        self.rule_dfas: dict[str, str] = {}
 
     @staticmethod
     def compute_safety_text_sha256(safety_text: str) -> str:
@@ -168,9 +170,9 @@ class SafetyLogic:
         return token.split("@")[0].lower()
 
     @staticmethod
-    def _dedupe_keep_order(items: List[str]) -> List[str]:
+    def _dedupe_keep_order(items: list[str]) -> list[str]:
         seen: set[str] = set()
-        ordered: List[str] = []
+        ordered: list[str] = []
         for item in items:
             if item in seen:
                 continue
@@ -197,7 +199,7 @@ class SafetyLogic:
         return str(value).strip()
 
     @classmethod
-    def _normalize_context_object(cls, value: Any) -> Optional[dict[str, str]]:
+    def _normalize_context_object(cls, value: Any) -> dict[str, str] | None:
         if not isinstance(value, dict):
             return None
 
@@ -229,7 +231,7 @@ class SafetyLogic:
         return "&".join(items) if items else "any"
 
     @staticmethod
-    def _ap_segments(ap: str) -> Optional[dict[str, str]]:
+    def _ap_segments(ap: str) -> dict[str, str] | None:
         parts = str(ap or "").split("/", 5)
         if len(parts) != 6:
             return None
@@ -307,10 +309,10 @@ class SafetyLogic:
             rows.append(row)
         return rows
 
-    def _tool_row_for_action(self, resource: str, function_name: str) -> Optional[dict[str, Any]]:
+    def _tool_row_for_action(self, resource: str, function_name: str) -> dict[str, Any] | None:
         token = self._normalize_resource_token(resource)
         fn = str(function_name or "").strip()
-        fallback: Optional[dict[str, Any]] = None
+        fallback: dict[str, Any] | None = None
         for row in self._tool_rows():
             if str(row.get("function", "")).strip() != fn:
                 continue
@@ -521,8 +523,8 @@ class SafetyLogic:
         *,
         selector_process: str = "",
         selector_resource_type: str = "",
-        selector_functions: Optional[set[str]] = None,
-        selector_states: Optional[set[str]] = None,
+        selector_functions: set[str] | None = None,
+        selector_states: set[str] | None = None,
     ) -> bool:
         row_process = self._normalize_process_token(row.get("process"))
         row_resource_type = self._normalize_resource_type_token(row.get("resource_type"))
@@ -972,7 +974,7 @@ class SafetyLogic:
         self,
         rule: dict[str, Any],
         formula_ast: dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         ast = deepcopy(formula_ast)
         resource_vars = self._collect_resource_var_names(ast)
         if len(resource_vars) > 1:
@@ -1009,7 +1011,7 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # 1. Load NL safety requirements
     # ------------------------------------------------------------------ #
-    def load_nl_safety_text(self) -> Optional[str]:
+    def load_nl_safety_text(self) -> str | None:
         """
         Load raw NL safety text from safety_file.
         """
@@ -1173,7 +1175,7 @@ class SafetyLogic:
             # Normalize context (the LLM should return dict or None)
             context = self._normalize_context_object(context)
 
-            node: Dict[str, Any] = {
+            node: dict[str, Any] = {
                 "id": rule_id,
                 "raw_text": raw_text,
                 "constraint_type": constraint_type,
@@ -1422,7 +1424,7 @@ class SafetyLogic:
         *,
         refinement_feedback: str = "",
         previous_preview_rules: list[dict[str, Any]] | None = None,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """
         Use the LLM to convert self.rules into AP lists + LTLf formulas.
 
@@ -1467,7 +1469,7 @@ class SafetyLogic:
                 )
             raise
 
-        result: Dict[str, Dict[str, Any]] = {}
+        result: dict[str, dict[str, Any]] = {}
         items = parsed.get("rules", [])
         allowed_functions, function_process, allowed_resources, _ = self._tool_grounding()
         allowed_states = self._allowed_state_names()
@@ -1670,7 +1672,7 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # Split LTLf formula
     # ------------------------------------------------------------------ #
-    def _split_ltlf_formula_by_top_level_and(self, formula: str) -> List[str]:
+    def _split_ltlf_formula_by_top_level_and(self, formula: str) -> list[str]:
         """
         Split an LTLf formula string by top-level '&' operators.
         We ignore '&' that are inside parentheses.
@@ -1682,7 +1684,7 @@ class SafetyLogic:
             return []
 
         f = formula.strip()
-        parts: List[str] = []
+        parts: list[str] = []
         depth = 0
         last = 0
 
@@ -1719,8 +1721,8 @@ class SafetyLogic:
         if not self.logic_raw or not self.rules:
             return
 
-        new_rules: List[Dict[str, Any]] = []
-        new_logic: Dict[str, Dict[str, Any]] = {}
+        new_rules: list[dict[str, Any]] = []
+        new_logic: dict[str, dict[str, Any]] = {}
 
         for rule in self.rules:
             rid = rule.get("id")
@@ -1734,7 +1736,7 @@ class SafetyLogic:
                 continue
 
             raw_ltlf = str(raw_logic.get("ltlf", "") or "").strip()
-            raw_aps: List[str] = [str(a).strip() for a in (raw_logic.get("aps") or [])]
+            raw_aps: list[str] = [str(a).strip() for a in (raw_logic.get("aps") or [])]
 
             if not raw_ltlf or not raw_aps:
                 new_rules.append(rule)
@@ -1756,7 +1758,7 @@ class SafetyLogic:
                 continue
 
             # 2) for each conjunct, collect the APs that appear in it
-            ap_sets: List[set] = []
+            ap_sets: list[set] = []
             for conj in conjuncts:
                 used = {ap for ap in raw_aps if ap and ap in conj}
                 ap_sets.append(used)
@@ -1771,7 +1773,7 @@ class SafetyLogic:
                 continue
 
             # 3) group conjuncts by AP overlap (very simple grouping)
-            groups: List[List[int]] = []
+            groups: list[list[int]] = []
             assigned: set[int] = set()
 
             for i in range(len(conjuncts)):
@@ -1859,7 +1861,7 @@ class SafetyLogic:
         unique_aps = sorted(set(all_aps))
 
         # Assign labels (global)
-        ap_reverse: Dict[str, str] = {}  # full_ap -> label
+        ap_reverse: dict[str, str] = {}  # full_ap -> label
         for idx, ap in enumerate(unique_aps, start=1):
             label = f"ap{idx:03d}"
             ap_reverse[ap] = label
@@ -1877,7 +1879,7 @@ class SafetyLogic:
             raw_aps = raw_logic.get("aps", [])
             raw_ltlf = raw_logic.get("ltlf", "")
             raw_formula_ast = raw_logic.get("formula_ast")
-            ap_details_by_full: Dict[str, Dict[str, Any]] = {}
+            ap_details_by_full: dict[str, dict[str, Any]] = {}
             for detail in raw_logic.get("ap_details", []) or []:
                 if not isinstance(detail, dict):
                     continue
@@ -1912,7 +1914,7 @@ class SafetyLogic:
     # ------------------------------------------------------------------ #
     # Combine all rules into one global safety spec
     # ------------------------------------------------------------------ #
-    def _combine_safety_rules(self) -> Dict[str, Any]:
+    def _combine_safety_rules(self) -> dict[str, Any]:
         """
         Combine all per-rule LTLf formulas into a single global safety
         specification:
@@ -1925,8 +1927,8 @@ class SafetyLogic:
             "formula": "(φ_SAFE_1) & (φ_SAFE_2) & ..."
           }
         """
-        global_ap_map: Dict[str, str] = {}
-        formula_list: List[str] = []
+        global_ap_map: dict[str, str] = {}
+        formula_list: list[str] = []
 
         for rule in self.rules:
             # collect APs for this rule

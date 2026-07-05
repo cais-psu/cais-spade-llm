@@ -22,7 +22,6 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.substitutions import FindPackageShare
 
-
 _JOINT_STATE_RELAY = r"""
 import rclpy
 from rclpy.node import Node

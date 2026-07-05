@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from typing import Any
-
 
 DEFAULT_BRIDGE_RUNTIME_DATA_DIR = Path(
     "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"

@@ -8,10 +8,10 @@ are defined here with YAML frontmatter for catalog introspection.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
-from cais_spade_llm.resources.machine.printer_profile import PRINTER_PROFILE
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+from cais_spade_llm.resources.machine.printer_profile import PRINTER_PROFILE
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class PrintingAgent(ResourceAgent):
     _BRIDGE_PRIMITIVES: list[str] = ["pause_job", "resume_job", "cancel_job"]
 
     # Expose minimal runtime state for replanning context.
-    def _snapshot_state(self) -> Dict[str, Any]:
+    def _snapshot_state(self) -> dict[str, Any]:
         return {
             "resource_type": "printer",
             "agent_name": self.agent_name,
@@ -41,7 +41,7 @@ class PrintingAgent(ResourceAgent):
     # for FunctionAnalyzer._extract_yaml_frontmatter() to parse it.
     # ------------------------------------------------------------------
 
-    async def pause_job(self, *, job_id: str = "", **kwargs: Any) -> Dict[str, Any]:
+    async def pause_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
         preconditions:
@@ -61,7 +61,7 @@ class PrintingAgent(ResourceAgent):
             self._job_state = "paused"
         return {"success": True, "state": "paused"}
 
-    async def resume_job(self, *, job_id: str = "", **kwargs: Any) -> Dict[str, Any]:
+    async def resume_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
         preconditions:
@@ -81,7 +81,7 @@ class PrintingAgent(ResourceAgent):
             self._job_state = "printing"
         return {"success": True, "state": "printing"}
 
-    async def cancel_job(self, *, job_id: str = "", **kwargs: Any) -> Dict[str, Any]:
+    async def cancel_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
         preconditions:
@@ -113,7 +113,7 @@ class PrintingAgent(ResourceAgent):
         part_context: dict[str, Any] | None = None,
         bridge_snapshot: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Printer-specific bridge feasibility checks."""
         del event_instance, schema, projection, part_context
         snapshot = bridge_snapshot or {}

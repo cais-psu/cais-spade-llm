@@ -24,7 +24,6 @@ from cais_spade_llm.product.order import validate_product_order
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
 
-
 ROOT = Path(__file__).resolve().parents[1]
 GEOMETRY_PATH = ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
 TOOLS_PATH = ROOT / "cais_spade_llm/initialization/tools.json"
@@ -1127,9 +1126,7 @@ def test_active_window_monitor_restore_replays_task_progress_not_state_alias():
     for node in planner.nodes:
         if node["id"] in lrp["task_ids"][:-1]:
             node["status"] = "completed"
-        elif node["id"] == lrp["task_ids"][-1]:
-            node["status"] = "running"
-        elif node["id"] == mrp["task_ids"][0]:
+        elif node["id"] == lrp["task_ids"][-1] or node["id"] == mrp["task_ids"][0]:
             node["status"] = "running"
 
     old_fsa = planner.recompile_committed_product_order_fsa()

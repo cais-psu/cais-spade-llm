@@ -8,11 +8,10 @@ import json
 import re
 from pathlib import Path
 
-from nicegui import ui, events
+from nicegui import events, ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
-
 
 _SAFETY_DIR = Path("cais_spade_llm/specification/safety")
 
@@ -822,7 +821,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     else "Safety rule preview generated.",
                     type="positive",
                 )
-            except Exception as exc:
+            except Exception:
                 ui.notify(
                     "Safety preview generation failed. Review the explanation box below.",
                     type="negative",

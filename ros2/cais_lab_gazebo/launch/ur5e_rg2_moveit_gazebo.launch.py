@@ -6,7 +6,6 @@ Usage:
     ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py
 """
 
-import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path

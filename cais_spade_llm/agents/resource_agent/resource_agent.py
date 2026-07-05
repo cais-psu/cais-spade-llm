@@ -6,18 +6,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any
 
 from spade.behaviour import CyclicBehaviour  # Behaviour base used for our inbox loop.
 from spade.message import Message  # SPADE message objects (XMPP stanzas under the hood).
 from spade.template import Template  # Filters incoming messages by metadata.
 
-from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
     build_failure_event,
 )
+from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
+from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 
 
 class ResourceAgent(LlmAgent):
@@ -38,12 +39,12 @@ class ResourceAgent(LlmAgent):
         password: str,
         *,
         name: str,
-        function_names: Optional[Iterable[str]] = None,
-        static_capabilities: Optional[Dict[str, Any]] = None,
-        allowed_senders: Optional[Iterable[str]] = None,
+        function_names: Iterable[str] | None = None,
+        static_capabilities: dict[str, Any] | None = None,
+        allowed_senders: Iterable[str] | None = None,
         llm_timeout_s: int = 30,
         tool_timeout_s: int = 300,
-        cca_jid: Optional[str] = None,   # <-- NEW
+        cca_jid: str | None = None,   # <-- NEW
         **kw: Any,
     ) -> None:
         """
@@ -65,7 +66,7 @@ class ResourceAgent(LlmAgent):
         self.cca_jid = cca_jid
 
         # Optional metadata (payload limits, tool list, etc.) exposed to other agents or dashboards.
-        self.static_capabilities: Dict[str, Any] = static_capabilities or {}
+        self.static_capabilities: dict[str, Any] = static_capabilities or {}
         # Optional sender allow-list: if populated, only those JIDs can submit work.
         self.allowed_senders = set(allowed_senders or [])
         # Separate timeouts keep LLM latency (planning) independent from tool runtime (execution).
@@ -96,7 +97,7 @@ class ResourceAgent(LlmAgent):
         t_safety.set_metadata("type", "safety_decision")
         self.add_behaviour(self._SafetyDecisionInbox(), t_safety)
 
-    def _snapshot_state(self) -> Dict[str, Any]:
+    def _snapshot_state(self) -> dict[str, Any]:
         """
         Best-effort snapshot of resource state for failure context.
         Subclasses can override to provide richer state.
@@ -114,7 +115,7 @@ class ResourceAgent(LlmAgent):
             return token
         return "resource"
 
-    def get_bridge_snapshot(self) -> Dict[str, Any]:
+    def get_bridge_snapshot(self) -> dict[str, Any]:
         """Return the current descriptor-driven bridge snapshot for this resource."""
         from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
@@ -159,10 +160,10 @@ class ResourceAgent(LlmAgent):
         event_instance: Any | None = None,
         schema: Any | None = None,
         projection: Any | None = None,
-        part_context: Dict[str, Any] | None = None,
-        bridge_snapshot: Dict[str, Any] | None = None,
+        part_context: dict[str, Any] | None = None,
+        bridge_snapshot: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Default permissive bridge feasibility oracle.
 
         Subclasses (RobotAgent, PrintingAgent) can override with
@@ -177,11 +178,11 @@ class ResourceAgent(LlmAgent):
         bridge_session_id: str = "",
         resource_jid: str = "",
         assigned_outline_events: list[dict[str, Any]] | None = None,
-        prepared_bridge_request: Dict[str, Any] | None = None,
-        carried_session_state: Dict[str, Any] | None = None,
+        prepared_bridge_request: dict[str, Any] | None = None,
+        carried_session_state: dict[str, Any] | None = None,
         max_turns: int = 24,
         **_kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
             generate_primitive_batch_with_llm_agent,
         )
@@ -211,23 +212,19 @@ class ResourceAgent(LlmAgent):
         macro_name: str = "",
         primitive_steps: list | None = None,
         expected_start_state: str = "",
-        expected_snapshot: Dict[str, Any] | None = None,
+        expected_snapshot: dict[str, Any] | None = None,
         product_jid: str | None = None,
         task_id: str | None = None,
         in_state: str | None = None,
         out_state: str | None = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Generic bridge recovery macro executor.
 
         Validates the starting snapshot, semantically validates the primitive
         sequence, executes each primitive on the resolved owner, and applies
         projected bridge state back onto the resource agent.
         """
-        from cais_spade_llm.resources.resource_profile import (
-            get_resource_profile_for_agent,
-            resource_snapshot_set_field,
-        )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
@@ -240,6 +237,10 @@ class ResourceAgent(LlmAgent):
         from cais_spade_llm.resources.resource_primitives import (
             get_resource_bridge_snapshot,
             sync_agent_from_bridge_snapshot,
+        )
+        from cais_spade_llm.resources.resource_profile import (
+            get_resource_profile_for_agent,
+            resource_snapshot_set_field,
         )
 
         steps = list(primitive_steps or [])
@@ -334,7 +335,7 @@ class ResourceAgent(LlmAgent):
         if profile.primitive_owner_resolver is not None:
             owner = profile.primitive_owner_resolver(self) or self
 
-        results: list[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         event_facts: dict[str, Any] = {}
         resource_type = str(
             dict(runtime_snapshot.get("resource_core") or {}).get("resource_type")
@@ -532,12 +533,12 @@ class ResourceAgent(LlmAgent):
         self,
         *,
         fn_name: str,
-        fn_args: Dict[str, Any],
-        result: Dict[str, Any] | None,
+        fn_args: dict[str, Any],
+        result: dict[str, Any] | None,
         final_status: str,
-        state_before: Dict[str, Any],
-        state_after: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        state_before: dict[str, Any],
+        state_after: dict[str, Any],
+    ) -> dict[str, Any]:
         """
         Build a normalized failure context payload for any failure type.
         """
@@ -568,7 +569,7 @@ class ResourceAgent(LlmAgent):
         )
         return deepcopy(failure_event.get("failure_context") or {})
 
-    async def _wait_for_safety_decision(self, task_id: str) -> Optional[str]:
+    async def _wait_for_safety_decision(self, task_id: str) -> str | None:
         """
         Block until a safety_decision is available for this task_id.
         No timeout: waits indefinitely until CCA replies.
@@ -584,7 +585,7 @@ class ResourceAgent(LlmAgent):
     class _TaskInbox(CyclicBehaviour):
         """Long-running behaviour that processes incoming tasks sequentially."""
         async def run(self) -> None:
-            agent: "ResourceAgent" = self.agent  # type: ignore
+            agent: ResourceAgent = self.agent  # type: ignore
 
             # Poll inbox frequently but yield control if nothing arrives to keep agent responsive.
             msg = await self.receive(timeout=0.05)
@@ -628,7 +629,7 @@ class ResourceAgent(LlmAgent):
             # ----- Tool selection ----- #
             # If the instruction already specifies a tool, honor it and skip the LLM.
             fn_name = None
-            fn_args: Dict[str, Any] = {}
+            fn_args: dict[str, Any] = {}
             if isinstance(instruction, dict):
                 fn_name = instruction.get("function_name") or instruction.get("function")
                 if isinstance(instruction.get("params"), dict):
@@ -785,7 +786,7 @@ class ResourceAgent(LlmAgent):
             # ---------------------------
             state_before = agent._snapshot_state()
             state_after = state_before
-            result: Dict[str, Any] | None = None
+            result: dict[str, Any] | None = None
             try:
                 # Filter fn_args to only params the function accepts.
                 # Functions that declare **kwargs receive everything;
@@ -906,10 +907,10 @@ class ResourceAgent(LlmAgent):
             self,
             msg: Message,
             *,
-            task_id: Optional[str],
+            task_id: str | None,
             status: str,
             content: str = "",
-            observations: Dict[str, Any] | None = None,
+            observations: dict[str, Any] | None = None,
         ) -> None:
             """Send an acknowledgement/status update back to the originating ProductAgent."""
             reply = Message(to=str(msg.sender))
@@ -929,7 +930,7 @@ class ResourceAgent(LlmAgent):
     class _SafetyDecisionInbox(CyclicBehaviour):
         """Receives safety_decision messages from CCA and stores them on the agent."""
         async def run(self) -> None:
-            agent: "ResourceAgent" = self.agent  # type: ignore
+            agent: ResourceAgent = self.agent  # type: ignore
 
             msg = await self.receive(timeout=0.05)
             if not msg:

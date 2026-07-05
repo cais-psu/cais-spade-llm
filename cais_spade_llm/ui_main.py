@@ -16,13 +16,13 @@ import asyncio
 import atexit
 import logging
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
-from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
+from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
 from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
 
 install_startup_logging_filters()
@@ -36,10 +36,12 @@ if _pkg_dir not in sys.path:
 
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
-    from spade import run as spade_run
-    import utils, agent_creator
-    from function_analyzer import FunctionAnalyzer
+    import agent_creator
+    import utils
     from agent_creator import ALLOWED_FUNCS
+    from function_analyzer import FunctionAnalyzer
+    from spade import run as spade_run
+
     from cais_spade_llm.ui.bridge import SystemBridge
 
     async def _main():

@@ -53,7 +53,7 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _load_real_gripper_config(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     ur5e = raw.get("ur5e", {}) if isinstance(raw, dict) else {}
     real = ur5e.get("real", {}) if isinstance(ur5e, dict) else {}

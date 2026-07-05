@@ -24,7 +24,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artif
     write_bridge_artifacts,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
-    resolve_param_refs,
     validate_and_project_steps_with_trace,
 )
 from cais_spade_llm.resources.resource_primitives import (

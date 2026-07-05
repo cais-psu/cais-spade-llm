@@ -7,12 +7,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from nicegui import ui, events
+from nicegui import events, ui
 
+from cais_spade_llm.product.order import validate_product_order
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
-from cais_spade_llm.product.order import validate_product_order
-
 
 _SPEC_DIR = Path("cais_spade_llm/specification/products")
 _ORDER_DIR = _SPEC_DIR / "orders"
@@ -108,7 +107,7 @@ def _normalize_product_meta(meta: dict[str, Any] | None, *, product_name: str = 
 def _ordered_product_config_keys(meta: dict[str, Any]) -> list[str]:
     keys = [key for key in _PRODUCT_CONFIG_ORDER if key in meta and key != "cad_path"]
     extras = sorted(
-        key for key in meta.keys()
+        key for key in meta
         if key not in _PRODUCT_CONFIG_ORDER and key != "cad_path"
     )
     return keys + extras

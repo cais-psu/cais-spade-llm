@@ -1,11 +1,13 @@
 """Online safety monitor that tracks running actions and DFA states."""
 
 from __future__ import annotations
+
 import json
 import logging
-from typing import Tuple, Dict, Any, List, Optional, Set
+from typing import Any
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+
 
 class OnlineSafetyMonitor(BaseSafetyChecker):
     """
@@ -14,30 +16,30 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
     """
     def __init__(
         self,
-        dfa_dots: Dict[str, str],
+        dfa_dots: dict[str, str],
         safety_rules: list[dict],
-        tools_catalog: Optional[list[dict[str, Any]]] = None,
+        tools_catalog: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(dfa_dots, safety_rules, tools_catalog=tools_catalog)
 
         self.logger = logging.getLogger("OnlineSafetyMonitor")
 
         # STATE: Track currently running actions across the factory
-        self.running_aps: Set[str] = set()
+        self.running_aps: set[str] = set()
 
         # STATE: Track currently active state APs across the factory
-        self.resource_state_aps: Dict[str, Set[str]] = {}
-        self.resource_states: Dict[str, Dict[str, Any]] = {}
+        self.resource_state_aps: dict[str, set[str]] = {}
+        self.resource_states: dict[str, dict[str, Any]] = {}
 
         # STATE: Current DFA state pointer for every rule
-        self.current_states: Dict[str, str] = {
+        self.current_states: dict[str, str] = {
             rid: data["initial"] for rid, data in self.dfas.items()
         }
 
     # ------------------------------------------------------------------ #
     # 1. Parsing Logic
     # ------------------------------------------------------------------ #
-    def parse_resource_event(self, msg) -> Optional[dict[str, Any]]:
+    def parse_resource_event(self, msg) -> dict[str, Any] | None:
         """Parse and validate a resource_event message body into a dict."""
         try:
             data = json.loads(msg.body or "{}")
@@ -66,7 +68,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             "failure_context": data.get("failure_context") or {},
         }
 
-    def seed_resource_states(self, resource_snapshots: Dict[str, Dict[str, Any]]) -> None:
+    def seed_resource_states(self, resource_snapshots: dict[str, dict[str, Any]]) -> None:
         """Seed initial persistent state APs from resource snapshots when available."""
         for resource_jid, snapshot in (resource_snapshots or {}).items():
             if not isinstance(snapshot, dict):
@@ -76,8 +78,8 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
                 continue
             self._update_resource_state(resource_jid, current_state, params={})
 
-    def _all_state_aps(self) -> Set[str]:
-        active: Set[str] = set()
+    def _all_state_aps(self) -> set[str]:
+        active: set[str] = set()
         for labels in self.resource_state_aps.values():
             active |= set(labels)
         return active
@@ -87,7 +89,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         resource_jid: str,
         current_state: str,
         *,
-        params: Optional[dict[str, Any]] = None,
+        params: dict[str, Any] | None = None,
     ) -> None:
         payload = dict(params or {})
         self.resource_states[str(resource_jid)] = {
@@ -103,10 +105,10 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
     # ------------------------------------------------------------------ #
     def online_safety_validation(
         self,
-        candidate_aps: List[str],
+        candidate_aps: list[str],
         *,
-        predicted_state_aps: Optional[List[str]] = None,
-    ) -> Tuple[bool, dict[str, Any]]:
+        predicted_state_aps: list[str] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
         """
         Pure safety validation step: check if adding candidate APs would violate any rule.
         Does NOT mutate state.
@@ -131,7 +133,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             | set(predicted)
         )
 
-        next_states: Dict[str, str] = {}
+        next_states: dict[str, str] = {}
         violated_rule = None
         violated_from = None
         violated_to = None
@@ -169,7 +171,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             "predicted_state_aps": predicted,
         }
 
-    def process_start_event(self, event: dict[str, Any]) -> Tuple[bool, dict[str, Any]]:
+    def process_start_event(self, event: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         """
         Check if a task can start. If yes, update running_aps only.
         The DFA state is NOT advanced here; it advances on successful
@@ -235,7 +237,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             | self._all_state_aps()
             | set(finished_aps)
         )
-        next_states: Dict[str, str] = {}
+        next_states: dict[str, str] = {}
         for rule_id in self.dfas:
             prev = self.current_states.get(rule_id, "1")
             nxt = self._delta(rule_id, prev, sigma)

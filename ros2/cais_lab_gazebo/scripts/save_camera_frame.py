@@ -8,12 +8,11 @@ Usage:
     python3 ros2/cais_lab_gazebo/scripts/save_camera_frame.py
 """
 
-import sys
 import cv2
 import numpy as np
 import rclpy
-from rclpy.node import Node
 from cv_bridge import CvBridge
+from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 CAMERAS = ["cam_mk3", "cam_mk4_1", "cam_mk4_2", "cam_assembly"]

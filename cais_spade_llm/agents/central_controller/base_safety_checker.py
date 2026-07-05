@@ -1,11 +1,13 @@
 """Shared DFA parsing and AP-mapping utilities for safety checking."""
 
 from __future__ import annotations
+
+import json
 import logging
 import re
-import json
-from typing import Any, Dict, List, Tuple, Optional, FrozenSet
+from typing import Any
 from urllib.parse import parse_qsl
+
 
 class BaseSafetyChecker:
     """
@@ -20,9 +22,9 @@ class BaseSafetyChecker:
 
     def __init__(
         self,
-        dfa_dots: Dict[str, str],
+        dfa_dots: dict[str, str],
         safety_rules: list[dict],
-        tools_catalog: Optional[list[dict[str, Any]]] = None,
+        tools_catalog: list[dict[str, Any]] | None = None,
     ) -> None:
         """Load safety rules and parse DFA DOT sources into transition tables."""
         self.logger = logging.getLogger("BaseSafetyChecker")
@@ -30,11 +32,11 @@ class BaseSafetyChecker:
         self.tools_catalog = tools_catalog or []
         
         # Performance optimization caches
-        self._compiled_expr_cache: Dict[str, Any] = {}
-        self._eval_result_cache: Dict[Tuple[str, FrozenSet[str]], bool] = {}
+        self._compiled_expr_cache: dict[str, Any] = {}
+        self._eval_result_cache: dict[tuple[str, frozenset[str]], bool] = {}
 
         # Internal DFA storage: { rule_id: { "initial": "1", "transitions": {...} } }
-        self.dfas: Dict[str, Dict[str, Any]] = {}
+        self.dfas: dict[str, dict[str, Any]] = {}
 
         # Parse all DOT strings immediately
         for rule_id, dot_str in dfa_dots.items():
@@ -159,7 +161,7 @@ class BaseSafetyChecker:
         return bool(source_task_ids & cls._task_id_tokens(params))
 
     @staticmethod
-    def _parse_ap_descriptor(full: str) -> Optional[Dict[str, str]]:
+    def _parse_ap_descriptor(full: str) -> dict[str, str] | None:
         token = str(full or "").strip()
         parts = token.split("/")
         if len(parts) < 6:
@@ -197,7 +199,7 @@ class BaseSafetyChecker:
     # ------------------------------------------------------------------ #
     # Shared: Task -> AP Mapping (generic, no hard-coded fn names)
     # ------------------------------------------------------------------ #
-    def _map_task_to_aps(self, resource_jid: str, function_name: str, params: dict) -> List[str]:
+    def _map_task_to_aps(self, resource_jid: str, function_name: str, params: dict) -> list[str]:
         """
         Maps a task execution to a list of AP labels based on loaded safety rules.
 
@@ -209,7 +211,7 @@ class BaseSafetyChecker:
                        * composite key=value pairs joined by "&" must all match, or
                        * legacy single-token matching falls back to raw value comparison
         """
-        labels: List[str] = []
+        labels: list[str] = []
 
         # Normalize "<resource>@<host>" -> "<resource>"
         res_short = self._resource_short_name(resource_jid)
@@ -281,7 +283,7 @@ class BaseSafetyChecker:
 
         return labels
 
-    def _map_state_to_aps(self, resource_jid: str, current_state: str, params: dict) -> List[str]:
+    def _map_state_to_aps(self, resource_jid: str, current_state: str, params: dict) -> list[str]:
         """
         Maps a resource's persistent state to matching state AP labels.
 
@@ -297,9 +299,9 @@ class BaseSafetyChecker:
         resource_jid: str,
         surface: dict[str, str],
         params: dict[str, Any],
-    ) -> List[str]:
+    ) -> list[str]:
         """Maps a structured state surface to matching state AP labels."""
-        labels: List[str] = []
+        labels: list[str] = []
         res_short = self._resource_short_name(resource_jid)
         task_product = self._task_product_name(params)
         state_tokens = self._state_surface_tokens(surface)
@@ -385,9 +387,9 @@ class BaseSafetyChecker:
         )
         return json.dumps(labels, separators=(",", ":"))
 
-    def _tool_rows_for_action(self, resource_jid: str, function_name: str) -> List[Dict[str, Any]]:
+    def _tool_rows_for_action(self, resource_jid: str, function_name: str) -> list[dict[str, Any]]:
         res_short = self._resource_short_name(resource_jid)
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for row in self.tools_catalog:
             if not isinstance(row, dict):
                 continue
@@ -404,11 +406,11 @@ class BaseSafetyChecker:
         resource_jid: str,
         function_name: str,
         params: dict[str, Any],
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Predict which state APs would become true if the task finishes successfully.
         """
-        predicted: List[str] = []
+        predicted: list[str] = []
         for row in self._tool_rows_for_action(resource_jid, function_name):
             out_state = str(row.get("out_state", "")).strip()
             if not out_state or out_state.lower() == "any":
@@ -419,7 +421,7 @@ class BaseSafetyChecker:
             predicted.extend(
                 self._map_state_surface_to_aps(resource_jid, projected_surface, params)
             )
-        deduped: List[str] = []
+        deduped: list[str] = []
         seen: set[str] = set()
         for label in predicted:
             if label in seen:
@@ -429,7 +431,7 @@ class BaseSafetyChecker:
         return deduped
 
     @staticmethod
-    def _context_pairs(ap_context: str) -> Optional[list[tuple[str, str]]]:
+    def _context_pairs(ap_context: str) -> list[tuple[str, str]] | None:
         token = str(ap_context or "").strip()
         if not token or token == "any" or "=" not in token:
             return None
@@ -475,7 +477,7 @@ class BaseSafetyChecker:
     # ------------------------------------------------------------------ #
     # Shared: DFA Transition Logic (The Math)
     # ------------------------------------------------------------------ #
-    def _delta(self, rule_id: str, current_state: str, sigma: FrozenSet[str]) -> str:
+    def _delta(self, rule_id: str, current_state: str, sigma: frozenset[str]) -> str:
         """
         Calculates the next state for a specific rule given the current state and active APs.
         """
@@ -493,7 +495,7 @@ class BaseSafetyChecker:
         # If no transition matches, remain in current state (Stuttering)
         return current_state
 
-    def _eval_label(self, label: str, sigma: FrozenSet[str], rule_aps: List[str]) -> bool:
+    def _eval_label(self, label: str, sigma: frozenset[str], rule_aps: list[str]) -> bool:
         """
         Evaluates boolean label expression (e.g., "ap001 & !ap002").
         """
@@ -540,14 +542,14 @@ class BaseSafetyChecker:
     # ------------------------------------------------------------------ #
     # Shared: DOT Parsing
     # ------------------------------------------------------------------ #
-    def _parse_dot(self, rule_id: str, dot_src: str) -> Dict[str, Any]:
+    def _parse_dot(self, rule_id: str, dot_src: str) -> dict[str, Any]:
         """
         Parses a DOT string into a dictionary structure.
         """
-        transitions: Dict[str, List[Tuple[str, str]]] = {}
-        ap_list: List[str] = []
-        init: Optional[str] = None
-        violation: Optional[str] = None
+        transitions: dict[str, list[tuple[str, str]]] = {}
+        ap_list: list[str] = []
+        init: str | None = None
+        violation: str | None = None
         accepting: set[str] = set()
 
         text = " ".join(dot_src.split())
@@ -559,7 +561,7 @@ class BaseSafetyChecker:
             init = m_init.group(1)
 
         for state_blob in re.findall(
-            rf"node\s*\[shape\s*=\s*doublecircle\]\s*;\s*([^;]+)\s*;",
+            r"node\s*\[shape\s*=\s*doublecircle\]\s*;\s*([^;]+)\s*;",
             text,
             flags=re.IGNORECASE,
         ):
