@@ -53,7 +53,7 @@ from cais_spade_llm.ui import digital_twin
 
 log = logging.getLogger("ui.bridge")
 
-# Filesystem locations (mirror spade_main.py constants).
+# Filesystem locations used throughout the runtime.
 _BASE = Path(__file__).resolve().parent.parent  # cais_spade_llm/
 _PROJECT_ROOT = _BASE.parent  # repo root
 _PRODUCT_DIR = _BASE / "initialization" / "products"
@@ -4040,7 +4040,7 @@ class SystemBridge:
     # System lifecycle
     # ------------------------------------------------------------------
     async def start_system(self) -> None:
-        """Start the SPADE agent system (mirrors spade_main.spade_main)."""
+        """Start the SPADE agent system (CCA, robots, user agent, XMPP)."""
         if self.system_running or self._starting:
             return
         self._starting = True

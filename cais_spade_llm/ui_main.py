@@ -5,7 +5,7 @@ Modes::
     # Operator console (default) -- web UI at http://localhost:8080
     python3 -m cais_spade_llm.ui_main
 
-    # Headless -- same as the old spade_main.py, no web server
+    # Headless -- SPADE agents only, no web server
     python3 -m cais_spade_llm.ui_main --headless
 """
 
@@ -29,7 +29,7 @@ install_startup_logging_filters()
 install_xmpp_runtime_patches()
 
 # Ensure the cais_spade_llm package directory is on sys.path so that
-# agent_creator, utils, etc. can be imported the same way spade_main.py does.
+# agent_creator, utils, etc. resolve as bare module names (legacy import style).
 _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)

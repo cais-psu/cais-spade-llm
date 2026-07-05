@@ -216,9 +216,9 @@ poetry install
 # Should print 3.10.x
 .venv/bin/python --version
 
-# Should run the main entry point
+# Should run the main entry point (headless SPADE agents, no UI)
 source .venv/bin/activate
-python cais_spade_llm/spade_main.py
+python -m cais_spade_llm.ui_main --headless
 ```
 
 ---
@@ -232,7 +232,7 @@ The Poetry venv does not contain ROS2 tools or `lxml`. When the venv is active,
 
 | Terminal | Purpose | Environment |
 |---|---|---|
-| **Terminal A** (Python/SPADE) | Run `spade_main.py`, tests, Poetry commands | Poetry venv **activated** (`source .venv/bin/activate`) |
+| **Terminal A** (Python/SPADE) | Run `python -m cais_spade_llm`, tests, Poetry commands | Poetry venv **activated** (`source .venv/bin/activate`) |
 | **Terminal B** (ROS2/Gazebo) | `ros2 launch`, `ros2 topic`, Gazebo | Poetry venv **NOT activated** — only `source /opt/ros/humble/setup.bash` |
 
 **How to check:** Run `which python3` — if it points to `.venv/bin/python3`, the venv is active.

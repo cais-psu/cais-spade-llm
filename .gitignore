@@ -43,3 +43,6 @@ debug/
 
 # Local environment files
 .env
+
+# IDE configuration
+.idea/
