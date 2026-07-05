@@ -55,8 +55,12 @@ ignore = [
 ]
 
 # Package __init__ files legitimately re-export names.
+# test/ and ros2/ scripts are CLI-style tools where stdout print is the interface;
+# the no-print rule targets the runtime package (use logging there).
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]
+"test/**" = ["T20"]
+"ros2/**" = ["T20"]
 
 # Generous thresholds so the complexity rules flag only egregious cases now,
 # not merely-large functions. Tighten these as the monster files get decomposed.
@@ -79,5 +83,6 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
-    "ruff (>=0.14,<0.15)"
+    "ruff (>=0.14,<0.15)",
+    "pre-commit (>=4.6.0,<5.0.0)"
 ]
