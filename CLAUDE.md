@@ -1,69 +1,67 @@
-# CLAUDE.md — Project Instructions for Claude Code
+# CLAUDE.md
 
-## Project Overview
+## Project overview
 
-CAIS-SPADE-LLM is a multi-agent manufacturing automation system combining LLM-driven planning (SPADE + OpenAI function calling), safety-aware execution (LTL/FSA validation), dual-robot coordination (UR5e + xArm6), and a NiceGUI web UI operator console.
+CAIS-SPADE-LLM is a multi-agent manufacturing automation system. It uses SPADE
+agents for coordination, LLM planning, safety validation, ROS2/Gazebo/MoveIt for
+robot execution, UR5e + xArm6 dual robots, and a NiceGUI operator UI.
 
-## Tech Stack
+## Tech stack
 
-- **Python 3.10** (strict: `>=3.10,<3.11` — required by ROS2 Humble)
-- **Package manager:** Poetry
-- **Multi-agent framework:** SPADE 4.1.2 (XMPP-based)
-- **LLM:** LangChain + OpenAI API
-- **UI:** NiceGUI 2.0+ (port 8080)
-- **Robotics:** ROS2 Humble, MoveIt2, Gazebo Classic 11
-- **Safety:** LTL formulas → DFA automata (ltlf2dfa)
+- Python 3.10 (`>=3.10,<3.11`, required by ROS2 Humble)
+- Poetry
+- SPADE 4.1.2
+- LangChain + OpenAI API
+- NiceGUI
+- ROS2 Humble, MoveIt2, Gazebo Classic 11
+- LTL/FSA safety validation
 
-## Project Structure
+## Project structure
 
-```
+```text
 cais_spade_llm/          # Main Python package
-  agents/                # SPADE agents (ProductAgent, RobotAgent, CCA, UserAgent)
-  resources/             # Robot controllers, camera, gripper modules
-  ui/                    # NiceGUI web UI (pages, components, bridge)
-ros2/                    # ROS2 Gazebo packages and launch files
-test/                    # Test scripts
-initialization/          # JSON configs (products, robots, CCA)
-specification/           # Assembly specs, safety rules, geometry
-monitor/                 # Runtime outputs (logs, state, plans)
+  agents/                # SPADE agents
+  resources/             # Robot controllers, sensors, grippers, primitives
+  ui/                    # NiceGUI pages, components, and SystemBridge
+ros2/                    # ROS2 launch files, scripts, configs, RViz assets
+initialization/          # JSON configs for products, robots, and agents
+specification/           # Product requirements, safety rules, geometry
+monitor/                 # Runtime outputs: logs, state, plans, history
 ```
 
-## Running the Project
+## Run commands
 
 ```bash
-# Activate venv
-source .venv/bin/activate
-
-# Run in dry run mode (no ROS2 needed)
-python -m cais_spade_llm --mode dry_run
-
-# Run with ROS2 + Gazebo
-python -m cais_spade_llm --mode simulation
+poetry install
+poetry run python -m cais_spade_llm
+poetry run python -m cais_spade_llm.ui_main --headless
 ```
 
-## Running Tests
+For ROS2/Gazebo work, bootstrap the workspace before checking installed launch
+behavior:
 
 ```bash
-# Full pytest suite (no ROS2 needed)
-poetry run python -m pytest test/
-
-# Digital twin / Teach / Replay in Twin / ROS2 launch gate (per AGENTS.md)
-poetry run python -m pytest test/test_ur5e_rg2_rtde_gripper.py
+make bootstrap-gazebo
 ```
 
-## Conventions & standards
+## Verification
 
-Code conventions, repository boundaries, and the enforced clean-code standards
-(ruff rules, `make lint` / `make lint-fix`, pre-commit, and the docstring &
-comment policy) live in **AGENTS.md** and the files under `docs/`. AGENTS.md is
-imported below so this file and AGENTS.md never drift — read it before changing
-code.
+```bash
+poetry check
+poetry run python -m compileall -q cais_spade_llm ros2
+poetry run python -m cais_spade_llm.ui_main --help
+```
+
+Create focused or temporary tests in `test/` when a feature needs them. Run the
+tests you create or restore for the touched behavior. For ROS2 launch, script, or
+RViz changes, run `make bootstrap-gazebo` before checking the installed
+workspace.
+
+## Coding rules
+
+Read `AGENTS.md` before changing code. It is the source for project coding rules:
+keep changes scoped, preserve project terms exactly as written, avoid generic
+canonical rewrites, keep `SystemBridge` as the UI-to-runtime surface unless the
+user asks otherwise, and write clean human-readable code.
 
 @AGENTS.md
-
-## Important Patterns
-
-- Robot controllers are instantiated dynamically from JSON manifests (`initialization/resources/robot_*.json`)
-- SPADE agents communicate over XMPP; the `SystemBridge` syncs agent state to the NiceGUI UI
-- Safety validation runs both offline (pre-execution LTL→DFA) and online (runtime FSA monitoring)
-- Three execution modes: `dry_run` (pure Python), `simulation` (Gazebo), `physical` (hardware)

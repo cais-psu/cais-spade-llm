@@ -1,76 +1,73 @@
 # Codebase Map
 
-One page to re-orient yourself. What runs, in what order, and where to look.
+Use this file to find the right code path quickly. It is a coding/navigation map,
+not an install guide.
 
-## What happens when you run it
+## What Runs When The App Starts
 
-`python -m cais_spade_llm` (or `make run`) does this, in order:
+`python -m cais_spade_llm` or `make run` follows this path:
 
-1. [`cais_spade_llm/__main__.py`](../cais_spade_llm/__main__.py) — thin launcher, hands off to:
-2. [`cais_spade_llm/ui_main.py`](../cais_spade_llm/ui_main.py) — the real entry point.
-   Parses flags (`--mode dry_run|simulation|physical`, `--headless`), installs
-   startup/shutdown cleanup, then starts the web UI (or agents only with `--headless`).
-3. [`cais_spade_llm/ui/app.py`](../cais_spade_llm/ui/app.py) — builds the NiceGUI app
-   at http://localhost:8080 and registers exactly **5 pages**:
-   `/` dashboard · `/control` · `/products` · `/resources` · `/safety`.
-4. [`cais_spade_llm/ui/bridge.py`](../cais_spade_llm/ui/bridge.py) — **`SystemBridge`, the
-   hub of the whole system.** Every UI button lands here. It owns: config/product-order
-   files, agent startup, ROS2 launch/process control, digital twin, hardware status,
-   function recording, safety intent preview, and runtime status. (Its digital-twin
-   helpers live in [`ui/digital_twin.py`](../cais_spade_llm/ui/digital_twin.py); an
-   embedded XMPP server is started as a subprocess via `ui/xmpp_server_runner.py`.)
-5. When you press start, `SystemBridge.start_system()` creates the **SPADE agents**
-   (wired up by [`agent_creator.py`](../cais_spade_llm/agent_creator.py)), which talk
-   to each other over XMPP:
-   - **ProductAgent** (`agents/intelligent_product/`) — plans the product's assembly
-     with the LLM (`process_planner.py`), and re-plans on failure
-     (`product_recovery_controller.py`, `replanner/llm_bridge/`).
-   - **CCA** (`agents/central_controller/`) — validates every plan against safety
-     rules before execution: LTL formulas → DFA automata (`safety_logic.py`,
-     `plan_safety_validator.py`), plus runtime FSA monitoring.
-   - **RobotAgent** (`agents/resource_agent/robot_agent.py`) — executes approved steps
-     on a robot by calling the controllers in `resources/robot/`.
-6. **Robot execution** (`resources/robot/`) — `robot_tasks.py` → `robot_primitives.py`
-   → a controller (`gazebo_pick_place_controller.py` for simulation, RTDE/xArm
-   hardware controllers for `physical`). Which robot has which capability comes from
-   JSON manifests in `initialization/resources/robot_*.json` — never hardcoded.
+1. [`cais_spade_llm/__main__.py`](../cais_spade_llm/__main__.py) hands off to
+   [`cais_spade_llm/ui_main.py`](../cais_spade_llm/ui_main.py).
+2. [`cais_spade_llm/ui_main.py`](../cais_spade_llm/ui_main.py) parses mode flags,
+   prepares startup/shutdown handling, and starts the UI or headless agents.
+3. [`cais_spade_llm/ui/app.py`](../cais_spade_llm/ui/app.py) builds the NiceGUI
+   shell and registers five routes: `/`, `/control`, `/products`, `/resources`,
+   and `/safety`.
+4. [`cais_spade_llm/ui/bridge.py`](../cais_spade_llm/ui/bridge.py) exposes
+   `SystemBridge`, the public surface that UI pages call for runtime work.
+5. [`cais_spade_llm/agent_creator.py`](../cais_spade_llm/agent_creator.py) wires
+   ProductAgent, CCA, RobotAgent, and UserAgent when the system starts.
+6. Robot execution flows through `resources/robot/`: task methods, primitives,
+   then simulation or hardware controllers.
 
-## The 3 modes
+## Modes
 
-| Mode | What actually runs |
-|---|---|
-| `dry_run` | Pure Python: agents + planning + safety validation. No ROS2 anywhere. Best for development. |
-| `simulation` | Same, plus Gazebo via the launch files in `ros2/cais_lab_gazebo/` (bootstrap once with `make bootstrap-gazebo`). |
-| `physical` | Same, plus real UR5e (RTDE) / xArm6 drivers. Physical perception services are still stubs. |
+| Mode | What it runs |
+| --- | --- |
+| `dry_run` | Pure Python agents, planning, and safety validation. No ROS2 required. |
+| `simulation` | Python system plus Gazebo/MoveIt launch files under `ros2/cais_lab_gazebo/`. |
+| `physical` | Python system plus hardware controllers, RTDE/xArm paths, and machine-specific setup. |
 
-## Directory guide — "what do I open when…"
+## Where To Look
 
-| Path | What it is |
-|---|---|
-| `cais_spade_llm/ui_main.py` | Entry point: flags, startup, shutdown |
-| `cais_spade_llm/ui/` | Web UI: `app.py` (pages), `bridge.py` (SystemBridge hub), `pages/`, `components/` |
-| `cais_spade_llm/agents/` | The three agent roles: `intelligent_product/` (LLM planning), `central_controller/` (safety), `resource_agent/` (execution), `shared_information/` (LLM/user helpers) |
-| `cais_spade_llm/resources/` | Robot/machine/sensor drivers and primitives — the "hands" |
-| `cais_spade_llm/prompts.py` | The LLM prompt texts |
-| `cais_spade_llm/agent_creator.py` | Builds and wires the agents at startup |
-| `cais_spade_llm/initialization/` | **JSON manifests: products, robot capabilities, CCA config.** Change behavior here, not in code |
-| `cais_spade_llm/specification/` | Assembly specs, safety rules, geometry |
-| `cais_spade_llm/safety/`, `monitor/`, `log/`, `bundles/`, `user_verified_*/` | Runtime outputs (DFAs, state, plans, logs) — generated, mostly gitignored |
-| `ros2/cais_lab_gazebo/` | Gazebo/MoveIt launch files, digital-twin + teleop scripts, RViz configs. **Never auto-format this tree — tests assert its exact source text** |
-| `test/` | 5 pytest files; `test_ur5e_rg2_rtde_gripper.py` is the gate for digital-twin/ROS2-launch changes |
-| `initialization/`, `specification/` (repo root) | Root-level copies of configs used by some flows |
-| `docs/` | This map + `architecture.md` (boundaries) + `code_review.md` + `refactoring.md` |
-| `TODO/`, `writing/` | Research notes and paper drafts — not code |
+| Task | Start here |
+| --- | --- |
+| UI startup, CLI flags, shutdown behavior | `cais_spade_llm/ui_main.py` |
+| Page routing and layout shell | `cais_spade_llm/ui/app.py` |
+| UI button behavior and runtime state | `cais_spade_llm/ui/bridge.py` |
+| ROS2 launch commands, domains, workspace prerequisites | `cais_spade_llm/ui/ros2_processes.py` |
+| Control page behavior | `cais_spade_llm/ui/pages/control.py` |
+| Product files and order handling | `cais_spade_llm/product/` and `cais_spade_llm/initialization/products/` |
+| Product planning and recovery | `cais_spade_llm/agents/intelligent_product/` |
+| Safety validation and monitoring | `cais_spade_llm/agents/central_controller/` and `cais_spade_llm/specification/safety/` |
+| Robot task execution | `cais_spade_llm/resources/robot/` |
+| ROS2 launch/config/RViz/world assets | `ros2/cais_lab_gazebo/` |
+| ROS2 helper scripts | `ros2/cais_lab_gazebo/scripts/` |
+| Generated runtime state and logs | `cais_spade_llm/monitor/`, `cais_spade_llm/log/`, `cais_spade_llm/user_verified_*/` |
+| Focused tests while developing | `test/` |
 
-## Quick answers
+## ROS2 Workspace Rule
 
-- **"Why did the robot refuse to do a step?"** → CCA safety validation:
-  `agents/central_controller/safety_logic.py` and the rules in `specification/safety/`.
-- **"Where do UI buttons actually do things?"** → `ui/bridge.py` (`SystemBridge`) —
-  search for the button's label in `ui/pages/`, follow the call into the bridge.
-- **"How do I add/modify a product?"** → JSON in `cais_spade_llm/initialization/products/`.
-- **"Robot moves wrong in Gazebo?"** → `resources/robot/gazebo_pick_place_controller.py`
-  and the launch files in `ros2/cais_lab_gazebo/launch/`.
-- **"What ran last time?"** → `monitor/` (state, plans, history) and `log/`.
-- **Code health:** `make lint-report` shows remaining debt; `make lint-fix` cleans
-  what's automatable. Conventions live in `AGENTS.md`.
+The repo source files are under `ros2/cais_lab_gazebo/`. The running ROS2
+workspace is under `~/ros2_ws`, outside this git repository.
+
+After changing repo ROS2 launch/config/RViz/world files, run:
+
+```bash
+make bootstrap-gazebo
+```
+
+Then test the installed workspace behavior.
+
+## Quick Answers
+
+- Robot refused a step: inspect CCA safety validation and the relevant safety
+  rules first.
+- UI button did not do what was expected: search the page under `ui/pages/`, then
+  follow the call into `SystemBridge`.
+- Product setup changed: inspect product JSON under `cais_spade_llm/initialization/`
+  and product specs under `cais_spade_llm/specification/`.
+- ROS2 launch failed: check `cais_spade_llm/ui/ros2_processes.py`, then the
+  matching file under `ros2/cais_lab_gazebo/`.
+- A change touches cleanup/extraction only: use [`refactoring.md`](refactoring.md).

@@ -1,38 +1,57 @@
-# Refactoring Rules
+# Refactoring Guide
 
-Use this file for cleanup, extraction, and readability work.
+Use this file only for cleanup, extraction, and readability work. Feature work
+and bug fixes should stay focused on the touched runtime path unless a small
+refactor is required to make the change safely.
 
-## Before editing
+## Before Editing
 
 - Run `git status --short`.
-- Identify the smallest touched runtime path.
+- Read the smallest runtime path involved before changing it.
 - Do not combine cleanup with unrelated feature or behavior changes.
-- Do not rename fixed symbols: identifiers, variable names, actions, resources, states, predicates, or domain-specific wording.
+- Do not canonicalize, normalize, generalize, rename, or replace fixed project
+  terms, identifiers, actions, resources, states, predicates, or domain wording.
 
-## Extraction order
+## How To Refactor
 
-- Start with high-churn, high-size files only when the user's task touches them.
-- For `cais_spade_llm/ui/bridge.py`, preserve `SystemBridge` as the callable public surface first.
-- Move cohesive helper code in small slices using existing terms such as `digital_twin`, ROS2 launch/process handling, safety intent preview, bundle handling, and function recording.
-- Keep imports lazy where ROS2 availability is optional.
-- Keep tests passing after each slice.
+- Keep behavior unchanged unless the user explicitly asks for behavior changes.
+- Prefer direct, human-readable code over generic abstractions.
+- Add an abstraction only when it removes real duplication or matches an existing
+  local pattern.
+- Move code in small slices that can be reviewed and verified independently.
+- Preserve `SystemBridge` as the callable UI-to-runtime surface unless the user
+  asks for a public interface change.
+- Keep ROS2 imports lazy in files that must run without ROS2.
+- Keep configuration in JSON manifests under `initialization/` and
+  `specification/`; do not replace it with hardcoded robot positions or
+  capabilities.
 
-## Comments and docstrings
+## Comments And Docstrings
 
-- Do not add comments to every statement.
-- Use docstrings for public modules, classes, functions, and methods when touched.
-- Use comments to explain why a non-obvious constraint exists, especially hardware safety assumptions, ROS2 timing constraints, `digital twin` authority, `Teach`, `Replay in Twin`, `Preview in Gazebo`, and validation-stage behavior.
-- Delete or update stale comments when touching the surrounding code.
+- Let clear names, type hints, and small functions carry the simple cases.
+- Add Google-style docstrings to public modules, classes, functions, and methods
+  when you touch them.
+- Use comments only for non-obvious intent, safety assumptions, ROS2 timing
+  constraints, validation-stage behavior, or runtime authority.
+- Delete or update stale comments when touching nearby code.
 
-## Error handling
+## Error Handling
 
-- Do not add new silent failure paths.
-- When touching `except Exception: pass`, replace it with logging, explicit return status, or a narrow exception if the surrounding behavior allows it.
-- Keep fail-closed behavior for safety validation and recovery paths unless the user explicitly asks otherwise.
+- Do not add silent failure paths.
+- When touching a broad exception block, replace it with a narrow exception,
+  logging, or an explicit return status when the surrounding behavior allows it.
+- Keep safety-validation and recovery paths fail-closed unless the user asks for
+  a different behavior.
 
 ## Verification
 
-- Use focused tests for extraction-only changes.
-- Use `python -m pytest test/test_ur5e_rg2_rtde_gripper.py` for `digital twin`, `Teach`, `Replay in Twin`, or ROS2 launch behavior.
-- Use `make bootstrap-gazebo` after ROS2 launch/script/RViz edits.
-- State the code-verification versus runtime-verification boundary in the final response.
+- For Python-only refactors, run `poetry check` and
+  `poetry run python -m compileall -q cais_spade_llm ros2`.
+- Add or run focused tests in `test/` when the refactor touches behavior that is
+  easy to exercise locally.
+- For entrypoint or CLI changes, run
+  `poetry run python -m cais_spade_llm.ui_main --help`.
+- For ROS2 launch/script/RViz changes, run `make bootstrap-gazebo` before
+  installed workspace checks.
+- State the code-verification versus runtime-verification boundary in the final
+  response.

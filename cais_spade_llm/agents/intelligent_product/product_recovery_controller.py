@@ -35,15 +35,6 @@ from cais_spade_llm.product.profile import ProductProfile
 _UNSET = object()
 
 
-def _env_flag_enabled(*names: str, default: bool = False) -> bool:
-    for name in names:
-        token = str(os.environ.get(name) or "").strip().lower()
-        if not token:
-            continue
-        return token in {"1", "true", "yes", "on"}
-    return bool(default)
-
-
 class ProductRecoveryController:
     EXPORTED_METHODS = (
         "_build_plan_safety_alert",
@@ -159,14 +150,6 @@ class ProductRecoveryController:
         "_append_acquire_entity_repair_event",
         "_mark_runtime_des_human_required",
         "_bridge_continuation_disabled_frontier",
-        "_runtime_is_gazebo_simulation",
-        "_should_enable_generated_bridge_verification",
-        "_build_generated_code_verification",
-        "_runtime_bridge_fixture_final_output_path",
-        "_runtime_bridge_fixture_final_output_source_path",
-        "_runtime_bridge_fixture_replay_enabled",
-        "_compact_fixture_replay_status",
-        "_load_runtime_bridge_fixture_replay",
         "_bridge_task_debug_rows",
         "_bridge_sequence_tail_task_ids",
         "_refresh_bridge_snapshot",
@@ -808,7 +791,6 @@ class ProductRecoveryController:
             "recovery_final_output_path": "",
             "recovery_enforced_task_ids": [],
             "bridge_feedback_history": [],
-            "fixture_replay": None,
             "generated_code_verification": None,
             "history": [],
             "updated_at_utc": self._utc_now_iso(),
@@ -865,7 +847,6 @@ class ProductRecoveryController:
         recovery_final_output_path: str | None | object = _UNSET,
         recovery_enforced_task_ids: list[str] | object = _UNSET,
         bridge_feedback_history: list[str] | object = _UNSET,
-        fixture_replay: dict[str, Any] | None | object = _UNSET,
         generated_code_verification: dict[str, Any] | None | object = _UNSET,
         violations: list[dict[str, Any]] | None = None,
         append_history: bool = False,
@@ -954,10 +935,6 @@ class ProductRecoveryController:
             current["bridge_feedback_history"] = [
                 str(item).strip() for item in (bridge_feedback_history or []) if str(item).strip()
             ]
-        if fixture_replay is not _UNSET:
-            current["fixture_replay"] = (
-                deepcopy(fixture_replay) if isinstance(fixture_replay, dict) else None
-            )
         if generated_code_verification is not _UNSET:
             current["generated_code_verification"] = (
                 deepcopy(generated_code_verification)
@@ -4995,195 +4972,6 @@ class ProductRecoveryController:
             )
         return list(grouped.values())
 
-    @staticmethod
-    def _runtime_is_gazebo_simulation() -> bool:
-        exec_mode = str(os.environ.get("EXECUTION_MODE", "dry_run") or "").strip().lower()
-        robot_env = str(os.environ.get("ROBOT_ENV", "gazebo") or "").strip().lower()
-        return exec_mode == "simulation" and robot_env == "gazebo"
-
-    def _should_enable_generated_bridge_verification(
-        self,
-        *,
-        bridge_debug: dict[str, Any] | None = None,
-    ) -> bool:
-        verification_flag_enabled = bool(
-            self._generated_bridge_gazebo_verification_enabled
-            or _env_flag_enabled(
-                "CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO",
-                "CAIS_GENERATED_BRIDGE_GAZEBO_VERIFICATION",
-                default=False,
-            )
-        )
-        if not verification_flag_enabled:
-            return False
-        if not self._runtime_is_gazebo_simulation():
-            return False
-        payload = dict(bridge_debug or {})
-        reasoning_mode = str(payload.get("reasoning_mode") or "").strip().lower()
-        return reasoning_mode == "multi_turn"
-
-    def _build_generated_code_verification(
-        self,
-        *,
-        enabled: bool,
-        bridge_debug: dict[str, Any] | None = None,
-        prepared_bridge_request: dict[str, Any] | None = None,
-        bridge_proposal: dict[str, Any] | None = None,
-        status: str = "disabled",
-        reason: str = "",
-        verification_result: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        bridge_debug = dict(bridge_debug or {})
-        prepared_bridge_request = dict(prepared_bridge_request or {})
-        final_output = dict(bridge_debug.get("final_output") or {})
-        artifacts = dict(bridge_debug.get("artifacts") or {})
-        fixture_replay = dict(bridge_debug.get("fixture_replay") or {})
-        session = dict(bridge_debug.get("multi_turn_session") or {})
-        verification_payload: dict[str, Any] = {
-            "enabled": bool(enabled),
-            "status": str(status or "disabled").strip() or "disabled",
-            "reason": str(reason or "").strip(),
-            "verdict": "pending" if enabled else "disabled",
-            "source_reasoning_mode": str(bridge_debug.get("reasoning_mode") or "").strip(),
-            "source_final_output_stage": str(final_output.get("final_output_stage") or "").strip(),
-            "source_artifact_path": (
-                str(fixture_replay.get("source_path") or "").strip()
-                or str(
-                    dict(artifacts.get("prepare") or {}).get("response_artifact_path") or ""
-                ).strip()
-            ),
-            "source_turn_index": int(session.get("turn_index") or 0),
-            "bridge_proposal_available": isinstance(bridge_proposal, dict),
-            "executed_macro_ids": [],
-            "snapshot_match_details": [],
-            "updated_at_utc": self._utc_now_iso(),
-        }
-        if isinstance(verification_result, dict) and verification_result:
-            verification_payload["result"] = deepcopy(verification_result)
-            verdict = str(verification_result.get("verdict") or "").strip()
-            if verdict:
-                verification_payload["verdict"] = verdict
-        if enabled and isinstance(final_output, dict) and final_output:
-            verification_payload["source_final_output"] = {
-                "final_output_stage": str(final_output.get("final_output_stage") or "").strip(),
-                "accepted_trace_length": int(final_output.get("accepted_trace_length") or 0),
-            }
-        if isinstance(prepared_bridge_request, dict) and prepared_bridge_request:
-            verification_payload["prepared_request_reasoning_mode"] = str(
-                dict(prepared_bridge_request.get("bridge_session") or {}).get("reasoning_mode")
-                or ""
-            ).strip()
-        return verification_payload
-
-    @staticmethod
-    def _runtime_bridge_fixture_final_output_path() -> str:
-        return str(os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or "").strip()
-
-    def _runtime_bridge_fixture_final_output_source_path(self) -> str:
-        fixture_path = self._runtime_bridge_fixture_final_output_path()
-        if not fixture_path:
-            return ""
-        resolved_path = Path(fixture_path).expanduser()
-        try:
-            resolved_path = resolved_path.resolve()
-        except Exception:
-            pass
-        return str(resolved_path)
-
-    def _runtime_bridge_fixture_replay_enabled(self) -> bool:
-        return bool(self._runtime_bridge_fixture_final_output_path())
-
-    @staticmethod
-    def _compact_fixture_replay_status(
-        fixture_replay: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        payload = dict(fixture_replay or {})
-        if not payload:
-            return None
-        return {
-            "enabled": bool(payload.get("enabled")),
-            "source_path": str(payload.get("source_path") or "").strip(),
-            "load_status": str(payload.get("load_status") or "").strip(),
-            "proposal_build_status": str(payload.get("proposal_build_status") or "").strip(),
-            "reason": str(payload.get("reason") or "").strip(),
-        }
-
-    def _load_runtime_bridge_fixture_replay(
-        self,
-        prepared_bridge_request: dict[str, Any],
-    ) -> dict[str, Any]:
-        fixture_path = self._runtime_bridge_fixture_final_output_path()
-        result: dict[str, Any] = {
-            "enabled": bool(fixture_path),
-            "source_path": "",
-            "load_status": "disabled",
-            "proposal_build_status": "disabled",
-            "reason": "",
-            "final_output": None,
-            "adapter_result": None,
-            "proposal": None,
-        }
-        if not fixture_path:
-            return result
-
-        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-        reasoning_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
-        resolved_path = Path(fixture_path).expanduser()
-        try:
-            resolved_path = resolved_path.resolve()
-        except Exception:
-            pass
-        result["source_path"] = str(resolved_path)
-
-        if reasoning_mode != "multi_turn":
-            result["load_status"] = "skipped"
-            result["proposal_build_status"] = "skipped"
-            result["reason"] = "runtime bridge fixture replay requires reasoning_mode=multi_turn"
-            return result
-
-        if not resolved_path.exists():
-            result["load_status"] = "missing"
-            result["proposal_build_status"] = "skipped"
-            result["reason"] = f"fixture final_output artifact does not exist: {resolved_path}"
-            return result
-
-        try:
-            final_output_payload = json.loads(resolved_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            result["load_status"] = "invalid_json"
-            result["proposal_build_status"] = "skipped"
-            result["reason"] = f"failed to parse fixture final_output artifact: {exc}"
-            return result
-
-        if not isinstance(final_output_payload, dict) or not final_output_payload:
-            result["load_status"] = "loaded"
-            result["proposal_build_status"] = "rejected"
-            result["reason"] = "fixture final_output artifact did not contain a JSON object"
-            return result
-
-        result["final_output"] = deepcopy(final_output_payload)
-        result["load_status"] = "loaded"
-
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-            build_multi_turn_bridge_proposal,
-        )
-
-        adapter_result = build_multi_turn_bridge_proposal(
-            final_output_payload=final_output_payload,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-        result["adapter_result"] = deepcopy(adapter_result)
-        if isinstance(adapter_result, dict) and adapter_result.get("accepted") is True:
-            result["proposal_build_status"] = "accepted"
-            result["proposal"] = deepcopy(adapter_result.get("bridge_proposal") or {})
-            return result
-
-        result["proposal_build_status"] = "rejected"
-        result["reason"] = str(
-            dict(adapter_result or {}).get("reason") or "fixture final_output proposal build failed"
-        ).strip()
-        return result
-
     def _bridge_task_debug_rows(self, task_ids: list[str] | None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         lookup = {
@@ -6017,21 +5805,7 @@ class ProductRecoveryController:
         )
 
         scenario_hint = ""
-        fixture_replay_enabled = self._runtime_bridge_fixture_replay_enabled()
-        fixture_source_path = self._runtime_bridge_fixture_final_output_source_path()
-        self.logger.info(
-            "[Product] Runtime bridge fixture replay gate: fixture_replay=%s source_path=%s env_var=CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT",
-            fixture_replay_enabled,
-            fixture_source_path or "<unset>",
-        )
         bridge_generation_mode = "auto" if session_bridge_mode == "auto" else "manual"
-        if fixture_replay_enabled and bridge_generation_mode != "manual":
-            self.logger.info(
-                "[Product] Forcing manual bridge handoff for runtime bridge replay: fixture_replay=%s mode=%s->manual",
-                fixture_replay_enabled,
-                bridge_generation_mode or "auto",
-            )
-            bridge_generation_mode = "manual"
 
         self._runtime_repair_inflight = True
         try:
@@ -6085,7 +5859,7 @@ class ProductRecoveryController:
                 bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
                 active_bridge_phase = str(bridge_session.get("phase") or "").strip().lower()
                 allow_preprogrammed_autoload = active_bridge_phase not in {"prepare_trace"}
-                if scenario_hint and allow_preprogrammed_autoload and not fixture_replay_enabled:
+                if scenario_hint and allow_preprogrammed_autoload:
                     self.logger.info(
                         "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
                         scenario_hint,
@@ -6133,11 +5907,6 @@ class ProductRecoveryController:
                             "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
                             scenario_hint,
                         )
-                elif scenario_hint and allow_preprogrammed_autoload and fixture_replay_enabled:
-                    self.logger.info(
-                        "[Product] Skipping preprogrammed recovery auto-load because fixture replay is enabled: scenario_id=%s",
-                        scenario_hint,
-                    )
                 elif scenario_hint and not allow_preprogrammed_autoload:
                     self.logger.info(
                         "[Product] Active bridge mode left runtime recovery at prepare-trace checkpoint; "
@@ -6268,35 +6037,12 @@ class ProductRecoveryController:
                         session_validation_policy,
                     )
                     return self.approve_runtime_bridge_proposal_sync()
-                verification_ready = self._should_enable_generated_bridge_verification(
-                    bridge_debug=bridge_debug if isinstance(bridge_debug, dict) else None,
-                )
-                if (
-                    session_bridge_mode == "auto"
-                    or fixture_replay_enabled
-                    or (not scenario_hint and verification_ready)
-                ):
-                    if fixture_replay_enabled:
-                        self.logger.info(
-                            "[Product] Auto-starting runtime bridge fixture replay from prepared request: source_path=%s verification_ready=%s",
-                            self._runtime_bridge_fixture_final_output_path(),
-                            verification_ready,
-                        )
-                    elif session_bridge_mode == "auto":
-                        self.logger.info(
-                            "[Product] Auto-starting live runtime bridge generation from the prepared request."
-                        )
-                    else:
-                        self.logger.info(
-                            "[Product] Auto-starting multi-turn bridge generation for Gazebo verification."
-                        )
+                if session_bridge_mode == "auto":
+                    self.logger.info(
+                        "[Product] Auto-starting live runtime bridge generation from the prepared request."
+                    )
                     self._runtime_repair_inflight = False
                     return await self.generate_runtime_bridge_proposal()
-                if not fixture_replay_enabled:
-                    self.logger.info(
-                        "[Product] Runtime bridge fixture replay disabled at prepare-trace checkpoint: "
-                        "CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT is not set; staying at bridge_ready."
-                    )
                 return recovery
             if awaiting_bridge_approval and isinstance(bridge_proposal, dict):
                 bridge_text = (
@@ -6787,35 +6533,6 @@ class ProductRecoveryController:
         prepared_bridge_request: dict[str, Any],
     ) -> dict[str, Any] | None:
         self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        fixture_replay = self._load_runtime_bridge_fixture_replay(prepared_bridge_request)
-        if bool(fixture_replay.get("enabled")):
-            bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-            bridge_debug["fixture_replay"] = (
-                self._compact_fixture_replay_status(fixture_replay) or {}
-            )
-            if isinstance(fixture_replay.get("final_output"), dict):
-                bridge_debug["final_output"] = deepcopy(fixture_replay.get("final_output") or {})
-            if isinstance(fixture_replay.get("adapter_result"), dict):
-                bridge_debug["final_output_adapter"] = deepcopy(
-                    fixture_replay.get("adapter_result") or {}
-                )
-            if isinstance(fixture_replay.get("proposal"), dict):
-                bridge_debug["bridge_proposal"] = deepcopy(fixture_replay.get("proposal") or {})
-                bridge_debug["status"] = "fixture_replay_ready"
-                bridge_debug["message"] = (
-                    "Loaded runtime bridge proposal from archived final_output fixture."
-                )
-            else:
-                bridge_debug["status"] = "fixture_replay_failed"
-                bridge_debug["message"] = str(
-                    fixture_replay.get("reason") or "Runtime bridge fixture replay failed."
-                ).strip()
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            if hasattr(self.process_planner, "_set_last_bridge_debug"):
-                self.process_planner._set_last_bridge_debug(bridge_debug)
-            proposal = fixture_replay.get("proposal")
-            return deepcopy(proposal) if isinstance(proposal, dict) else None
-
         proposal = await self.process_planner.execute_prepared_bridge_request(
             prepared_bridge_request
         )
@@ -6906,9 +6623,6 @@ class ProductRecoveryController:
             or self.runtime_recovery.get("bridge_debug")
             or {}
         )
-        fixture_replay_payload = self._compact_fixture_replay_status(
-            bridge_debug.get("fixture_replay")
-        )
         bridge_debug = self._bridge_debug_with_runtime_handoff(
             bridge_debug,
             handoff_owner="product_agent",
@@ -6947,7 +6661,6 @@ class ProductRecoveryController:
             bridge_feedback_history=list(
                 self._runtime_recovery_context.get("bridge_feedback_history") or []
             ),
-            fixture_replay=fixture_replay_payload,
             violations=violations,
             append_history=True,
             history_message=(
@@ -6983,36 +6696,6 @@ class ProductRecoveryController:
                 or self.process_planner.get_last_bridge_debug()
                 or {}
             )
-            fixture_replay_payload = self._compact_fixture_replay_status(
-                bridge_debug.get("fixture_replay")
-            )
-            verification_enabled = self._should_enable_generated_bridge_verification(
-                bridge_debug=bridge_debug,
-            )
-            verification_payload: dict[str, Any] | None = None
-            if (
-                session_bridge_mode == "auto"
-                and str(bridge_debug.get("reasoning_mode") or "").strip().lower() == "multi_turn"
-            ):
-                verification_payload = self._build_generated_code_verification(
-                    enabled=verification_enabled,
-                    bridge_debug=bridge_debug,
-                    prepared_bridge_request=prepared_bridge_request,
-                    bridge_proposal=proposal if isinstance(proposal, dict) else None,
-                    status="ready" if isinstance(proposal, dict) else "generating",
-                    reason=(
-                        ""
-                        if verification_enabled
-                        else "Gazebo generated-code verification is disabled."
-                    ),
-                )
-                bridge_debug["generated_code_verification"] = deepcopy(verification_payload)
-                if isinstance(proposal, dict) and verification_enabled:
-                    bridge_debug["execution_policy"] = {
-                        "complete_full_tail": False,
-                        "verification_only": True,
-                        "pause_after_verification": True,
-                    }
             prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
             self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
                 prepared_bridge_request
@@ -7046,7 +6729,6 @@ class ProductRecoveryController:
                     bridge_approval_state="outline_pending",
                     bridge_stage="outline",
                     active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
                     generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7068,11 +6750,7 @@ class ProductRecoveryController:
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message=(
-                        "Validated replayed bridge proposal is ready for final approval."
-                        if fixture_replay_payload
-                        else "Validated LLM bridge proposal is ready for final approval."
-                    ),
+                    message="Validated LLM bridge proposal is ready for final approval.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
                     used_llm_bridge=True,
@@ -7081,65 +6759,15 @@ class ProductRecoveryController:
                     bridge_approval_state="pending",
                     bridge_stage="final",
                     active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
-                    generated_code_verification=verification_payload,
+                    generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message=(
-                        f"Fixture replay loaded {bridge_text} from archived final output."
-                        if fixture_replay_payload
-                        else f"LLM bridge proposed {bridge_text}."
-                    ),
+                    history_message=f"LLM bridge proposed {bridge_text}.",
                 )
                 self._clear_plan_safety_alert()
-                await asyncio.to_thread(self._persist_product_state)
-                if verification_enabled:
-                    self.logger.info(
-                        "[Product] Auto-approving multi-turn bridge proposal for Gazebo verification."
-                    )
-                    self._runtime_repair_inflight = False
-                    return self.approve_runtime_bridge_proposal_sync()
-                return recovery
-
-            if fixture_replay_payload:
-                message = str(
-                    fixture_replay_payload.get("reason")
-                    or "Runtime bridge fixture replay failed before producing a validated proposal."
-                ).strip()
-                recovery = self._set_runtime_recovery(
-                    status="human_required",
-                    resolution_class="human_required",
-                    trigger=str(self._runtime_recovery_context.get("trigger", "")),
-                    failed_task_id=failed_task_id,
-                    message=message,
-                    attempts_used=self._runtime_repair_fail_streak,
-                    attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="none",
-                    bridge_stage="none",
-                    active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
-                    generated_code_verification=verification_payload,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
-                    ),
-                    violations=violations,
-                    append_history=True,
-                    history_message=message,
-                )
-                self._set_plan_safety_alert(
-                    stage="runtime",
-                    message=message,
-                    retries_used=self._runtime_repair_fail_streak,
-                    retries_max=self._runtime_repair_max_attempts,
-                    violations=violations,
-                    paused=True,
-                )
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
@@ -7159,8 +6787,7 @@ class ProductRecoveryController:
                     bridge_approval_state="generating",
                     bridge_stage="none",
                     active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
-                    generated_code_verification=verification_payload,
+                    generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
@@ -7191,8 +6818,7 @@ class ProductRecoveryController:
                     bridge_approval_state="generating",
                     bridge_stage="none",
                     active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
-                    generated_code_verification=verification_payload,
+                    generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
@@ -7219,8 +6845,7 @@ class ProductRecoveryController:
                     bridge_approval_state="none",
                     bridge_stage="none",
                     active_bridge_sequence=None,
-                    fixture_replay=fixture_replay_payload,
-                    generated_code_verification=verification_payload,
+                    generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
                     ),
@@ -7254,8 +6879,7 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=fixture_replay_payload,
-                generated_code_verification=verification_payload,
+                generated_code_verification=None,
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
                 ),
@@ -7291,7 +6915,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=self.runtime_recovery.get("fixture_replay"),
                 generated_code_verification=self.runtime_recovery.get(
                     "generated_code_verification"
                 ),
@@ -7522,7 +7145,6 @@ class ProductRecoveryController:
             recovery_safety_dir=recovery_safety_dir,
             recovery_plan_dir=recovery_plan_dir,
             recovery_safery_dir=recovery_safery_dir,
-            fixture_replay=None,
             generated_code_verification=None,
             bridge_feedback_history=list(
                 self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7587,7 +7209,6 @@ class ProductRecoveryController:
             recovery_final_dir="",
             recovery_final_output_path="",
             recovery_enforced_task_ids=[],
-            fixture_replay=self.runtime_recovery.get("fixture_replay"),
             generated_code_verification=None,
             bridge_feedback_history=list(
                 self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7634,7 +7255,6 @@ class ProductRecoveryController:
                 recovery_final_dir="",
                 recovery_final_output_path="",
                 recovery_enforced_task_ids=[],
-                fixture_replay=self.runtime_recovery.get("fixture_replay"),
                 generated_code_verification=None,
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7715,7 +7335,6 @@ class ProductRecoveryController:
                     bridge_approval_state="primitive_pending",
                     bridge_stage="primitive",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7743,7 +7362,6 @@ class ProductRecoveryController:
                     bridge_approval_state="pending",
                     bridge_stage="final",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=list(
                         self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7776,7 +7394,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7813,7 +7430,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=list(
                     self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -7872,7 +7488,6 @@ class ProductRecoveryController:
             bridge_approval_state="generating",
             bridge_stage="outline",
             active_bridge_sequence=None,
-            fixture_replay=None,
             generated_code_verification=None,
             bridge_feedback_history=feedback_history,
             violations=violations,
@@ -7919,7 +7534,6 @@ class ProductRecoveryController:
                     bridge_approval_state="outline_pending",
                     bridge_stage="outline",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=feedback_history,
                     violations=violations,
@@ -7945,7 +7559,6 @@ class ProductRecoveryController:
                     bridge_approval_state="pending",
                     bridge_stage="final",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=feedback_history,
                     violations=violations,
@@ -7971,7 +7584,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=feedback_history,
                 violations=violations,
@@ -8006,7 +7618,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=feedback_history,
                 violations=violations,
@@ -8060,7 +7671,6 @@ class ProductRecoveryController:
             bridge_approval_state="none",
             bridge_stage="none",
             active_bridge_sequence=None,
-            fixture_replay=None,
             generated_code_verification=None,
             violations=violations,
             bridge_feedback_history=feedback_history,
@@ -8144,7 +7754,6 @@ class ProductRecoveryController:
             bridge_approval_state="pending",
             bridge_stage="final",
             active_bridge_sequence=None,
-            fixture_replay=None,
             generated_code_verification=None,
             bridge_feedback_history=list(
                 self._runtime_recovery_context.get("bridge_feedback_history") or []
@@ -8194,7 +7803,6 @@ class ProductRecoveryController:
             bridge_approval_state="generating",
             bridge_stage="primitive",
             active_bridge_sequence=None,
-            fixture_replay=None,
             generated_code_verification=None,
             bridge_feedback_history=feedback_history,
             violations=violations,
@@ -8247,7 +7855,6 @@ class ProductRecoveryController:
                     bridge_approval_state="primitive_pending",
                     bridge_stage="primitive",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=feedback_history,
                     violations=violations,
@@ -8273,7 +7880,6 @@ class ProductRecoveryController:
                     bridge_approval_state="pending",
                     bridge_stage="final",
                     active_bridge_sequence=None,
-                    fixture_replay=None,
                     generated_code_verification=None,
                     bridge_feedback_history=feedback_history,
                     violations=violations,
@@ -8304,7 +7910,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=feedback_history,
                 violations=violations,
@@ -8339,7 +7944,6 @@ class ProductRecoveryController:
                 bridge_approval_state="none",
                 bridge_stage="none",
                 active_bridge_sequence=None,
-                fixture_replay=None,
                 generated_code_verification=None,
                 bridge_feedback_history=feedback_history,
                 violations=violations,
@@ -8393,7 +7997,6 @@ class ProductRecoveryController:
             bridge_approval_state="none",
             bridge_stage="none",
             active_bridge_sequence=None,
-            fixture_replay=None,
             generated_code_verification=None,
             violations=violations,
             bridge_feedback_history=feedback_history,

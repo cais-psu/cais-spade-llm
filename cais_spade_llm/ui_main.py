@@ -19,7 +19,6 @@ import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
 from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
@@ -28,6 +27,9 @@ from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
 install_startup_logging_filters()
 install_xmpp_runtime_patches()
 
+LOGGER = logging.getLogger("ui_main")
+
+# Legacy import compatibility.
 # Ensure the cais_spade_llm package directory is on sys.path so that
 # agent_creator, utils, etc. resolve as bare module names (legacy import style).
 _pkg_dir = os.path.join(os.path.dirname(__file__))
@@ -35,6 +37,7 @@ if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
 
+# Headless agent runner.
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
     import agent_creator
@@ -45,7 +48,7 @@ def _run_headless() -> None:
 
     from cais_spade_llm.ui.bridge import SystemBridge
 
-    async def _main():
+    async def _main() -> None:
         SystemBridge._archive_monitors()
 
         prod_files = utils.get_init_files("cais_spade_llm/initialization/products/")
@@ -89,11 +92,12 @@ def _run_headless() -> None:
                 try:
                     await a.stop()
                 except Exception:
-                    pass
+                    LOGGER.debug("Headless agent stop failed for %r.", a, exc_info=True)
 
     spade_run(_main(), embedded_xmpp_server=True)
 
 
+# ROS2/Gazebo cleanup.
 _KILL_CMDS: list[str] = [
     "killall -9 gzserver gzclient 2>/dev/null",
     (
@@ -123,8 +127,7 @@ def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") 
     and at shutdown (via atexit / signal handler) so stale processes never
     survive across sessions.
     """
-    log = logging.getLogger("ui_main")
-    log.info("ROS2/Gazebo hard cleanup requested reason=%s", reason)
+    LOGGER.info("ROS2/Gazebo hard cleanup requested reason=%s", reason)
     killed_any = False
     for cmd in _KILL_CMDS:
         try:
@@ -136,14 +139,19 @@ def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") 
             if result.returncode == 0:
                 killed_any = True
         except Exception:
-            pass
+            LOGGER.debug(
+                "ROS2/Gazebo cleanup command failed reason=%s command=%r",
+                reason,
+                cmd,
+                exc_info=True,
+            )
     if killed_any:
         # Give OS time to release ports/shared memory (critical on WSL2)
         import time
 
         time.sleep(3)
         if not quiet:
-            log.info(
+            LOGGER.info(
                 "ROS2/Gazebo cleanup complete: killed stale processes reason=%s.",
                 reason,
             )
@@ -151,7 +159,6 @@ def _kill_stale_ros2_processes(*, quiet: bool = False, reason: str = "startup") 
 
 def _cleanup_ros2_shm() -> None:
     """Remove stale ROS2/DDS shared-memory and Gazebo temp files (WSL2)."""
-    log = logging.getLogger("ui_main")
     shm_patterns = [
         "/dev/shm/fastrtps_*",
         "/dev/shm/cyclonedds_*",
@@ -177,17 +184,20 @@ def _cleanup_ros2_shm() -> None:
                 )
                 cleaned = True
         except Exception:
-            pass
+            LOGGER.debug(
+                "Startup cleanup failed for shared-memory/temp pattern=%s",
+                pattern,
+                exc_info=True,
+            )
     if cleaned:
-        log.info("Startup cleanup: removed stale shared-memory / Gazebo temp files.")
+        LOGGER.info("Startup cleanup: removed stale shared-memory / Gazebo temp files.")
 
 
+# UI startup and shutdown cleanup.
 def _install_exit_cleanup() -> None:
     """Register atexit + SIGTERM handler to guarantee process cleanup."""
     if keep_gazebo_on_exit():
-        logging.getLogger("ui_main").info(
-            "CAIS_KEEP_GAZEBO_ON_EXIT=1; skipping UI exit Gazebo hard-kill hooks."
-        )
+        LOGGER.info("CAIS_KEEP_GAZEBO_ON_EXIT=1; skipping UI exit Gazebo hard-kill hooks.")
         return
 
     atexit.register(_kill_stale_ros2_processes, quiet=True, reason="app_shutdown")
@@ -215,6 +225,7 @@ def _run_ui() -> None:
     create_app()
 
 
+# CLI parsing.
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CAIS-SPADE-LLM: multi-agent manufacturing system",
@@ -224,89 +235,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run without the web UI (agents only, Ctrl+C to stop)",
     )
-    parser.add_argument(
-        "--bridge-fixture-final-output",
-        "--runtime-bridge-fixture-final-output",
-        dest="bridge_fixture_final_output",
-        default="",
-        metavar="PATH",
-        help=(
-            "Test-only: exact archived multi-turn final_output artifact to replay "
-            "for runtime bridge generation."
-        ),
-    )
-    parser.add_argument(
-        "--verify-generated-bridge-in-gazebo",
-        action="store_true",
-        help=(
-            "Test-only: enable auto-execution of generated bridge proposals when "
-            "the UI/system is in simulation+gazebo mode."
-        ),
-    )
     return parser
-
-
-def _apply_runtime_bridge_test_args(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-) -> None:
-    fixture_arg = str(getattr(args, "bridge_fixture_final_output", "") or "").strip()
-
-    if fixture_arg:
-        fixture_path = Path(fixture_arg).expanduser()
-        try:
-            fixture_path = fixture_path.resolve()
-        except Exception:
-            pass
-        if not fixture_path.exists():
-            parser.error(
-                "--bridge-fixture-final-output must point to an existing final_output file"
-            )
-        if fixture_path.is_dir():
-            parser.error(
-                "--bridge-fixture-final-output must point to the exact final_output file, not a directory"
-            )
-        os.environ["CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"] = str(fixture_path)
-        print(
-            "WARNING: Runtime bridge fixture final_output replay is active; "
-            f"live auto bridge is overridden: {fixture_path}",
-            flush=True,
-        )
-    elif os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT"):
-        fixture_path = Path(
-            str(os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or "").strip()
-        ).expanduser()
-        try:
-            fixture_path = fixture_path.resolve()
-        except Exception:
-            pass
-        print(
-            "WARNING: Runtime bridge fixture final_output replay is active; "
-            f"live auto bridge is overridden: {fixture_path}",
-            flush=True,
-        )
-
-    if bool(getattr(args, "verify_generated_bridge_in_gazebo", False)):
-        os.environ["CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"] = "1"
-        if not str(os.environ.get("CAIS_KEEP_GAZEBO_ON_EXIT") or "").strip():
-            os.environ["CAIS_KEEP_GAZEBO_ON_EXIT"] = "1"
-            print(
-                "Generated bridge Gazebo preservation on exit: enabled",
-                flush=True,
-            )
-        print("Generated bridge Gazebo verification: enabled", flush=True)
-    elif os.environ.get("CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO"):
-        print(
-            "Generated bridge Gazebo verification: "
-            f"{os.environ['CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO']}",
-            flush=True,
-        )
 
 
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
-    _apply_runtime_bridge_test_args(args, parser)
 
     if args.headless:
         _run_headless()

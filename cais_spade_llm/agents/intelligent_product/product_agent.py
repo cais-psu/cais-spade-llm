@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import shutil
 import uuid
 from collections.abc import Iterable
@@ -44,15 +43,6 @@ _ACK_PROGRESS_RANK = {
     "finished": 4,
     "blocked": 4,
 }
-
-
-def _env_flag_enabled(*names: str, default: bool = False) -> bool:
-    for name in names:
-        token = str(os.environ.get(name) or "").strip().lower()
-        if not token:
-            continue
-        return token in {"1", "true", "yes", "on"}
-    return bool(default)
 
 
 def _ack_status_rank(status: str) -> int:
@@ -200,11 +190,6 @@ class ProductAgent(LlmAgent):
         self._runtime_bridge_archive_path = ""
         self._runtime_bridge_archive_label = ""
         self._orphaned_bridge_task_warning_ids: set[str] = set()
-        self._generated_bridge_gazebo_verification_enabled = _env_flag_enabled(
-            "CAIS_VERIFY_GENERATED_BRIDGE_IN_GAZEBO",
-            "CAIS_GENERATED_BRIDGE_GAZEBO_VERIFICATION",
-            default=False,
-        )
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
         self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
@@ -256,10 +241,6 @@ class ProductAgent(LlmAgent):
                 self._bridge_reasoning_mode = "multi_turn"
             if self._bridge_reasoning_mode != "multi_turn":
                 self._bridge_reasoning_mode = "multi_turn"
-            if "generated_bridge_gazebo_verification" in precomputed_policy:
-                self._generated_bridge_gazebo_verification_enabled = bool(
-                    precomputed_policy.get("generated_bridge_gazebo_verification")
-                )
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 

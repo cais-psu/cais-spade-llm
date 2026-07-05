@@ -49,7 +49,7 @@ from cais_spade_llm.product.order import (
     validate_product_order,
 )
 from cais_spade_llm.product.profile import ProductProfile
-from cais_spade_llm.ui import digital_twin
+from cais_spade_llm.ui import digital_twin, ros2_processes
 
 log = logging.getLogger("ui.bridge")
 
@@ -494,16 +494,6 @@ class SystemBridge:
             if isinstance(preferred_entry, dict):
                 self.runtime_bridge_archive_path = str(preferred_entry.get("path") or "").strip()
                 self.runtime_bridge_archive_label = str(preferred_entry.get("label") or "").strip()
-        fixture_replay_path = str(
-            os.environ.get("CAIS_RUNTIME_BRIDGE_FIXTURE_FINAL_OUTPUT") or ""
-        ).strip()
-        if fixture_replay_path:
-            fixture_path = Path(fixture_replay_path).expanduser()
-            try:
-                fixture_path = fixture_path.resolve()
-            except Exception:
-                pass
-            fixture_replay_path = str(fixture_path)
         return {
             "mode": self._normalize_runtime_bridge_mode(self.runtime_bridge_mode),
             "validation_policy": self._normalize_runtime_bridge_validation_policy(
@@ -511,8 +501,6 @@ class SystemBridge:
             ),
             "selected_archive_path": str(self.runtime_bridge_archive_path or "").strip(),
             "selected_archive_label": str(self.runtime_bridge_archive_label or "").strip(),
-            "fixture_replay_path": fixture_replay_path,
-            "fixture_replay_active": bool(fixture_replay_path),
         }
 
     def _preferred_runtime_bridge_archive_entry(self) -> dict[str, Any] | None:
@@ -4657,70 +4645,17 @@ class SystemBridge:
     # ------------------------------------------------------------------
     # ROS2 process management
     # ------------------------------------------------------------------
-    # Shell preamble that sources ROS2 outside of the Poetry venv.
-    _ROS2_ENV = (
-        "unset VIRTUAL_ENV PYTHONHOME; "
-        "export PATH=/usr/bin:/usr/local/bin:$PATH; "
-        "source /opt/ros/humble/setup.bash && "
-        "source $HOME/ros2_ws/install/setup.bash && "
+    _ROS2_ENV = ros2_processes.ROS2_ENV
+    _TELEOP_SCRIPT = str(ros2_processes.teleop_script_path(_PROJECT_ROOT))
+    _DUAL_DRAG_MARKERS_SCRIPT = str(ros2_processes.dual_drag_markers_script_path(_PROJECT_ROOT))
+    _DIGITAL_TWIN_SYNC_SCRIPT = ros2_processes.digital_twin_sync_script_path(_PROJECT_ROOT)
+    ROS2_LAUNCH_CMDS: dict[str, str] = ros2_processes.build_ros2_launch_cmds(
+        project_root=_PROJECT_ROOT,
+        venv_python=_VENV_PYTHON,
+        ur5e_rg2_gripper_script=_UR5E_RG2_GRIPPER_SCRIPT,
+        ur5e_rtde_trajectory_script=_UR5E_RTDE_TRAJECTORY_SCRIPT,
+        ur5e_rtde_trajectory_status=_UR5E_RTDE_TRAJECTORY_STATUS,
     )
-
-    _TELEOP_SCRIPT = str(
-        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "keyboard_teleop.py"
-    )
-    _DUAL_DRAG_MARKERS_SCRIPT = str(
-        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "dual_drag_markers.py"
-    )
-    _DIGITAL_TWIN_SYNC_SCRIPT = (
-        _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "digital_twin_sync.py"
-    )
-
-    # Registry: name → shell command suffix (appended after _ROS2_ENV).
-    ROS2_LAUNCH_CMDS: dict[str, str] = {
-        "gazebo_dual": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
-            "run_perception:=false include_assembly_parts:=false"
-        ),
-        "gazebo_dual_gazebo_only": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
-            "launch_moveit:=false launch_rviz:=false "
-            "run_perception:=false include_assembly_parts:=false"
-        ),
-        "gazebo_dual_moveit_only": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
-            "launch_gazebo:=false launch_moveit:=true launch_rviz:=true "
-            "run_perception:=false include_assembly_parts:=false"
-        ),
-        "gazebo_dual_passive": (
-            "ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py "
-            "passive:=true run_perception:=false include_assembly_parts:=false"
-        ),
-        "gazebo_xarm6": "ros2 launch xarm_gazebo xarm6_moveit_single_gazebo.launch.py",
-        "gazebo_ur5e": "ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py",
-        "gazebo_xarm6_passive": "ros2 launch xarm_gazebo xarm6_single_gazebo.launch.py passive:=true",
-        "gazebo_ur5e_passive": "ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false",
-        "hardware_xarm6_driver": "ros2 launch xarm_gazebo xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}",
-        "hardware_xarm6_moveit": (
-            "ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py "
-            "robot_ip:={xarm6_ip} add_gripper:=true"
-        ),
-        "hardware_ur5e_rtde_trajectory_server": (
-            f"{_VENV_PYTHON} {_UR5E_RTDE_TRAJECTORY_SCRIPT} "
-            f"--robot-ip {{ur5e_ip}} --status-file {_UR5E_RTDE_TRAJECTORY_STATUS}"
-        ),
-        "hardware_ur5e_rg2_gripper": (
-            f"{_VENV_PYTHON} {_UR5E_RG2_GRIPPER_SCRIPT} --robot-ip {{ur5e_ip}} --backend xmlrpc"
-        ),
-        "hardware_ur5e_moveit": (
-            "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true"
-        ),
-        "hardware_dual_robots_moveit": (
-            "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py launch_rviz:=true"
-        ),
-        "perception": f"python3.10 {_PROJECT_ROOT / 'ros2' / 'cais_lab_gazebo' / 'sensor' / 'gazebo_camera_detector.py'}",
-        "teleop_xarm6": f"python3.10 {_TELEOP_SCRIPT} --robot xarm6",
-        "teleop_ur5e": f"python3.10 {_TELEOP_SCRIPT} --robot ur5e",
-    }
 
     def ros2_proc_status(self, name: str) -> str:
         """Return 'running', 'stopped', or 'unknown' for a tracked ROS2 process."""
@@ -5059,12 +4994,12 @@ class SystemBridge:
         *,
         fast_forward_simulation: bool | None = None,
     ) -> str:
-        cmd = self.ROS2_LAUNCH_CMDS[name]
-        if str(name or "").strip().lower() == "gazebo_dual" and bool(fast_forward_simulation):
-            cmd = f"{cmd} fast_sim:=true launch_rviz:=false"
-        return cmd.format(
-            xarm6_ip=self.hardware_ips.get("xarm6", self._HW_IP_DEFAULTS["xarm6"]),
-            ur5e_ip=self.hardware_ips.get("ur5e", self._HW_IP_DEFAULTS["ur5e"]),
+        return ros2_processes.render_ros2_launch_cmd(
+            self.ROS2_LAUNCH_CMDS,
+            self.hardware_ips,
+            self._HW_IP_DEFAULTS,
+            name,
+            fast_forward_simulation=fast_forward_simulation,
         )
 
     def _hardware_stack_for_robot(self, robot: str) -> tuple[str, ...] | None:
@@ -5073,268 +5008,66 @@ class SystemBridge:
 
     @staticmethod
     def _env_int(name: str, default: int) -> int:
-        raw = str(os.environ.get(name, "")).strip()
-        if not raw:
-            return int(default)
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return int(default)
+        return ros2_processes.env_int(name, default)
 
     @classmethod
     def _digital_twin_domain_ids(cls) -> dict[str, int]:
-        return {
-            "gazebo": cls._env_int(
-                "CAIS_DIGITAL_TWIN_GAZEBO_DOMAIN_ID",
-                cls._DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT,
-            ),
-            "hardware": cls._env_int(
-                "CAIS_DIGITAL_TWIN_HARDWARE_DOMAIN_ID",
-                cls._DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT,
-            ),
-            "hardware_xarm6": cls._env_int(
-                "CAIS_DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_ID",
-                cls._DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT,
-            ),
-            "hardware_ur5e": cls._env_int(
-                "CAIS_DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_ID",
-                cls._DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT,
-            ),
-        }
+        return ros2_processes.digital_twin_domain_ids(
+            gazebo_default=cls._DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT,
+            hardware_default=cls._DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT,
+            hardware_xarm6_default=cls._DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT,
+            hardware_ur5e_default=cls._DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT,
+        )
 
     @staticmethod
     def _ros2_domain_export(ros_domain_id: int | None) -> str:
-        if ros_domain_id is None:
-            return ""
-        try:
-            domain = int(ros_domain_id)
-        except (TypeError, ValueError):
-            return ""
-        return f"export ROS_DOMAIN_ID={domain}; "
+        return ros2_processes.ros2_domain_export(ros_domain_id)
 
     @staticmethod
     def _ros2_setup_path() -> Path:
-        return Path("/opt/ros/humble/setup.bash")
+        return ros2_processes.ros2_setup_path()
 
     @staticmethod
     def _ros2_workspace_root() -> Path:
-        return Path.home() / "ros2_ws"
+        return ros2_processes.ros2_workspace_root()
 
     @classmethod
     def _ros2_workspace_setup_path(cls) -> Path:
-        return cls._ros2_workspace_root() / "install" / "setup.bash"
+        return ros2_processes.ros2_workspace_setup_path()
 
     @classmethod
     def _ros2_workspace_launch_dir(cls) -> Path:
-        return cls._ros2_workspace_root() / "src" / "xarm_ros2" / "xarm_gazebo" / "launch"
+        return ros2_processes.ros2_workspace_launch_dir()
 
     @classmethod
     def _ros2_workspace_install_pkg_path(cls, pkg_name: str) -> Path:
-        return cls._ros2_workspace_root() / "install" / str(pkg_name).strip()
+        return ros2_processes.ros2_workspace_install_pkg_path(pkg_name)
 
     @classmethod
     def _ros2_workspace_install_share_pkg_path(cls, pkg_name: str) -> Path:
-        pkg_name = str(pkg_name).strip()
-        return cls._ros2_workspace_install_pkg_path(pkg_name) / "share" / pkg_name
+        return ros2_processes.ros2_workspace_install_share_pkg_path(pkg_name)
 
     @staticmethod
     def _ros2_system_share_pkg_path(pkg_name: str) -> Path:
-        return Path("/opt/ros/humble/share") / str(pkg_name).strip()
+        return ros2_processes.ros2_system_share_pkg_path(pkg_name)
 
     @classmethod
     def _ros2_launch_required_paths(cls, name: str) -> list[tuple[Path, str]]:
-        launch_key = str(name or "").strip().lower()
-        xarm_gazebo_share = cls._ros2_workspace_install_share_pkg_path("xarm_gazebo")
-        workspace_xarm = (
-            (
-                cls._ros2_workspace_install_pkg_path("xarm_gazebo"),
-                "ROS2 workspace is missing package 'xarm_gazebo'. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                cls._ros2_workspace_install_pkg_path("xarm_moveit_config"),
-                "ROS2 workspace is missing package 'xarm_moveit_config'. Re-run `make bootstrap-gazebo`.",
-            ),
+        return ros2_processes.ros2_launch_required_paths(
+            name,
+            venv_python=_VENV_PYTHON,
+            ur5e_rg2_gripper_script=_UR5E_RG2_GRIPPER_SCRIPT,
+            ur5e_rtde_trajectory_script=_UR5E_RTDE_TRAJECTORY_SCRIPT,
         )
-        moveit_core = (
-            (
-                cls._ros2_system_share_pkg_path("moveit_ros_move_group"),
-                "MoveIt is not installed. Install `ros-humble-moveit`.",
-            ),
-        )
-        ur_stack = (
-            (
-                cls._ros2_system_share_pkg_path("ur_description"),
-                "UR description is not installed. Install `ros-humble-ur-description`.",
-            ),
-            (
-                cls._ros2_system_share_pkg_path("ur_moveit_config"),
-                "UR MoveIt config is not installed. Install `ros-humble-ur-moveit-config`.",
-            ),
-        )
-        onrobot_ws = (
-            (
-                cls._ros2_workspace_install_pkg_path("onrobot_description"),
-                "ROS2 workspace is missing package 'onrobot_description'. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        link_attacher_ws = (
-            (
-                cls._ros2_workspace_install_pkg_path("linkattacher_msgs"),
-                "ROS2 workspace is missing package 'linkattacher_msgs'. Re-run `make bootstrap-gazebo` to install IFRA LinkAttacher.",
-            ),
-            (
-                cls._ros2_workspace_install_pkg_path("ros2_linkattacher"),
-                "ROS2 workspace is missing package 'ros2_linkattacher'. Re-run `make bootstrap-gazebo` to install IFRA LinkAttacher.",
-            ),
-        )
-        dual_assets = (
-            (
-                xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
-                "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
-                "ROS2 workspace is missing the UR5e initial positions config. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                xarm_gazebo_share / "rviz" / "dual_moveit.rviz",
-                "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        dual_passive_assets = (
-            (
-                xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
-                "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
-                "ROS2 workspace is missing the UR5e initial positions config. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        xarm_hardware_driver_assets = (
-            (
-                xarm_gazebo_share / "launch" / "xarm6_hardware_driver.launch.py",
-                "ROS2 workspace is missing the xArm6 hardware driver launch file. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        dual_hardware_moveit_assets = (
-            (
-                xarm_gazebo_share / "launch" / "dual_robots_hardware_moveit.launch.py",
-                "ROS2 workspace is missing the dual robots hardware MoveIt launch file. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                xarm_gazebo_share / "rviz" / "dual_robots_hardware_moveit.rviz",
-                "ROS2 workspace is missing the dual robots hardware RViz config. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        ur_assets = (
-            (
-                xarm_gazebo_share / "config" / "ur5e_rg2_controllers.yaml",
-                "ROS2 workspace is missing the UR5e RG2 controller config. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        ur_hardware_rg2_assets = (
-            (
-                xarm_gazebo_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
-                "ROS2 workspace is missing the UR5e RG2 hardware MoveIt launch file. Re-run `make bootstrap-gazebo`.",
-            ),
-            (
-                xarm_gazebo_share / "rviz" / "ur5e_rg2_hardware_moveit.rviz",
-                "ROS2 workspace is missing the UR5e RG2 hardware RViz config. Re-run `make bootstrap-gazebo`.",
-            ),
-        )
-        ur_rg2_bridge_assets = (
-            (
-                _VENV_PYTHON,
-                f"Python venv is missing at {_VENV_PYTHON}. Create the project venv before starting the UR5e RG2 bridge.",
-            ),
-            (
-                _UR5E_RG2_GRIPPER_SCRIPT,
-                f"UR5e RG2 bridge script is missing at {_UR5E_RG2_GRIPPER_SCRIPT}.",
-            ),
-        )
-        ur_rtde_trajectory_assets = (
-            (
-                _VENV_PYTHON,
-                f"Python venv is missing at {_VENV_PYTHON}. Create the project venv before starting the UR5e RTDE trajectory server.",
-            ),
-            (
-                _UR5E_RTDE_TRAJECTORY_SCRIPT,
-                f"UR5e RTDE trajectory server script is missing at {_UR5E_RTDE_TRAJECTORY_SCRIPT}.",
-            ),
-        )
-
-        if launch_key == "gazebo_dual":
-            return [
-                *workspace_xarm,
-                *moveit_core,
-                *ur_stack,
-                *onrobot_ws,
-                *link_attacher_ws,
-                *dual_assets,
-            ]
-        if launch_key == "gazebo_dual_passive":
-            return [*workspace_xarm, *ur_stack, *onrobot_ws, *dual_passive_assets]
-        if launch_key == "gazebo_xarm6":
-            return [*workspace_xarm, *moveit_core, *link_attacher_ws]
-        if launch_key == "gazebo_ur5e":
-            return [
-                *workspace_xarm,
-                *moveit_core,
-                *ur_stack,
-                *onrobot_ws,
-                *link_attacher_ws,
-                *ur_assets,
-            ]
-        if launch_key == "gazebo_xarm6_passive":
-            return [*workspace_xarm]
-        if launch_key == "gazebo_ur5e_passive":
-            return [*workspace_xarm, *ur_stack, *onrobot_ws, *ur_assets]
-        if launch_key == "hardware_xarm6_driver":
-            return [*workspace_xarm, *xarm_hardware_driver_assets]
-        if launch_key == "hardware_dual_robots_moveit":
-            return [
-                *workspace_xarm,
-                *moveit_core,
-                *ur_stack,
-                *onrobot_ws,
-                *dual_hardware_moveit_assets,
-            ]
-        if launch_key == "hardware_ur5e_moveit":
-            return [*moveit_core, *ur_stack, *onrobot_ws, *ur_hardware_rg2_assets]
-        if launch_key == "hardware_ur5e_rg2_gripper":
-            return [*ur_rg2_bridge_assets]
-        if launch_key == "hardware_ur5e_rtde_trajectory_server":
-            return [*ur_rtde_trajectory_assets]
-        return []
 
     def _ros2_launch_prereq_error(self, name: str) -> str | None:
-        ros_setup = self._ros2_setup_path()
-        if not ros_setup.is_file():
-            return (
-                f"ROS 2 Humble is not installed: missing {ros_setup}. "
-                "Install the README simulation dependencies first."
-            )
-
-        ws_setup = self._ros2_workspace_setup_path()
-        if not ws_setup.is_file():
-            return (
-                f"ROS2 workspace is not built yet: missing {ws_setup}. "
-                "Run `make bootstrap-gazebo` after installing the README simulation packages."
-            )
-
-        launch_file = self._GAZEBO_WORKSPACE_LAUNCH_FILES.get(str(name or "").strip().lower())
-        if launch_file:
-            launch_path = self._ros2_workspace_launch_dir() / launch_file
-            if not launch_path.is_file():
-                return (
-                    f"ROS2 workspace is missing {launch_file} at {launch_path}. "
-                    "Re-run `make bootstrap-gazebo` to copy the custom Gazebo launch files and rebuild."
-                )
-        for required_path, remedy in self._ros2_launch_required_paths(name):
-            if not required_path.exists():
-                return f"Missing ROS dependency at {required_path}. {remedy}"
-        return None
+        return ros2_processes.ros2_launch_prereq_error(
+            name,
+            gazebo_workspace_launch_files=self._GAZEBO_WORKSPACE_LAUNCH_FILES,
+            venv_python=_VENV_PYTHON,
+            ur5e_rg2_gripper_script=_UR5E_RG2_GRIPPER_SCRIPT,
+            ur5e_rtde_trajectory_script=_UR5E_RTDE_TRAJECTORY_SCRIPT,
+        )
 
     def _perception_backend_for_mode(self) -> str:
         mode = str(self.execution_mode or "").strip().lower()

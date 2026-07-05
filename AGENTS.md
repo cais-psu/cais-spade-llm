@@ -1,70 +1,66 @@
 # AGENTS.md
 
-## Repository expectations
+## Project
 
-- Read this file before changing code in this repository.
-- Keep changes scoped to the user's request and the touched runtime path.
-- Run `git status --short` before editing and do not overwrite unrelated local changes.
-- Preserve `SystemBridge` as the public UI-to-runtime surface unless the user explicitly asks for a public interface change.
-- Do not refactor behavior while fixing a bug unless the refactor is required for the fix.
-- For code review behavior, use `docs/code_review.md`.
-- For cleanup and extraction work, use `docs/refactoring.md`.
-- For boundary context, use `docs/architecture.md`.
-- Follow the `Clean code standards` below; run `make lint` before finishing and do not add new lint findings.
+CAIS-SPADE-LLM is a multi-agent manufacturing automation system. It combines
+SPADE agents, LLM planning, safety validation, ROS2/Gazebo/MoveIt robot
+integration, dual-robot execution, and a NiceGUI operator UI.
+
+## Before editing
+
+- Read the code path you are about to touch before changing it.
+- Run `git status --short` and do not overwrite unrelated local changes.
+- Keep changes scoped to the user's request and the runtime path involved.
+- Preserve `SystemBridge` as the public UI-to-runtime surface unless the user
+  explicitly asks for a public interface change.
+- Do not mix unrelated refactors into feature work or bug fixes.
 
 ## Fixed-symbol rule
 
-- Do not canonicalize, normalize, generalize, or rename any terms.
-- Do not replace specific names with generic labels.
-- Do not introduce new abstractions, categories, or standardized forms.
-- Keep all identifiers, variable names, and domain-specific wording exactly as provided.
-- If a term is ambiguous or inconsistent, leave it unchanged instead of correcting it.
-- Treat all tokens (actions, resources, states, predicates) as fixed symbols in a formal system.
+- Do not canonicalize, normalize, generalize, rename, or replace project terms.
+- Keep identifiers, variable names, actions, resources, states, predicates, and
+  domain-specific wording exactly as provided.
+- If a term is ambiguous or inconsistent, leave it unchanged instead of
+  correcting it.
+- Treat formal-system tokens as fixed symbols, not labels to standardize.
 
-## Runtime boundaries
+## How to code here
 
-- Keep `digital twin`, `Teach`, `Replay in Twin`, `Preview in Gazebo`, `Monitor`, and `dual_robots` wording exactly as written.
-- Treat hardware MoveIt/RViz as the operator surface for `digital twin`; Gazebo is a passive mirror unless the user asks for a different architecture.
-- Keep `Teach` as sim/recovery authoring and `Replay in Twin` as the path that commits the saved sim waypoint through hardware MoveIt.
-- Keep validation-stage checks separate from downstream runtime gating when the user says `during validation process`.
-- Do not import ROS2 modules at top level in Python files that must run without ROS2.
+- Write clean, human-readable code that fits the nearby file.
+- Prefer direct code over generic abstractions. Add an abstraction only when it
+  removes real duplication or matches an existing local pattern.
+- Use clear names, small functions, type hints, and explicit data flow.
+- Start Python modules with `from __future__ import annotations` when touching
+  them.
+- Use `snake_case` for functions and variables, `PascalCase` for classes, and
+  `_private_name` for private helpers.
+- Use `logging.getLogger(__name__)`; do not add new `print()`.
+- Catch narrow exceptions. Do not add bare `except` or broad silent failure
+  paths.
+- Keep ROS2 imports lazy in Python files that must also run without ROS2.
+- Keep robot positions and capabilities configuration-driven through the JSON
+  manifests under `initialization/` and `specification/`.
+- Never commit `.env` files or credentials.
 
-## Clean code standards
+## Comments and docstrings
 
-These are enforced by `ruff` (config in `pyproject.toml`), the `Makefile` targets,
-`.pre-commit-config.yaml`, and the Claude Code hook in `.claude/settings.json`. The
-repo carries a known lint backlog being burned down per `docs/refactoring.md` — do
-not add to it.
-
-- `make lint-report` shows current per-rule debt counts; `make lint` shows full
-  findings; `make lint-fix` applies safe auto-fixes and formats.
-- Do not add new `print()`. Use `logging.getLogger(__name__)` per module.
-- Do not add new broad `except Exception` or bare `except`. Catch the narrowest
-  exception and log or return an explicit status. Keep safety-validation and
-  recovery paths fail-closed.
-- Keep functions small. Ruff flags excessive complexity, branches, arguments, and
-  statements (thresholds are generous now, tightened as files are decomposed).
-- Type hints everywhere; start modules with `from __future__ import annotations`.
-- `snake_case` for functions/variables, `PascalCase` for classes, private methods
-  prefixed with `_`.
-- Keep ROS2 imports lazy (never top-level) in files that must run without ROS2.
-- Configuration-driven: robot positions and capabilities come from JSON manifests
-  under `initialization/` and `specification/` — do not hardcode them.
-- Never commit `.env` or credentials.
-
-### Comments and docstrings
-
-- Readability comes from small functions, clear names, and type hints — not from a
-  comment on every line. Do not restate code in comments.
+- Let readable code carry the simple cases.
 - Add Google-style docstrings to public modules, classes, functions, and methods
   when you touch them.
-- Use comments only for non-obvious intent: hardware safety assumptions, ROS2
-  timing constraints, `digital twin` authority, `Teach`, `Replay in Twin`,
-  `Preview in Gazebo`, and validation-stage behavior.
+- Use comments only when they explain non-obvious intent, safety assumptions,
+  ROS2 timing constraints, validation-stage behavior, or runtime authority.
+- Do not add comments that restate the next line of code.
 
 ## Verification
 
-- For Python-only cleanup, run targeted `python -m pytest ...` commands for the touched area.
-- For `digital twin`, `Teach`, `Replay in Twin`, or ROS2 launch changes, run `python -m pytest test/test_ur5e_rg2_rtde_gripper.py`.
-- For ROS2 launch/script/RViz changes, run `make bootstrap-gazebo` before checking installed workspace behavior.
-- If live ROS2 validation is unavailable, state that boundary explicitly and report the static or unit checks that did run.
+- For normal Python changes, run `poetry check` and
+  `poetry run python -m compileall -q cais_spade_llm ros2`.
+- For entrypoint or CLI changes, run
+  `poetry run python -m cais_spade_llm.ui_main --help`.
+- For ROS2 launch/script/RViz changes, run `make bootstrap-gazebo` before
+  checking installed workspace behavior.
+- Use `test/` for focused or temporary tests when a feature needs them. Broad
+  permanent test suites are not required unless the user asks for them.
+- Run any focused tests you create or restore for the touched feature.
+- If live ROS2 or hardware validation is unavailable, say so and report the
+  static, import, compile, CLI, or focused tests that did run.

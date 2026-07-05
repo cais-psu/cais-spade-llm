@@ -346,9 +346,6 @@ def render(bridge: SystemBridge) -> None:
                                 or "validated"
                             )
                             selected_path = str(settings.get("selected_archive_path") or "").strip()
-                            fixture_replay_path = str(
-                                settings.get("fixture_replay_path") or ""
-                            ).strip()
                             if str(bridge_mode_select.value or "") != selected_mode:
                                 bridge_mode_select.value = selected_mode
                             if str(bridge_validation_select.value or "") != validation_policy:
@@ -381,17 +378,12 @@ def render(bridge: SystemBridge) -> None:
                                 f"Runtime bridge mode: {_BRIDGE_MODE_OPTIONS.get(selected_mode, selected_mode)}"
                                 + f" ({_BRIDGE_VALIDATION_POLICY_OPTIONS.get(validation_policy, validation_policy.replace('_', ' '))})."
                             )
-                            if fixture_replay_path:
-                                bridge_fixture_status.text = (
-                                    "Fixture replay is active and overrides live auto bridge: "
-                                    f"{fixture_replay_path}"
-                                )
-                            elif selected_mode == "pre_ran" and selected_path:
+                            if selected_mode == "pre_ran" and selected_path:
                                 bridge_fixture_status.text = (
                                     f"Selected archived bridge path: {selected_path}"
                                 )
                             else:
-                                bridge_fixture_status.text = "No fixture replay env var is active."
+                                bridge_fixture_status.text = "No archived bridge run selected."
 
                             if selected_mode == "pre_ran":
                                 if resolved_value:
@@ -919,12 +911,14 @@ def render(bridge: SystemBridge) -> None:
                     bundle_gate_banner.clear()
                     if not text:
                         return
-                    with bundle_gate_banner:
-                        with ui.row().classes(
+                    with (
+                        bundle_gate_banner,
+                        ui.row().classes(
                             "items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"
-                        ):
-                            ui.icon("warning").classes("text-lg")
-                            ui.label(text).classes("text-sm font-semibold")
+                        ),
+                    ):
+                        ui.icon("warning").classes("text-lg")
+                        ui.label(text).classes("text-sm font-semibold")
 
                 def _update_controls():
                     try:

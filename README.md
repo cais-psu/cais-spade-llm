@@ -1,87 +1,76 @@
 # CAIS-SPADE-LLM
 
-CAIS-SPADE-LLM is a multi-agent manufacturing system with:
+CAIS-SPADE-LLM is a multi-agent manufacturing automation system. It combines:
 
-- LLM-based product planning
-- LTLf/DFA-based safety validation and monitoring
-- dual-robot execution with UR5e and xArm6
-- a NiceGUI operator console for products, plans, safety, and control
+- SPADE agents for product, robot, user, and central-controller coordination
+- LLM-based process planning and recovery planning
+- LTL/FSA safety validation and runtime monitoring
+- xArm6 + UR5e dual-robot execution
+- ROS2 Humble, Gazebo Classic, MoveIt2, RViz, RTDE, and RG2 support
+- a NiceGUI operator UI for setup, control, plans, safety, and status
 
-This README is the deployment contract for a new engineer or an LLM. It is written to answer one question clearly:
+This README is the beginner install guide for a new Ubuntu 22.04 / WSL2 PC.
+It is written for the full digital twin environment first, then notes what can
+run without ROS2 or without physical robots.
 
-`What can I run immediately after cloning, and what still requires extra system setup?`
+For code orientation after installation, read [docs/codebase_map.md](docs/codebase_map.md).
 
-> **Lost in the code?** Read [docs/codebase_map.md](docs/codebase_map.md) — a one-page tour of
-> what runs in what order, what every directory is for, and where to look when something breaks.
+## What Works At Each Level
 
-## Reality Check
+| Level | What you can run | What you need |
+| --- | --- | --- |
+| `dry_run` | UI, agents, planning, safety files, sample product flow | Python 3.10, Poetry, OpenAI key |
+| Gazebo + RViz | xArm6 + UR5e simulation with MoveIt/RViz | ROS2 Humble, Gazebo Classic, `~/ros2_ws`, bootstrap |
+| digital twin | hardware MoveIt/RViz with Gazebo as visual mirror | ROS2 stack, `~/ros2_ws`, xArm6 network, UR5e RTDE network, RG2 bridge |
+| physical product flow | real robots plus production perception | lab networking, calibration, physical perception implementation |
 
-This repository is deployable on a new PC, but not all modes are equally turnkey.
+The physical perception files are still stubs:
 
-| Mode | After host tools install | Extra setup required | Notes |
-| --- | --- | --- | --- |
-| `dry_run` | Yes | No | Best first-run path |
-| `simulation` | No | ROS 2 Humble + Gazebo workspace | A bootstrap script is included |
-| `physical` | No | Robot drivers, networking, calibration, perception implementation | Physical perception is not fully implemented yet |
+- [cais_spade_llm/resources/sensor/physical/detect_all_service.py](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
+- [cais_spade_llm/resources/sensor/physical/detect_part_service.py](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
 
-Important limits:
+## New PC Install: Digital Twin Environment
 
-- Core dependencies install from Poetry, but the UI still uses a checked-in [`requirements-ui.txt`](requirements-ui.txt) because the current `spade` and `nicegui` dependency constraints do not solve cleanly together in Poetry. If you want the web UI or the default `python -m cais_spade_llm` entry point, you need this file. If you only run `--headless`, you can skip it.
-- On a brand-new Ubuntu/WSL machine, the `dry_run` path still needs a few base OS packages first: `git`, `curl`, `python3-pip`, and `python3.10-venv`.
-- Gazebo simulation still depends on an external ROS 2 workspace under `~/ros2_ws`.
-- Physical perception is not turnkey yet because these files are still stubs:
-  - [`cais_spade_llm/resources/sensor/physical/detect_all_service.py`](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
-  - [`cais_spade_llm/resources/sensor/physical/detect_part_service.py`](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
+Use Ubuntu 22.04, either native or WSL2. ROS2 Humble is built for Ubuntu 22.04.
+On WSL2, WSLg is enough for Gazebo and RViz windows on modern Windows installs.
 
-## Guidance for LLM-Assisted Setup
+### 1. Install base system tools
 
-If an engineer or an LLM turns this README into machine setup instructions, use this format:
-
-- Give the normal install and run steps first.
-- At the very end, include one final section titled `Sudo Commands Summary`.
-- That final section should repeat every command that needs `sudo` for the requested setup mode on that machine.
-- Do not imply that a fresh Ubuntu/WSL machine is `clone only` if host packages are still missing.
-- If Gazebo/MoveIt still will not launch, end with a short `What Is Still Missing` section that names the exact missing file, package, or workspace step and the next command the user should run.
-- State whether [`requirements-ui.txt`](requirements-ui.txt) is required:
-  - required for the NiceGUI web UI and the default entry point
-  - optional only for headless-only usage
-
-## Fastest Successful Bring-Up
-
-Use this path on any new PC to confirm the repo works before touching Gazebo or hardware.
-
-### 1. Install host tools
-
-For a fresh Ubuntu 22.04 / WSL2 machine, this is the shortest reproducible path:
+Open Ubuntu 22.04 and run:
 
 ```bash
 sudo apt update
-sudo apt install -y git curl python3-pip python3.10-venv
+sudo apt install -y \
+  git \
+  curl \
+  python3-pip \
+  python3.10 \
+  python3.10-venv \
+  python3.10-dev \
+  python-is-python3 \
+  graphviz
+```
 
-# Optional, but useful for saved DOT/graph rendering
-sudo apt install -y graphviz
+Install Poetry:
 
-curl -sSL https://install.python-poetry.org | python3
+```bash
+curl -sSL https://install.python-poetry.org | python3.10
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Required for the `dry_run` path:
-
-- Python `3.10`
-- Poetry
-- Git
-
-Optional but useful:
-
-- Graphviz
-- MONA, if you want real DFA graphs in the Safety page
-
-### 2. Clone and configure
+### 2. Clone this repo
 
 ```bash
-git clone <repo-url>
+mkdir -p ~/projects
+cd ~/projects
+git clone <repo-url> cais-spade-llm
 cd cais-spade-llm
+```
+
+### 3. Create `.env`
+
+```bash
 cp .env.example .env
 ```
 
@@ -91,99 +80,52 @@ Edit `.env` and set:
 OPENAI_API_KEY=...
 ```
 
-### 3. Install Python dependencies
+The optional values in `.env.example` can stay commented for a first install.
+
+### 4. Install Python dependencies
 
 ```bash
 poetry config virtualenvs.in-project true
+poetry env use /usr/bin/python3.10
 poetry install
 poetry run pip install -r requirements-ui.txt
 ```
 
-`requirements-ui.txt` installs `nicegui`, which is needed for the web UI. If you plan to run only:
+`requirements-ui.txt` is required for the NiceGUI web UI and the normal
+`poetry run python -m cais_spade_llm` entry point.
+
+The UR5e RTDE Python dependency is installed through Poetry from `pyproject.toml`.
+
+### 5. Verify the Python-only path
 
 ```bash
-poetry run python -m cais_spade_llm.ui_main --headless
-```
-
-you can skip the `poetry run pip install -r requirements-ui.txt` step.
-
-### 4. Start the UI
-
-```bash
+poetry check
+poetry run python -m compileall -q cais_spade_llm ros2
+poetry run python -m cais_spade_llm.ui_main --help
 poetry run python -m cais_spade_llm
 ```
 
-If you launch the app from VS Code, use the checked-in debug configuration in [`.vscode/launch.json`](.vscode/launch.json). It now runs Python through [`scripts/ros_python.sh`](scripts/ros_python.sh), which sources `/opt/ros/humble/setup.bash` and `~/ros2_ws/install/setup.bash` first so simulation controllers can import `rclpy`.
+Open:
 
-The UI runs on `http://localhost:8080`.
-
-### 5. First-run recommendation
-
-Start in:
-
-- execution mode: `dry_run`
-- robot environment: `gazebo`
-
-This avoids ROS 2/hardware setup while validating that:
-
-- Python environment is correct
-- LLM access works
-- the UI works
-- the shipped sample product and safety files load
-
-## UI Pages
-
-Current routes:
-
-| Page | Path |
-| --- | --- |
-| Dashboard | `/` |
-| Control | `/control` |
-| Plans | `/plans` |
-| Safety | `/safety` |
-| Products | `/products` |
-| Resources | `/resources` |
-
-## What Ships as the Default Sample
-
-The repo now includes a coherent default sample for the tracked product:
-
-- Product manifest: [`cais_spade_llm/initialization/products/assembly_board-v1.json`](cais_spade_llm/initialization/products/assembly_board-v1.json)
-- Product requirements: [`cais_spade_llm/specification/products/requirements/assembly_board-v1.txt`](cais_spade_llm/specification/products/requirements/assembly_board-v1.txt)
-- Product geometry: [`cais_spade_llm/specification/products/geometry/assembly_board-v1.json`](cais_spade_llm/specification/products/geometry/assembly_board-v1.json)
-- Default safety file: [`cais_spade_llm/specification/safety/safety_requirements.txt`](cais_spade_llm/specification/safety/safety_requirements.txt)
-
-That means a fresh clone no longer depends on your local untracked safety/product text files just to start the sample flow.
-
-## Commands for a New Engineer
-
-Common commands are also wrapped in the included [`Makefile`](Makefile):
-
-```bash
-make install
-make run
-make headless
+```text
+http://localhost:8080
 ```
 
-## Gazebo Simulation Setup
+For a first UI run, use `dry_run` before starting ROS2 or hardware.
 
-`simulation` mode requires ROS 2 Humble and Gazebo outside the Poetry environment.
+### 6. Install ROS2 Humble, Gazebo, MoveIt, and controllers
 
-### System packages required for simulation
-
-If `/opt/ros/humble/setup.bash` is not present on the machine yet, install ROS 2 Humble first.
-
-On Ubuntu 22.04 / WSL2:
+Install locale and ROS apt repository support:
 
 ```bash
-sudo apt install -y locales
+sudo apt install -y locales software-properties-common curl
 sudo locale-gen en_US en_US.UTF-8
 sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+```
 
-sudo apt install -y software-properties-common curl
+Add the ROS apt repository if this PC does not already have it:
 
-# Only add the ROS apt repo manually if the machine does not already have
-# /etc/apt/sources.list.d/ros2.sources from ros-apt-source.
+```bash
 if [ ! -e /etc/apt/sources.list.d/ros2.sources ]; then
   sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     -o /usr/share/keyrings/ros-archive-keyring.gpg
@@ -191,23 +133,25 @@ if [ ! -e /etc/apt/sources.list.d/ros2.sources ]; then
     http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
     | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 fi
+```
 
-# If apt reports a conflicting Signed-By error, disable the duplicate manual file
-# and keep the existing ros2.sources entry.
+If apt reports a duplicate `Signed-By` conflict and both files exist, keep
+`ros2.sources` and disable the manual `ros2.list` file:
+
+```bash
 if [ -e /etc/apt/sources.list.d/ros2.sources ] && [ -e /etc/apt/sources.list.d/ros2.list ]; then
   sudo mv /etc/apt/sources.list.d/ros2.list /etc/apt/sources.list.d/ros2.list.disabled
 fi
-
-sudo apt update
-sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep
-sudo rosdep init
-rosdep update
 ```
 
-For this repository's dual-robot Gazebo setup, also install:
+Install ROS2 and this project's ROS dependencies:
 
 ```bash
+sudo apt update
 sudo apt install -y \
+  ros-humble-desktop \
+  python3-colcon-common-extensions \
+  python3-rosdep \
   ros-humble-moveit \
   ros-humble-gazebo-ros-pkgs \
   ros-humble-gazebo-ros2-control \
@@ -220,89 +164,123 @@ sudo apt install -y \
   ros-humble-robot-state-publisher
 ```
 
-### One-time Gazebo workspace bootstrap
-
-This repo now includes:
-
-- [`scripts/bootstrap_gazebo_workspace.sh`](scripts/bootstrap_gazebo_workspace.sh)
-
-It will:
-
-- create or reuse `~/ros2_ws`
-- clone `xarm_ros2`
-- clone `OnRobot_ROS2_Description`
-- clone `IFRA_LinkAttacher`
-- copy this repo's custom world, launch, config, and RViz files into the ROS 2 workspace
-- copy this repo's patched IFRA `gazebo_link_attacher.cpp` into the workspace before build
-- copy the custom config and RViz assets into the installed `xarm_gazebo` package share that the launch files read at runtime
-- run `colcon build --packages-skip d435i_xarm_setup`
-
-The IFRA LinkAttacher build is required for this repository's Gazebo grasp/attach flow:
-
-- workspace package `linkattacher_msgs`
-- workspace package `ros2_linkattacher`
-- Gazebo services `/ATTACHLINK` and `/DETACHLINK`
-
-If those are missing, startup may succeed but simulated grasp attach/detach will be disabled.
-
-Why `d435i_xarm_setup` is skipped:
-
-- it is an optional xArm camera / hand-eye example package
-- it depends on `object_recognition_msgs`
-- it is not required for this repository's dual-robot Gazebo + MoveIt launch path
-
-If you later want that optional package too:
+Initialize rosdep once:
 
 ```bash
-sudo apt install -y ros-humble-object-recognition-msgs
+if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+  sudo rosdep init
+fi
+rosdep update
 ```
 
-Run:
+### 7. Build the ROS2 workspace
+
+From this repo:
 
 ```bash
+cd ~/projects/cais-spade-llm
 make bootstrap-gazebo
 ```
 
-or:
+This creates and builds `~/ros2_ws`. The first build can take a while.
+
+### 8. Source ROS2 in ROS terminals
+
+For any terminal where you run raw `ros2`, `gazebo`, or RViz commands:
 
 ```bash
-bash scripts/bootstrap_gazebo_workspace.sh
+deactivate 2>/dev/null || true
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ```
 
-If this step has not been completed yet, the UI `Dual Robots` launch will not work because it requires:
+Do not run raw ROS2/Gazebo commands from an activated Poetry venv. The UI is
+started with Poetry, but raw ROS2 terminals should use the system ROS2
+environment.
+
+Optional convenience lines for `~/.bashrc`:
 
 ```bash
-~/ros2_ws/install/setup.bash
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
 ```
 
-If the UI reports:
+Do not add `source .venv/bin/activate` to `~/.bashrc`.
 
-```text
-ROS2 workspace is not built yet: missing /home/<user>/ros2_ws/install/setup.bash.
-```
+## What `make bootstrap-gazebo` Does
 
-the next step is:
+`make bootstrap-gazebo` runs [scripts/bootstrap_gazebo_workspace.sh](scripts/bootstrap_gazebo_workspace.sh).
 
-```bash
-cd /path/to/cais-spade-llm
-make bootstrap-gazebo
-```
+It does this:
 
-If `make bootstrap-gazebo` fails, finish the missing ROS 2 / Gazebo apt packages from `System packages required for simulation`, then rerun it.
+- creates or reuses `~/ros2_ws`
+- clones `xarm_ros2` into `~/ros2_ws/src/xarm_ros2`
+- clones `OnRobot_ROS2_Description` for the RG2 meshes/URDF
+- clones `IFRA_LinkAttacher` for Gazebo attach/detach services
+- copies this repo's `ros2/cais_lab_gazebo/worlds/*.world` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_gazebo/launch/*.py` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_gazebo/config/*.yaml` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_gazebo/rviz/*.rviz` into the xArm Gazebo package
+- copies the patched IFRA `gazebo_link_attacher.cpp`
+- runs `colcon build --packages-skip d435i_xarm_setup`
+- copies config and RViz assets into the installed `xarm_gazebo` share directory
 
-After a successful bootstrap, verify the IFRA attacher services once:
+The IFRA LinkAttacher packages provide:
+
+- `linkattacher_msgs`
+- `ros2_linkattacher`
+- `/ATTACHLINK`
+- `/DETACHLINK`
+
+Verify after bootstrap:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 service list | grep -E '/ATTACHLINK|/DETACHLINK'
+ros2 pkg prefix xarm_gazebo
+ros2 pkg prefix linkattacher_msgs
+ros2 pkg prefix ros2_linkattacher
 ```
 
-If they are missing, restart the Gazebo launch once so it reloads the new plugin build.
+## Tracked Repo Files vs ROS2 Workspace Files
 
-### Start Gazebo
+This repo is the source of truth for custom ROS2 files:
 
-To match the UI Control page's `Dual Robots` button, launch:
+```text
+ros2/cais_lab_gazebo/launch/
+ros2/cais_lab_gazebo/config/
+ros2/cais_lab_gazebo/rviz/
+ros2/cais_lab_gazebo/worlds/
+ros2/cais_lab_gazebo/scripts/
+ros2/third_party/IFRA_LinkAttacher/
+```
+
+The runtime ROS2 workspace is outside this repo:
+
+```text
+~/ros2_ws/src/xarm_ros2/xarm_gazebo/
+~/ros2_ws/src/OnRobot_ROS2_Description/
+~/ros2_ws/src/IFRA_LinkAttacher/
+~/ros2_ws/install/
+```
+
+Git in this project does not track files under `~/ros2_ws`. If you manually edit
+`~/ros2_ws/src/...` or `~/ros2_ws/install/...`, those edits are local to that PC
+and will not appear in this repository.
+
+The safe workflow is:
+
+1. Edit the source file in this repo under `ros2/cais_lab_gazebo/...`.
+2. Run `make bootstrap-gazebo`.
+3. Test through `~/ros2_ws`.
+4. Commit only the repo file.
+
+If a ROS2 launch change seems ignored, rerun `make bootstrap-gazebo` before
+debugging the launch itself.
+
+## Run The Gazebo + RViz Simulation
+
+Use a ROS terminal:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -310,114 +288,206 @@ source ~/ros2_ws/install/setup.bash
 ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
 ```
 
-If you want the lower-level world bring-up without the combined MoveIt launch, use:
+Expected result:
+
+- Gazebo Classic opens with the dual-robot table world.
+- RViz opens with MoveIt.
+- xArm6 and UR5e are visible.
+- Planning groups are available in the MotionPlanning panel.
+
+Useful checks:
 
 ```bash
-ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py
+ros2 topic echo /joint_states --once
+ros2 control list_controllers
+ros2 service list | grep -E '/ATTACHLINK|/DETACHLINK'
 ```
 
-Then, in a separate terminal:
+WSL2 note: Gazebo and RViz can take 30-60 seconds to show useful output.
+
+## Run The UI
+
+Use a project terminal:
 
 ```bash
-cd /path/to/cais-spade-llm
+cd ~/projects/cais-spade-llm
 poetry run python -m cais_spade_llm
 ```
 
-You can also manage Gazebo and hardware launch from the UI Control page once the ROS 2 workspace is prepared.
+Open:
 
-Full ROS 2 notes remain in:
-
-- [`ros2/ROS2_SETUP_README.md`](ros2/ROS2_SETUP_README.md)
-
-## Physical Hardware Setup
-
-`physical` mode is not yet fully one-command deployable from this repository alone.
-
-What is already here:
-
-- robot-agent wiring
-- hardware launch integration in the UI
-- configurable robot IPs
-- execution-mode switching
-
-What still requires machine-specific integration:
-
-- physical robot drivers and MoveIt stacks
-- hardware network configuration
-- calibration
-- real perception implementation for:
-  - [`cais_spade_llm/resources/sensor/physical/detect_all_service.py`](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
-  - [`cais_spade_llm/resources/sensor/physical/detect_part_service.py`](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
-
-So the physical path is deployable as a framework, but not yet turnkey as a fully finished hardware product.
-
-## Safety DFA Rendering
-
-Safety preview works without MONA, but real DFA graphs require the external `mona` executable.
-
-Without MONA:
-
-- safety parsing still works
-- DOT files may still be saved
-- PNG DFA graphs will be unavailable
-
-## Environment Variables
-
-The main environment file is:
-
-- [`.env.example`](.env.example)
-
-Most users only need:
-
-```bash
-OPENAI_API_KEY=...
+```text
+http://localhost:8080
 ```
 
-Optional overrides already supported by the code include:
+The important UI page for ROS2 and digital twin work is:
 
-- `EXECUTION_MODE`
-- `ROBOT_ENV`
-- `PERCEPTION_BACKEND`
-- `PERCEPTION_NODE_NAME`
-- `CAIS_XMPP_HOST`
-- `CAIS_XMPP_DB_IN_MEMORY`
-- `ENABLE_ROBOT_AGENT_PREWARM`
+```text
+/control
+```
 
-## Entry Points
+The Control page can launch Gazebo, hardware processes, teleop, and digital twin
+processes after the ROS2 workspace has been bootstrapped.
 
-Primary entry point:
+## Digital Twin Hardware Stack
+
+The current dual-robot digital twin uses these pieces:
+
+| Piece | Runtime path |
+| --- | --- |
+| xArm6 hardware | xArm hardware driver and xArm MoveIt realmove launch |
+| UR5e arm | [ros2/cais_lab_gazebo/scripts/ur5e_rtde_trajectory_server.py](ros2/cais_lab_gazebo/scripts/ur5e_rtde_trajectory_server.py) |
+| UR5e RG2 | [ros2/cais_lab_gazebo/scripts/ur5e_rg2_rtde_gripper.py](ros2/cais_lab_gazebo/scripts/ur5e_rg2_rtde_gripper.py) |
+| combined hardware MoveIt/RViz | `dual_robots_hardware_moveit.launch.py` |
+| Gazebo mirror | passive Gazebo launch files copied into `~/ros2_ws` |
+| sync/replay helper | [ros2/cais_lab_gazebo/scripts/digital_twin_sync.py](ros2/cais_lab_gazebo/scripts/digital_twin_sync.py) |
+| paired RViz markers | [ros2/cais_lab_gazebo/scripts/dual_drag_markers.py](ros2/cais_lab_gazebo/scripts/dual_drag_markers.py) |
+
+The UR5e arm path is RTDE-based. Do not expect the old UR dashboard/external
+control path to be the main runtime path for this project.
+
+The UI starts the UR5e RTDE trajectory server with:
+
+```text
+/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory
+```
+
+The UI starts the UR5e RG2 bridge with:
+
+```text
+/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory
+```
+
+The combined hardware MoveIt/RViz launch file is:
+
+```text
+ros2/cais_lab_gazebo/launch/dual_robots_hardware_moveit.launch.py
+```
+
+After bootstrap, ROS2 launches it from:
+
+```text
+~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_robots_hardware_moveit.launch.py
+```
+
+## Digital Twin Run Checklist
+
+Before starting hardware digital twin:
+
+1. Build the Python venv with `poetry install`.
+2. Build the ROS2 workspace with `make bootstrap-gazebo`.
+3. Put the xArm6 and UR5e on the same network as the PC.
+4. Confirm the robot IPs in the Control page.
+5. Start the UI with `poetry run python -m cais_spade_llm`.
+6. Use the Control page to start the relevant Gazebo, hardware, and digital twin processes.
+7. Confirm RViz and Gazebo are open.
+8. Confirm `/joint_states` is publishing.
+
+Hardware IP defaults in the app are:
+
+| Robot | Default IP |
+| --- | --- |
+| xArm6 | `192.168.1.240` |
+| UR5e | `192.168.1.172` |
+
+If your lab uses different addresses, change them in the Control page and apply
+the hardware IPs before launching hardware processes.
+
+## Terminal Rules
+
+Use two terminal styles:
+
+| Terminal | Use it for | Environment |
+| --- | --- | --- |
+| Project terminal | Poetry, UI, Python checks | `poetry run ...` or `.venv` |
+| ROS terminal | `ros2 launch`, `ros2 topic`, RViz/Gazebo checks | no Poetry venv, source ROS2 setup files |
+
+If ROS2 commands fail with Python import errors, check:
+
+```bash
+which python3
+```
+
+If it points into `.venv/bin/python3`, run:
+
+```bash
+deactivate
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+## Default Sample Product
+
+The repo includes a default sample product:
+
+- [cais_spade_llm/initialization/products/assembly_board-v1.json](cais_spade_llm/initialization/products/assembly_board-v1.json)
+- [cais_spade_llm/specification/products/requirements/assembly_board-v1.txt](cais_spade_llm/specification/products/requirements/assembly_board-v1.txt)
+- [cais_spade_llm/specification/products/geometry/assembly_board-v1.json](cais_spade_llm/specification/products/geometry/assembly_board-v1.json)
+- [cais_spade_llm/specification/safety/safety_requirements.txt](cais_spade_llm/specification/safety/safety_requirements.txt)
+
+That sample is enough to start the UI and exercise planning/safety flows after
+Python dependencies are installed.
+
+## Useful Commands
+
+```bash
+make install
+make run
+make headless
+make bootstrap-gazebo
+```
+
+Equivalent direct commands:
 
 ```bash
 poetry run python -m cais_spade_llm
-```
-
-Alternative entry points:
-
-```bash
 poetry run python -m cais_spade_llm.ui_main
 poetry run python -m cais_spade_llm.ui_main --headless
 ```
 
+## Troubleshooting
+
+| Problem | Fix |
+| --- | --- |
+| `ROS2 workspace is not built yet` | Run `make bootstrap-gazebo` from the repo root. |
+| ROS2 launch cannot find custom launch/config/RViz files | Run `make bootstrap-gazebo`; the files in `~/ros2_ws` are copied from this repo. |
+| Gazebo/RViz does not appear quickly on WSL2 | Wait 30-60 seconds. First launch is slow. |
+| ROS2 Python import error mentions `.venv` | Deactivate the Poetry venv before raw ROS2 commands. |
+| `/ATTACHLINK` or `/DETACHLINK` missing | Rerun `make bootstrap-gazebo`, then restart Gazebo. |
+| `/joint_states` missing | Wait for launch startup, then check controllers and hardware process status. |
+| UR5e RTDE process cannot connect | Check UR5e IP, network route, and robot-side RTDE availability. |
+| RG2 bridge cannot connect | Check UR5e IP and the RG2 bridge status in the Control page. |
+
+## More ROS2 Notes
+
+Older detailed ROS2 notes remain under:
+
+- [ros2/ROS2_SETUP_README.md](ros2/ROS2_SETUP_README.md)
+- [ros2/docs/wsl_ubuntu22_ros2_humble_setup.md](ros2/docs/wsl_ubuntu22_ros2_humble_setup.md)
+- [ros2/docs/ros2_operation_guide_dual_robots.md](ros2/docs/ros2_operation_guide_dual_robots.md)
+
+Use this README first for the current beginner install path. Some older ROS2
+notes are lower-level references and may describe narrower simulation modes.
+
 ## Sudo Commands Summary
 
-This section is intentionally redundant. It lists only the commands that require `sudo` on a new Ubuntu 22.04 / WSL2 desktop.
-
-If you only want the `dry_run` path:
+These are the commands above that require `sudo` on a new Ubuntu 22.04 / WSL2 PC.
 
 ```bash
 sudo apt update
-sudo apt install -y git curl python3-pip python3.10-venv
-sudo apt install -y graphviz
-```
+sudo apt install -y \
+  git \
+  curl \
+  python3-pip \
+  python3.10 \
+  python3.10-venv \
+  python3.10-dev \
+  python-is-python3 \
+  graphviz
 
-If you also need ROS 2 Humble and Gazebo simulation:
-
-```bash
-sudo apt install -y locales
+sudo apt install -y locales software-properties-common curl
 sudo locale-gen en_US en_US.UTF-8
 sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-
-sudo apt install -y software-properties-common curl
 
 if [ ! -e /etc/apt/sources.list.d/ros2.sources ]; then
   sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
@@ -432,10 +502,10 @@ if [ -e /etc/apt/sources.list.d/ros2.sources ] && [ -e /etc/apt/sources.list.d/r
 fi
 
 sudo apt update
-sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep
-sudo rosdep init
-
 sudo apt install -y \
+  ros-humble-desktop \
+  python3-colcon-common-extensions \
+  python3-rosdep \
   ros-humble-moveit \
   ros-humble-gazebo-ros-pkgs \
   ros-humble-gazebo-ros2-control \
@@ -446,22 +516,18 @@ sudo apt install -y \
   ros-humble-joint-trajectory-controller \
   ros-humble-xacro \
   ros-humble-robot-state-publisher
+
+if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+  sudo rosdep init
+fi
 ```
 
-## If You Want True "Clone And Deploy Anywhere"
+## What Is Still Machine-Specific
 
-This README gets the repo much closer, but true one-command deployment on a brand-new PC would still need follow-up work:
+The install is reproducible, but a real hardware digital twin still depends on:
 
-1. a scripted system dependency installer for Ubuntu
-2. a scripted ROS 2 dependency installer, not just workspace bootstrap
-3. a finished physical perception pipeline
-4. a clean dependency strategy that removes the current `spade`/`nicegui` installer split
-5. optionally a container/devcontainer for the non-ROS `dry_run` path
-6. optionally a dedicated installer or compose-style orchestration for ROS 2 + UI
-
-That is the difference between:
-
-- `well-documented and reproducible`
-- and `fully turnkey on any machine`
-
-This repo is now set up for the first one, and partially prepared for the second.
+1. xArm6 and UR5e being reachable from the PC network
+2. correct robot IPs in the Control page
+3. robot-side safety and calibration setup
+4. RG2 availability on the UR5e setup
+5. physical perception implementation for production use

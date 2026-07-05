@@ -1,32 +1,50 @@
 # Code Review Checklist
 
-Use this checklist when reviewing changes in this repository.
+Use this checklist when reviewing changes in this repository. Lead with bugs,
+behavioral regressions, unsafe assumptions, and missing verification.
 
 ## Scope
 
 - Confirm the diff only changes files needed for the request.
 - Confirm unrelated dirty worktree changes were not rewritten.
-- Confirm no terms, identifiers, variable names, actions, resources, states, predicates, or domain wording were canonicalized, normalized, generalized, renamed, or replaced.
-- Confirm `digital twin`, `Teach`, `Replay in Twin`, `Preview in Gazebo`, `Monitor`, and `dual_robots` wording remains exact when touched.
+- Confirm project terms, identifiers, variable names, actions, resources, states,
+  predicates, and domain wording were not canonicalized, normalized,
+  generalized, renamed, or replaced.
+- Confirm public UI calls still go through `SystemBridge` unless the change
+  intentionally changes the UI-to-runtime surface.
 
 ## Behavior
 
-- Check whether a refactor accidentally changes public behavior.
-- Check whether UI code still calls `SystemBridge` through the existing public surface.
-- Check whether ROS2 imports remain lazy in files that must run without ROS2.
-- Check whether validation-stage checks remain separate from runtime gating.
-- Check whether broad `except Exception: pass` blocks were added. If an existing block is touched, prefer logging or explicit failure details.
+- Check whether the change alters runtime behavior that was supposed to stay
+  stable.
+- Check whether ROS2 imports remain lazy in Python paths that must run without
+  ROS2.
+- Check whether validation-stage checks remain separate from runtime dispatch
+  gating.
+- Check whether safety-validation and recovery paths still fail closed.
+- Check whether broad silent failures were added. If an existing broad exception
+  block is touched, prefer logging, explicit status, or a narrow exception.
 
 ## Readability
 
-- Prefer smaller functions and clear data flow over comments that restate code.
-- Add docstrings for public modules, classes, functions, and methods when touching them.
-- Add comments only for non-obvious intent, hardware safety assumptions, ROS2 timing constraints, `digital twin` authority, `Teach`, `Replay in Twin`, `Preview in Gazebo`, or validation-stage behavior.
-- Do not add line-by-line comments for obvious statements.
+- Prefer direct, human-readable code that matches the nearby file.
+- Prefer small functions and clear data flow over comments that restate code.
+- Add docstrings for touched public modules, classes, functions, and methods.
+- Add comments only for non-obvious intent, safety assumptions, ROS2 timing
+  constraints, validation-stage behavior, or runtime authority.
+- Do not introduce generic abstractions unless they remove real duplication or
+  match an existing local pattern.
 
 ## Verification
 
-- For Python-only changes, run the targeted `python -m pytest ...` command for the touched area.
-- For `digital twin`, `Teach`, `Replay in Twin`, or ROS2 launch changes, run `python -m pytest test/test_ur5e_rg2_rtde_gripper.py`.
-- For ROS2 launch/script/RViz changes, run `make bootstrap-gazebo` before installed workspace checks.
-- If a required runtime check cannot run locally, state exactly what did not run and what static or unit checks did run.
+- For normal Python changes, expect `poetry check` and
+  `poetry run python -m compileall -q cais_spade_llm ros2`.
+- For entrypoint changes, expect
+  `poetry run python -m cais_spade_llm.ui_main --help`.
+- For ROS2 launch/script/RViz changes, expect `make bootstrap-gazebo` before
+  installed workspace checks.
+- Run focused tests when they are created, restored, or already relevant to the
+  touched behavior.
+- If live ROS2 or hardware checks cannot run locally, the final report should
+  say exactly what did not run and what static, import, compile, CLI, or focused
+  checks did run.

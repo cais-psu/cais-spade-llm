@@ -54,11 +54,10 @@ ignore = [
 ]
 
 # Package __init__ files legitimately re-export names.
-# test/ and ros2/ scripts are CLI-style tools where stdout print is the interface;
+# ros2/ scripts are CLI-style tools where stdout print is the interface;
 # the no-print rule targets the runtime package (use logging there).
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]
-"test/**" = ["T20"]
 "ros2/**" = ["T20"]
 
 # Generous thresholds so the complexity rules flag only egregious cases now,
@@ -75,8 +74,8 @@ max-statements = 80
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
-# ros2/ launch files and scripts are source-text contracts: tests read them with
-# read_text() and assert exact snippets (quotes included). Lint them, never format them.
+# ros2/ launch files and scripts are runtime contracts for the installed workspace.
+# Lint them, never auto-format them.
 exclude = ["ros2/**"]
 
 [build-system]
