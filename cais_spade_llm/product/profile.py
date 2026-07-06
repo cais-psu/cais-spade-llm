@@ -16,7 +16,7 @@ from cais_spade_llm.product.order import load_product_order_file
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_GAZEBO_WORLD_PATH = _REPO_ROOT / "ros2" / "cais_lab_gazebo" / "worlds" / "table.world"
+_DEFAULT_GAZEBO_WORLD_PATH = _REPO_ROOT / "ros2" / "cais_lab_robotics" / "worlds" / "table.world"
 
 
 @dataclass(frozen=True)

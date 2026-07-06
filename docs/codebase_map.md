@@ -26,7 +26,7 @@ not an install guide.
 | Mode | What it runs |
 | --- | --- |
 | `dry_run` | Pure Python agents, planning, and safety validation. No ROS2 required. |
-| `simulation` | Python system plus Gazebo/MoveIt launch files under `ros2/cais_lab_gazebo/`. |
+| `simulation` | Python system plus Gazebo/MoveIt launch files under `ros2/cais_lab_robotics/`. |
 | `physical` | Python system plus hardware controllers, RTDE/xArm paths, and machine-specific setup. |
 
 ## Where To Look
@@ -42,14 +42,14 @@ not an install guide.
 | Product planning and recovery | `cais_spade_llm/agents/intelligent_product/` |
 | Safety validation and monitoring | `cais_spade_llm/agents/central_controller/` and `cais_spade_llm/specification/safety/` |
 | Robot task execution | `cais_spade_llm/resources/robot/` |
-| ROS2 launch/config/RViz/world assets | `ros2/cais_lab_gazebo/` |
-| ROS2 helper scripts | `ros2/cais_lab_gazebo/scripts/` |
+| ROS2 launch/config/RViz/world assets | `ros2/cais_lab_robotics/` |
+| ROS2 helper scripts | `ros2/cais_lab_robotics/scripts/` |
 | Generated runtime state and logs | `cais_spade_llm/monitor/`, `cais_spade_llm/log/`, `cais_spade_llm/user_verified_*/` |
 | Focused tests while developing | `test/` |
 
 ## ROS2 Workspace Rule
 
-The repo source files are under `ros2/cais_lab_gazebo/`. The running ROS2
+The repo source files are under `ros2/cais_lab_robotics/`. The running ROS2
 workspace is under `~/ros2_ws`, outside this git repository.
 
 After changing repo ROS2 launch/config/RViz/world files, run:
@@ -69,5 +69,5 @@ Then test the installed workspace behavior.
 - Product setup changed: inspect product JSON under `cais_spade_llm/initialization/`
   and product specs under `cais_spade_llm/specification/`.
 - ROS2 launch failed: check `cais_spade_llm/ui/ros2_processes.py`, then the
-  matching file under `ros2/cais_lab_gazebo/`.
+  matching file under `ros2/cais_lab_robotics/`.
 - A change touches cleanup/extraction only: use [`refactoring.md`](refactoring.md).

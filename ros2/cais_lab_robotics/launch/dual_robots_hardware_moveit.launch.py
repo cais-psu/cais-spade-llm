@@ -13,7 +13,9 @@ from __future__ import annotations
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
+import yaml
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -24,15 +26,107 @@ from uf_ros_lib.uf_robot_utils import get_xacro_content
 
 ROBOT_BASE_Y = 0.50
 RG2_PREFIX = "ur5e_rg2_"
-RG2_MAX_VELOCITY = 0.40
-RG2_MAX_ACCELERATION = 1.50
-UR5E_MAX_VELOCITY = 0.50
-UR5E_MAX_ACCELERATION = 0.80
-DEFAULT_VELOCITY_SCALING = 0.20
-DEFAULT_ACCELERATION_SCALING = 0.20
-RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
-RTDE_ALLOWED_GOAL_DURATION_MARGIN = 20.0
-UR5E_RTDE_TRAJECTORY_CONTROLLER = "cais_ur5e_rtde_trajectory_controller"
+
+
+def _load_hardware_arms_config() -> dict[str, Any]:
+    path = (
+        Path(get_package_share_directory("xarm_gazebo"))
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml"
+    )
+    with path.open(encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _nested(config: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    try:
+        return float(_nested(config, keys, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    value = str(_nested(config, keys, default) or "").strip()
+    return value or str(default)
+
+
+HARDWARE_ARMS_CONFIG = _load_hardware_arms_config()
+XARM6_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("xarm6", "moveit", "arm_joint_limits", "max_velocity"),
+    2.14,
+)
+XARM6_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("xarm6", "moveit", "arm_joint_limits", "max_acceleration"),
+    10.0,
+)
+XARM6_GRIPPER_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("xarm6", "moveit", "gripper_joint_limits", "max_velocity"),
+    3.14,
+)
+XARM6_GRIPPER_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("xarm6", "moveit", "gripper_joint_limits", "max_acceleration"),
+    10.0,
+)
+RG2_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "gripper_joint_limits", "max_velocity"),
+    0.40,
+)
+RG2_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "gripper_joint_limits", "max_acceleration"),
+    1.50,
+)
+UR5E_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "arm_joint_limits", "max_velocity"),
+    0.90,
+)
+UR5E_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "arm_joint_limits", "max_acceleration"),
+    1.80,
+)
+DEFAULT_VELOCITY_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "moveit", "default_velocity_scaling"),
+    0.50,
+)
+DEFAULT_ACCELERATION_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "moveit", "default_acceleration_scaling"),
+    0.50,
+)
+RTDE_ALLOWED_EXECUTION_DURATION_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_allowed_execution_duration_scaling"),
+    8.0,
+)
+RTDE_ALLOWED_GOAL_DURATION_MARGIN = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_allowed_goal_duration_margin"),
+    20.0,
+)
+UR5E_RTDE_TRAJECTORY_CONTROLLER = _str(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_trajectory_controller"),
+    "cais_ur5e_rtde_trajectory_controller",
+)
 
 
 def _strip_world_and_ground(root: ET.Element) -> None:
@@ -228,6 +322,37 @@ def _build_moveit_params(
     xarm_gripper_limits = load_yaml("xarm_moveit_config", "config/xarm_gripper/joint_limits.yaml")
     if "joint_limits" in xarm_gripper_limits:
         combined_limits.update(_scale_joint_limits(xarm_gripper_limits["joint_limits"]))
+    for joint_name in ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6"):
+        joint_limit = dict(combined_limits.get(joint_name, {}))
+        joint_limit.update(
+            {
+                "has_velocity_limits": True,
+                "max_velocity": XARM6_MAX_VELOCITY,
+                "has_acceleration_limits": True,
+                "max_acceleration": XARM6_MAX_ACCELERATION,
+            }
+        )
+        combined_limits[joint_name] = joint_limit
+    for joint_name in (
+        "drive_joint",
+        "left_finger_joint",
+        "left_inner_knuckle_joint",
+        "right_finger_joint",
+        "right_inner_knuckle_joint",
+        "right_outer_knuckle_joint",
+    ):
+        if joint_name not in combined_limits:
+            continue
+        joint_limit = dict(combined_limits.get(joint_name, {}))
+        joint_limit.update(
+            {
+                "has_velocity_limits": True,
+                "max_velocity": XARM6_GRIPPER_MAX_VELOCITY,
+                "has_acceleration_limits": True,
+                "max_acceleration": XARM6_GRIPPER_MAX_ACCELERATION,
+            }
+        )
+        combined_limits[joint_name] = joint_limit
     ur_limits = load_yaml("ur_moveit_config", "config/joint_limits.yaml")
     if "joint_limits" in ur_limits:
         combined_limits.update(_scale_joint_limits(ur_limits["joint_limits"]))

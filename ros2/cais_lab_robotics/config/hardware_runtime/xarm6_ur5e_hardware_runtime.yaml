@@ -1,0 +1,125 @@
+xarm6:
+  robot_ip: "192.168.1.240"
+  moveit:
+    launch: "xarm6_hardware_moveit.launch.py"
+    robot_type: "xarm"
+    dof: 6
+    hw_ns: "xarm"
+    add_gripper: true
+    default_velocity_scaling: 0.50
+    default_acceleration_scaling: 0.50
+    arm_joint_limits:
+      max_velocity: 2.14
+      max_acceleration: 10.0
+    gripper_joint_limits:
+      max_velocity: 3.14
+      max_acceleration: 10.0
+  joint_state_topics:
+    - "/joint_states"
+    - "/xarm/joint_states"
+    - "/xarm6/joint_states"
+    - "/xarm6/xarm/joint_states"
+    - "/xarm6/xarm_gripper/joint_states"
+  trajectory_topics:
+    - "/xarm6/xarm6_traj_controller/joint_trajectory"
+    - "/xarm6_traj_controller/joint_trajectory"
+    - "/xarm_traj_controller/joint_trajectory"
+    - "/xarm6_xarm6_traj_controller/joint_trajectory"
+  hardware_trajectory_action: "/xarm6/xarm6_traj_controller/follow_joint_trajectory"
+  gazebo_trajectory_topics:
+    - "/xarm6_xarm6_traj_controller/joint_trajectory"
+    - "/xarm6_traj_controller/joint_trajectory"
+  gripper:
+    joint: "xarm6_drive_joint"
+    hardware_service: "set_gripper_position"
+    hardware_action: "/xarm6/xarm_gripper/gripper_action"
+    gazebo_trajectory_topics:
+      - "/xarm6_xarm_gripper_traj_controller/joint_trajectory"
+    open_position: 0.0
+    close_position: 0.85
+    open_pulse: 850.0
+    close_pulse: 0.0
+
+ur5e:
+  robot_ip: "192.168.1.172"
+  moveit:
+    launch: "ur5e_rg2_hardware_moveit.launch.py"
+    group_name: "ur_manipulator"
+    default_velocity_scaling: 0.50
+    default_acceleration_scaling: 0.50
+    arm_joint_limits:
+      max_velocity: 2.90
+      max_acceleration: 4.80
+    gripper_joint_limits:
+      max_velocity: 0.40
+      max_acceleration: 1.50
+    rtde_allowed_execution_duration_scaling: 8.0
+    rtde_allowed_goal_duration_margin: 20.0
+    rtde_trajectory_controller: "cais_ur5e_rtde_trajectory_controller"
+  rtde:
+    max_joint_vel_rad_s: 1.324
+    max_joint_accel_rad_s2: 1.486
+    max_joint_jerk_rad_s3: 3.025
+    shoulder_pan_extra_scale: 2.0
+    movej_speed_rad_s: 1.486
+    movej_accel_rad_s2: 1.81
+  joint_state_topics:
+    - "/joint_states"
+  trajectory_topics: []
+  hardware_trajectory_action: "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+  gazebo_trajectory_topics:
+    - "/ur5e_joint_trajectory_controller/joint_trajectory"
+  gripper:
+    joint: "ur5e_rg2_finger_width"
+    topic: "/ur5e_rg2_gripper_traj_controller/joint_trajectory"
+    action: "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
+    gazebo_trajectory_topics:
+      - "/ur5e_rg2_gripper_traj_controller/joint_trajectory"
+    open: 0.11
+    close: 0.02
+    move_time_sec: 0.35
+    settle_sec: 0.05
+    feedback_timeout_pad_sec: 1.0
+    position_tolerance: 0.01
+    backend: "xmlrpc"
+    rtde:
+      hostname: "192.168.1.172"
+      open_width_mm: 70.0
+      close_width_mm: 10.0
+      open_force: 10.0
+      close_force: 40.0
+      open_settle_sec: 1.2
+      close_settle_sec: 2.0
+      method: "script"
+      disable_remote_control_check: true
+    xmlrpc:
+      port: 41414
+      path: "/"
+      timeout_sec: 3.0
+
+dual_robots:
+  moveit:
+    launch: "dual_robots_hardware_moveit.launch.py"
+    default_velocity_scaling: 0.50
+    default_acceleration_scaling: 0.50
+  paired_markers:
+    velocity_scale: 0.50
+    marker_scale: 0.25
+    cart_max_step_mm: 30.0
+    service_timeout_sec: 8.0
+  mirror:
+    direction: "hardware -> gazebo"
+    point_time_sec: 0.1
+    ur5e_point_time_sec: 0.12
+    ur5e_min_publish_period_sec: 0.05
+    ur5e_min_joint_delta_rad: 0.0010
+
+digital_twin:
+  domains:
+    gazebo: 41
+    hardware: 42
+    hardware_xarm6: 42
+    hardware_ur5e: 43
+  status_paths:
+    ur5e_rtde_trajectory: "/tmp/cais_ur5e_rtde_trajectory_status.json"
+    ur5e_rg2_gripper: "/tmp/cais_ur5e_rg2_gripper_status.json"

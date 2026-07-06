@@ -17,6 +17,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import yaml
 from ament_index_python import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -133,6 +134,15 @@ def _set_ros2_control_initial_positions(root, joint_positions):
             if initial_param is None:
                 initial_param = ET.SubElement(position_si, 'param', {'name': 'initial_value'})
             initial_param.text = str(joint_positions[joint_name])
+
+
+def _load_prefixed_joint_positions(path, prefix):
+    """Load unprefixed Gazebo initial joint positions and apply the URDF prefix."""
+    with open(path, encoding='utf-8') as f:
+        loaded = yaml.safe_load(f) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f'Initial joint positions file must contain a map: {path}')
+    return {f'{prefix}{str(name)}': value for name, value in loaded.items()}
 
 
 def _set_or_update_text(parent, tag_name, value):
@@ -351,7 +361,9 @@ def launch_setup(context, *args, **kwargs):
     # ── Combined controllers YAML ─────────────────────────────────────────────
     combined_controllers_yaml = os.path.join(
         get_package_share_directory('xarm_gazebo'),
-        'config', 'xarm6_ur5e_controllers.yaml',
+        'config',
+        'gazebo_ros2_control',
+        'xarm6_ur5e_gazebo_ros2_control_controllers.yaml',
     )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -416,6 +428,12 @@ def launch_setup(context, *args, **kwargs):
     # UR5e URDF fragment (with sim_gazebo for GazeboSystem hardware interface)
     # ══════════════════════════════════════════════════════════════════════════
     ur5e_prefix = 'ur5e_'
+    ur5e_initial_positions_file = os.path.join(
+        get_package_share_directory('xarm_gazebo'),
+        'config',
+        'gazebo_initial_joint_positions',
+        'ur5e_gazebo_initial_joint_positions.yaml',
+    )
     ur5e_raw = subprocess.check_output([
         'xacro',
         str(Path(get_package_share_directory('ur_description')) / 'urdf' / 'ur.urdf.xacro'),
@@ -424,19 +442,14 @@ def launch_setup(context, *args, **kwargs):
         f'tf_prefix:={ur5e_prefix}',
         'sim_gazebo:=true',
         f'simulation_controllers:={combined_controllers_yaml}',
-        f'initial_positions_file:={os.path.join(get_package_share_directory("xarm_gazebo"), "config", "ur5e_initial_positions.yaml")}',
+        f'initial_positions_file:={ur5e_initial_positions_file}',
     ]).decode('utf-8')
     ur5e_root = ET.fromstring(ur5e_raw)
 
-    # Home position from robot_ur5e.json named_positions.home
-    ur5e_initial_positions = {
-        f'{ur5e_prefix}shoulder_pan_joint': 1.637161,
-        f'{ur5e_prefix}shoulder_lift_joint': -2.150816,
-        f'{ur5e_prefix}elbow_joint': 2.028921,
-        f'{ur5e_prefix}wrist_1_joint': -1.452287,
-        f'{ur5e_prefix}wrist_2_joint': -1.561075,
-        f'{ur5e_prefix}wrist_3_joint': 1.637331,
-    }
+    ur5e_initial_positions = _load_prefixed_joint_positions(
+        ur5e_initial_positions_file,
+        ur5e_prefix,
+    )
     _set_ros2_control_initial_positions(ur5e_root, ur5e_initial_positions)
 
     # Strip world/ground_plane links and joints
@@ -603,7 +616,7 @@ def launch_setup(context, *args, **kwargs):
     # Start perception node so /detect_part and /detect_all are available to SPADE camera clients.
     perception_candidates = [
         Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
-        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_robotics/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
     post_controller_actions = [] if passive else [auto_link_attacher]
@@ -629,7 +642,7 @@ def launch_setup(context, *args, **kwargs):
         )
     else:
         perception_log = LogInfo(
-            msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
+            msg='[cais_lab_robotics] gazebo_camera_detector.py not found. '
                 'Skipping automatic perception startup.'
         )
 

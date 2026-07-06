@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+import yaml
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
@@ -32,21 +33,107 @@ ARM_JOINTS = [
 ]
 ACTION_NAME = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
 DEFAULT_STATUS_FILE = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
+DEFAULT_CONFIG_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "hardware_runtime"
+    / "xarm6_ur5e_hardware_runtime.yaml"
+)
+HARDWARE_ARMS_CONFIG_FILE = str(DEFAULT_CONFIG_FILE)
+
+
+def _load_hardware_arms_config(path: Path) -> dict[str, Any]:
+    with Path(path).expanduser().open(encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _nested(config: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    try:
+        return float(_nested(config, keys, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    value = str(_nested(config, keys, default) or "").strip()
+    return value or str(default)
+
+
+def _apply_hardware_arms_config(config_path: Path) -> None:
+    """Load UR5e RTDE runtime limits from xarm6_ur5e_hardware_runtime.yaml."""
+    global ACTION_NAME
+    global UR5E_RTDE_MAX_JOINT_VEL_RAD_S
+    global UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2
+    global UR5E_RTDE_MAX_JOINT_JERK_RAD_S3
+    global UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE
+    global UR5E_RTDE_MOVEJ_SPEED_RAD_S
+    global UR5E_RTDE_MOVEJ_ACCEL_RAD_S2
+    global HARDWARE_ARMS_CONFIG_FILE
+
+    HARDWARE_ARMS_CONFIG_FILE = str(Path(config_path).expanduser())
+    config = _load_hardware_arms_config(config_path)
+    ACTION_NAME = _str(
+        config,
+        ("ur5e", "hardware_trajectory_action"),
+        ACTION_NAME,
+    )
+    UR5E_RTDE_MAX_JOINT_VEL_RAD_S = _float(
+        config,
+        ("ur5e", "rtde", "max_joint_vel_rad_s"),
+        UR5E_RTDE_MAX_JOINT_VEL_RAD_S,
+    )
+    UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2 = _float(
+        config,
+        ("ur5e", "rtde", "max_joint_accel_rad_s2"),
+        UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2,
+    )
+    UR5E_RTDE_MAX_JOINT_JERK_RAD_S3 = _float(
+        config,
+        ("ur5e", "rtde", "max_joint_jerk_rad_s3"),
+        UR5E_RTDE_MAX_JOINT_JERK_RAD_S3,
+    )
+    UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE = _float(
+        config,
+        ("ur5e", "rtde", "shoulder_pan_extra_scale"),
+        UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE,
+    )
+    UR5E_RTDE_MOVEJ_SPEED_RAD_S = _float(
+        config,
+        ("ur5e", "rtde", "movej_speed_rad_s"),
+        UR5E_RTDE_MOVEJ_SPEED_RAD_S,
+    )
+    UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 = _float(
+        config,
+        ("ur5e", "rtde", "movej_accel_rad_s2"),
+        UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
+    )
 
 UR5E_RTDE_CURRENT_HOLD_SEC = 0.25
 UR5E_RTDE_MIN_POINT_SPACING_SEC = 0.10
-UR5E_RTDE_MAX_JOINT_VEL_RAD_S = 0.08
-UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2 = 0.12
-UR5E_RTDE_MAX_JOINT_JERK_RAD_S3 = 0.50
-UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE = 1.50
+UR5E_RTDE_MAX_JOINT_VEL_RAD_S = 0.324
+UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2 = 0.486
+UR5E_RTDE_MAX_JOINT_JERK_RAD_S3 = 2.025
+UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE = 1.0
 UR5E_RTDE_START_TOLERANCE_RAD = 0.15
 UR5E_RTDE_GOAL_TOLERANCE_RAD = 0.025
-UR5E_RTDE_MOVEJ_SPEED_RAD_S = 0.12
-UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 = 0.20
+UR5E_RTDE_MOVEJ_SPEED_RAD_S = 0.486
+UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 = 0.81
 UR5E_RTDE_INTERMEDIATE_BLEND_RAD = 0.005
 UR5E_RTDE_STOP_ACCEL_RAD_S2 = 0.50
 UR5E_RTDE_FEEDBACK_STALE_SEC = 2.0
 UR5E_RTDE_RESULT_MARGIN_SEC = 12.0
+
+_apply_hardware_arms_config(DEFAULT_CONFIG_FILE)
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -295,6 +382,14 @@ def _trajectory_status_base() -> dict[str, Any]:
         "jerk_time_scale": 1.0,
         "shoulder_pan_extra_scale_applied": False,
         "time_scale_applied": 1.0,
+        "max_joint_velocity_limit_rad_s": UR5E_RTDE_MAX_JOINT_VEL_RAD_S,
+        "max_joint_acceleration_limit_rad_s2": UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2,
+        "max_joint_jerk_limit_rad_s3": UR5E_RTDE_MAX_JOINT_JERK_RAD_S3,
+        "movej_speed_rad_s": UR5E_RTDE_MOVEJ_SPEED_RAD_S,
+        "movej_acceleration_rad_s2": UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
+        "shoulder_pan_extra_scale": UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE,
+        "hardware_runtime_config": HARDWARE_ARMS_CONFIG_FILE,
+        "hardware_arms_config": HARDWARE_ARMS_CONFIG_FILE,
     }
 
 
@@ -311,6 +406,12 @@ def prepare_guarded_trajectory(
     shoulder_pan_extra_scale: float = UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE,
 ) -> tuple[bool, Any | None, dict[str, Any]]:
     status = _trajectory_status_base()
+    status.update(
+        max_joint_velocity_limit_rad_s=float(max_joint_velocity_rad_s),
+        max_joint_acceleration_limit_rad_s2=float(max_joint_acceleration_rad_s2),
+        max_joint_jerk_limit_rad_s3=float(max_joint_jerk_rad_s3),
+        shoulder_pan_extra_scale=float(shoulder_pan_extra_scale),
+    )
     guarded = copy.deepcopy(trajectory)
     joint_names = [str(name) for name in list(getattr(guarded, "joint_names", []) or [])]
     points = list(getattr(guarded, "points", []) or [])
@@ -492,6 +593,14 @@ def _status_base() -> dict[str, Any]:
         "rtde_result": "",
         "rtde_command_mode": "",
         "rtde_async_dispatch_elapsed_sec": None,
+        "max_joint_velocity_limit_rad_s": UR5E_RTDE_MAX_JOINT_VEL_RAD_S,
+        "max_joint_acceleration_limit_rad_s2": UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2,
+        "max_joint_jerk_limit_rad_s3": UR5E_RTDE_MAX_JOINT_JERK_RAD_S3,
+        "movej_speed_rad_s": UR5E_RTDE_MOVEJ_SPEED_RAD_S,
+        "movej_acceleration_rad_s2": UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
+        "shoulder_pan_extra_scale": UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE,
+        "hardware_runtime_config": HARDWARE_ARMS_CONFIG_FILE,
+        "hardware_arms_config": HARDWARE_ARMS_CONFIG_FILE,
     }
 
 
@@ -524,6 +633,12 @@ def prepare_rtde_trajectory(
         "max_segment_jerk_rad_s3",
         "max_segment_jerk_joint",
         "time_scale_applied",
+        "max_joint_velocity_limit_rad_s",
+        "max_joint_acceleration_limit_rad_s2",
+        "max_joint_jerk_limit_rad_s3",
+        "movej_speed_rad_s",
+        "movej_acceleration_rad_s2",
+        "shoulder_pan_extra_scale",
         "point_count",
         "joint_names",
     ):
@@ -542,10 +657,16 @@ def prepare_rtde_trajectory(
 def rtde_movej_path(
     trajectory: Any,
     *,
-    speed_rad_s: float = UR5E_RTDE_MOVEJ_SPEED_RAD_S,
-    acceleration_rad_s2: float = UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
+    speed_rad_s: float | None = None,
+    acceleration_rad_s2: float | None = None,
     blend_rad: float = UR5E_RTDE_INTERMEDIATE_BLEND_RAD,
 ) -> list[list[float]]:
+    speed = UR5E_RTDE_MOVEJ_SPEED_RAD_S if speed_rad_s is None else float(speed_rad_s)
+    acceleration = (
+        UR5E_RTDE_MOVEJ_ACCEL_RAD_S2
+        if acceleration_rad_s2 is None
+        else float(acceleration_rad_s2)
+    )
     joint_names = [str(name) for name in list(getattr(trajectory, "joint_names", []) or [])]
     points = list(getattr(trajectory, "points", []) or [])
     index_by_joint = {name: index for index, name in enumerate(joint_names)}
@@ -554,7 +675,7 @@ def rtde_movej_path(
         positions = list(point.positions)
         q = [float(positions[index_by_joint[joint]]) for joint in ARM_JOINTS]
         blend = 0.0 if point_index == len(points) - 1 else max(0.0, float(blend_rad))
-        path.append([*q, float(speed_rad_s), float(acceleration_rad_s2), blend])
+        path.append([*q, speed, acceleration, blend])
     return path
 
 
@@ -835,15 +956,23 @@ class UR5eRTDETrajectoryServer(Node):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    config = _load_hardware_arms_config(DEFAULT_CONFIG_FILE)
+    default_status_file = _nested(
+        config,
+        ("digital_twin", "status_paths", "ur5e_rtde_trajectory"),
+        str(DEFAULT_STATUS_FILE),
+    )
     parser = argparse.ArgumentParser(description="UR5e RTDE FollowJointTrajectory action server")
     parser.add_argument("--robot-ip", required=True)
-    parser.add_argument("--status-file", default=str(DEFAULT_STATUS_FILE))
+    parser.add_argument("--status-file", default=str(default_status_file))
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_FILE))
     parser.add_argument("--publish-rate-hz", type=float, default=50.0)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _apply_hardware_arms_config(Path(args.config))
     rclpy.init()
     node = UR5eRTDETrajectoryServer(
         robot_ip=str(args.robot_ip),

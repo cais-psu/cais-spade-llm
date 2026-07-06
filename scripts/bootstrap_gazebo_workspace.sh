@@ -40,6 +40,9 @@ copy_file_if_not_same() {
   if [[ -e "${dst}" ]] && [[ "$(readlink -f "${src}")" == "$(readlink -f "${dst}")" ]]; then
     return
   fi
+  if [[ -L "${dst}" ]]; then
+    rm -f "${dst}"
+  fi
   cp "${src}" "${dst_dir}/"
 }
 
@@ -55,18 +58,43 @@ copy_glob_if_not_same() {
   shopt -u nullglob
 }
 
+copy_tree_if_not_same() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local src rel rel_dir
+  if [[ ! -d "${src_dir}" ]]; then
+    return
+  fi
+  while IFS= read -r -d '' src; do
+    rel="${src#${src_dir}/}"
+    rel_dir="$(dirname "${rel}")"
+    mkdir -p "${dst_dir}/${rel_dir}"
+    copy_file_if_not_same "${src}" "${dst_dir}/${rel_dir}"
+  done < <(find "${src_dir}" -type f -print0)
+}
+
+remove_legacy_cais_config_files() {
+  local config_dir="$1"
+  rm -f \
+    "${config_dir}/hardware_arms.yaml" \
+    "${config_dir}/xarm6_ur5e_controllers.yaml" \
+    "${config_dir}/ur5e_rg2_controllers.yaml" \
+    "${config_dir}/ur5e_initial_positions.yaml"
+}
+
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
 mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
 
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/worlds" "*.world" \
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/worlds" "*.world" \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/launch" "*.py" \
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/launch" "*.py" \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/config" "*.yaml" \
+copy_tree_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/config" \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz" "*.rviz" \
+remove_legacy_cais_config_files "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/rviz" "*.rviz" \
   "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
 copy_file_if_not_same \
   "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
@@ -87,9 +115,10 @@ colcon build --packages-skip d435i_xarm_setup
 # robot flow also requires `config/` and `rviz/` assets at runtime.
 mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
 mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/config" "*.yaml" \
+copy_tree_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/config" \
   "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_gazebo/rviz" "*.rviz" \
+remove_legacy_cais_config_files "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
+copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/rviz" "*.rviz" \
   "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
 
 cat <<EOF

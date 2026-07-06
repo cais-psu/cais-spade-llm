@@ -6,10 +6,14 @@ Usage:
     ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py
 """
 
+from __future__ import annotations
+
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
+import yaml
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -18,13 +22,87 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 RG2_PREFIX = "ur5e_rg2_"
-RG2_MAX_VELOCITY = 0.40
-RG2_MAX_ACCELERATION = 1.50
-DEFAULT_VELOCITY_SCALING = 0.20
-DEFAULT_ACCELERATION_SCALING = 0.20
-RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
-RTDE_ALLOWED_GOAL_DURATION_MARGIN = 20.0
-UR5E_RTDE_TRAJECTORY_CONTROLLER = "cais_ur5e_rtde_trajectory_controller"
+
+
+def _load_hardware_arms_config() -> dict[str, Any]:
+    path = (
+        Path(get_package_share_directory("xarm_gazebo"))
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml"
+    )
+    with path.open(encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _nested(config: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    try:
+        return float(_nested(config, keys, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    value = str(_nested(config, keys, default) or "").strip()
+    return value or str(default)
+
+
+HARDWARE_ARMS_CONFIG = _load_hardware_arms_config()
+RG2_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "gripper_joint_limits", "max_velocity"),
+    0.40,
+)
+RG2_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "gripper_joint_limits", "max_acceleration"),
+    1.50,
+)
+UR5E_MAX_VELOCITY = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "arm_joint_limits", "max_velocity"),
+    0.90,
+)
+UR5E_MAX_ACCELERATION = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "arm_joint_limits", "max_acceleration"),
+    1.80,
+)
+DEFAULT_VELOCITY_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "default_velocity_scaling"),
+    0.50,
+)
+DEFAULT_ACCELERATION_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "default_acceleration_scaling"),
+    0.50,
+)
+RTDE_ALLOWED_EXECUTION_DURATION_SCALING = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_allowed_execution_duration_scaling"),
+    8.0,
+)
+RTDE_ALLOWED_GOAL_DURATION_MARGIN = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_allowed_goal_duration_margin"),
+    20.0,
+)
+UR5E_RTDE_TRAJECTORY_CONTROLLER = _str(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "moveit", "rtde_trajectory_controller"),
+    "cais_ur5e_rtde_trajectory_controller",
+)
 
 
 def _strip_world_and_ground(root):
@@ -182,9 +260,9 @@ def _build_moveit_params(urdf, srdf):
         joint_limit = dict(joint_limits.get(joint_name, {}))
         joint_limit.update({
             "has_velocity_limits": True,
-            "max_velocity": 0.50,
+            "max_velocity": UR5E_MAX_VELOCITY,
             "has_acceleration_limits": True,
-            "max_acceleration": 1.00,
+            "max_acceleration": UR5E_MAX_ACCELERATION,
         })
         joint_limits[joint_name] = joint_limit
     joint_limits["ur5e_rg2_finger_width"] = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 ROS2_ENV = (
     "unset VIRTUAL_ENV PYTHONHOME; "
@@ -14,15 +15,93 @@ ROS2_ENV = (
 
 
 def teleop_script_path(project_root: Path) -> Path:
-    return Path(project_root) / "ros2" / "cais_lab_gazebo" / "scripts" / "keyboard_teleop.py"
+    return Path(project_root) / "ros2" / "cais_lab_robotics" / "scripts" / "keyboard_teleop.py"
 
 
 def dual_drag_markers_script_path(project_root: Path) -> Path:
-    return Path(project_root) / "ros2" / "cais_lab_gazebo" / "scripts" / "dual_drag_markers.py"
+    return Path(project_root) / "ros2" / "cais_lab_robotics" / "scripts" / "dual_drag_markers.py"
 
 
 def digital_twin_sync_script_path(project_root: Path) -> Path:
-    return Path(project_root) / "ros2" / "cais_lab_gazebo" / "scripts" / "digital_twin_sync.py"
+    return Path(project_root) / "ros2" / "cais_lab_robotics" / "scripts" / "digital_twin_sync.py"
+
+
+def hardware_arms_config_path(project_root: Path) -> Path:
+    """Return the checked-in ROS2 hardware runtime config path."""
+    return (
+        Path(project_root)
+        / "ros2"
+        / "cais_lab_robotics"
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml"
+    )
+
+
+def load_hardware_arms_config(project_root: Path) -> dict[str, Any]:
+    """Load `xarm6_ur5e_hardware_runtime.yaml` for UI-side process defaults."""
+    path = hardware_arms_config_path(project_root)
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            loaded = yaml.safe_load(f) or {}
+    except (OSError, TypeError, yaml.YAMLError):
+        return {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def hardware_arms_value(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+    default: Any,
+) -> Any:
+    """Return a nested value from `xarm6_ur5e_hardware_runtime.yaml` data."""
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def hardware_arms_str(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+    default: str,
+) -> str:
+    """Return a string value from `xarm6_ur5e_hardware_runtime.yaml` data."""
+    value = hardware_arms_value(config, keys, default)
+    text = str(value or "").strip()
+    return text or str(default)
+
+
+def hardware_arms_float(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+    default: float,
+) -> float:
+    """Return a float value from `xarm6_ur5e_hardware_runtime.yaml` data."""
+    value = hardware_arms_value(config, keys, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def hardware_arms_int(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+    default: int,
+) -> int:
+    """Return an int value from `xarm6_ur5e_hardware_runtime.yaml` data."""
+    value = hardware_arms_value(config, keys, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def build_ros2_launch_cmds(
@@ -34,8 +113,15 @@ def build_ros2_launch_cmds(
     ur5e_rtde_trajectory_status: Path,
 ) -> dict[str, str]:
     teleop_script = str(teleop_script_path(project_root))
+    hardware_config = load_hardware_arms_config(project_root)
+    hardware_config_path = hardware_arms_config_path(project_root)
     perception_script = (
-        Path(project_root) / "ros2" / "cais_lab_gazebo" / "sensor" / "gazebo_camera_detector.py"
+        Path(project_root) / "ros2" / "cais_lab_robotics" / "sensor" / "gazebo_camera_detector.py"
+    )
+    ur5e_gripper_backend = hardware_arms_str(
+        hardware_config,
+        ("ur5e", "gripper", "backend"),
+        "xmlrpc",
     )
     return {
         "gazebo_dual": (
@@ -68,15 +154,16 @@ def build_ros2_launch_cmds(
             "ros2 launch xarm_gazebo xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}"
         ),
         "hardware_xarm6_moveit": (
-            "ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py "
-            "robot_ip:={xarm6_ip} add_gripper:=true"
+            "ros2 launch xarm_gazebo xarm6_hardware_moveit.launch.py robot_ip:={xarm6_ip}"
         ),
         "hardware_ur5e_rtde_trajectory_server": (
             f"{venv_python} {ur5e_rtde_trajectory_script} "
-            f"--robot-ip {{ur5e_ip}} --status-file {ur5e_rtde_trajectory_status}"
+            f"--robot-ip {{ur5e_ip}} --status-file {ur5e_rtde_trajectory_status} "
+            f"--config {hardware_config_path}"
         ),
         "hardware_ur5e_rg2_gripper": (
-            f"{venv_python} {ur5e_rg2_gripper_script} --robot-ip {{ur5e_ip}} --backend xmlrpc"
+            f"{venv_python} {ur5e_rg2_gripper_script} --robot-ip {{ur5e_ip}} "
+            f"--config {hardware_config_path} --backend {ur5e_gripper_backend}"
         ),
         "hardware_ur5e_moveit": (
             "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true"
@@ -190,6 +277,21 @@ def ros2_launch_required_paths(
 ) -> list[tuple[Path, str]]:
     launch_key = str(name or "").strip().lower()
     xarm_gazebo_share = ros2_workspace_install_share_pkg_path("xarm_gazebo")
+    repo_hardware_config = (
+        Path(ur5e_rtde_trajectory_script).resolve().parents[1]
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml"
+    )
+    hardware_config_asset = (
+        xarm_gazebo_share / "config" / "hardware_runtime" / "xarm6_ur5e_hardware_runtime.yaml",
+        "ROS2 workspace is missing the xArm6 + UR5e hardware runtime config. "
+        "Re-run `make bootstrap-gazebo`.",
+    )
+    repo_hardware_config_asset = (
+        repo_hardware_config,
+        f"xArm6 + UR5e hardware runtime config is missing at {repo_hardware_config}.",
+    )
     workspace_xarm = (
         (
             ros2_workspace_install_pkg_path("xarm_gazebo"),
@@ -238,12 +340,18 @@ def ros2_launch_required_paths(
     )
     dual_assets = (
         (
-            xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
+            xarm_gazebo_share
+            / "config"
+            / "gazebo_ros2_control"
+            / "xarm6_ur5e_gazebo_ros2_control_controllers.yaml",
             "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
+            xarm_gazebo_share
+            / "config"
+            / "gazebo_initial_joint_positions"
+            / "ur5e_gazebo_initial_joint_positions.yaml",
             "ROS2 workspace is missing the UR5e initial positions config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
@@ -254,12 +362,18 @@ def ros2_launch_required_paths(
     )
     dual_passive_assets = (
         (
-            xarm_gazebo_share / "config" / "xarm6_ur5e_controllers.yaml",
+            xarm_gazebo_share
+            / "config"
+            / "gazebo_ros2_control"
+            / "xarm6_ur5e_gazebo_ros2_control_controllers.yaml",
             "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share / "config" / "ur5e_initial_positions.yaml",
+            xarm_gazebo_share
+            / "config"
+            / "gazebo_initial_joint_positions"
+            / "ur5e_gazebo_initial_joint_positions.yaml",
             "ROS2 workspace is missing the UR5e initial positions config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
@@ -271,7 +385,16 @@ def ros2_launch_required_paths(
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
+    xarm_hardware_moveit_assets = (
+        hardware_config_asset,
+        (
+            xarm_gazebo_share / "launch" / "xarm6_hardware_moveit.launch.py",
+            "ROS2 workspace is missing the xArm6 hardware MoveIt launch file. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+    )
     dual_hardware_moveit_assets = (
+        hardware_config_asset,
         (
             xarm_gazebo_share / "launch" / "dual_robots_hardware_moveit.launch.py",
             "ROS2 workspace is missing the dual robots hardware MoveIt launch file. "
@@ -285,12 +408,16 @@ def ros2_launch_required_paths(
     )
     ur_assets = (
         (
-            xarm_gazebo_share / "config" / "ur5e_rg2_controllers.yaml",
+            xarm_gazebo_share
+            / "config"
+            / "gazebo_ros2_control"
+            / "ur5e_rg2_gazebo_ros2_control_controllers.yaml",
             "ROS2 workspace is missing the UR5e RG2 controller config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
     ur_hardware_rg2_assets = (
+        hardware_config_asset,
         (
             xarm_gazebo_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
             "ROS2 workspace is missing the UR5e RG2 hardware MoveIt launch file. "
@@ -312,6 +439,7 @@ def ros2_launch_required_paths(
             ur5e_rg2_gripper_script,
             f"UR5e RG2 bridge script is missing at {ur5e_rg2_gripper_script}.",
         ),
+        repo_hardware_config_asset,
     )
     ur_rtde_trajectory_assets = (
         (
@@ -323,6 +451,7 @@ def ros2_launch_required_paths(
             ur5e_rtde_trajectory_script,
             f"UR5e RTDE trajectory server script is missing at {ur5e_rtde_trajectory_script}.",
         ),
+        repo_hardware_config_asset,
     )
 
     if launch_key == "gazebo_dual":
@@ -353,6 +482,8 @@ def ros2_launch_required_paths(
         return [*workspace_xarm, *ur_stack, *onrobot_ws, *ur_assets]
     if launch_key == "hardware_xarm6_driver":
         return [*workspace_xarm, *xarm_hardware_driver_assets]
+    if launch_key == "hardware_xarm6_moveit":
+        return [*workspace_xarm, *moveit_core, *xarm_hardware_moveit_assets]
     if launch_key == "hardware_dual_robots_moveit":
         return [
             *workspace_xarm,

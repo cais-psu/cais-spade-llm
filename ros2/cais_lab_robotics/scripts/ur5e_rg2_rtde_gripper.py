@@ -17,6 +17,8 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 def _project_root() -> Path:
     script_path = Path(__file__).resolve()
@@ -37,10 +39,38 @@ from cais_spade_llm.resources.robot.hardware_pick_place_controller import (  # n
 
 
 def _default_config_path() -> Path:
-    return _PROJECT_ROOT / "cais_spade_llm" / "initialization" / "resources" / "robot_ur5e.json"
+    return (
+        _PROJECT_ROOT
+        / "ros2"
+        / "cais_lab_robotics"
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml"
+    )
+
+
+def _load_hardware_arms_config(path: Path | None = None) -> dict[str, Any]:
+    config_path = Path(path or _default_config_path()).expanduser()
+    with config_path.open(encoding="utf-8") as f:
+        if config_path.suffix.lower() in {".yaml", ".yml"}:
+            raw = yaml.safe_load(f) or {}
+        else:
+            raw = json.load(f)
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def _default_status_path() -> Path:
+    try:
+        raw = _load_hardware_arms_config()
+        path = (
+            raw.get("digital_twin", {})
+            .get("status_paths", {})
+            .get("ur5e_rg2_gripper")
+        )
+        if str(path or "").strip():
+            return Path(str(path).strip()).expanduser()
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        pass
     return Path("/tmp") / "cais_ur5e_rg2_gripper_status.json"
 
 
@@ -53,9 +83,14 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _load_real_gripper_config(path: Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
+    raw = _load_hardware_arms_config(path)
     ur5e = raw.get("ur5e", {}) if isinstance(raw, dict) else {}
+    if isinstance(ur5e, dict) and isinstance(ur5e.get("gripper"), dict):
+        gripper = dict(ur5e["gripper"])
+        rtde = dict(gripper.get("rtde") or {})
+        rtde.setdefault("hostname", str(ur5e.get("robot_ip") or "").strip())
+        gripper["rtde"] = rtde
+        return gripper
     real = ur5e.get("real", {}) if isinstance(ur5e, dict) else {}
     controller = real.get("controller", {}) if isinstance(real, dict) else {}
     gripper = controller.get("gripper", {}) if isinstance(controller, dict) else {}

@@ -27,7 +27,7 @@ ros2/
 │   ├── ros2_operation_guide_dual_robots.md ← Step 3: Daily operation guide
 │   ├── ros2_operation_guide_xarm6.md      ← Reference: xArm6 standalone
 │   └── ros2_operation_guide_ur5e.md       ← Reference: UR5e standalone
-└── cais_lab_gazebo/
+└── cais_lab_robotics/
     ├── launch/
     │   └── xarm6_ur5e_gazebo.launch.py   ← Custom launch file (copy into xarm_ros2)
     └── worlds/
@@ -86,12 +86,12 @@ From the root of this repository (`cais-spade-llm/`):
 ```bash
 # Copy the custom Gazebo world
 # (tables, printers, parts, assembly board markers, overhead camera, gravity)
-cp ros2/cais_lab_gazebo/worlds/table.world \
+cp ros2/cais_lab_robotics/worlds/table.world \
    ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
 
 # Copy the dual-robot launch file
 # (xArm6 + UR5e with RG2 gripper, spawn timing, controllers)
-cp ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py \
    ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
 
 ```
@@ -213,8 +213,8 @@ Core custom assets to copy for this setup:
 
 | File | Purpose |
 |---|---|
-| `cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py` | Spawns both robots in the same world, injects RG2 gripper onto UR5e, starts xArm6 controllers |
-| `cais_lab_gazebo/worlds/table.world` | Gazebo SDF world: tables, printers, parts with physics, assembly board with markers, overhead camera, gravity enabled |
+| `cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py` | Spawns both robots in the same world, injects RG2 gripper onto UR5e, starts xArm6 controllers |
+| `cais_lab_robotics/worlds/table.world` | Gazebo SDF world: tables, printers, parts with physics, assembly board with markers, overhead camera, gravity enabled |
 
 ### Upstream Dependencies (no modifications needed)
 

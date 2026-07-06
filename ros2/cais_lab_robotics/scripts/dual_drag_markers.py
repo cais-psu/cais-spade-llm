@@ -9,8 +9,10 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import rclpy
+import yaml
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
 from interactive_markers.interactive_marker_server import InteractiveMarkerServer
@@ -19,7 +21,9 @@ from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.msg import DisplayTrajectory, RobotState, RobotTrajectory
 from moveit_msgs.srv import GetCartesianPath, GetStateValidity
 from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import JointState
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectoryPoint
 from visualization_msgs.msg import (
     InteractiveMarker,
@@ -37,11 +41,60 @@ except Exception:
     from keyboard_teleop import ROBOTS, KeyboardTeleop, wait_for_joint_positions
 
 
-UR5E_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
-UR5E_JOINT_STATES_STALE_SEC = 3.0
+HARDWARE_ARMS_CONFIG_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "hardware_runtime"
+    / "xarm6_ur5e_hardware_runtime.yaml"
+)
+
+
+def _load_hardware_arms_config() -> dict[str, Any]:
+    with HARDWARE_ARMS_CONFIG_FILE.open(encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _nested(config: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    try:
+        return float(_nested(config, keys, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    value = str(_nested(config, keys, default) or "").strip()
+    return value or str(default)
+
+
+HARDWARE_ARMS_CONFIG = _load_hardware_arms_config()
+UR5E_TRAJECTORY_ACTION = _str(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "hardware_trajectory_action"),
+    "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
+)
+DEFAULT_DUAL_DRAG_MARKERS_VELOCITY_SCALE = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "paired_markers", "velocity_scale"),
+    0.50,
+)
+DUAL_DRAG_MARKERS_RESYNC_SERVICE = "/dual_drag_markers/resync"
+DUAL_DRAG_MARKERS_JOINT_STATES_STALE_SEC = 3.0
+UR5E_JOINT_STATES_STALE_SEC = DUAL_DRAG_MARKERS_JOINT_STATES_STALE_SEC
 
 
 class DualDragMarkers(KeyboardTeleop):
+    """Expose paired RViz drag markers for xarm6 and ur5e."""
+
     def __init__(
         self,
         *,
@@ -53,6 +106,7 @@ class DualDragMarkers(KeyboardTeleop):
         execution_policy: str,
         status_file: str = "",
     ) -> None:
+        self._last_arm_joint_state_monotonic: dict[str, float] = {}
         self._ur5e_last_joint_state_monotonic: float | None = None
         super().__init__(
             cartesian_max_step_mm=cartesian_max_step_mm,
@@ -86,6 +140,12 @@ class DualDragMarkers(KeyboardTeleop):
             GetStateValidity, "/check_state_validity", callback_group=self.cb_group
         )
         self.display_pub = self.create_publisher(DisplayTrajectory, "/move_group/display_planned_path", 10)
+        self.resync_service = self.create_service(
+            Trigger,
+            DUAL_DRAG_MARKERS_RESYNC_SERVICE,
+            self._resync_service_cb,
+            callback_group=self.cb_group,
+        )
         if self.execution_policy == "paired":
             self._install_paired_menu()
         self._write_status(
@@ -102,15 +162,27 @@ class DualDragMarkers(KeyboardTeleop):
     def _joint_state_cb(self, msg: JointState) -> None:
         super()._joint_state_cb(msg)
         names = {str(name) for name in msg.name}
-        for joint_names in self._joint_name_candidates("ur5e"):
-            if all(str(joint) in names for joint in joint_names):
-                self._ur5e_last_joint_state_monotonic = time.monotonic()
-                break
+        now = time.monotonic()
+        for robot in ("xarm6", "ur5e"):
+            for joint_names in self._joint_name_candidates(robot):
+                if all(str(joint) in names for joint in joint_names):
+                    self._last_arm_joint_state_monotonic[robot] = now
+                    if robot == "ur5e":
+                        self._ur5e_last_joint_state_monotonic = now
+                    break
 
     def _ur5e_joint_states_fresh(self) -> bool:
         if self._ur5e_last_joint_state_monotonic is None:
             return False
-        return (time.monotonic() - self._ur5e_last_joint_state_monotonic) <= UR5E_JOINT_STATES_STALE_SEC
+        return self._marker_joint_states_fresh("ur5e")
+
+    def _marker_joint_states_fresh(self, robot: str) -> bool:
+        updated_at = self._last_arm_joint_state_monotonic.get(str(robot))
+        if updated_at is None:
+            return False
+        return (
+            time.monotonic() - updated_at
+        ) <= DUAL_DRAG_MARKERS_JOINT_STATES_STALE_SEC
 
     def _ur5e_execution_health(self) -> tuple[bool, str]:
         trajectory_action_available = self.ur5e_trajectory_action_client.wait_for_server(timeout_sec=1.0)
@@ -229,7 +301,7 @@ class DualDragMarkers(KeyboardTeleop):
             return "ur5e"
         return ""
 
-    def _refresh_markers(self) -> None:
+    def _refresh_markers(self) -> bool:
         changed = False
         for robot in ("xarm6", "ur5e"):
             if self._busy.get(robot):
@@ -246,6 +318,7 @@ class DualDragMarkers(KeyboardTeleop):
             changed = True
         if changed:
             self.server.applyChanges()
+        return changed
 
     def _feedback_cb(self, feedback: InteractiveMarkerFeedback) -> None:
         robot = self._robot_from_marker_name(feedback.marker_name)
@@ -289,6 +362,83 @@ class DualDragMarkers(KeyboardTeleop):
         )
         self._refresh_markers()
 
+    def _clear_paired_state(self) -> None:
+        self._paired_targets.clear()
+        self._paired_plan = None
+        self._last_feedback_pose.clear()
+
+    def _clear_marker_pose_cache(self) -> None:
+        for robot in ("xarm6", "ur5e"):
+            self.active_frame_id.pop(robot, None)
+            self.active_ee_link.pop(robot, None)
+
+    def _wait_for_fresh_marker_joint_states(self, timeout_sec: float) -> tuple[bool, str]:
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        targets = ("xarm6", "ur5e")
+        while rclpy.ok() and time.monotonic() < deadline:
+            if all(robot in self.joint_positions for robot in targets) and all(
+                self._marker_joint_states_fresh(robot) for robot in targets
+            ):
+                return True, "fresh /joint_states for xarm6 and ur5e"
+            time.sleep(0.05)
+        missing = [robot for robot in targets if robot not in self.joint_positions]
+        stale = [
+            robot
+            for robot in targets
+            if robot in self.joint_positions and not self._marker_joint_states_fresh(robot)
+        ]
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={','.join(missing)}")
+        if stale:
+            details.append(f"stale={','.join(stale)}")
+        suffix = f"; {'; '.join(details)}" if details else ""
+        return False, f"fresh /joint_states timed out{suffix}"
+
+    def _resync_service_cb(
+        self,
+        _request: Trigger.Request,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        self._write_status(
+            state="running",
+            action="resync",
+            stage="joint_states",
+            message="dual_drag_markers resync started.",
+        )
+        self._clear_paired_state()
+        self._clear_marker_pose_cache()
+        ok, message = self._wait_for_fresh_marker_joint_states(
+            timeout_sec=max(2.0, min(self.service_timeout_sec, 6.0))
+        )
+        if not ok:
+            response.success = False
+            response.message = message
+            self._write_status(
+                state="failed",
+                action="resync",
+                stage="joint_states",
+                message=f"dual_drag_markers resync failed: {message}",
+                last_error=message,
+            )
+            return response
+
+        refreshed = self._refresh_markers()
+        response.success = bool(refreshed)
+        response.message = (
+            "dual_drag_markers resynced from latest hardware state"
+            if refreshed
+            else "dual_drag_markers resync found no marker poses"
+        )
+        self._write_status(
+            state="succeeded" if refreshed else "failed",
+            action="resync",
+            stage="markers",
+            message=response.message,
+            last_error="" if refreshed else response.message,
+        )
+        return response
+
     def _run_paired_menu_action(self, action: str) -> None:
         action_label = {
             "plan": "Plan dual_robots",
@@ -307,8 +457,7 @@ class DualDragMarkers(KeyboardTeleop):
                 message=f"{action_label}: started.",
             )
             if action == "clear":
-                self._paired_targets.clear()
-                self._paired_plan = None
+                self._clear_paired_state()
                 ok, msg = True, "dual_robots plan cleared"
             elif action == "plan":
                 stage = "plan"
@@ -332,6 +481,9 @@ class DualDragMarkers(KeyboardTeleop):
                 ok, msg = False, f"unknown dual_robots menu action: {action}"
 
             if ok:
+                if stage == "execute":
+                    self._clear_paired_state()
+                    msg = f"{msg}; markers reset to current hardware state"
                 final_message = f"{action_label}: {msg}"
             else:
                 final_message = f"{action_label} failed during {stage}: {msg}"
@@ -348,7 +500,7 @@ class DualDragMarkers(KeyboardTeleop):
                 self.get_logger().warn(final_message)
         finally:
             self._paired_busy = False
-            time.sleep(0.2)
+            time.sleep(0.5 if ok and stage == "execute" else 0.2)
             self._refresh_markers()
 
     def _execute_marker_pose(self, robot: str, target: Pose) -> None:
@@ -726,10 +878,12 @@ class DualDragMarkers(KeyboardTeleop):
 
 
 def main() -> int:
+    """Run the dual_drag_markers ROS2 node."""
+
     parser = argparse.ArgumentParser(description="Dual robots paired RViz drag markers")
     parser.add_argument("--mode", choices=("monitor", "teach"), default="monitor")
     parser.add_argument("--marker-scale", type=float, default=0.25)
-    parser.add_argument("--velocity-scale", type=float, default=0.35)
+    parser.add_argument("--velocity-scale", type=float, default=DEFAULT_DUAL_DRAG_MARKERS_VELOCITY_SCALE)
     parser.add_argument("--cart-max-step-mm", type=float, default=30.0)
     parser.add_argument("--service-timeout-sec", type=float, default=8.0)
     parser.add_argument("--execution-policy", choices=("immediate", "paired"), default="immediate")
@@ -746,14 +900,17 @@ def main() -> int:
         execution_policy=args.execution_policy,
         status_file=args.status_file,
     )
+    executor = MultiThreadedExecutor(num_threads=2)
     try:
         node.get_logger().info(
             f"dual drag markers ready mode={args.mode}; "
             f"execution-policy={args.execution_policy}; "
             "add/use RViz InteractiveMarkers display topic /dual_drag_markers/update"
         )
-        rclpy.spin(node)
+        executor.add_node(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         try:
             node.server.shutdown()
         except Exception:

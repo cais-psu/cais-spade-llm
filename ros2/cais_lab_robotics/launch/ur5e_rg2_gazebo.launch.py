@@ -294,7 +294,8 @@ def launch_setup(context, *args, **kwargs):
     controllers_yaml = os.path.join(
         get_package_share_directory('xarm_gazebo'),
         'config',
-        'ur5e_rg2_controllers.yaml',
+        'gazebo_ros2_control',
+        'ur5e_rg2_gazebo_ros2_control_controllers.yaml',
     )
 
     gazebo_world = PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'worlds', 'single_table.world'])
@@ -334,7 +335,7 @@ def launch_setup(context, *args, **kwargs):
 
     perception_candidates = [
         Path(__file__).resolve().parents[1] / 'sensor' / 'gazebo_camera_detector.py',
-        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_gazebo/sensor/gazebo_camera_detector.py')),
+        Path(os.path.expanduser('~/projects/cais-spade-llm/ros2/cais_lab_robotics/sensor/gazebo_camera_detector.py')),
     ]
     perception_script = next((str(p) for p in perception_candidates if p.is_file()), None)
     post_controller_actions = []
@@ -360,7 +361,7 @@ def launch_setup(context, *args, **kwargs):
         )
     else:
         perception_log = LogInfo(
-            msg='[cais_lab_gazebo] gazebo_camera_detector.py not found. '
+            msg='[cais_lab_robotics] gazebo_camera_detector.py not found. '
                 'Skipping automatic perception startup.'
         )
 

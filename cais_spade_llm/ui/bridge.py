@@ -56,6 +56,7 @@ log = logging.getLogger("ui.bridge")
 # Filesystem locations used throughout the runtime.
 _BASE = Path(__file__).resolve().parent.parent  # cais_spade_llm/
 _PROJECT_ROOT = _BASE.parent  # repo root
+_HARDWARE_ARMS_CONFIG = ros2_processes.load_hardware_arms_config(_PROJECT_ROOT)
 _PRODUCT_DIR = _BASE / "initialization" / "products"
 _RESOURCE_DIR = _BASE / "initialization" / "resources"
 _TOOLS_OUT = _BASE / "initialization" / "tools.json"
@@ -68,18 +69,49 @@ _PRODUCT_ORDERS_DIR = _BASE / "specification" / "products" / "orders"
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
-_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
+_UR5E_GAZEBO_ARM_TRAJECTORY_TOPICS = ros2_processes.hardware_arms_value(
+    _HARDWARE_ARMS_CONFIG,
+    ("ur5e", "gazebo_trajectory_topics"),
+    ["/ur5e_joint_trajectory_controller/joint_trajectory"],
+)
+if not isinstance(_UR5E_GAZEBO_ARM_TRAJECTORY_TOPICS, list):
+    _UR5E_GAZEBO_ARM_TRAJECTORY_TOPICS = ["/ur5e_joint_trajectory_controller/joint_trajectory"]
+_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = str(
+    (_UR5E_GAZEBO_ARM_TRAJECTORY_TOPICS or ["/ur5e_joint_trajectory_controller/joint_trajectory"])[
+        0
+    ]
+)
 _VENV_PYTHON = _PROJECT_ROOT / ".venv" / "bin" / "python"
 _UR5E_RG2_GRIPPER_SCRIPT = (
-    _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rg2_rtde_gripper.py"
+    _PROJECT_ROOT / "ros2" / "cais_lab_robotics" / "scripts" / "ur5e_rg2_rtde_gripper.py"
 )
 _UR5E_RTDE_TRAJECTORY_SCRIPT = (
-    _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "scripts" / "ur5e_rtde_trajectory_server.py"
+    _PROJECT_ROOT / "ros2" / "cais_lab_robotics" / "scripts" / "ur5e_rtde_trajectory_server.py"
 )
-_UR5E_RTDE_TRAJECTORY_ACTION = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
-_UR5E_RTDE_TRAJECTORY_STATUS = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
-_UR5E_RG2_GRIPPER_ACTION = "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory"
-_UR5E_RG2_GRIPPER_STATUS = Path("/tmp") / "cais_ur5e_rg2_gripper_status.json"
+_UR5E_RTDE_TRAJECTORY_ACTION = ros2_processes.hardware_arms_str(
+    _HARDWARE_ARMS_CONFIG,
+    ("ur5e", "hardware_trajectory_action"),
+    "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
+)
+_UR5E_RTDE_TRAJECTORY_STATUS = Path(
+    ros2_processes.hardware_arms_str(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "status_paths", "ur5e_rtde_trajectory"),
+        "/tmp/cais_ur5e_rtde_trajectory_status.json",
+    )
+)
+_UR5E_RG2_GRIPPER_ACTION = ros2_processes.hardware_arms_str(
+    _HARDWARE_ARMS_CONFIG,
+    ("ur5e", "gripper", "action"),
+    "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+)
+_UR5E_RG2_GRIPPER_STATUS = Path(
+    ros2_processes.hardware_arms_str(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "status_paths", "ur5e_rg2_gripper"),
+        "/tmp/cais_ur5e_rg2_gripper_status.json",
+    )
+)
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
@@ -87,7 +119,7 @@ _SAFETY_INTENT_PREVIEWS = _USER_VERIFIED_SAFETY / "intent_previews.json"
 _SAFETY_PREVIEW_DIR = _USER_VERIFIED_SAFETY / "previews"
 _SAFETY_VERIFIED_DIR = _USER_VERIFIED_SAFETY / "verified"
 _SAFETY_PREVIEW_HISTORY_LIMIT = 10
-_GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_gazebo" / "worlds" / "table.world"
+_GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_robotics" / "worlds" / "table.world"
 _RESETTABLE_GAZEBO_MODEL_PREFIXES = ("gear_", "rect_pin_", "circ_pin_")
 _ROBOT_TAUGHT_FUNCTIONS_DIR = _BASE / "resources" / "robot" / "taught_functions"
 
@@ -109,8 +141,16 @@ class SystemBridge:
 
     _instance: SystemBridge | None = None
     _HW_IP_DEFAULTS = {
-        "xarm6": "192.168.1.240",
-        "ur5e": "192.168.1.172",
+        "xarm6": ros2_processes.hardware_arms_str(
+            _HARDWARE_ARMS_CONFIG,
+            ("xarm6", "robot_ip"),
+            "192.168.1.240",
+        ),
+        "ur5e": ros2_processes.hardware_arms_str(
+            _HARDWARE_ARMS_CONFIG,
+            ("ur5e", "robot_ip"),
+            "192.168.1.172",
+        ),
     }
     _BASE_GAZEBO_PROCESS_NAMES = {"gazebo_dual", "gazebo_xarm6", "gazebo_ur5e"}
     _BASE_HARDWARE_PROCESS_NAMES = {
@@ -243,17 +283,33 @@ class SystemBridge:
         "mirror": "monitor",
         "author": "teach",
     }
-    _DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT = 41
-    _DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT = 42
-    _DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT = 42
-    _DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT = 43
+    _DIGITAL_TWIN_GAZEBO_DOMAIN_DEFAULT = ros2_processes.hardware_arms_int(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "domains", "gazebo"),
+        41,
+    )
+    _DIGITAL_TWIN_HARDWARE_DOMAIN_DEFAULT = ros2_processes.hardware_arms_int(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "domains", "hardware"),
+        42,
+    )
+    _DIGITAL_TWIN_HARDWARE_XARM6_DOMAIN_DEFAULT = ros2_processes.hardware_arms_int(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "domains", "hardware_xarm6"),
+        42,
+    )
+    _DIGITAL_TWIN_HARDWARE_UR5E_DOMAIN_DEFAULT = ros2_processes.hardware_arms_int(
+        _HARDWARE_ARMS_CONFIG,
+        ("digital_twin", "domains", "hardware_ur5e"),
+        43,
+    )
     # Absolute sanity ceiling for the first-waypoint approach (deg). The replay sizes the
     # approach by a safe joint speed; this only blocks near-180 deg deltas (encoder/wrap).
     _DIGITAL_TWIN_MAX_JOINT_DELTA_DEG = 175.0
     _DIGITAL_TWIN_REPLAY_SPEED_SCALE = 1.0
     _DIGITAL_TWIN_REPLAY_WAYPOINT_DURATION_SEC = 2.0 / _DIGITAL_TWIN_REPLAY_SPEED_SCALE
     _DIGITAL_TWIN_REPLAY_MAX_JOINT_VEL_DEG_S = 25.0 * _DIGITAL_TWIN_REPLAY_SPEED_SCALE
-    _DIGITAL_TWIN_PREPARED_REPLAY_VERSION = 6
+    _DIGITAL_TWIN_PREPARED_REPLAY_VERSION = 7
     _DIGITAL_TWIN_INITIALIZE_TIMEOUT_S = 90.0
     _DIGITAL_TWIN_MIRROR_STABILIZATION_SEC = 0.75
     # Per-robot home/initial joint pose (arm joints, radians) for the "Go Home" button.
@@ -4648,6 +4704,12 @@ class SystemBridge:
     _ROS2_ENV = ros2_processes.ROS2_ENV
     _TELEOP_SCRIPT = str(ros2_processes.teleop_script_path(_PROJECT_ROOT))
     _DUAL_DRAG_MARKERS_SCRIPT = str(ros2_processes.dual_drag_markers_script_path(_PROJECT_ROOT))
+    _DUAL_DRAG_MARKERS_RESYNC_SERVICE = "/dual_drag_markers/resync"
+    _DUAL_DRAG_MARKERS_VELOCITY_SCALE = ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("dual_robots", "paired_markers", "velocity_scale"),
+        0.50,
+    )
     _DIGITAL_TWIN_SYNC_SCRIPT = ros2_processes.digital_twin_sync_script_path(_PROJECT_ROOT)
     ROS2_LAUNCH_CMDS: dict[str, str] = ros2_processes.build_ros2_launch_cmds(
         project_root=_PROJECT_ROOT,
@@ -6220,7 +6282,7 @@ class SystemBridge:
                         sync_message = (
                             "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
                             "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
-                            "/execute_trajectory."
+                            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory."
                         )
                     else:
                         sync_message = (
@@ -6442,6 +6504,8 @@ class SystemBridge:
             str(script),
             "--mode",
             str(mode or "monitor"),
+            "--velocity-scale",
+            f"{self._DUAL_DRAG_MARKERS_VELOCITY_SCALE:.2f}",
             "--status-file",
             str(self._digital_twin_dual_drag_markers_status_path("dual robots")),
         ]
@@ -6453,6 +6517,61 @@ class SystemBridge:
             command,
             ros_domain_id=ros_domain_id,
         )
+
+    def _resync_digital_twin_dual_drag_markers(
+        self,
+        cfg: dict[str, Any],
+        *,
+        ros_domain_id: int,
+    ) -> str | None:
+        process_name = str(cfg.get("paired_marker_process") or "").strip()
+        service_name = self._DUAL_DRAG_MARKERS_RESYNC_SERVICE
+
+        def _wait_for_resync_service() -> str | None:
+            return self._wait_for_ros_service(
+                service_name,
+                timeout_sec=4.0,
+                process_name=process_name or None,
+                ros_domain_id=ros_domain_id,
+            )
+
+        wait_err = self._wait_with_ros2_daemon_retry(
+            "dual_drag_markers resync service",
+            _wait_for_resync_service,
+            ros_domain_id=ros_domain_id,
+        )
+        if wait_err:
+            if process_name and self.ros2_proc_status(process_name) == "running":
+                self.ros2_stop(process_name, reason="digital_twin_replay")
+                time.sleep(0.5)
+            start_err = self._start_digital_twin_dual_drag_markers(
+                cfg,
+                ros_domain_id=ros_domain_id,
+                mode="monitor",
+            )
+            if start_err:
+                return f"dual_drag_markers start failed before resync: {start_err}"
+            wait_err = self._wait_with_ros2_daemon_retry(
+                "dual_drag_markers resync service after start",
+                _wait_for_resync_service,
+                ros_domain_id=ros_domain_id,
+            )
+            if wait_err:
+                return f"dual_drag_markers resync service not ready: {wait_err}"
+
+        ok, out = self._ros2_command_output(
+            f'ros2 service call {shlex.quote(service_name)} std_srvs/srv/Trigger "{{}}"',
+            timeout_sec=12.0,
+            ros_domain_id=ros_domain_id,
+        )
+        if not ok:
+            return f"dual_drag_markers resync call failed: {out}"
+        output = str(out or "")
+        lowered = output.lower()
+        if "success=false" in lowered or "success: false" in lowered:
+            detail = self._tail_output(output) or "dual_drag_markers resync returned success=false"
+            return detail
+        return None
 
     def _wait_for_digital_twin_gazebo_controller_actions(
         self,
@@ -7353,7 +7472,7 @@ class SystemBridge:
                         "message": (
                             "Teach: sim RViz controls Gazebo only; Replay in Twin commits saved sim waypoints through "
                             "/xarm6/xarm6_traj_controller/follow_joint_trajectory and "
-                            "/execute_trajectory."
+                            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory."
                         ),
                     },
                 )
@@ -8854,7 +8973,7 @@ class SystemBridge:
         recording = self._read_json_file(recording_path)
         if not recording:
             return {"success": False, "message": f"recording not found: {recording_path.name}"}
-        sync_target = "both" if replay_target == "twin" else replay_target
+        sync_target = "hardware" if replay_target == "twin" else replay_target
         needs_hardware = replay_target in ("twin", "hardware")
         domains = self._digital_twin_domain_ids()
         if needs_hardware:
@@ -8862,7 +8981,6 @@ class SystemBridge:
                 cfg,
                 ros_domain_id=int(domains["hardware"]),
                 require_moveit=False,
-                require_ur5e_trajectory_controller=False,
             )
             if err:
                 message = f"{target} hardware is not ready: {err}"
@@ -8949,11 +9067,16 @@ class SystemBridge:
         replay_label = (
             "Replay Dual Function" if str(source).startswith("dual_function") else "Replay Function"
         )
-        # "twin" drives gazebo + hardware together; "gazebo" is a sim-only dry run.
-        sync_target = "both" if replay_target == "twin" else replay_target
         needs_hardware = replay_target in ("twin", "hardware")
         domains = self._digital_twin_domain_ids()
         dual_hardware_replay = needs_hardware and self._digital_twin_is_dual_robots(cfg)
+        # For dual Replay in Twin, Gazebo follows the real hardware through the
+        # live hardware -> gazebo mirror instead of a separate preplanned publish.
+        sync_target = (
+            "hardware"
+            if replay_target == "twin" and dual_hardware_replay
+            else ("both" if replay_target == "twin" else replay_target)
+        )
 
         def _check_dual_replay_ready(message: str) -> str | None:
             self._write_digital_twin_status(
@@ -9052,6 +9175,7 @@ class SystemBridge:
                     if all(metadata.get(key) == value for key, value in expected.items()):
                         prepared_args = ["--prepared-file", str(prepared_path)]
         gazebo_initialization = "not_required"
+        sync_is_healthy = False
         init_before_replay = replay_target == "twin" or (
             replay_target == "gazebo"
             and self._digital_twin_is_dual_robots(cfg)
@@ -9098,6 +9222,31 @@ class SystemBridge:
                 }
             gazebo_initialization = "ran"
         if dual_hardware_replay:
+            if replay_target == "twin" and not sync_is_healthy:
+                self._write_digital_twin_status(
+                    target,
+                    {
+                        "state": "replaying",
+                        "direction": "hardware -> gazebo",
+                        "message": "Replay in Twin: starting hardware -> gazebo mirror.",
+                        "last_error": "",
+                    },
+                )
+                sync_err = self._start_digital_twin_sync_when_ready(
+                    target,
+                    cfg,
+                    gazebo_process=str(cfg.get("gazebo_process") or ""),
+                    domains=domains,
+                    direction="hardware -> gazebo",
+                )
+                if sync_err:
+                    return _blocked_dual_replay_result(
+                        f"hardware -> Gazebo sync start failed before replay: {sync_err}",
+                        gazebo_initialization=gazebo_initialization,
+                    )
+                settle_sec = max(0.0, float(self._DIGITAL_TWIN_MIRROR_STABILIZATION_SEC))
+                if settle_sec > 0.0:
+                    time.sleep(settle_sec)
             err = _check_dual_replay_ready("checking final replay readiness.")
             if err:
                 message = f"{target} hardware is not ready: {err}"
@@ -9113,14 +9262,14 @@ class SystemBridge:
                 if replay_target == "twin"
                 else self._digital_twin_direction(target),
                 "message": (
-                    "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /execute_trajectory."
+                    "Replay in Twin: committing prepared sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory while hardware -> gazebo sync mirrors Gazebo."
                     if (
                         prepared_args
                         and replay_target == "twin"
                         and self._digital_twin_is_dual_robots(cfg)
                     )
                     else (
-                        "Replay in Twin: committing saved sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /execute_trajectory."
+                        "Replay in Twin: committing saved sim waypoint through /xarm6/xarm6_traj_controller/follow_joint_trajectory and /cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory while hardware -> gazebo sync mirrors Gazebo."
                         if replay_target == "twin" and self._digital_twin_is_dual_robots(cfg)
                         else (
                             "Replay in Twin: committing prepared sim waypoint through hardware MoveIt."
@@ -9137,18 +9286,6 @@ class SystemBridge:
             },
         )
         stopped_mirror_workers = False
-        if replay_target == "twin" and self._digital_twin_is_dual_robots(cfg):
-            self._stop_digital_twin_mirror_workers_for_target(target, cfg)
-            stopped_mirror_workers = True
-            self._write_digital_twin_status(
-                target,
-                {
-                    "state": "replaying",
-                    "direction": "hardware -> gazebo",
-                    "message": "executing dual replay.",
-                    "last_error": "",
-                },
-            )
         sync_args = [
             "--mode",
             "replay",
@@ -9220,7 +9357,38 @@ class SystemBridge:
                 f"{replay_label} repeated {repeat_total} times. {str(result.get('message') or '')}"
             )
         result["gazebo_initialization"] = gazebo_initialization
-        if replay_target == "twin" and (result.get("success") or stopped_mirror_workers):
+        if replay_target == "twin" and dual_hardware_replay:
+            result["sync_remained_active"] = True
+            base_message = str(result.get("message") or "")
+            result["message"] = (
+                f"{base_message}; hardware -> Gazebo sync remained active."
+                if base_message
+                else "hardware -> Gazebo sync remained active."
+            )
+            marker_err = self._resync_digital_twin_dual_drag_markers(
+                cfg,
+                ros_domain_id=domains["hardware"],
+            )
+            result["paired_markers_refreshed"] = not bool(marker_err)
+            result["paired_markers_resynced"] = not bool(marker_err)
+            base_message = str(result.get("message") or "")
+            if marker_err:
+                result["paired_marker_resync_error"] = marker_err
+                result["message"] = (
+                    f"{base_message}; dual_drag_markers resync failed: {marker_err}"
+                    if base_message
+                    else f"dual_drag_markers resync failed: {marker_err}"
+                )
+            else:
+                marker_message = (
+                    "dual_drag_markers resynced from latest hardware state."
+                    if result.get("success")
+                    else "dual_drag_markers resynced from latest hardware state after failed replay."
+                )
+                result["message"] = (
+                    f"{base_message}; {marker_message}" if base_message else marker_message
+                )
+        elif replay_target == "twin" and (result.get("success") or stopped_mirror_workers):
             self._write_digital_twin_status(
                 target,
                 {
@@ -9884,6 +10052,7 @@ class SystemBridge:
             "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
             "pkill -9 -f dual_robots_hardware_moveit.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",
+            "pkill -9 -f xarm6_hardware_moveit.launch.py 2>/dev/null",
             "pkill -9 -f xarm6_moveit_realmove.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
             "pkill -9 -f ur5e_rtde_trajectory_server.py 2>/dev/null",
@@ -10073,6 +10242,7 @@ class SystemBridge:
             "pkill -9 -f 'spawner' 2>/dev/null",
             "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
             "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
+            "pkill -9 -f xarm6_hardware_moveit.launch.py 2>/dev/null",
             "pkill -9 -f xarm6_moveit_realmove.launch.py 2>/dev/null",
             "pkill -9 -f ur_moveit.launch.py 2>/dev/null",
             "pkill -9 -f ur5e_rg2_hardware_moveit.launch.py 2>/dev/null",

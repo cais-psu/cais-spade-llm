@@ -42,15 +42,15 @@ From your project root (`~/projects/cais-spade-llm`):
 
 ```bash
 # xarm_gazebo custom launch/world/rviz
-cp ros2/cais_lab_gazebo/worlds/table.world \
+cp ros2/cais_lab_robotics/worlds/table.world \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
-cp ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/auto_link_attacher_node.py \
+cp ros2/cais_lab_robotics/launch/auto_link_attacher_node.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/auto_link_attacher_node.py
-cp ros2/cais_lab_gazebo/rviz/dual_moveit.rviz \
+cp ros2/cais_lab_robotics/rviz/dual_moveit.rviz \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz/dual_moveit.rviz
 
 # Patched IFRA plugin source (multi-attach + preserve grasp pose)
@@ -84,7 +84,7 @@ ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
 ```
 
 In this repository it is already present in:
-`ros2/cais_lab_gazebo/worlds/table.world`
+`ros2/cais_lab_robotics/worlds/table.world`
 
 ## 7. Verify LinkAttacher Is Active
 
@@ -119,9 +119,9 @@ then `IFRA_LinkAttacher` repo is missing from `~/ros2_ws/src` or was not built.
 
 These are the editable, versioned files in this repo for your setup:
 
-- `ros2/cais_lab_gazebo/launch/auto_link_attacher_node.py`
-- `ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py`
-- `ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py`
-- `ros2/cais_lab_gazebo/rviz/dual_moveit.rviz`
-- `ros2/cais_lab_gazebo/worlds/table.world`
+- `ros2/cais_lab_robotics/launch/auto_link_attacher_node.py`
+- `ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py`
+- `ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py`
+- `ros2/cais_lab_robotics/rviz/dual_moveit.rviz`
+- `ros2/cais_lab_robotics/worlds/table.world`
 - `ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp`

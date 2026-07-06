@@ -226,13 +226,13 @@ corresponding ROS2 controller action server at the root namespace.
 
 ```
 # Gazebo base launch (combined URDF + controllers)
-~/projects/cais-spade-llm/ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py
+~/projects/cais-spade-llm/ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py
 
 # Combined controller config
-~/projects/cais-spade-llm/ros2/cais_lab_gazebo/config/xarm6_ur5e_controllers.yaml
+~/projects/cais-spade-llm/ros2/cais_lab_robotics/config/gazebo_ros2_control/xarm6_ur5e_gazebo_ros2_control_controllers.yaml
 
 # MoveIt launch (Gazebo + MoveIt for both robots)
-~/projects/cais-spade-llm/ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py
+~/projects/cais-spade-llm/ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py
 
 # Runtime copy used by ros2 launch after build
 ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
@@ -257,6 +257,6 @@ source install/setup.bash
 | `spawn_entity: service not available` | Gazebo not ready yet — wait longer, or increase `TimerAction(period=...)` |
 | Controllers not loading | Check `ros2 control list_controllers`; spawn must complete first |
 | `xarm6_xarm6_traj_controller` not found | Rebuild workspace: `colcon build --packages-select xarm_gazebo` |
-| `ur5e_joint_trajectory_controller` not found | Rebuild workspace; verify `xarm6_ur5e_controllers.yaml` is installed |
+| `ur5e_joint_trajectory_controller` not found | Rebuild workspace; verify `xarm6_ur5e_gazebo_ros2_control_controllers.yaml` is installed |
 | Closing Gazebo window kills everything | Rebuild with the current launch file — it uses `gui_required:=false` |
 | UR5e doesn't move in Gazebo | Verify `ur5e_joint_trajectory_controller` is `active` in controller list |

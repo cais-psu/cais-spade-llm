@@ -16,6 +16,50 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+HARDWARE_ARMS_CONFIG_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "hardware_runtime"
+    / "xarm6_ur5e_hardware_runtime.yaml"
+)
+
+
+def _load_hardware_arms_config() -> dict[str, Any]:
+    with HARDWARE_ARMS_CONFIG_FILE.open(encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _nested(config: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    current: Any = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _list(config: dict[str, Any], keys: tuple[str, ...], default: list[Any]) -> list[Any]:
+    value = _nested(config, keys, default)
+    return list(value) if isinstance(value, list) else list(default)
+
+
+def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    value = str(_nested(config, keys, default) or "").strip()
+    return value or str(default)
+
+
+def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    try:
+        return float(_nested(config, keys, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+HARDWARE_ARMS_CONFIG = _load_hardware_arms_config()
+
 ROBOTS: dict[str, dict[str, Any]] = {
     "xarm6": {
         "prefix": "xarm6_",
@@ -38,40 +82,66 @@ ROBOTS: dict[str, dict[str, Any]] = {
                 "xarm6_joint6",
             ],
         ],
-        "hardware_joint_state_topics": [
-            "/joint_states",
-            "/xarm/joint_states",
-            "/xarm6/joint_states",
-            "/xarm6/xarm/joint_states",
-            "/xarm6/xarm_gripper/joint_states",
-        ],
-        "trajectory_topics": [
-            "/xarm6/xarm6_traj_controller/joint_trajectory",
-            "/xarm6_traj_controller/joint_trajectory",
-            "/xarm_traj_controller/joint_trajectory",
-            "/xarm6_xarm6_traj_controller/joint_trajectory",
-        ],
-        "hardware_trajectory_action": "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+        "hardware_joint_state_topics": _list(
+            HARDWARE_ARMS_CONFIG,
+            ("xarm6", "joint_state_topics"),
+            [
+                "/joint_states",
+                "/xarm/joint_states",
+                "/xarm6/joint_states",
+                "/xarm6/xarm/joint_states",
+                "/xarm6/xarm_gripper/joint_states",
+            ],
+        ),
+        "trajectory_topics": _list(
+            HARDWARE_ARMS_CONFIG,
+            ("xarm6", "trajectory_topics"),
+            [
+                "/xarm6/xarm6_traj_controller/joint_trajectory",
+                "/xarm6_traj_controller/joint_trajectory",
+                "/xarm_traj_controller/joint_trajectory",
+                "/xarm6_xarm6_traj_controller/joint_trajectory",
+            ],
+        ),
+        "hardware_trajectory_action": _str(
+            HARDWARE_ARMS_CONFIG,
+            ("xarm6", "hardware_trajectory_action"),
+            "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+        ),
         # Controllers spawned by the passive/mirror gazebo launch (prefix is applied
         # twice: launch prefix 'xarm6_' + controller name 'xarm6_traj_controller').
-        "gazebo_trajectory_topics": [
-            "/xarm6_xarm6_traj_controller/joint_trajectory",
-            "/xarm6_traj_controller/joint_trajectory",
-        ],
+        "gazebo_trajectory_topics": _list(
+            HARDWARE_ARMS_CONFIG,
+            ("xarm6", "gazebo_trajectory_topics"),
+            [
+                "/xarm6_xarm6_traj_controller/joint_trajectory",
+                "/xarm6_traj_controller/joint_trajectory",
+            ],
+        ),
         # Optional 1-DOF gripper mirror. The xarm gripper trajectory controller drives
         # the single 'drive_joint'; the finger joints follow via mimic. The hardware
         # position is resolved with the same prefix/endswith lookup as the arm joints.
         "gripper": {
             "gazebo_joint": "xarm6_drive_joint",
-            "gazebo_trajectory_topics": [
-                "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
-            ],
-            "hardware_service": "set_gripper_position",
-            "hardware_action": "/xarm6/xarm_gripper/gripper_action",
-            "open_position": 0.0,
-            "close_position": 0.85,
-            "open_pulse": 850.0,
-            "close_pulse": 0.0,
+            "gazebo_trajectory_topics": _list(
+                HARDWARE_ARMS_CONFIG,
+                ("xarm6", "gripper", "gazebo_trajectory_topics"),
+                ["/xarm6_xarm_gripper_traj_controller/joint_trajectory"],
+            ),
+            "hardware_service": _str(
+                HARDWARE_ARMS_CONFIG,
+                ("xarm6", "gripper", "hardware_service"),
+                "set_gripper_position",
+            ),
+            "hardware_action": _str(
+                HARDWARE_ARMS_CONFIG,
+                ("xarm6", "gripper", "hardware_action"),
+                "/xarm6/xarm_gripper/gripper_action",
+            ),
+            "open_position": _float(HARDWARE_ARMS_CONFIG, ("xarm6", "gripper", "open_position"), 0.0),
+            "close_position": _float(HARDWARE_ARMS_CONFIG, ("xarm6", "gripper", "close_position"), 0.85),
+            "open_pulse": _float(HARDWARE_ARMS_CONFIG, ("xarm6", "gripper", "open_pulse"), 850.0),
+            "close_pulse": _float(HARDWARE_ARMS_CONFIG, ("xarm6", "gripper", "close_pulse"), 0.0),
         },
     },
     "ur5e": {
@@ -102,33 +172,59 @@ ROBOTS: dict[str, dict[str, Any]] = {
                 "ur5e_wrist_3_joint",
             ],
         ],
-        "hardware_joint_state_topics": [
-            "/joint_states",
-        ],
-        "trajectory_topics": [],
-        "hardware_trajectory_action": "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
+        "hardware_joint_state_topics": _list(
+            HARDWARE_ARMS_CONFIG,
+            ("ur5e", "joint_state_topics"),
+            ["/joint_states"],
+        ),
+        "trajectory_topics": _list(HARDWARE_ARMS_CONFIG, ("ur5e", "trajectory_topics"), []),
+        "hardware_trajectory_action": _str(
+            HARDWARE_ARMS_CONFIG,
+            ("ur5e", "hardware_trajectory_action"),
+            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
+        ),
         # Controller spawned by the passive/mirror gazebo launch.
-        "gazebo_trajectory_topics": [
-            "/ur5e_joint_trajectory_controller/joint_trajectory",
-        ],
+        "gazebo_trajectory_topics": _list(
+            HARDWARE_ARMS_CONFIG,
+            ("ur5e", "gazebo_trajectory_topics"),
+            ["/ur5e_joint_trajectory_controller/joint_trajectory"],
+        ),
         "gripper": {
             "gazebo_joint": "ur5e_rg2_finger_width",
-            "gazebo_trajectory_topics": [
-                "/ur5e_rg2_gripper_traj_controller/joint_trajectory",
-            ],
-            "hardware_action": "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+            "gazebo_trajectory_topics": _list(
+                HARDWARE_ARMS_CONFIG,
+                ("ur5e", "gripper", "gazebo_trajectory_topics"),
+                ["/ur5e_rg2_gripper_traj_controller/joint_trajectory"],
+            ),
+            "hardware_action": _str(
+                HARDWARE_ARMS_CONFIG,
+                ("ur5e", "gripper", "action"),
+                "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory",
+            ),
         },
     },
 }
 
 # Re-target period for streamed mirror trajectory points (seconds). Small enough to
 # track hardware closely, large enough to give the JTC a smooth interpolation window.
-MIRROR_POINT_TIME_SEC = 0.1
+MIRROR_POINT_TIME_SEC = _float(HARDWARE_ARMS_CONFIG, ("dual_robots", "mirror", "point_time_sec"), 0.1)
 MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.0
 MIRROR_MIN_JOINT_DELTA_RAD = 0.0
-UR5E_MIRROR_POINT_TIME_SEC = 0.12
-UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.05
-UR5E_MIRROR_MIN_JOINT_DELTA_RAD = 0.0010
+UR5E_MIRROR_POINT_TIME_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "ur5e_point_time_sec"),
+    0.12,
+)
+UR5E_MIRROR_MIN_PUBLISH_PERIOD_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "ur5e_min_publish_period_sec"),
+    0.05,
+)
+UR5E_MIRROR_MIN_JOINT_DELTA_RAD = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "ur5e_min_joint_delta_rad"),
+    0.0010,
+)
 NO_MATCHING_JOINT_STATE_REPORT_SEC = 5.0
 HARDWARE_SNAPSHOT_TIMEOUT_SEC = 20.0
 
@@ -168,7 +264,7 @@ UR5E_TEACH_REPLAY_MIN_POINT_STEP_SEC = 0.02
 UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC = 20.0
 UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC = 2.0
 UR5E_FINAL_ERROR_SNAPSHOT_TIMEOUT_SEC = 2.0
-PREPARED_REPLAY_VERSION = 6
+PREPARED_REPLAY_VERSION = 7
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -228,8 +324,8 @@ def _prepared_replay_validation_error(
         return "prepared replay stale: paired plans missing."
     if str(args.replay_target or "hardware") in ("hardware", "both"):
         ur5e_plan = dict(dict(prepared.get("plans") or {}).get("ur5e") or {})
-        if not ur5e_plan.get("execute_trajectory_points"):
-            return "prepared replay stale: ur5e execute trajectory missing."
+        if not ur5e_plan.get("hardware_points"):
+            return "prepared replay stale: ur5e hardware trajectory missing."
     return ""
 
 
@@ -301,12 +397,6 @@ def _refresh_prepared_hardware_start_from_snapshot(
             first_point["positions"] = [float(value) for value in observed_positions]
             hardware_points[0] = first_point
             plan["hardware_points"] = hardware_points
-        execute_points = [dict(point) for point in list(plan.get("execute_trajectory_points") or [])]
-        if robot_key == "ur5e" and execute_points:
-            first_point = dict(execute_points[0])
-            first_point["positions"] = [float(value) for value in observed_positions]
-            execute_points[0] = first_point
-            plan["execute_trajectory_points"] = execute_points
         plan["hardware_positions"] = [float(value) for value in observed_positions]
         plans[robot_key] = plan
     prepared["plans"] = plans
@@ -4023,6 +4113,17 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
                 "success": False,
                 "message": f"xarm6: {str(xarm6_action_result.get('message') or f'{xarm6_action_name} unavailable')}",
             }
+        ur5e_action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        ur5e_action_result = _wait_follow_joint_trajectory_action(
+            int(args.hardware_domain_id),
+            ur5e_action_name,
+            timeout_sec=8.0,
+        )
+        if not ur5e_action_result.get("success"):
+            return {
+                "success": False,
+                "message": f"ur5e: {str(ur5e_action_result.get('message') or f'{ur5e_action_name} unavailable')}",
+            }
         for robot in robots:
             plan = plans[robot]
             gripper_points = [
@@ -4117,30 +4218,21 @@ def _build_paired_replay_preparation(args: argparse.Namespace, recording: dict[s
         )
 
     if need_hardware:
-        ur5e_preflight = _preflight_ur5e_move_group_replay(
-            args,
-            dict(plans["ur5e"]),
-            timeout_sec=max(timeout, MOVE_GROUP_PLAN_TIMEOUT_SEC),
-        )
-        if not bool(ur5e_preflight.get("success")):
-            return {
-                "success": False,
-                "message": str(ur5e_preflight.get("message") or "ur5e MoveIt preflight failed"),
-                "preflight": dict(ur5e_preflight),
-            }
         ur5e_plan = plans["ur5e"]
-        ur5e_plan["hardware_plan_result"] = dict(ur5e_preflight)
-        ur5e_plan["execute_trajectory_joint_names"] = [
-            str(name)
-            for name in list(ur5e_preflight.get("execute_trajectory_joint_names") or [])
-        ]
-        ur5e_plan["execute_trajectory_points"] = [
-            dict(point)
-            for point in list(ur5e_preflight.get("execute_trajectory_points") or [])
-        ]
-        ur5e_plan["execute_trajectory_final_time"] = float(
-            ur5e_preflight.get("execute_trajectory_final_time") or 0.0
-        )
+        ur5e_action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        ur5e_points = [dict(point) for point in list(ur5e_plan.get("hardware_points") or [])]
+        ur5e_plan["hardware_plan_result"] = {
+            "success": True,
+            "message": (
+                f"{ur5e_action_name}: ur5e direct trajectory preflight ready; "
+                f"waypoints={len(waypoints)}; points={len(ur5e_points)}."
+            ),
+            "action_name": ur5e_action_name,
+            "mode": "follow_joint_trajectory",
+            "joint_names": [str(name) for name in list(ur5e_plan.get("hardware_names") or [])],
+            "waypoints": len(waypoints),
+            "points": len(ur5e_points),
+        }
 
     return {
         "success": True,
@@ -4422,12 +4514,14 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
             _write_replay_status(args, state="blocked", message=message, last_error=message)
             print(json.dumps({"success": False, "message": message}))
             return 6
-        ur5e_action_result = _wait_execute_trajectory_action(
+        ur5e_action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        ur5e_action_result = _wait_follow_joint_trajectory_action(
             int(args.hardware_domain_id),
+            ur5e_action_name,
             timeout_sec=3.0,
         )
         if not ur5e_action_result.get("success"):
-            message = f"ur5e: {str(ur5e_action_result.get('message') or '/execute_trajectory unavailable')}"
+            message = f"ur5e: {str(ur5e_action_result.get('message') or f'{ur5e_action_name} unavailable')}"
             _write_replay_status(args, state="blocked", message=message, last_error=message)
             print(json.dumps({"success": False, "message": message}))
             return 6
@@ -4581,31 +4675,31 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
 
     def _publish_ur5e_hardware_arm() -> None:
         plan = plans["ur5e"]
-        joint_names = [
-            str(name)
-            for name in list(plan.get("execute_trajectory_joint_names") or plan.get("hardware_names") or [])
-        ]
-        points = [dict(point) for point in list(plan.get("execute_trajectory_points") or [])]
+        action_name = str(ROBOTS["ur5e"].get("hardware_trajectory_action") or "").strip()
+        joint_names = [str(name) for name in list(plan.get("hardware_names") or [])]
+        points = [dict(point) for point in list(plan.get("hardware_points") or [])]
         _set_result("ur5e/hardware_plan", dict(plan.get("hardware_plan_result") or {}))
         target_positions = [float(value) for value in list(points[-1].get("positions") or [])] if points else []
         final_time = max((float(point.get("time") or 0.0) for point in points), default=0.0)
         if not joint_names or not points:
             result = {
                 "success": False,
-                "message": "/execute_trajectory: no stitched UR5e trajectory points.",
-                "mode": "execute_trajectory",
-                "action_name": "/execute_trajectory",
-                "group_name": UR5E_HARDWARE_MOVE_GROUP,
+                "message": f"{action_name}: no UR5e hardware trajectory points.",
+                "mode": "follow_joint_trajectory",
+                "action_name": action_name,
             }
         else:
-            result = _publish_execute_trajectory_action(
+            result = _publish_follow_joint_trajectory_action(
                 int(args.hardware_domain_id),
+                action_name,
                 joint_names,
                 points,
                 join_timeout_sec=max(
                     timeout,
                     final_time + UR5E_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC,
                 ),
+                start_delay_sec=HARDWARE_TRAJECTORY_START_DELAY_SEC,
+                goal_time_tolerance_sec=UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC,
             )
             result = _apply_observed_completion_fallback(
                 result,
@@ -4614,21 +4708,16 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                 joint_names=joint_names,
                 target_positions=target_positions,
             )
-            result["message"] = (
-                f"{str(result.get('message') or '').rstrip('. ')}; "
-                f"ur5e/hardware_arm used MoveIt /execute_trajectory; "
-                f"group={UR5E_HARDWARE_MOVE_GROUP}"
-            ).rstrip("; ") + "."
-            result["mode"] = "execute_trajectory"
-            result["action_name"] = "/execute_trajectory"
-            result["group_name"] = UR5E_HARDWARE_MOVE_GROUP
+            result["mode"] = "follow_joint_trajectory"
+            result["action_name"] = action_name
+            result["goal_time_tolerance_sec"] = UR5E_TEACH_REPLAY_GOAL_TIME_TOLERANCE_SEC
             result["final_hold_sec"] = float(plan.get("hardware_final_hold_sec") or UR5E_TEACH_REPLAY_FINAL_HOLD_SEC)
         _set_result(
             "ur5e/hardware_arm",
             _decorate_hardware_arm_result(
                 result,
                 robot="ur5e",
-                action_name="/execute_trajectory",
+                action_name=action_name,
                 joint_names=joint_names,
                 points=points,
             ),
@@ -4703,17 +4792,17 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
         ur5e_preflight = dict(plans["ur5e"].get("hardware_plan_result") or {})
         plans["ur5e"]["hardware_plan_result"] = dict(ur5e_preflight)
         _set_result("ur5e/hardware_plan", dict(ur5e_preflight))
-        if not bool(ur5e_preflight.get("success")) or not list(plans["ur5e"].get("execute_trajectory_points") or []):
+        if not bool(ur5e_preflight.get("success")) or not list(plans["ur5e"].get("hardware_points") or []):
             thread_launch_blocked = True
             preflight_message = str(
                 ur5e_preflight.get("message")
-                or "ur5e MoveIt preflight failed: missing stitched /execute_trajectory points"
+                or "ur5e direct trajectory preflight failed: missing hardware trajectory points"
             )
             _set_result(
                 "xarm6/hardware_arm",
                 {
                     "success": False,
-                    "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
+                    "message": f"not sent because ur5e direct trajectory preflight failed: {preflight_message}",
                     "skip_observed_completion": True,
                 },
             )
@@ -4721,10 +4810,9 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                 "ur5e/hardware_arm",
                 {
                     "success": False,
-                    "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
-                    "action_name": "/execute_trajectory",
-                    "group_name": UR5E_HARDWARE_MOVE_GROUP,
-                    "mode": "execute_trajectory",
+                    "message": f"not sent because ur5e direct trajectory preflight failed: {preflight_message}",
+                    "action_name": str(ROBOTS["ur5e"].get("hardware_trajectory_action") or ""),
+                    "mode": "follow_joint_trajectory",
                     "skip_observed_completion": True,
                 },
             )
@@ -4733,7 +4821,7 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                     "xarm6/hardware_gripper",
                     {
                         "success": False,
-                        "message": f"not sent because ur5e MoveIt preflight failed: {preflight_message}",
+                        "message": f"not sent because ur5e direct trajectory preflight failed: {preflight_message}",
                     },
                 )
             if plans["ur5e"].get("gripper_points"):
@@ -4774,7 +4862,7 @@ def run_paired_replay(args: argparse.Namespace, recording: dict[str, Any]) -> in
                 xarm_final_time + XARM6_TEACH_REPLAY_RESULT_TIMEOUT_MARGIN_SEC + 20.0,
             )
             ur5e_points = list(
-                dict(plans.get("ur5e") or {}).get("execute_trajectory_points")
+                dict(plans.get("ur5e") or {}).get("hardware_points")
                 or dict(plans.get("ur5e") or {}).get("points")
                 or []
             )

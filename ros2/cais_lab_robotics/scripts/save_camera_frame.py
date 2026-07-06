@@ -5,7 +5,7 @@ Also prints HSV stats to help tune color detection ranges.
 
 Usage:
     source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
-    python3 ros2/cais_lab_gazebo/scripts/save_camera_frame.py
+    python3 ros2/cais_lab_robotics/scripts/save_camera_frame.py
 """
 
 import cv2

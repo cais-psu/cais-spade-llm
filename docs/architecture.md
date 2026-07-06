@@ -43,7 +43,7 @@ debugging after the project is installed. Installation steps belong in
 
 ## ROS2 And `digital twin`
 
-- `ros2/cais_lab_gazebo/launch/`, `config/`, `rviz/`, `worlds/`, and `scripts/`
+- `ros2/cais_lab_robotics/launch/`, `config/`, `rviz/`, `worlds/`, and `scripts/`
   are the repo source files for this project's ROS2 integration.
 - `make bootstrap-gazebo` copies those repo files into `~/ros2_ws`, builds the
   workspace, and installs the config/RViz assets used at runtime. Edits made only
@@ -51,7 +51,7 @@ debugging after the project is installed. Installation steps belong in
 - Hardware MoveIt/RViz is the operator surface for `digital twin`; Gazebo is the
   passive mirror unless the user asks for a different architecture.
 - UR5e hardware motion uses the RTDE trajectory server and the RG2 bridge in
-  `ros2/cais_lab_gazebo/scripts/`; xArm6 uses the xArm hardware driver and MoveIt
+  `ros2/cais_lab_robotics/scripts/`; xArm6 uses the xArm hardware driver and MoveIt
   path.
 - After launch, script, config, world, or RViz edits, run `make bootstrap-gazebo`
   before checking installed workspace behavior.

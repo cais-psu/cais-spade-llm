@@ -57,36 +57,43 @@ From `~/projects/cais-spade-llm`:
 
 ```bash
 # Worlds
-cp ros2/cais_lab_gazebo/worlds/table.world \
+cp ros2/cais_lab_robotics/worlds/table.world \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
-cp ros2/cais_lab_gazebo/worlds/single_table.world \
+cp ros2/cais_lab_robotics/worlds/single_table.world \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/single_table.world
 
 # Gazebo launches
-cp ros2/cais_lab_gazebo/launch/xarm6_ur5e_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/ur5e_rg2_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/ur5e_rg2_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/xarm6_single_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/xarm6_single_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_single_gazebo.launch.py
 
 # MoveIt + Gazebo launches
-cp ros2/cais_lab_gazebo/launch/dual_moveit_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/ur5e_rg2_moveit_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py
-cp ros2/cais_lab_gazebo/launch/xarm6_moveit_single_gazebo.launch.py \
+cp ros2/cais_lab_robotics/launch/xarm6_moveit_single_gazebo.launch.py \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_moveit_single_gazebo.launch.py
 
 # ros2_control configs
-cp ros2/cais_lab_gazebo/config/xarm6_ur5e_controllers.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/xarm6_ur5e_controllers.yaml
-cp ros2/cais_lab_gazebo/config/ur5e_rg2_controllers.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/ur5e_rg2_controllers.yaml
+mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control
+cp ros2/cais_lab_robotics/config/gazebo_ros2_control/xarm6_ur5e_gazebo_ros2_control_controllers.yaml \
+  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control/xarm6_ur5e_gazebo_ros2_control_controllers.yaml
+cp ros2/cais_lab_robotics/config/gazebo_ros2_control/ur5e_rg2_gazebo_ros2_control_controllers.yaml \
+  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control/ur5e_rg2_gazebo_ros2_control_controllers.yaml
+mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_initial_joint_positions
+cp ros2/cais_lab_robotics/config/gazebo_initial_joint_positions/ur5e_gazebo_initial_joint_positions.yaml \
+  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_initial_joint_positions/ur5e_gazebo_initial_joint_positions.yaml
+mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/hardware_runtime
+cp ros2/cais_lab_robotics/config/hardware_runtime/xarm6_ur5e_hardware_runtime.yaml \
+  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/hardware_runtime/xarm6_ur5e_hardware_runtime.yaml
 
 # RViz profile for dual mode
 mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz
-cp ros2/cais_lab_gazebo/rviz/dual_moveit.rviz \
+cp ros2/cais_lab_robotics/rviz/dual_moveit.rviz \
   ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz/dual_moveit.rviz
 ```
 
@@ -177,5 +184,5 @@ ros2 topic pub --once /xarm6_xarm_gripper_traj_controller/joint_trajectory \
 
 - `No module named 'lxml'`: Poetry venv is active; run `deactivate`.
 - Gazebo spawn timeout on WSL: wait longer or restart stale Gazebo processes.
-- Missing RG2 controls in RViz: confirm `ur5e_rg2_moveit_gazebo.launch.py` and `ur5e_rg2_controllers.yaml` were copied and rebuilt.
+- Missing RG2 controls in RViz: confirm `ur5e_rg2_moveit_gazebo.launch.py` and `ur5e_rg2_gazebo_ros2_control_controllers.yaml` were copied and rebuilt.
 - RG2 instability: confirm updated `ur5e_rg2_gazebo.launch.py` is installed and rebuilt.

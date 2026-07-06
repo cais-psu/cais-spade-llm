@@ -217,10 +217,10 @@ It does this:
 - clones `xarm_ros2` into `~/ros2_ws/src/xarm_ros2`
 - clones `OnRobot_ROS2_Description` for the RG2 meshes/URDF
 - clones `IFRA_LinkAttacher` for Gazebo attach/detach services
-- copies this repo's `ros2/cais_lab_gazebo/worlds/*.world` into the xArm Gazebo package
-- copies this repo's `ros2/cais_lab_gazebo/launch/*.py` into the xArm Gazebo package
-- copies this repo's `ros2/cais_lab_gazebo/config/*.yaml` into the xArm Gazebo package
-- copies this repo's `ros2/cais_lab_gazebo/rviz/*.rviz` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_robotics/worlds/*.world` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_robotics/launch/*.py` into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_robotics/config/` tree into the xArm Gazebo package
+- copies this repo's `ros2/cais_lab_robotics/rviz/*.rviz` into the xArm Gazebo package
 - copies the patched IFRA `gazebo_link_attacher.cpp`
 - runs `colcon build --packages-skip d435i_xarm_setup`
 - copies config and RViz assets into the installed `xarm_gazebo` share directory
@@ -247,11 +247,11 @@ ros2 pkg prefix ros2_linkattacher
 This repo is the source of truth for custom ROS2 files:
 
 ```text
-ros2/cais_lab_gazebo/launch/
-ros2/cais_lab_gazebo/config/
-ros2/cais_lab_gazebo/rviz/
-ros2/cais_lab_gazebo/worlds/
-ros2/cais_lab_gazebo/scripts/
+ros2/cais_lab_robotics/launch/
+ros2/cais_lab_robotics/config/
+ros2/cais_lab_robotics/rviz/
+ros2/cais_lab_robotics/worlds/
+ros2/cais_lab_robotics/scripts/
 ros2/third_party/IFRA_LinkAttacher/
 ```
 
@@ -270,7 +270,7 @@ and will not appear in this repository.
 
 The safe workflow is:
 
-1. Edit the source file in this repo under `ros2/cais_lab_gazebo/...`.
+1. Edit the source file in this repo under `ros2/cais_lab_robotics/...`.
 2. Run `make bootstrap-gazebo`.
 3. Test through `~/ros2_ws`.
 4. Commit only the repo file.
@@ -336,12 +336,12 @@ The current dual-robot digital twin uses these pieces:
 | Piece | Runtime path |
 | --- | --- |
 | xArm6 hardware | xArm hardware driver and xArm MoveIt realmove launch |
-| UR5e arm | [ros2/cais_lab_gazebo/scripts/ur5e_rtde_trajectory_server.py](ros2/cais_lab_gazebo/scripts/ur5e_rtde_trajectory_server.py) |
-| UR5e RG2 | [ros2/cais_lab_gazebo/scripts/ur5e_rg2_rtde_gripper.py](ros2/cais_lab_gazebo/scripts/ur5e_rg2_rtde_gripper.py) |
+| UR5e arm | [ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py](ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py) |
+| UR5e RG2 | [ros2/cais_lab_robotics/scripts/ur5e_rg2_rtde_gripper.py](ros2/cais_lab_robotics/scripts/ur5e_rg2_rtde_gripper.py) |
 | combined hardware MoveIt/RViz | `dual_robots_hardware_moveit.launch.py` |
 | Gazebo mirror | passive Gazebo launch files copied into `~/ros2_ws` |
-| sync/replay helper | [ros2/cais_lab_gazebo/scripts/digital_twin_sync.py](ros2/cais_lab_gazebo/scripts/digital_twin_sync.py) |
-| paired RViz markers | [ros2/cais_lab_gazebo/scripts/dual_drag_markers.py](ros2/cais_lab_gazebo/scripts/dual_drag_markers.py) |
+| sync/replay helper | [ros2/cais_lab_robotics/scripts/digital_twin_sync.py](ros2/cais_lab_robotics/scripts/digital_twin_sync.py) |
+| paired RViz markers | [ros2/cais_lab_robotics/scripts/dual_drag_markers.py](ros2/cais_lab_robotics/scripts/dual_drag_markers.py) |
 
 The UR5e arm path is RTDE-based. Do not expect the old UR dashboard/external
 control path to be the main runtime path for this project.
@@ -361,7 +361,7 @@ The UI starts the UR5e RG2 bridge with:
 The combined hardware MoveIt/RViz launch file is:
 
 ```text
-ros2/cais_lab_gazebo/launch/dual_robots_hardware_moveit.launch.py
+ros2/cais_lab_robotics/launch/dual_robots_hardware_moveit.launch.py
 ```
 
 After bootstrap, ROS2 launches it from:
