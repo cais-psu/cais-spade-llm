@@ -304,21 +304,20 @@ class RecoverySessionMixin:
             descriptor = full.split("/")
             if len(descriptor) < 6:
                 continue
-            _, process, product, resource, _, _ = descriptor[:6]
+            _, _, product, _, _, _ = descriptor[:6]
             product_token = str(product or "").strip().lower()
-            resource_token = str(resource or "").strip().lower()
             if blocked_product and product_token == blocked_product:
                 recovery_aps.append(
                     {
                         "label": label,
                         "full": (
-                            f"ap_event/recovery/{product_token}/{resource_token or 'any'}/"
+                            f"ap_event/recovery/{product_token}/any/"
                             f"move_part_to_destination/destination={destination}"
                         ),
                         "selector": {
                             "mode": "move_part_to_destination",
                             "part": product_token or "any",
-                            "resource": resource_token or "any",
+                            "resource": "any",
                             "destination": destination,
                         },
                     }
@@ -696,25 +695,20 @@ class RecoverySessionMixin:
         profile: Any,
         prepared_recovery_request: dict[str, Any],
     ) -> tuple[Any, str]:
+        del resource_jid, profile, prepared_recovery_request
         explicit_location = snapshot.get("current_location")
         if explicit_location not in (None, ""):
             return deepcopy(explicit_location), "recovery_snapshot"
+
+        occupancy_location = dict(snapshot.get("occupancy") or {}).get("location")
+        if occupancy_location not in (None, ""):
+            return deepcopy(occupancy_location), "occupancy"
 
         current_pose_ref = snapshot.get("current_pose_ref")
         if current_pose_ref not in (None, ""):
             return deepcopy(current_pose_ref), "current_pose_ref"
 
-        held_part = str(resource_snapshot_carried_entity(snapshot, profile=profile) or "").strip()
         current_pose = self._coerce_xyz_pose(snapshot.get("current_pose"))
-
-        if held_part:
-            part_tracker = dict(prepared_recovery_request.get("part_tracker") or {})
-            held_entry = dict(part_tracker.get(held_part) or {})
-            origin_location = str(held_entry.get("origin_resource_location") or "").strip()
-            current_state = str(snapshot.get("current_state") or "").strip().lower()
-            if origin_location and current_state == "picked":
-                return origin_location, "held_part_origin"
-
         if current_pose is not None:
             return None, "current_pose_only"
         return None, "unavailable"
@@ -776,7 +770,7 @@ class RecoverySessionMixin:
         *,
         condition_family: str = "",
     ) -> dict[str, Any]:
-        return {
+        condition = {
             "kind": str(entry.get("kind") or "").strip(),
             "condition_family": (
                 str(entry.get("condition_family") or "").strip()
@@ -796,6 +790,13 @@ class RecoverySessionMixin:
             "source_function_name": str(entry.get("source_function_name") or "").strip(),
             "role": str(entry.get("role") or "").strip(),
         }
+        blocking_rule_id = str(entry.get("blocking_rule_id") or "").strip()
+        if blocking_rule_id:
+            condition["blocking_rule_id"] = blocking_rule_id
+        blocking_reason = str(entry.get("blocking_reason") or "").strip()
+        if blocking_reason:
+            condition["blocking_reason"] = blocking_reason
+        return condition
 
     @staticmethod
     def _condition_signature(entry: dict[str, Any]) -> tuple[str, str, str, str, str]:
@@ -1223,6 +1224,12 @@ class RecoverySessionMixin:
                 .lower()
                 or "resource"
             )
+            occupancy = deepcopy(
+                resource_core.get("occupancy")
+                or normalized_snapshot.get("occupancy")
+                or snapshot.get("occupancy")
+                or {}
+            )
             effective[jid] = {
                 "current_state": (
                     resource_core.get("current_state")
@@ -1240,6 +1247,8 @@ class RecoverySessionMixin:
                     if normalized_snapshot.get("current_location") is not None
                     else snapshot.get("current_location")
                     if snapshot.get("current_location") is not None
+                    else occupancy.get("location")
+                    if occupancy.get("location") is not None
                     else modeled_state.get("current_location")
                 ),
                 "resource_type": (
@@ -1250,12 +1259,7 @@ class RecoverySessionMixin:
                 ),
                 "resource_core": deepcopy(resource_core),
                 "resource_facets": deepcopy(resource_facets),
-                "occupancy": deepcopy(
-                    resource_core.get("occupancy")
-                    or normalized_snapshot.get("occupancy")
-                    or snapshot.get("occupancy")
-                    or {}
-                ),
+                "occupancy": occupancy,
                 **resource_snapshot_fields_map(
                     normalized_snapshot,
                     profile.snapshot_fields,
@@ -1406,30 +1410,6 @@ class RecoverySessionMixin:
             }
 
             if jid == focused_resource_jid:
-                last_task = pending_tasks[-1]
-                last_fn = str(last_task.get("function_name", "")).strip()
-                last_tool = self._tool_row_for_task(
-                    resource_jid=jid,
-                    function_name=last_fn,
-                    tools_catalog=tools_catalog,
-                )
-                terminal_state = str(last_tool.get("out_state") or "").strip()
-                suffix_summary["terminal_task_id"] = str(last_task.get("id", "")).strip()
-                suffix_summary["terminal_function_name"] = last_fn
-                if terminal_state:
-                    suffix_summary["terminal_resource_state"] = terminal_state
-                    _add_requirement(
-                        {
-                            "kind": "focused_resource_terminal_state",
-                            "entity_kind": "resource",
-                            "entity": jid,
-                            "field": "current_state",
-                            "expected": terminal_state,
-                            "source_task_id": str(last_task.get("id", "")).strip(),
-                            "source_function_name": last_fn,
-                            "role": role,
-                        }
-                    )
                 if goal_state:
                     for part_name in task_parts:
                         _add_requirement(
@@ -2284,6 +2264,54 @@ class RecoverySessionMixin:
                                 ),
                             }
                         )
+
+        # Explicit destination occupancy is a live safety condition, not a
+        # nominal-task obligation. A recovery transition may clear it using
+        # any physically validated end state outside the supplied destination.
+        for rule in prepared_recovery_request.get("loaded_safety_rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            if (
+                str(rule.get("constraint_type") or "").strip()
+                != "mutual_exclusion_in_destination_area"
+            ):
+                continue
+            destination = str((rule.get("context") or {}).get("destination") or "").strip()
+            if not destination:
+                continue
+            rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
+            resource_tokens = {
+                self._normalize_resource_token(resource)
+                for resource in (rule.get("resources") or [])
+                if self._normalize_resource_token(resource)
+            }
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                resource_jid = str(resource.get("resource_jid") or "").strip()
+                current_location = str(resource.get("current_location") or "").strip()
+                if not resource_jid or current_location != destination:
+                    continue
+                if (
+                    resource_tokens
+                    and self._normalize_resource_token(resource_jid) not in resource_tokens
+                ):
+                    continue
+                unmet_continuation_conditions.append(
+                    {
+                        "kind": "safety_destination_occupancy",
+                        "condition_family": "continuation",
+                        "entity_kind": "resource",
+                        "entity": resource_jid,
+                        "field": "current_location",
+                        "expected": {"not": destination},
+                        "actual": current_location,
+                        "blocking_rule_id": rule_id,
+                        "blocking_reason": (
+                            f"{resource_jid} currently occupies {destination} under {rule_id}"
+                        ),
+                    }
+                )
 
         unsatisfied_conditions: list[dict[str, Any]] = []
         seen_unsatisfied_signatures: set[tuple[str, str, str, str, str]] = set()

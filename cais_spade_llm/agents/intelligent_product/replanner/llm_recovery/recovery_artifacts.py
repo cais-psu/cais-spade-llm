@@ -265,6 +265,168 @@ def _extract_llm_raw_response(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_outline_transition_trace(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the accepted outline stack for a multi-turn debug artifact."""
+    latest_turn = _latest_multi_turn_turn(payload)
+    raw_response = latest_turn.get("raw_response")
+    if not isinstance(raw_response, dict):
+        raw_response = {}
+    session_state = payload.get("multi_turn_session_result")
+    if not isinstance(session_state, dict):
+        prepared_recovery_request = payload.get("prepared_recovery_request")
+        if isinstance(prepared_recovery_request, dict):
+            session_state = prepared_recovery_request.get("multi_turn_session_state")
+    if not isinstance(session_state, dict):
+        session_state = {}
+
+    candidates = (
+        latest_turn.get("transition_trace"),
+        raw_response.get("transition_trace"),
+        latest_turn.get("accepted_transition_prefix"),
+        payload.get("transition_trace"),
+        session_state.get("accepted_outline_prefix"),
+        session_state.get("transition_trace"),
+        session_state.get("accepted_transition_prefix"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, list) and candidate:
+            return [deepcopy(row) for row in candidate if isinstance(row, dict)]
+    return []
+
+
+def _extract_selected_candidate_index(payload: dict[str, Any]) -> int | None:
+    latest_turn = _latest_multi_turn_turn(payload)
+    raw_response = latest_turn.get("raw_response")
+    if not isinstance(raw_response, dict):
+        raw_response = {}
+    for source in (latest_turn, raw_response):
+        if source.get("selected_candidate_index") in (None, "", [], {}):
+            continue
+        try:
+            return int(source.get("selected_candidate_index"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _extract_selected_transition_outline_id(payload: dict[str, Any]) -> str:
+    latest_turn = _latest_multi_turn_turn(payload)
+    raw_response = latest_turn.get("raw_response")
+    if not isinstance(raw_response, dict):
+        raw_response = {}
+    for source in (latest_turn, raw_response):
+        selected_transition = source.get("selected_transition")
+        if not isinstance(selected_transition, dict):
+            continue
+        outline_id = str(selected_transition.get("outline_id") or "").strip()
+        if outline_id:
+            return outline_id
+    return ""
+
+
+def _extract_remaining_blocked_issue_count(payload: dict[str, Any]) -> int | None:
+    latest_turn = _latest_multi_turn_turn(payload)
+    raw_response = latest_turn.get("raw_response")
+    if not isinstance(raw_response, dict):
+        raw_response = {}
+    selected_candidate_index = _extract_selected_candidate_index(payload)
+    candidate_rows = []
+    for source in (latest_turn, raw_response):
+        for key in ("candidate_evaluations", "candidate_evaluation_summary"):
+            rows = source.get(key)
+            if isinstance(rows, list) and rows:
+                candidate_rows.extend(row for row in rows if isinstance(row, dict))
+    for row in candidate_rows:
+        if selected_candidate_index is not None:
+            try:
+                if int(row.get("candidate_index", -1)) != selected_candidate_index:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if row.get("remaining_blocked_issues") not in (None, "", [], {}):
+            try:
+                return int(row.get("remaining_blocked_issues"))
+            except (TypeError, ValueError):
+                return None
+        progress_detail = row.get("progress_detail")
+        if isinstance(progress_detail, dict) and progress_detail.get(
+            "remaining_blocked_issues"
+        ) not in (None, "", [], {}):
+            try:
+                return int(progress_detail.get("remaining_blocked_issues"))
+            except (TypeError, ValueError):
+                return None
+    decision = str(latest_turn.get("decision") or raw_response.get("decision") or "").strip()
+    return 0 if decision == "outline_ready" else None
+
+
+def _write_multi_turn_outline_stack_artifact(
+    *,
+    payload: dict[str, Any],
+    target_dir: Path,
+    artifact_name: str,
+) -> dict[str, str]:
+    transition_trace = _extract_outline_transition_trace(payload)
+    artifact_path = target_dir / artifact_name
+    artifact_path.write_text(
+        json.dumps(
+            _json_safe_resume_value(transition_trace),
+            indent=2,
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+    return {"outline_stack_artifact_path": str(artifact_path)}
+
+
+def _write_multi_turn_turn_index_artifact(
+    *,
+    payload: dict[str, Any],
+    target_dir: Path,
+    artifact_name: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, str]:
+    latest_turn = _latest_multi_turn_turn(payload)
+    multi_turn_ctx = _multi_turn_artifact_context(payload)
+    transition_trace = _extract_outline_transition_trace(payload)
+    index_payload: dict[str, Any] = {
+        "turn_index": int(multi_turn_ctx.get("turn_index") or 0),
+        "phase": str(multi_turn_ctx.get("phase") or "").strip(),
+        "decision": str(latest_turn.get("decision") or "").strip(),
+        "selected_candidate_index": _extract_selected_candidate_index(payload),
+        "selected_transition_outline_id": _extract_selected_transition_outline_id(payload),
+        "accepted_trace_length": len(transition_trace),
+        "remaining_blocked_issue_count": _extract_remaining_blocked_issue_count(payload),
+        "artifact_paths": {
+            key: str(artifact_paths.get(key) or "").strip()
+            for key in (
+                "prompt_artifact_path",
+                "llm_response_artifact_path",
+                "response_artifact_path",
+                "outline_stack_artifact_path",
+            )
+            if str(artifact_paths.get(key) or "").strip()
+        },
+        "artifact_roles": {
+            "prompt_artifact_path": "exact LLM input",
+            "llm_response_artifact_path": "raw model output only",
+            "response_artifact_path": "validator and session enriched output",
+            "outline_stack_artifact_path": "accepted transition_trace only",
+        },
+    }
+    artifact_path = target_dir / artifact_name
+    artifact_path.write_text(
+        json.dumps(
+            _json_safe_resume_value(index_payload),
+            indent=2,
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return {"turn_index_artifact_path": str(artifact_path)}
+
+
 def _extract_phase_result(payload: dict[str, Any]) -> str:
     latest_turn = _latest_multi_turn_turn(payload)
     result = latest_turn.get("phase_result")
@@ -525,6 +687,8 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "prompt_artifact_path",
         "llm_response_artifact_path",
         "response_artifact_path",
+        "outline_stack_artifact_path",
+        "turn_index_artifact_path",
     ):
         value = turn.get(key)
         if value in (None, "", [], {}):
@@ -922,6 +1086,14 @@ def write_recovery_artifacts(
             f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
             f"{multi_turn_ctx['phase']}_response_latest.txt"
         )
+        outline_stack_artifact_name = (
+            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+            f"{multi_turn_ctx['phase']}_stack_{timestamp}.json"
+        )
+        turn_index_artifact_name = (
+            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+            f"{multi_turn_ctx['phase']}_index_{timestamp}.json"
+        )
         session_transcript_artifact_name = (
             f"multi_turn_session_{multi_turn_ctx['session_id']}_{timestamp}.txt"
         )
@@ -942,6 +1114,8 @@ def write_recovery_artifacts(
         llm_response_artifact_name = ""
         latest_prompt_artifact_name = f"{reasoning_mode}_prompt_latest.txt"
         latest_response_artifact_name = f"{reasoning_mode}_response_latest.txt"
+        outline_stack_artifact_name = ""
+        turn_index_artifact_name = ""
         session_transcript_artifact_name = f"{reasoning_mode}_session_{timestamp}.txt"
         latest_session_transcript_artifact_name = f"{reasoning_mode}_session_latest.txt"
         resume_checkpoint_artifact_name = ""
@@ -1079,6 +1253,35 @@ def write_recovery_artifacts(
         llm_response_artifact_path = target_dir / llm_response_artifact_name
         llm_response_artifact_path.write_text(llm_raw_response, encoding="utf-8")
         artifact_paths["llm_response_artifact_path"] = str(llm_response_artifact_path)
+    if (
+        write_phase_prompt_response
+        and not suppress_phase_prompt_response
+        and reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+        and outline_stack_artifact_name
+    ):
+        artifact_paths.update(
+            _write_multi_turn_outline_stack_artifact(
+                payload=normalized_payload,
+                target_dir=target_dir,
+                artifact_name=outline_stack_artifact_name,
+            )
+        )
+    if (
+        write_phase_prompt_response
+        and not suppress_phase_prompt_response
+        and reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+        and turn_index_artifact_name
+    ):
+        artifact_paths.update(
+            _write_multi_turn_turn_index_artifact(
+                payload=normalized_payload,
+                target_dir=target_dir,
+                artifact_name=turn_index_artifact_name,
+                artifact_paths=artifact_paths,
+            )
+        )
     session_transcript = _extract_session_transcript(normalized_payload)
     if write_session_transcript and session_transcript:
         session_transcript_artifact_path = target_dir / session_transcript_artifact_name

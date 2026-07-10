@@ -25,6 +25,7 @@ from cais_spade_llm.resources.robot.robot_primitives import (
     ROBOT_PRIMITIVE_TRACE_FACT_MAP,
     robot_capability_decompositions,
     robot_primitive_sequence_validator,
+    robot_symbolic_event_family,
 )
 
 
@@ -131,6 +132,10 @@ def _robot_snapshot_equivalence(
 
 
 def _robot_event_family(event: dict[str, Any]) -> str:
+    symbolic_family = robot_symbolic_event_family(event)
+    if symbolic_family is not None:
+        return symbolic_family
+
     event_name = str(event.get("event_name", "") or "").strip().lower()
     has_pick_verb = "pick" in event_name or "grasp" in event_name or "acquire" in event_name
     has_place_verb = (

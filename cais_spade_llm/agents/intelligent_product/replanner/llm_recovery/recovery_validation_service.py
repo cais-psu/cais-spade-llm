@@ -417,6 +417,7 @@ def _known_location_tokens(
         current_location = str(resource_row.get("current_location") or "").strip()
         if current_location:
             location_tokens.append(current_location)
+        location_tokens.extend(_resource_named_pose_tokens(resource_row))
         for field_name in ("reachability", "reachable_locations", "known_locations"):
             location_tokens.extend(
                 str(token).strip()
@@ -1363,6 +1364,14 @@ def _binding_token_findings(
     explicit_target_ref = str(task.get("target_ref") or "").strip()
     if explicit_target_ref:
         location_candidates.append(("target_ref", explicit_target_ref))
+    for state_name, state in (
+        ("expected_start_state", start_state),
+        ("expected_end_state", end_state),
+    ):
+        for field_name in ("resource_location", "part_location"):
+            token = str(state.get(field_name) or "").strip()
+            if token:
+                location_candidates.append((f"{state_name}.{field_name}", token))
 
     known_locations = set(
         _known_location_tokens(

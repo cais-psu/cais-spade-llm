@@ -77,7 +77,6 @@ _DURABLE_PRUNED_CONSTRAINT_CODES = {
 }
 
 _OUTLINE_PART_STATE_FIELDS = (
-    "held_part",
     "part_state",
     "part_location",
 )
@@ -313,6 +312,7 @@ def build_multi_turn_session_seed(
         "outline_lookahead": [],
         "outline_stagnation_count": 0,
         "outline_progress_signature": "",
+        "semantic_state_history": [],
         "pruned_actions": [],
         "outline_validation_findings": [],
         "transition_validation": {},
@@ -1521,6 +1521,25 @@ def _continuation_condition_satisfied(
             )
         return False
 
+    if kind == "safety_destination_occupancy" and entity_kind == "resource" and entity:
+        row = dict(resources_by_jid.get(entity) or {})
+        if not row:
+            return False
+        expected_not = (
+            str(dict(expected).get("not") or "").strip()
+            if isinstance(expected, dict)
+            else ""
+        )
+        if not expected_not:
+            return False
+        current_location = str(
+            row.get("current_location")
+            or row.get("resource_location")
+            or dict(row.get("occupancy") or {}).get("location")
+            or ""
+        ).strip()
+        return current_location != expected_not
+
     if kind != "safety_blocked_suffix_task":
         return False
 
@@ -1554,7 +1573,7 @@ def _candidate_recovery_blocker_key(
         str(blocker.get("entity_kind") or "").strip().lower(),
         str(blocker.get("entity") or "").strip(),
         str(blocker.get("field") or "").strip(),
-        str(blocker.get("expected") or "").strip(),
+        json.dumps(blocker.get("expected"), sort_keys=True, default=str),
         str(blocker.get("blocking_rule_id") or blocker.get("source_task_id") or "").strip(),
     )
 
@@ -1595,6 +1614,21 @@ def _candidate_recovery_blocker_summary(
             return f"{blocker_part} must be restored before blocked suffix can resume"
         return "Blocked suffix must be cleared before continuation can resume"
 
+    if kind == "safety_destination_occupancy":
+        blocking_reason = str(blocker.get("blocking_reason") or "").strip()
+        if blocking_reason:
+            return blocking_reason
+        entity = str(blocker.get("entity") or "").strip()
+        expected = blocker.get("expected")
+        destination = (
+            str(dict(expected).get("not") or "").strip()
+            if isinstance(expected, dict)
+            else ""
+        )
+        if entity and destination:
+            return f"{entity} currently occupies {destination}"
+        return "A protected destination remains occupied"
+
     return "Recovery blocker remains"
 
 
@@ -1612,7 +1646,11 @@ def _active_candidate_recovery_blockers(
         if not isinstance(condition, dict):
             continue
         kind = _normalized_blocker_kind(condition)
-        if kind not in {"resource_terminal_state", "safety_blocked_suffix_task"}:
+        if kind not in {
+            "resource_terminal_state",
+            "safety_blocked_suffix_task",
+            "safety_destination_occupancy",
+        }:
             continue
         if _continuation_condition_satisfied(
             condition,
@@ -2567,6 +2605,38 @@ def _candidate_state_consistency_findings(
     return findings
 
 
+def _candidate_named_pose_location_findings(
+    *,
+    candidate_task: dict[str, Any],
+    resource_row: dict[str, Any],
+    end_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Require named-pose end states to preserve their concrete location token."""
+    end_resource_state = str(end_state.get("resource_state") or "").strip()
+    if not end_resource_state:
+        return []
+    if end_resource_state not in _candidate_named_pose_tokens(resource_row):
+        return []
+    end_resource_location = end_state.get("resource_location")
+    if end_resource_location == end_resource_state:
+        return []
+    return [
+        _candidate_schema_finding(
+            task=candidate_task,
+            reason=(
+                "expected_end_state.resource_location must preserve named-pose "
+                f"token '{end_resource_state}' when expected_end_state.resource_state "
+                "uses that named pose"
+            ),
+            evidence={
+                "field": "expected_end_state.resource_location",
+                "resource_state": end_resource_state,
+                "resource_location": deepcopy(end_resource_location),
+            },
+        )
+    ]
+
+
 def _derive_candidate_outline_task(
     *,
     candidate_task: dict[str, Any],
@@ -2734,6 +2804,14 @@ def _derive_candidate_outline_task(
     if consistency_findings:
         return None, consistency_findings
 
+    named_pose_location_findings = _candidate_named_pose_location_findings(
+        candidate_task=candidate_task,
+        resource_row=dict(resources_by_jid.get(resource_jid) or {}),
+        end_state=end_state,
+    )
+    if named_pose_location_findings:
+        return None, named_pose_location_findings
+
     validated_task: dict[str, Any] = {
         "outline_id": outline_id,
         "event_name": event_name,
@@ -2786,9 +2864,13 @@ def _apply_task_effects_to_symbolic_state(
             res["current_state"] = deepcopy(end_state.get("resource_state"))
         if "held_part" in end_state:
             res["held_part"] = deepcopy(end_state.get("held_part"))
+            res["gripper_state"] = "closed" if end_state.get("held_part") else "open"
         if "resource_location" in end_state:
             res["resource_location"] = deepcopy(end_state.get("resource_location"))
             res["current_location"] = deepcopy(end_state.get("resource_location"))
+            occupancy = dict(res.get("occupancy") or {})
+            occupancy["location"] = deepcopy(end_state.get("resource_location"))
+            res["occupancy"] = occupancy
 
     if part_name:
         part = symbolic_parts.setdefault(part_name, {"part_name": part_name})
@@ -3058,268 +3140,6 @@ async def _handle_outline_incremental_validated(
         "[MultiTurn] outline incremental_validated: accepted event %s "
         "(prefix now %d events, complete=%s)",
         str(committed_transition.get("outline_id") or "").strip(),
-        len(accepted_prefix),
-        outline_complete,
-    )
-
-    session_state["status"] = "paused_after_outline_turn"
-    return decision, turn_entry
-
-
-async def _handle_outline_incremental_candidates_validated(
-    *,
-    session_state: dict[str, Any],
-    parsed_response: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    planner: Any,
-) -> tuple[str, dict[str, Any]]:
-    """Incremental with multiple candidate next tasks and deterministic selection."""
-    turn_entry: dict[str, Any] = {}
-    sequence_index = _next_recovery_sequence_index(session_state)
-    session_state["outline_validation_findings"] = []
-    session_state["pruned_actions"] = _active_pruned_actions(
-        session_state,
-        prepared_recovery_request,
-    )
-
-    candidate_events = [
-        _prepare_candidate_task(
-            task=dict(row),
-            sequence_index=sequence_index,
-            candidate_index=candidate_index,
-        )
-        for candidate_index, row in enumerate(
-            _parsed_response_rows(
-                parsed_response,
-                primary_key="candidate_events",
-            )
-        )
-    ]
-    turn_entry["candidate_events"] = deepcopy(candidate_events)
-
-    candidate_bound = int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND)
-    if not (1 <= len(candidate_events) <= candidate_bound):
-        turn_entry["error"] = (
-            f"outline response must include 1 to {candidate_bound} candidate_events"
-        )
-        _logger.warning(
-            "[MultiTurn] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
-            candidate_bound,
-            len(candidate_events),
-        )
-        return "need_revision", turn_entry
-
-    candidate_evaluations: list[dict[str, Any]] = []
-    valid_candidates: list[dict[str, Any]] = []
-    for candidate_index, task in enumerate(candidate_events):
-        surface_task = deepcopy(task)
-        working_task = deepcopy(task)
-        evaluation: dict[str, Any] = {
-            "candidate_index": candidate_index,
-            "surface_task": deepcopy(surface_task),
-            "task": deepcopy(working_task),
-        }
-
-        pruned_row = _matching_active_pruned_action(
-            task=working_task,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if pruned_row is not None:
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = [
-                _retarget_candidate_finding_to_task(
-                    dict(pruned_row.get("guard") or {}),
-                    working_task,
-                )
-            ]
-            evaluation["pruned_match"] = True
-            candidate_evaluations.append(evaluation)
-            continue
-
-        validated_task, schema_findings = _derive_candidate_outline_task(
-            candidate_task=working_task,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if schema_findings:
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(schema_findings)
-            candidate_evaluations.append(evaluation)
-            continue
-        evaluation["validated_task"] = deepcopy(validated_task)
-
-        findings, grounded_action = _validate_single_outline_task(
-            planner=planner,
-            task=dict(validated_task or {}),
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        evaluation["valid"] = not findings
-        evaluation["validation_findings"] = deepcopy(findings)
-        if grounded_action:
-            evaluation["grounded_action"] = deepcopy(grounded_action)
-        if findings:
-            candidate_evaluations.append(evaluation)
-            continue
-
-        progress_score, progress_detail = _candidate_progress_score(
-            task=dict(validated_task or {}),
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        evaluation["progress_score"] = progress_score
-        evaluation["progress_detail"] = deepcopy(progress_detail)
-        valid_candidates.append(evaluation)
-        candidate_evaluations.append(evaluation)
-
-    progress_candidates = [
-        row for row in valid_candidates if int(row.get("progress_score") or 0) > 0
-    ]
-
-    if not progress_candidates:
-        for row in candidate_evaluations:
-            if not bool(row.get("valid")):
-                continue
-            row["valid"] = False
-            row["validation_findings"] = [
-                _no_blocker_reduction_finding(task=dict(row.get("task") or {}))
-            ]
-        _promote_durable_candidate_rejections(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-            candidate_evaluations=candidate_evaluations,
-        )
-        turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
-        feedback_rows = _candidate_feedback_rows(candidate_evaluations)
-        accumulated_feedback = _merge_candidate_rejection_feedback(
-            list(session_state.get("candidate_rejection_feedback") or []),
-            feedback_rows,
-        )
-        session_state["candidate_rejection_feedback"] = deepcopy(accumulated_feedback)
-        turn_entry["candidate_rejection_feedback"] = deepcopy(accumulated_feedback)
-        turn_entry["transition_validation"] = {
-            "status": "rejected",
-            "findings": deepcopy(feedback_rows),
-        }
-        session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
-        # Store the LLM's reasoning from this rejected turn for next-turn feedback.
-        session_state["rejected_turn_thought"] = str(parsed_response.get("thought") or "").strip()
-        _logger.info(
-            "[MultiTurn] outline incremental_candidates_validated: rejected all %d candidates",
-            len(candidate_events),
-        )
-        # Keep a stagnation counter for diagnostics, but do not terminate the
-        # LLM feedback loop here. Repeated validator feedback is part of the
-        # multi-turn recovery contract.
-        stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
-        session_state["outline_stagnation_count"] = stagnation
-        status_counts: dict[str, int] = {}
-        for row in candidate_evaluations:
-            if not isinstance(row, dict):
-                continue
-            findings = [
-                dict(f) for f in (row.get("validation_findings") or []) if isinstance(f, dict)
-            ]
-            if not findings:
-                continue
-            status = _finding_event_status_for_logging(findings[0])
-            status_counts[status] = int(status_counts.get(status) or 0) + 1
-        status_summary = (
-            ", ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
-            or "none"
-        )
-        rejection_codes = [
-            str(f.get("constraint_code") or "unknown")
-            for row in candidate_evaluations
-            if isinstance(row, dict)
-            for f in (row.get("validation_findings") or [])
-            if isinstance(f, dict)
-        ]
-        _logger.info(
-            "[MultiTurn] Stagnation %d — status_counts: %s",
-            stagnation,
-            status_summary,
-        )
-        _logger.debug(
-            "[MultiTurn] Stagnation %d — rejection codes: %s",
-            stagnation,
-            rejection_codes,
-        )
-        session_state["status"] = "paused_after_outline_turn"
-        return "need_revision", turn_entry
-    turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
-
-    # Reset stagnation on successful candidate acceptance.
-    session_state["outline_stagnation_count"] = 0
-
-    selected = max(
-        progress_candidates,
-        key=lambda row: (
-            int(dict(row.get("progress_detail") or {}).get("resolved_direct_blockers") or 0),
-            int(dict(row.get("progress_detail") or {}).get("blocker_part_acquired") or 0)
-            + int(dict(row.get("progress_detail") or {}).get("freed_resource_for_blocker") or 0),
-            int(dict(row.get("progress_detail") or {}).get("preparatory_transit") or 0),
-            -int(dict(row.get("progress_detail") or {}).get("remaining_blocked_issues") or 0),
-            -int(row.get("candidate_index") or 0),
-        ),
-    )
-    selected_candidate_index = int(selected.get("candidate_index") or 0)
-    selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
-    selected_validated_task = deepcopy(dict(selected.get("validated_task") or {}))
-    selected_transition = _commit_selected_candidate_task(
-        task=selected_validated_task,
-        sequence_index=sequence_index,
-    )
-    selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
-
-    turn_entry["selected_candidate_index"] = selected_candidate_index
-    turn_entry["selected_transition"] = deepcopy(selected_transition)
-    turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
-    turn_entry["next_transition"] = deepcopy(selected_transition)
-    if selected_grounded_action:
-        turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
-
-    accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(selected_transition))
-    session_state["accepted_outline_prefix"] = accepted_prefix
-    accepted_prefix = _refresh_accepted_outline_predecessors(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-        turn_entry=turn_entry,
-    )
-    session_state["outline_lookahead"] = []
-    session_state["candidate_rejection_feedback"] = []
-    session_state["rejected_turn_thought"] = ""
-    _sync_des_recovery_aliases(
-        session_state,
-        turn_entry=turn_entry,
-        transition_validation={
-            "status": "passed",
-            "selected_candidate_index": selected_candidate_index,
-        },
-    )
-
-    _apply_task_effects_to_symbolic_state(selected_transition, session_state)
-    session_state["pruned_actions"] = _active_pruned_actions(
-        session_state,
-        prepared_recovery_request,
-    )
-
-    remaining_findings, remaining_conditions = _remaining_blocked_issue_counts(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    outline_complete = remaining_findings == 0 and remaining_conditions == 0
-
-    decision = "outline_ready" if outline_complete else "need_next_task"
-
-    _logger.info(
-        "[MultiTurn] outline incremental_candidates_validated: selected candidate %d (%s) "
-        "(progress=%d, prefix now %d events, complete=%s)",
-        selected_candidate_index + 1,
-        str(selected_transition.get("outline_id") or "").strip(),
-        int(selected.get("progress_score") or 0),
         len(accepted_prefix),
         outline_complete,
     )
@@ -5173,6 +4993,8 @@ def _write_per_turn_artifact(
                 "prompt_artifact_path",
                 "llm_response_artifact_path",
                 "response_artifact_path",
+                "outline_stack_artifact_path",
+                "turn_index_artifact_path",
                 "session_transcript_artifact_path",
                 "resume_checkpoint_artifact_path",
                 "latest_resume_checkpoint_artifact_path",

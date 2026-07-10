@@ -192,7 +192,48 @@ def _robot_lower(value: Any) -> str:
     return _robot_token(value).lower()
 
 
+def robot_symbolic_event_family(event: dict[str, Any]) -> str | None:
+    """Infer recovery semantics from declared state effects, never from authored names."""
+    expected_start = event.get("expected_start_state")
+    expected_end = event.get("expected_end_state")
+    if not isinstance(expected_start, dict) or not isinstance(expected_end, dict):
+        return None
+    part_name = _robot_token(event.get("part_name"))
+    start_held = _robot_token(expected_start.get("held_part"))
+    end_held = _robot_token(expected_end.get("held_part"))
+    start_resource_state = _robot_token(expected_start.get("resource_state"))
+    end_resource_state = _robot_token(expected_end.get("resource_state"))
+    start_resource_location = _robot_token(expected_start.get("resource_location"))
+    end_resource_location = _robot_token(expected_end.get("resource_location"))
+    start_part_location = _robot_token(expected_start.get("part_location"))
+    end_part_location = _robot_token(expected_end.get("part_location"))
+    end_part_state = _robot_token(expected_end.get("part_state"))
+
+    if not part_name:
+        if end_resource_location == "home":
+            return "home"
+        if (
+            end_resource_location != start_resource_location
+            or end_resource_state != start_resource_state
+        ):
+            return "clear"
+        return ""
+    if end_held == part_name and start_held != part_name:
+        return "pick"
+    if start_held == part_name and end_held != part_name:
+        if end_part_state == "assembled":
+            return "assemble"
+        return "place"
+    if end_part_location and end_part_location != start_part_location:
+        return "place"
+    return ""
+
+
 def _robot_event_family(event: dict[str, Any]) -> str:
+    symbolic_family = robot_symbolic_event_family(event)
+    if symbolic_family is not None:
+        return symbolic_family
+
     event_name = str(event.get("event_name", "") or "").strip().lower()
     has_pick_verb = "pick" in event_name or "grasp" in event_name or "acquire" in event_name
     has_place_verb = (
@@ -2273,4 +2314,5 @@ __all__ = [
     "filter_robot_synthesis_primitive_catalog",
     "robot_capability_decompositions",
     "robot_primitive_sequence_validator",
+    "robot_symbolic_event_family",
 ]

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
-    projected_outline_validation_context as _service_projected_outline_validation_context,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
     multi_turn as _shared,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
+    projected_outline_validation_context as _service_projected_outline_validation_context,
 )
 
 _logger = logging.getLogger(__name__)
@@ -34,6 +35,129 @@ def _projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
+
+
+def _semantic_state_signature(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> str:
+    """Return a physical recovery-state signature independent of authored labels."""
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    resources: list[dict[str, Any]] = []
+    for resource_jid in sorted(resources_by_jid):
+        row = dict(resources_by_jid.get(resource_jid) or {})
+        occupancy = dict(row.get("occupancy") or {})
+        current_location = deepcopy(
+            row.get("current_location")
+            if "current_location" in row
+            else row.get("resource_location")
+            if "resource_location" in row
+            else occupancy.get("location")
+        )
+        resources.append(
+            {
+                "resource_jid": resource_jid,
+                "current_location": current_location,
+                "occupancy_location": deepcopy(
+                    occupancy.get("location")
+                    if occupancy.get("location") is not None
+                    else current_location
+                ),
+                "held_part": deepcopy(row.get("held_part")),
+                "gripper_state": deepcopy(row.get("gripper_state")),
+            }
+        )
+    parts: list[dict[str, Any]] = []
+    for part_name in sorted(parts_by_name):
+        row = dict(parts_by_name.get(part_name) or {})
+        parts.append(
+            {
+                "part_name": part_name,
+                "current_location": deepcopy(
+                    row.get("current_location")
+                    if "current_location" in row
+                    else row.get("part_location")
+                    if "part_location" in row
+                    else row.get("location")
+                ),
+                "current_holder_resource_jid": deepcopy(
+                    row.get("current_holder_resource_jid")
+                    if "current_holder_resource_jid" in row
+                    else row.get("part_holder_resource_jid")
+                ),
+            }
+        )
+    blockers = sorted(
+        [
+            list(_shared._candidate_recovery_blocker_key(row))
+            for row in _shared._active_candidate_recovery_blockers(
+                session_state=session_state,
+                prepared_recovery_request=prepared_recovery_request,
+            )
+            if isinstance(row, dict)
+        ],
+        key=lambda row: json.dumps(row, sort_keys=True, default=str),
+    )
+    return json.dumps(
+        {
+            "resources": resources,
+            "parts": parts,
+            "recovery_blockers": blockers,
+        },
+        sort_keys=True,
+        default=str,
+        ensure_ascii=True,
+    )
+
+
+def _semantic_validation_finding(
+    *,
+    task: dict[str, Any],
+    constraint_code: str,
+    reason: str,
+) -> dict[str, Any]:
+    return _shared.annotate_validation_finding(
+        {
+            "task_id": str(task.get("outline_id") or "").strip(),
+            "resource_jid": _shared._task_resource_jid(task) or None,
+            "part_name": _shared._task_part_name(task) or None,
+            "constraint_owner": "selector",
+            "constraint_family": "candidate_selection",
+            "constraint_code": constraint_code,
+            "reason": reason,
+            "evidence": {"field": "physical_recovery_state"},
+        }
+    )
+
+
+def _advance_semantic_history(
+    *,
+    task: dict[str, Any],
+    current_signature: str,
+    next_signature: str,
+    semantic_history: list[str],
+) -> tuple[str, dict[str, Any] | None]:
+    if next_signature == current_signature:
+        return current_signature, _semantic_validation_finding(
+            task=task,
+            constraint_code="no_semantic_state_change",
+            reason=(
+                "Candidate changes only authored state labels and has no validated "
+                "holder, location, occupancy, or recovery-condition effect."
+            ),
+        )
+    if next_signature in semantic_history:
+        return current_signature, _semantic_validation_finding(
+            task=task,
+            constraint_code="semantic_cycle_detected",
+            reason="Candidate returns to a previously accepted physical recovery state.",
+        )
+    semantic_history.append(next_signature)
+    return next_signature, None
 
 
 async def _handle_outline_single_pass(
@@ -458,7 +582,7 @@ def _resource_switch_count(events: list[dict[str, Any]]) -> int:
     )
 
 
-def _validate_candidate_sequence(
+def _validate_candidate_sequence(  # noqa: C901
     *,
     candidate: dict[str, Any],
     sequence_index: int,
@@ -523,6 +647,17 @@ def _validate_candidate_sequence(
     validated_events: list[dict[str, Any]] = []
     committed_events: list[dict[str, Any]] = []
     grounded_actions: list[dict[str, Any]] = []
+    current_semantic_signature = _semantic_state_signature(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    semantic_history = [
+        str(signature)
+        for signature in (session_state.get("semantic_state_history") or [])
+        if str(signature)
+    ]
+    if not semantic_history or semantic_history[-1] != current_semantic_signature:
+        semantic_history.append(current_semantic_signature)
 
     for event_index, surface_event in enumerate(surface_events):
         working_task = deepcopy(surface_event)
@@ -582,6 +717,21 @@ def _validate_candidate_sequence(
             committed_event,
             working_session_state,
         )
+        next_semantic_signature = _semantic_state_signature(
+            session_state=working_session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        current_semantic_signature, semantic_finding = _advance_semantic_history(
+            task=validated_task,
+            current_signature=current_semantic_signature,
+            next_signature=next_semantic_signature,
+            semantic_history=semantic_history,
+        )
+        if semantic_finding:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = [semantic_finding]
+            evaluation["failed_event_index"] = event_index
+            return evaluation
         validated_events.append(deepcopy(validated_task))
         committed_events.append(deepcopy(committed_event))
 
@@ -612,6 +762,7 @@ def _validate_candidate_sequence(
     evaluation["grounded_actions"] = deepcopy(grounded_actions)
     evaluation["remaining_blocked_issues"] = remaining_blocked_issues
     evaluation["resource_switch_count"] = resource_switches
+    evaluation["semantic_state_history"] = deepcopy(semantic_history)
     if validated_events:
         evaluation["task"] = deepcopy(validated_events[0])
         evaluation["validated_task"] = deepcopy(validated_events[0])
@@ -876,6 +1027,9 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
 
     for selected_event in selected_committed_events:
         _shared._apply_task_effects_to_symbolic_state(selected_event, session_state)
+    session_state["semantic_state_history"] = deepcopy(
+        selected.get("semantic_state_history") or session_state.get("semantic_state_history") or []
+    )
     session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_recovery_request,

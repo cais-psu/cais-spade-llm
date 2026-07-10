@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from copy import deepcopy
 from typing import Any
 
@@ -32,7 +31,6 @@ _PHASE_TITLES: dict[str, str] = {
 
 
 _OUTLINE_PART_STATE_FIELDS = (
-    "held_part",
     "part_state",
     "part_location",
 )
@@ -265,26 +263,15 @@ def _grounding_response_schema() -> dict[str, Any]:
         "strict": False,
         "schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "thought": {"type": "string"},
                 "decision": {"type": "string", "enum": ["observe", "grounded"]},
-                "blocking_reasons": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "grounded_facts": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "recovery_implications": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "observe_reason": {"type": "string"},
                 "observe_requests": {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
                             "fact_type": {"type": "string"},
                             "entity": {"type": "string"},
@@ -294,7 +281,7 @@ def _grounding_response_schema() -> dict[str, Any]:
                     },
                 },
             },
-            "required": ["thought", "decision"],
+            "required": ["thought", "decision", "observe_requests"],
         },
     }
 
@@ -450,31 +437,37 @@ def _inline_json(obj: Any) -> str:
     )
 
 
-_RESOURCE_ACTOR_PATTERN = re.compile(
-    r"\b([A-Za-z][A-Za-z0-9_-]*)\s+by\s+([A-Za-z][A-Za-z0-9_.@-]*)"
-)
+def _recovery_safety_rule_text(rule: dict[str, Any]) -> str:
+    """Render recovery semantics while preserving each supplied formal token."""
+    constraint_type = str(rule.get("constraint_type") or "").strip()
+    if constraint_type == "ordering_place_approach_priority":
+        products = [
+            str(item).strip()
+            for item in (rule.get("product") or [])
+            if str(item).strip()
+        ]
+        event = str(rule.get("event") or "").strip()
+        destination = str((rule.get("context") or {}).get("destination") or "").strip()
+        if len(products) >= 2 and event:
+            destination_text = f" to {destination}" if destination else ""
+            return (
+                f"{products[0]} {event} must occur before {products[1]} "
+                f"{event}{destination_text}."
+            )
+    return str(rule.get("raw_text") or rule.get("summary") or "").strip()
 
 
-def _compact_safety_rules(
-    llm_input: dict[str, Any],
-    *,
-    neutralize_resource_actors: bool = False,
-) -> str:
-    """Extract raw text from safety rules."""
+def _compact_safety_rules(llm_input: dict[str, Any]) -> str:
+    """Render safety rules using their recovery-facing semantics."""
     rules = llm_input.get("loaded_safety_rules") or []
     lines: list[str] = []
     for rule in rules:
         if not isinstance(rule, dict):
             continue
         rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
-        raw_text = str(rule.get("raw_text") or rule.get("summary") or "").strip()
-        if neutralize_resource_actors:
-            # Candidate mode should expose safety ordering facts, not nominal
-            # resource assignments that can bias recovery away from feasible handoff.
-            raw_text = _RESOURCE_ACTOR_PATTERN.sub(r"\1", raw_text)
-            raw_text = " ".join(raw_text.split())
-        if rule_id and raw_text:
-            lines.append(f"- {rule_id}: {raw_text}")
+        rule_text = _recovery_safety_rule_text(rule)
+        if rule_id and rule_text:
+            lines.append(f"- {rule_id}: {rule_text}")
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -493,35 +486,61 @@ def _compact_assembly_requirements(llm_input: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
-def _compact_recovery_objectives(
+def _compact_recovery_goals(
     llm_input: dict[str, Any],
     *,
     projected_parts: list[dict[str, Any]],
+    current_recovery_blockers: list[dict[str, Any]],
 ) -> str:
-    reqs = llm_input.get("relevant_assembly_requirements") or []
-    parts_by_req: dict[str, dict[str, Any]] = {}
+    parts_by_name: dict[str, dict[str, Any]] = {}
     for row in projected_parts:
         if not isinstance(row, dict):
             continue
-        req_id = str(row.get("goal_requirement_id") or "").strip()
-        if req_id and req_id not in parts_by_req:
-            parts_by_req[req_id] = dict(row)
+        part_name = str(row.get("part_name") or "").strip()
+        if part_name and part_name not in parts_by_name:
+            parts_by_name[part_name] = dict(row)
+
+    goal_part_names: set[str] = {
+        str(part_name).strip()
+        for part_name in (dict(llm_input.get("fault_event") or {}).get("affected_part_names") or [])
+        if str(part_name).strip()
+    }
+    rules_by_id = {
+        str(rule.get("id") or rule.get("rule_id") or "").strip(): rule
+        for rule in (llm_input.get("loaded_safety_rules") or [])
+        if isinstance(rule, dict)
+        and str(rule.get("id") or rule.get("rule_id") or "").strip()
+    }
+    remaining_condition_lines: set[str] = set()
+    for blocker in current_recovery_blockers:
+        if not isinstance(blocker, dict):
+            continue
+        kind = str(blocker.get("kind") or "").strip()
+        if kind == "focused_resource_terminal_state":
+            continue
+        if str(blocker.get("entity_kind") or "").strip() == "part":
+            entity = str(blocker.get("entity") or "").strip()
+            if entity:
+                goal_part_names.add(entity)
+        if kind == "safety_blocked_suffix_task":
+            rule_id = str(blocker.get("blocking_rule_id") or "").strip()
+            products = list(dict(rules_by_id.get(rule_id) or {}).get("product") or [])
+            if products and str(products[0]).strip():
+                goal_part_names.add(str(products[0]).strip())
+            continue
+        summary = str(blocker.get("summary") or "").strip()
+        if summary:
+            remaining_condition_lines.add(summary)
 
     lines: list[str] = []
-    for req in reqs:
-        if not isinstance(req, dict):
-            continue
-        req_id = str(req.get("requirement_id") or "").strip()
-        status = str(req.get("status") or "").strip()
-        part_row = dict(parts_by_req.get(req_id) or {})
-        part_name = str(part_row.get("part_name") or "").strip()
+    for part_name in sorted(goal_part_names):
+        part_row = dict(parts_by_name.get(part_name) or {})
         goal_location = str(part_row.get("goal_location") or "").strip()
-        if req_id and part_name and goal_location:
-            lines.append(f"- {req_id} [{status}]: restore {part_name} to {goal_location}")
-            continue
-        summary = str(req.get("summary") or "").strip()
-        if req_id and summary:
-            lines.append(f"- {req_id} [{status}]: {summary}")
+        if goal_location:
+            lines.append(f"- restore {part_name} to {goal_location}")
+        else:
+            lines.append(f"- restore {part_name}")
+    lines.extend(f"- {summary}" for summary in sorted(remaining_condition_lines))
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -792,9 +811,9 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
     if stage == "marked_progress":
         return {
             "event_status": "disabled",
-            "diagnosis": "marked_progress_failure",
+            "diagnosis": "recovery_goal_progress_failure",
             "guard_or_condition": (
-                "candidate event is enabled but does not reduce the marked-state recovery gap"
+                "candidate event is enabled but does not advance a recovery goal"
             ),
             "re_enablement": (
                 "choose an enabled event that strictly reduces the active continuation blockers"
@@ -858,10 +877,10 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             "event_status": "disabled",
             "diagnosis": "candidate_schema_violation",
             "guard_or_condition": (
-                "candidate event uses outline fields outside the allowed outline contract"
+                "candidate event uses fields outside the recovery candidate rules"
             ),
             "re_enablement": (
-                "author only the allowed outline state fields shown in the Outline Candidate Contract"
+                "author only the allowed state fields shown in Recovery Candidate Rules"
             ),
         }
 
@@ -1462,26 +1481,6 @@ def _pose_xyz_text(pose: dict[str, Any]) -> str:
     return ",".join(parts)
 
 
-def _resource_current_pose_text(
-    *,
-    entry: dict[str, Any],
-    recovery_snapshot: dict[str, Any],
-) -> str:
-    recovery_facets = dict(recovery_snapshot.get("resource_facets") or {})
-    entry_facets = dict(entry.get("resource_facets") or {})
-    recovery_manipulator = dict(recovery_facets.get("manipulator") or {})
-    entry_manipulator = dict(entry_facets.get("manipulator") or {})
-    for raw_pose in (
-        recovery_snapshot.get("current_pose"),
-        recovery_manipulator.get("current_pose"),
-        entry.get("current_pose"),
-        entry_manipulator.get("current_pose"),
-    ):
-        if isinstance(raw_pose, dict) and raw_pose:
-            return _pose_xyz_text(dict(raw_pose))
-    return "unknown"
-
-
 def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
     if not isinstance(recovery_resources, dict) or not recovery_resources:
         return "(none advertised)"
@@ -1530,21 +1529,9 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
             else "none advertised"
         )
 
-        workspace_hint = _workspace_capability_hint(
-            dict(
-                recovery_snapshot.get("workspace_bounds")
-                or static_capabilities.get("workspace_bounds")
-                or {}
-            )
-        )
-        current_pose_text = _resource_current_pose_text(
-            entry=entry,
-            recovery_snapshot=recovery_snapshot,
-        )
         lines.append(
             f"- {resource_jid}: {manipulation}; named poses {named_pose_text}; "
-            f"reachable locations {reachable_text}; current_pose({current_pose_text}); "
-            f"{workspace_hint}"
+            f"reachable locations {reachable_text}"
         )
     return "\n".join(lines) if lines else "(none advertised)"
 
@@ -1814,7 +1801,9 @@ def _outline_immediate_validation_feedback_summary(
             resources_by_jid=resources_by_jid,
             parts_by_name=parts_by_name,
         )
-    if primitive_escalation_diagnostics:
+    if primitive_escalation_diagnostics and (
+        outline_validation_findings or candidate_rejection_feedback
+    ):
         return _primitive_escalation_diagnostics_summary(primitive_escalation_diagnostics)
     return "(none)"
 
@@ -2322,21 +2311,10 @@ def _projected_outline_parts(
 
 
 def _clean_continuation_gap(llm_input: dict[str, Any]) -> dict[str, Any]:
-    """Strip internal IDs and prefixes from modeled continuation gap."""
+    """Keep only unresolved recovery conditions and readiness."""
     raw_gap = dict(llm_input.get("modeled_continuation_gap") or {})
     cleaned: dict[str, Any] = {}
 
-    # Clean pending nominal tasks — remove blocked_by_condition_ids
-    pending = []
-    for task in raw_gap.get("pending_nominal_tasks") or []:
-        if not isinstance(task, dict):
-            continue
-        clean_task = {k: v for k, v in task.items() if k != "blocked_by_condition_ids"}
-        pending.append(clean_task)
-    if pending:
-        cleaned["pending_nominal_tasks"] = pending
-
-    # Clean unmet continuation conditions — remove internal fields, strip "focused_" prefix
     conditions = []
     _drop_fields = {"condition_id", "condition_family", "source_task_ids", "role"}
     for cond in raw_gap.get("unmet_continuation_conditions") or []:
@@ -2414,6 +2392,10 @@ def _prompt_outline_resource_view(resource: dict[str, Any]) -> dict[str, Any]:
         view["resource_state"] = deepcopy(resource.get("current_state"))
     if "held_part" in resource:
         view["held_part"] = deepcopy(resource.get("held_part"))
+    if "resource_location" in resource:
+        view["resource_location"] = deepcopy(resource.get("resource_location"))
+    elif "current_location" in resource:
+        view["resource_location"] = deepcopy(resource.get("current_location"))
     if "current_pose" in resource:
         view["current_pose"] = deepcopy(resource.get("current_pose"))
     if "workspace_bounds" in resource:
@@ -2485,9 +2467,6 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
         "",
         "Safety Rules",
         _compact_safety_rules(llm_input),
-        "",
-        "Assembly Requirements",
-        _compact_assembly_requirements(llm_input),
         "",
         "Modeled Continuation Gap",
         _compact_json(_clean_continuation_gap(llm_input)),
@@ -2803,7 +2782,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     recovery_resources = dict(payload.get("recovery_resources") or {})
     feedback_render_style = _feedback_render_style_token(session_state)
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
-    observation_store = dict(session_state.get("observation_store") or {})
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
     previous_lookahead = list(session_state.get("outline_lookahead") or [])
     pruned_actions = list(session_state.get("pruned_actions") or [])
@@ -2839,11 +2817,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     candidate_rejection_history = _candidate_rejection_history(session_state)
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
-    recovery_selection_mode = (
-        str(session_state.get("recovery_selection_mode") or "pure_llm").strip().lower()
-    )
-    if recovery_selection_mode != "pure_llm":
-        recovery_selection_mode = "pure_llm"
     action_horizon = str(session_state.get("action_horizon") or "1").strip().lower()
     if action_horizon not in {"1", "k", "full"}:
         action_horizon = "1"
@@ -2859,22 +2832,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             action_horizon_steps = action_horizon_k
         else:
             action_horizon_steps = 1
-    raw_candidate_count = session_state.get("candidate_count", "auto")
-    candidate_count: int | str
-    if isinstance(raw_candidate_count, str):
-        candidate_count_token = raw_candidate_count.strip().lower()
-        if candidate_count_token in {"auto", "n"}:
-            candidate_count = "auto"
-        else:
-            try:
-                candidate_count = max(1, int(candidate_count_token))
-            except ValueError:
-                candidate_count = "auto"
-    else:
-        try:
-            candidate_count = max(1, int(raw_candidate_count))
-        except (TypeError, ValueError):
-            candidate_count = "auto"
     recent_candidate_diagnostic_signatures = (
         _candidate_rejection_diagnostic_signatures(
             history=candidate_rejection_history,
@@ -2914,14 +2871,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Author the expected symbolic start and end states directly."
         )
     elif is_candidate_mode:
-        candidate_count_unit = (
-            "candidate" if candidate_count != "auto" and int(candidate_count) == 1 else "candidates"
-        )
-        candidate_count_line = (
-            "- Propose as many distinct useful candidates as needed; do not pad weak duplicates."
-            if candidate_count == "auto"
-            else f"- Propose exactly {candidate_count} {candidate_count_unit}."
-        )
         selection_owner_text = (
             "You must choose the best candidate by setting `selected_candidate_index`."
         )
@@ -2936,7 +2885,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "You are the active replanner for a recovery session.\n"
             "Current phase: Recovery Event Candidate Proposal.\n"
             "Propose grounded symbolic recovery transitions enabled by the current symbolic state.\n"
-            "Accepted events extend the recovery trace toward marked-state conditions.\n"
+            "Accepted events extend the recovery trace toward safe nominal resumption.\n"
             f"{horizon_text}\n"
             f"{selection_owner_text}\n"
             "Return authored symbolic rows only; Product validates the stated transition."
@@ -2966,7 +2915,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text,
     ]
 
-    if not is_single_pass and accepted_prefix:
+    if not is_single_pass and not is_candidate_mode and accepted_prefix:
         sections.extend(
             [
                 "",
@@ -2978,24 +2927,12 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             ]
         )
 
-    sections.extend(_top_validation_feedback_section(summary=immediate_validation_feedback))
-
-    if is_candidate_mode:
-        rejected_candidate_summary = _candidate_rejection_learning_summary(
-            history=candidate_rejection_history,
-            feedback_rows=candidate_rejection_feedback,
-            feedback_render_style=feedback_render_style,
-            resources_by_jid=resources_by_jid,
-            parts_by_name=parts_by_name,
+    sections.extend(
+        _top_validation_feedback_section(
+            summary=immediate_validation_feedback,
+            label="Validation Feedback",
         )
-        if rejected_candidate_summary != "(none)":
-            sections.extend(
-                [
-                    "",
-                    "Disabled And Blocked Candidate Events",
-                    rejected_candidate_summary,
-                ]
-            )
+    )
 
     if primitive_escalation_diagnostics:
         sections.extend(
@@ -3018,24 +2955,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         sections.extend(
             [
                 "",
-                f"Candidate Count: {candidate_count}",
-                f"Action Horizon: {action_horizon_steps}",
-                f"Selection Mode: {recovery_selection_mode}",
-                "",
-                "Open Guard / Marking Conditions",
-                _current_recovery_blockers_summary(current_recovery_blockers),
-                "",
                 "Resource Capabilities",
                 _resource_capabilities_summary(recovery_resources),
-                "",
-                "Grounded Event Facts",
-                _candidate_grounding_facts_summary(
-                    recovery_resources=recovery_resources,
-                    projected_resources=prompt_projected_resources,
-                    projected_parts=prompt_projected_parts,
-                ),
-                # Experiment: keep raw observed poses and workspace bounds visible,
-                # but do not precompute the resource/part workspace relationship.
             ]
         )
     elif outline_validation_findings:
@@ -3080,13 +3001,15 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "",
             "Parts",
             _compact_json(prompt_projected_parts),
-            "Marked-State Conditions",
-            _compact_recovery_objectives(llm_input, projected_parts=projected_parts),
+            "Recovery Goals",
+            _compact_recovery_goals(
+                llm_input,
+                projected_parts=projected_parts,
+                current_recovery_blockers=current_recovery_blockers,
+            ),
         ]
     )
 
-    # Safety rules stay visible as facts; assembly requirements are hidden in
-    # candidate mode to avoid nominal-resource bias.
     sections.extend(
         [
             "",
@@ -3094,51 +3017,51 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             _compact_safety_rules(llm_input),
         ]
     )
-    if not is_candidate_mode:
-        sections.extend(
-            [
-                "",
-                "Assembly Requirements",
-                _compact_assembly_requirements(llm_input),
-            ]
-        )
 
     if is_candidate_mode:
-        selected_candidate_line = (
-            "- Return `selected_candidate_index` pointing at your chosen candidate."
+        candidate_property_name = (
+            "`candidate_events`" if action_horizon == "1" else "`candidate_traces`"
         )
-        if action_horizon == "1":
-            response_contract_lines = [
-                "- Return one JSON object with top-level fields `thought` and `candidate_events`.",
-                selected_candidate_line,
-                candidate_count_line,
-                "- Each candidate row is one physical action by one listed resource.",
-            ]
-        else:
-            horizon_count_text = (
-                f"up to {action_horizon_steps} next recovery rows"
-                if action_horizon == "k"
-                else "a complete recovery outline trace"
-            )
-            response_contract_lines = [
-                "- Return one JSON object with top-level fields `thought` and `candidate_traces`.",
-                selected_candidate_line,
-                candidate_count_line,
-                f"- Each candidate trace contains `events`, an ordered list with {horizon_count_text}.",
-                "- Each event row is one physical action by one listed resource.",
-            ]
         sections.extend(
             [
                 "",
-                "Outline Candidate Contract",
-                *response_contract_lines,
-                "- Split compound recoveries like fetch+place into separate rows.",
-                "- Each row must include `outline_id`, `event_name`, `resource_jid`, `expected_start_state`, `expected_end_state`, and `rationale`.",
-                "- Use top-level `resource_jid` and optional top-level `part_name`. `resource_location` and `part_location` are optional: include `resource_location` only when the row constrains a resource-only location change, and include `part_location` only when the row constrains a part location.",
-                "- Do not emit execution-layer fields such as `source_ref`, `target_ref`, `ppr_ontology`, `event_schema_id`, bindings objects, parameters, surface fields, or `predecessors`.",
-                "- If `part_name` is present, both state objects must include `held_part` and `part_state`; include `part_location` only when the row constrains a part location. If `part_name` is absent, omit part-specific state keys.",
-                "- Bind only listed resources, parts, and grounded location tokens from the current plant state.",
-                "- `rationale` should explain enabledness, blocker clearing, or why the action reduces the marked-state gap.",
+                "Recovery Candidate Rules",
+                (
+                    f"- Return one JSON object with `thought`, {candidate_property_name}, and "
+                    "an integer `selected_candidate_index` pointing at your chosen candidate."
+                ),
+                (
+                    "- Each candidate is one physical action by one listed resource with "
+                    "`outline_id`, `event_name`, `resource_jid`, `expected_start_state`, "
+                    "`expected_end_state`, and `rationale`."
+                ),
+                (
+                    "- Resource-only actions may include `resource_state`, "
+                    "`resource_location`, and `held_part`; match included start-state "
+                    "fields exactly."
+                ),
+                (
+                    "- `part_state` and `part_location` require `part_name`; when `part_name` "
+                    "is present, both state objects include `held_part` and `part_state`."
+                ),
+                (
+                    "- You may author a new `event_name` and new `resource_state` or "
+                    "`part_state` tokens in `expected_end_state`; accepted tokens remain exact "
+                    "symbols in later turns."
+                ),
+                (
+                    "- A new state token must accompany a concrete holder or location effect, or "
+                    "directly clear a listed recovery condition; changing only a label is invalid."
+                ),
+                (
+                    "- If `expected_end_state.resource_state` is an advertised named-pose token, "
+                    "`expected_end_state.resource_location` must preserve that same exact token."
+                ),
+                (
+                    "- Use only listed resource, part, predicate, location, and named-pose tokens; "
+                    "keep existing tokens unchanged, omit execution-layer fields, and split "
+                    "compound recoveries into separate candidates."
+                ),
             ]
         )
 
@@ -3174,7 +3097,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "- If part_name is present, expected_start_state and expected_end_state must include held_part and part_state; include part_location only when the row constrains a part location.",
                 "- If part_name is absent, do not emit part-specific state keys.",
                 "- Bind only entities and location tokens grounded in the current plant state.",
-                "- Rationale should explain enabledness, unsatisfied blockers being cleared, or why the candidate reduces the marked-state gap.",
+                "- Rationale should explain enabledness or which recovery goal is advanced.",
             ]
         )
 

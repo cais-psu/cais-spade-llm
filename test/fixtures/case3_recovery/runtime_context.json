@@ -96,6 +96,10 @@
       "resource_config_key": "xarm6",
       "execution_env": "gazebo",
       "current_state": "failed",
+      "current_location": "assembly_board-v1",
+      "occupancy": {
+        "location": "assembly_board-v1"
+      },
       "held_part": null,
       "gripper_state": "open",
       "current_pose_ref": null,
