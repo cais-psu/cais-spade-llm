@@ -29,6 +29,21 @@ The physical perception files are still stubs:
 - [cais_spade_llm/resources/sensor/physical/detect_all_service.py](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
 - [cais_spade_llm/resources/sensor/physical/detect_part_service.py](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
 
+## Minimum First Run Without ROS2
+
+If you only want to open the UI and confirm the Python path, complete steps 1-5
+below and stop before installing ROS2. The `dry_run` path does not need ROS2,
+Gazebo, RViz, xArm6, UR5e, RG2, or robot networking.
+
+After step 4, this is enough for the first local UI check:
+
+```bash
+make run
+```
+
+Open `http://localhost:8080`, then use `dry_run` before starting ROS2 or
+hardware.
+
 ## New PC Install: Digital Twin Environment
 
 Use Ubuntu 22.04, either native or WSL2. ROS2 Humble is built for Ubuntu 22.04.
@@ -41,6 +56,8 @@ Open Ubuntu 22.04 and run:
 ```bash
 sudo apt update
 sudo apt install -y \
+  build-essential \
+  cmake \
   git \
   curl \
   python3-pip \
@@ -57,7 +74,11 @@ Install Poetry:
 curl -sSL https://install.python-poetry.org | python3.10
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+poetry --version
 ```
+
+Use Poetry 2.x for this repo. Older Poetry 1.x installs can fail on the
+dependency group metadata in `pyproject.toml`.
 
 ### 2. Clone this repo
 
@@ -80,7 +101,8 @@ Edit `.env` and set:
 OPENAI_API_KEY=...
 ```
 
-The optional values in `.env.example` can stay commented for a first install.
+The optional values in `.env.example` are safe defaults for a first `dry_run`
+install.
 
 ### 4. Install Python dependencies
 
@@ -95,6 +117,12 @@ poetry run pip install -r requirements-ui.txt
 `poetry run python -m cais_spade_llm` entry point.
 
 The UR5e RTDE Python dependency is installed through Poetry from `pyproject.toml`.
+
+Equivalent Make target:
+
+```bash
+make install
+```
 
 ### 5. Verify the Python-only path
 
@@ -112,6 +140,7 @@ http://localhost:8080
 ```
 
 For a first UI run, use `dry_run` before starting ROS2 or hardware.
+No robot network connection is required for this Python-only check.
 
 ### 6. Install ROS2 Humble, Gazebo, MoveIt, and controllers
 
@@ -435,14 +464,21 @@ make install
 make run
 make headless
 make bootstrap-gazebo
+make check
 ```
 
 Equivalent direct commands:
 
 ```bash
+poetry install
+poetry run pip install -r requirements-ui.txt
 poetry run python -m cais_spade_llm
 poetry run python -m cais_spade_llm.ui_main
 poetry run python -m cais_spade_llm.ui_main --headless
+bash scripts/bootstrap_gazebo_workspace.sh
+poetry check
+poetry run python -m compileall -q cais_spade_llm ros2
+poetry run python -m cais_spade_llm.ui_main --help
 ```
 
 ## Troubleshooting
@@ -476,6 +512,8 @@ These are the commands above that require `sudo` on a new Ubuntu 22.04 / WSL2 PC
 ```bash
 sudo apt update
 sudo apt install -y \
+  build-essential \
+  cmake \
   git \
   curl \
   python3-pip \
