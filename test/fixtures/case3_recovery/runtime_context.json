@@ -1,0 +1,125 @@
+{
+  "bundle_root": "cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery",
+  "failure_scenario_id": "lg_slippage",
+  "product_geometry": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json",
+  "goal_state": "assembled",
+  "default_resource_state": "idle",
+  "task_statuses": {
+    "REQ_1_T1": "completed",
+    "REQ_1_T2": "completed",
+    "REQ_1_T3": "pending",
+    "REQ_1_T4": "pending",
+    "REQ_1_T5": "pending",
+    "REQ_2_T1": "completed",
+    "REQ_2_T2": "completed",
+    "REQ_2_T3": "completed",
+    "REQ_2_T4": "failed",
+    "REQ_2_T5": "pending"
+  },
+  "failure_event": {
+    "failed_task_id": "REQ_2_T4",
+    "final_status": "failed",
+    "part_name": "LG",
+    "state_before": {
+      "execution_mode": "simulation",
+      "controller_ready": true,
+      "held_part": "LG",
+      "current_state": "positioned",
+      "position": {
+        "x": 0.1,
+        "y": 0.08,
+        "z": 1.1994999760206477
+      },
+      "gripper_state": "closed"
+    },
+    "state_after": {
+      "execution_mode": "simulation",
+      "controller_ready": true,
+      "held_part": null,
+      "current_state": "failed",
+      "position": {
+        "x": 0.1,
+        "y": 0.08,
+        "z": 1.1994999760206477
+      },
+      "gripper_state": "open"
+    }
+  },
+  "part_tracker": {
+    "LG": {
+      "state": "misplaced",
+      "location": null,
+      "last_known_location": null,
+      "last_successful_task": "REQ_2_T3",
+      "origin_resource_location": "prusa-mk4-1"
+    },
+    "MCP": {
+      "state": "in_gripper",
+      "location": "ur5e@localhost_gripper",
+      "last_known_location": "ur5e@localhost_gripper",
+      "last_successful_task": "REQ_1_T2",
+      "origin_resource_location": "prusa-mk4-2"
+    }
+  },
+  "resource_snapshots": [
+    {
+      "resource_jid": "ur5e@localhost",
+      "resource_config": "cais_spade_llm/initialization/resources/robot_ur5e.json",
+      "resource_config_key": "ur5e",
+      "execution_env": "gazebo",
+      "current_state": "picked",
+      "held_part": "MCP",
+      "gripper_state": "closed",
+      "current_pose_ref": null,
+      "current_pose": {
+        "x": -0.25,
+        "y": 0.22,
+        "z": 1.18
+      },
+      "observations": {
+        "MCP": {
+          "part_name": "MCP",
+          "x": 0.0,
+          "y": -0.08,
+          "z": 1.025,
+          "pose": {
+            "x": 0.0,
+            "y": -0.08,
+            "z": 1.025
+          }
+        }
+      }
+    },
+    {
+      "resource_jid": "xarm6@localhost",
+      "resource_config": "cais_spade_llm/initialization/resources/robot_xarm6.json",
+      "resource_config_key": "xarm6",
+      "execution_env": "gazebo",
+      "current_state": "failed",
+      "held_part": null,
+      "gripper_state": "open",
+      "current_pose_ref": null,
+      "current_pose": {
+        "x": 0.1,
+        "y": 0.08,
+        "z": 1.1994999760206477
+      },
+      "observations": {
+        "LG": {
+          "part_name": "LG",
+          "x": 0.0,
+          "y": 0.2,
+          "z": 1.035,
+          "pose": {
+            "x": 0.0,
+            "y": 0.2,
+            "z": 1.035
+          }
+        }
+      }
+    }
+  ],
+  "obligation_targets": [],
+  "recovery_feedback": "",
+  "recovery_safety_context": {}
+}

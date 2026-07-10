@@ -103,7 +103,7 @@ class RobotTaskEffect:
 
 @dataclass(frozen=True)
 class RobotTaskProgram:
-    """Task-level SSOT; bridge/task decompositions are rendered from `steps`."""
+    """Task-level SSOT; recovery/task decompositions are rendered from `steps`."""
 
     entry_state: str
     success_state: str
@@ -137,7 +137,7 @@ class RobotTaskProgram:
                 resolved.append(token)
         return resolved
 
-    def render_bridge_steps(self) -> list[dict[str, Any]]:
+    def render_recovery_steps(self) -> list[dict[str, Any]]:
         return [step.render_capability_row() for step in self.steps if step.exposed]
 
 
@@ -215,14 +215,14 @@ class RobotTaskDefinition:
         }
 
     def capability_decomposition(self, *, resource_jid: str = "") -> dict[str, Any]:
-        # `program.steps` is the authored task SSOT. `bridge_visible_steps` remains
-        # a derived rendering for primitive generation and related bridge tooling.
+        # `program.steps` is the authored task SSOT. `recovery_visible_steps` remains
+        # a derived rendering for primitive generation and related recovery tooling.
         return {
             "function_name": self.name,
             "source": self.source,
             "modeled_transition": self.program.modeled_transition(),
             "task_preconditions": self.program.task_preconditions(resource_jid=resource_jid),
-            "bridge_visible_steps": self.program.render_bridge_steps(),
+            "recovery_visible_steps": self.program.render_recovery_steps(),
             "execution_notes": list(self.program.notes),
         }
 
@@ -493,7 +493,7 @@ def _build_runtime_state(agent: Any) -> dict[str, Any]:
         "_current_state": deepcopy(getattr(agent, "_current_state", "")),
         "_position": deepcopy(getattr(agent, "_position", {})),
         "_gripper_state": deepcopy(getattr(agent, "_gripper_state", "")),
-        "_bridge_pose_ref": deepcopy(getattr(agent, "_bridge_pose_ref", None)),
+        "_recovery_pose_ref": deepcopy(getattr(agent, "_recovery_pose_ref", None)),
         "_task_ctx": deepcopy(getattr(agent, "_task_ctx", {})),
     }
 
@@ -504,7 +504,7 @@ def _commit_runtime_state(agent: Any, runtime_state: dict[str, Any]) -> None:
         "_current_state",
         "_position",
         "_gripper_state",
-        "_bridge_pose_ref",
+        "_recovery_pose_ref",
         "_task_ctx",
     ):
         setattr(agent, field, deepcopy(runtime_state.get(field)))
@@ -1045,7 +1045,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "z": _step_output("pick_targets", "pick_z"),
                         },
                     ),
-                    RobotTaskEffect(target="bridge_pose_ref", action="set", value=None),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value=None),
                 ),
                 success_response={
                     "status": "completed",
@@ -1369,7 +1369,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "z": _step_output("place_targets", "place_z"),
                         },
                     ),
-                    RobotTaskEffect(target="bridge_pose_ref", action="set", value=None),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value=None),
                 ),
                 success_response={
                     "status": "completed",
@@ -1630,7 +1630,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         action="set",
                         value={"x": 0.0, "y": 0.0, "z": 445.0},
                     ),
-                    RobotTaskEffect(target="bridge_pose_ref", action="set", value="home"),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value="home"),
                     RobotTaskEffect(target="task_ctx", action="clear"),
                 ),
                 success_response={

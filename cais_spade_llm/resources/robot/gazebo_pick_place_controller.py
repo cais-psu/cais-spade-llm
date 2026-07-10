@@ -445,7 +445,7 @@ class GazeboPickPlaceController:
         self._joint_lock = threading.Lock()
         self._joint_positions: dict[str, float] = {}
 
-        # Remembered start pose for move_home (set externally or by UI bridge).
+        # Remembered start pose for move_home (set externally or by UI recovery).
         self._last_start_pose = None
 
     def _apply_gazebo_fast_timing_profile(self, scale: float | None = None) -> None:
@@ -725,7 +725,7 @@ class GazeboPickPlaceController:
         return True
 
     # ------------------------------------------------------------------ #
-    # Public primitives (bridge-visible low-level API)
+    # Public primitives (recovery-visible low-level API)
     # ------------------------------------------------------------------ #
     def move_cartesian(
         self,
@@ -1168,7 +1168,7 @@ class GazeboPickPlaceController:
         description: Open the gripper and detach the currently held part as one high-level release primitive.
         params:
           model_name: {type: string, description: "Optional controller model name to detach."}
-          part_name: {type: string, description: "Optional canonical bridge part name for release trace validation."}
+          part_name: {type: string, description: "Optional canonical recovery part name for release trace validation."}
           assume_released_if_open: {type: boolean, description: "Treat an already-open gripper as an idempotent release when true."}
         preconditions:
           held_part:
@@ -1946,7 +1946,7 @@ class GazeboPickPlaceController:
         return parts
 
     # ------------------------------------------------------------------ #
-    # Standalone utility methods (called directly by UI bridge / tests)
+    # Standalone utility methods (called directly by UI recovery / tests)
     # ------------------------------------------------------------------ #
     def return_to_remembered_start_pose(self) -> dict[str, Any]:
         if not self.wait_for_services():

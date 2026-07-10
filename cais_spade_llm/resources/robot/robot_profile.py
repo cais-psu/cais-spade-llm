@@ -1,4 +1,4 @@
-"""Built-in robot resource profile and robot-specific bridge helpers."""
+"""Built-in robot resource profile and robot-specific recovery helpers."""
 
 from __future__ import annotations
 
@@ -196,51 +196,51 @@ def _robot_event_contract_validator(
 
     if operation_family in {"clear", "home"} and part_name:
         return (
-            f"bridge event '{event_name}' is inconsistent for robot resources: "
+            f"recovery event '{event_name}' is inconsistent for robot resources: "
             f"operation_family '{operation_family}' must not declare part_name"
         )
     if operation_family == "pick":
         if part_to and part_to != "in_gripper":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'pick' requires expected_part_delta.to='in_gripper'"
             )
         if delta_to and delta_to != "picked":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'pick' requires expected_resource_delta.to='picked'"
             )
     if operation_family == "stage":
         if part_to and part_to != "ready":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'stage' requires expected_part_delta.to='ready'"
             )
         if delta_to == "picked":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'stage' cannot keep the resource in state 'picked'"
             )
     if operation_family == "assemble":
         if part_to and part_to != "assembled":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'assemble' requires expected_part_delta.to='assembled'"
             )
         if delta_to == "picked":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'assemble' cannot keep the resource in state 'picked'"
             )
     if operation_family == "place":
         if part_to == "in_gripper":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'place' cannot leave the part in_gripper"
             )
         if delta_to == "picked":
             return (
-                f"bridge event '{event_name}' is inconsistent for robot resources: "
+                f"recovery event '{event_name}' is inconsistent for robot resources: "
                 "'place' cannot keep the resource in state 'picked'"
             )
     return None
@@ -340,25 +340,25 @@ def _robot_event_state_validator(
         if carried_before != part_name:
             if not carried_before:
                 return (
-                    f"bridge event '{str(event.get('event_name', '') or resource_jid).strip()}' "
+                    f"recovery event '{str(event.get('event_name', '') or resource_jid).strip()}' "
                     f"is inconsistent: {resource_jid} must be carrying '{part_name}' "
                     f"before it starts"
                 )
             return (
-                f"bridge event '{str(event.get('event_name', '') or resource_jid).strip()}' "
+                f"recovery event '{str(event.get('event_name', '') or resource_jid).strip()}' "
                 f"is inconsistent: {resource_jid} must be carrying '{part_name}' before it "
                 f"starts, but projected carried entity is '{carried_before}'"
             )
         if carried_after:
             return (
-                f"bridge event '{str(event.get('event_name', '') or resource_jid).strip()}' "
+                f"recovery event '{str(event.get('event_name', '') or resource_jid).strip()}' "
                 f"is inconsistent: it claims '{part_name}' is released, but projected "
                 f"carried entity after the event is '{carried_after}'"
             )
 
     if semantic_kind == "pick" and carried_after != part_name:
         return (
-            f"bridge event '{str(event.get('event_name', '') or resource_jid).strip()}' "
+            f"recovery event '{str(event.get('event_name', '') or resource_jid).strip()}' "
             f"is inconsistent: it claims '{part_name}' is acquired, but projected carried "
             f"entity after the event is {carried_after!r}"
         )
@@ -411,7 +411,7 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
                     "y": float(pose["y"]),
                     "z": float(pose["z"]),
                 }
-    if current_pose is None and getattr(agent, "_bridge_pose_ref", None) is None:
+    if current_pose is None and getattr(agent, "_recovery_pose_ref", None) is None:
         position = getattr(agent, "_position", None)
         if isinstance(position, dict) and {"x", "y", "z"} <= set(position.keys()):
             current_pose = {
@@ -425,7 +425,7 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
         "held_part": getattr(agent, "_held_part", None),
         "gripper_state": str(getattr(agent, "_gripper_state", "") or "").strip() or "unknown",
         "current_pose": current_pose,
-        "current_pose_ref": getattr(agent, "_bridge_pose_ref", None),
+        "current_pose_ref": getattr(agent, "_recovery_pose_ref", None),
         "named_poses": sorted((getattr(agent, "named_positions", {}) or {}).keys()),
     }
 
@@ -442,7 +442,7 @@ ROBOT_PROFILE = RobotProfile(
         "held_part": "_held_part",
         "gripper_state": "_gripper_state",
         "current_pose": _sync_robot_pose,
-        "current_pose_ref": "_bridge_pose_ref",
+        "current_pose_ref": "_recovery_pose_ref",
     },
     primitive_kind_map=ROBOT_PRIMITIVE_KIND_MAP,
     primitive_trace_fact_map=ROBOT_PRIMITIVE_TRACE_FACT_MAP,
@@ -466,7 +466,7 @@ ROBOT_PROFILE = RobotProfile(
             "optional_request_fields": ("scope", "reason"),
         },
     },
-    example_families=("generic_bridge", "manipulator_pick_place"),
+    example_families=("generic_recovery", "manipulator_pick_place"),
     observation_output_schema_map=ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP,
     preview_output_map=ROBOT_PREVIEW_OUTPUT_MAP,
     extract_output_map=ROBOT_EXTRACT_OUTPUT_MAP,

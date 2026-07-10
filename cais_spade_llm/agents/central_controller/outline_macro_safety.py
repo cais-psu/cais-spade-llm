@@ -1,4 +1,4 @@
-"""CCA-owned generic bridge AP projection and outline-time safety validation."""
+"""CCA-owned generic recovery AP projection and outline-time safety validation."""
 
 from __future__ import annotations
 
@@ -330,27 +330,27 @@ def _effective_task_part_name(task: dict[str, Any], signature: dict[str, Any]) -
     return str(task.get("part_name") or signature.get("inferable_primary_part") or "").strip()
 
 
-def _bridge_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
+def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for raw_rule in llm_input.get("loaded_safety_rules") or []:
         if not isinstance(raw_rule, dict):
             continue
         ap_scope = str(raw_rule.get("ap_scope") or "").strip().lower()
-        if ap_scope not in {"bridge", "both", "nominal"}:
+        if ap_scope not in {"recovery", "bridge", "both", "nominal"}:
             continue
         dfa_dot = str(raw_rule.get("dfa_dot") or "").strip()
-        bridge_aps = _bridge_rule_aps(raw_rule)
-        if not dfa_dot or not bridge_aps:
+        recovery_aps = _recovery_rule_aps(raw_rule)
+        if not dfa_dot or not recovery_aps:
             continue
         rule = deepcopy(raw_rule)
         rule.setdefault("rule_id", str(rule.get("id") or rule.get("rule_id") or "").strip())
-        rule["bridge_aps"] = bridge_aps
+        rule["recovery_aps"] = recovery_aps
         rule["dfa_dot"] = dfa_dot
         selected.append(rule)
     return selected
 
 
-def _parse_bridge_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
+def _parse_recovery_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
     full = str(ap_full or "").strip()
     if not full:
         return None
@@ -404,16 +404,16 @@ def _parse_bridge_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
     return None
 
 
-def _bridge_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
-    explicit_bridge_aps = [
+def _recovery_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit_recovery_aps = [
         deepcopy(ap)
-        for ap in (raw_rule.get("bridge_aps") or [])
+        for ap in (raw_rule.get("recovery_aps") or [])
         if isinstance(ap, dict)
         and str(ap.get("label") or "").strip()
         and str(ap.get("full") or "").strip()
     ]
-    if explicit_bridge_aps:
-        return explicit_bridge_aps
+    if explicit_recovery_aps:
+        return explicit_recovery_aps
     derived_aps: list[dict[str, Any]] = []
     for raw_ap in raw_rule.get("aps") or []:
         if not isinstance(raw_ap, dict):
@@ -422,7 +422,7 @@ def _bridge_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
         full = str(raw_ap.get("full") or "").strip()
         selector = dict(raw_ap.get("selector") or {})
         if not selector:
-            selector = dict(_parse_bridge_selector_from_ap_full(full) or {})
+            selector = dict(_parse_recovery_selector_from_ap_full(full) or {})
         if not label or not full or not selector:
             continue
         derived_aps.append(
@@ -435,34 +435,34 @@ def _bridge_rule_aps(raw_rule: dict[str, Any]) -> list[dict[str, Any]]:
     return derived_aps
 
 
-def _bridge_monitor_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _recovery_monitor_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     monitor_rules: list[dict[str, Any]] = []
     for raw_rule in rules:
         rule_id = str(raw_rule.get("id") or raw_rule.get("rule_id") or "").strip()
-        bridge_aps = [
+        recovery_aps = [
             {
                 "label": str(ap.get("label") or "").strip(),
                 "full": str(ap.get("full") or "").strip(),
             }
-            for ap in (raw_rule.get("bridge_aps") or [])
+            for ap in (raw_rule.get("recovery_aps") or [])
             if isinstance(ap, dict)
             and str(ap.get("label") or "").strip()
             and str(ap.get("full") or "").strip()
         ]
-        if not rule_id or not bridge_aps:
+        if not rule_id or not recovery_aps:
             continue
         monitor_rules.append(
             {
                 "id": rule_id,
                 "rule_id": rule_id,
                 "constraint_type": deepcopy(raw_rule.get("constraint_type")),
-                "aps": bridge_aps,
+                "aps": recovery_aps,
             }
         )
     return monitor_rules
 
 
-def _bridge_dfa_dots(rules: list[dict[str, Any]]) -> dict[str, str]:
+def _recovery_dfa_dots(rules: list[dict[str, Any]]) -> dict[str, str]:
     dfa_dots: dict[str, str] = {}
     for raw_rule in rules:
         rule_id = str(raw_rule.get("id") or raw_rule.get("rule_id") or "").strip()
@@ -472,7 +472,7 @@ def _bridge_dfa_dots(rules: list[dict[str, Any]]) -> dict[str, str]:
     return dfa_dots
 
 
-def _bridge_rule_lookup(rules: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _recovery_rule_lookup(rules: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     lookup: dict[str, dict[str, Any]] = {}
     for raw_rule in rules:
         rule_id = str(raw_rule.get("id") or raw_rule.get("rule_id") or "").strip()
@@ -481,10 +481,10 @@ def _bridge_rule_lookup(rules: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return lookup
 
 
-def _bridge_rule_labels(rules: list[dict[str, Any]]) -> set[str]:
+def _recovery_rule_labels(rules: list[dict[str, Any]]) -> set[str]:
     labels: set[str] = set()
     for raw_rule in rules:
-        for raw_ap in raw_rule.get("bridge_aps") or []:
+        for raw_ap in raw_rule.get("recovery_aps") or []:
             if not isinstance(raw_ap, dict):
                 continue
             label = str(raw_ap.get("label") or "").strip()
@@ -621,7 +621,7 @@ def _selector_matches_state(
     return False
 
 
-def project_outline_macro_bridge_aps(
+def project_outline_macro_recovery_aps(
     *,
     task: dict[str, Any],
     signature: dict[str, Any],
@@ -631,12 +631,12 @@ def project_outline_macro_bridge_aps(
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
 ) -> dict[str, Any]:
-    rules = _bridge_loaded_rules(llm_input)
+    rules = _recovery_loaded_rules(llm_input)
     candidate_aps: list[str] = []
     predicted_state_aps: list[str] = []
     current_state_aps: list[str] = []
     for raw_rule in rules:
-        for raw_ap in raw_rule.get("bridge_aps") or []:
+        for raw_ap in raw_rule.get("recovery_aps") or []:
             if not isinstance(raw_ap, dict):
                 continue
             label = str(raw_ap.get("label") or "").strip()
@@ -676,30 +676,30 @@ def project_outline_macro_bridge_aps(
     }
 
 
-def _bridge_running_aps(llm_input: dict[str, Any], rules: list[dict[str, Any]]) -> list[str]:
-    bridge_ctx = dict(llm_input.get("bridge_safety_context") or {})
-    allowed_labels = _bridge_rule_labels(rules)
+def _recovery_running_aps(llm_input: dict[str, Any], rules: list[dict[str, Any]]) -> list[str]:
+    recovery_ctx = dict(llm_input.get("recovery_safety_context") or {})
+    allowed_labels = _recovery_rule_labels(rules)
     running_aps = [
         str(label).strip()
-        for label in (bridge_ctx.get("running_aps") or [])
+        for label in (recovery_ctx.get("running_aps") or [])
         if str(label).strip() in allowed_labels
     ]
     return _dedupe_tokens(running_aps)
 
 
-def _build_bridge_safety_monitor(
+def _build_recovery_safety_monitor(
     *,
     rules: list[dict[str, Any]],
     state_aps: list[str],
     llm_input: dict[str, Any],
 ) -> OnlineSafetyMonitor:
     monitor = OnlineSafetyMonitor(
-        _bridge_dfa_dots(rules),
-        _bridge_monitor_rules(rules),
+        _recovery_dfa_dots(rules),
+        _recovery_monitor_rules(rules),
     )
     if state_aps:
-        monitor.resource_state_aps["bridge_scope"] = set(state_aps)
-    running_aps = _bridge_running_aps(llm_input, rules)
+        monitor.resource_state_aps["recovery_scope"] = set(state_aps)
+    running_aps = _recovery_running_aps(llm_input, rules)
     if running_aps:
         monitor.running_aps.update(running_aps)
     return monitor
@@ -766,7 +766,7 @@ def _safe_next_task_ids_after_projection(
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
 ) -> tuple[list[str], list[str]]:
-    rule_lookup = _bridge_rule_lookup(rules)
+    rule_lookup = _recovery_rule_lookup(rules)
     safe_next_task_ids: list[str] = []
     cleared_condition_ids: list[str] = []
     for condition_id in claimed_condition_ids:
@@ -791,7 +791,7 @@ def _safe_next_task_ids_after_projection(
             "task_kind": "part_handling",
             "changes_part_world": True,
         }
-        projection = project_outline_macro_bridge_aps(
+        projection = project_outline_macro_recovery_aps(
             task=proxy_task,
             signature=proxy_signature,
             pre_resources=projected_resources,
@@ -800,10 +800,10 @@ def _safe_next_task_ids_after_projection(
             projected_parts=projected_parts,
             llm_input={
                 "loaded_safety_rules": [rule],
-                "bridge_safety_context": llm_input.get("bridge_safety_context") or {},
+                "recovery_safety_context": llm_input.get("recovery_safety_context") or {},
             },
         )
-        monitor = _build_bridge_safety_monitor(
+        monitor = _build_recovery_safety_monitor(
             rules=[rule],
             state_aps=list(projection.get("current_state_aps") or []),
             llm_input=llm_input,
@@ -818,7 +818,7 @@ def _safe_next_task_ids_after_projection(
     return _dedupe_tokens(safe_next_task_ids), _dedupe_tokens(cleared_condition_ids)
 
 
-def validate_outline_macro_bridge_safety(
+def validate_outline_macro_recovery_safety(
     *,
     task: dict[str, Any],
     signature: dict[str, Any],
@@ -828,8 +828,8 @@ def validate_outline_macro_bridge_safety(
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
 ) -> dict[str, Any]:
-    rules = _bridge_loaded_rules(llm_input)
-    projection = project_outline_macro_bridge_aps(
+    rules = _recovery_loaded_rules(llm_input)
+    projection = project_outline_macro_recovery_aps(
         task=task,
         signature=signature,
         pre_resources=pre_resources,
@@ -861,7 +861,7 @@ def validate_outline_macro_bridge_safety(
             "cleared_condition_ids": [],
         }
 
-    monitor = _build_bridge_safety_monitor(
+    monitor = _build_recovery_safety_monitor(
         rules=rules,
         state_aps=list(projection.get("current_state_aps") or []),
         llm_input=llm_input,
@@ -870,7 +870,7 @@ def validate_outline_macro_bridge_safety(
         list(projection.get("candidate_aps") or []),
         predicted_state_aps=list(projection.get("predicted_state_aps") or []),
     )
-    rule_lookup = _bridge_rule_lookup(rules)
+    rule_lookup = _recovery_rule_lookup(rules)
     violated_rule_id = str(info.get("violated_rule") or "").strip()
     violated_rule = dict(rule_lookup.get(violated_rule_id) or {})
     related_condition_ids = _claimed_safety_condition_ids_for_rule(
@@ -914,7 +914,7 @@ def validate_outline_macro_bridge_safety(
                 "task_id": str(task.get("outline_id") or "").strip(),
                 "resource_jid": str(task.get("resource_jid") or "").strip() or None,
                 "part_name": _effective_task_part_name(task, signature) or None,
-                "pose_source": "bridge_safety_rule",
+                "pose_source": "recovery_safety_rule",
                 "pose": None,
                 "workspace_bounds": None,
                 "failed_axes": ["safety_rule_violation"],
@@ -1225,7 +1225,7 @@ def validate_outline_macro_cca_constraints(
                 )
             )
 
-    safety_result = validate_outline_macro_bridge_safety(
+    safety_result = validate_outline_macro_recovery_safety(
         task=task,
         signature=signature,
         pre_resources=pre_resources,
@@ -1250,7 +1250,7 @@ def validate_outline_macro_cca_constraints(
 
 
 __all__ = [
-    "project_outline_macro_bridge_aps",
-    "validate_outline_macro_bridge_safety",
+    "project_outline_macro_recovery_aps",
+    "validate_outline_macro_recovery_safety",
     "validate_outline_macro_cca_constraints",
 ]

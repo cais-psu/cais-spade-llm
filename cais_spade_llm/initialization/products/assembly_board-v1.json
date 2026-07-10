@@ -6,7 +6,7 @@
     "domain": "localhost",
     "functions": [],
     "instructions": "This product requires to be printed and assembled as specified.",
-    "product_order_file": "cais_spade_llm/specification/products/orders/llm_bridge_scenario.json",
+    "product_order_file": "cais_spade_llm/specification/products/orders/llm_recovery_scenario.json",
     "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
   }
 }

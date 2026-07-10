@@ -74,10 +74,10 @@ class ResourceAgent(LlmAgent):
         self.tool_timeout_s = int(tool_timeout_s)
 
         self._safety_decisions: dict[str, str] = {}
-        self._bridge_execution_primitive_catalog_cache: list[dict[str, Any]] | None = None
-        self._bridge_synthesis_primitive_catalog_cache: list[dict[str, Any]] | None = None
+        self._recovery_execution_primitive_catalog_cache: list[dict[str, Any]] | None = None
+        self._recovery_synthesis_primitive_catalog_cache: list[dict[str, Any]] | None = None
 
-        # Register bridge recovery executor for all resource types.
+        # Register recovery executor for all resource types.
         # RobotAgent overrides the method but no longer needs to re-register.
         self.executables["execute_recovery_macro"] = self.execute_recovery_macro
 
@@ -104,7 +104,7 @@ class ResourceAgent(LlmAgent):
         """
         return {}
 
-    def bridge_resource_type(self) -> str:
+    def recovery_resource_type(self) -> str:
         snapshot = self._snapshot_state() if hasattr(self, "_snapshot_state") else {}
         if isinstance(snapshot, dict):
             token = str(snapshot.get("resource_type", "") or "").strip().lower()
@@ -115,71 +115,69 @@ class ResourceAgent(LlmAgent):
             return token
         return "resource"
 
-    def get_bridge_snapshot(self) -> dict[str, Any]:
-        """Return the current descriptor-driven bridge snapshot for this resource."""
+    def get_recovery_snapshot(self) -> dict[str, Any]:
+        """Return the current descriptor-driven recovery snapshot for this resource."""
         from cais_spade_llm.resources.resource_primitives import (
-            get_resource_bridge_snapshot,
+            get_resource_recovery_snapshot,
         )
 
-        return get_resource_bridge_snapshot(self)
+        return get_resource_recovery_snapshot(self)
 
-    def bridge_execution_primitive_catalog(self) -> list[dict[str, Any]]:
+    def recovery_execution_primitive_catalog(self) -> list[dict[str, Any]]:
         """Return the resource-owned execution primitive catalog."""
-        if self._bridge_execution_primitive_catalog_cache is None:
+        if self._recovery_execution_primitive_catalog_cache is None:
             from cais_spade_llm.resources.resource_primitives import (
                 build_execution_primitive_catalog,
             )
 
-            self._bridge_execution_primitive_catalog_cache = build_execution_primitive_catalog(self)
-        return deepcopy(self._bridge_execution_primitive_catalog_cache)
+            self._recovery_execution_primitive_catalog_cache = build_execution_primitive_catalog(self)
+        return deepcopy(self._recovery_execution_primitive_catalog_cache)
 
-    def bridge_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
+    def recovery_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
         """Return the resource-owned LLM-facing primitive catalog."""
-        if self._bridge_synthesis_primitive_catalog_cache is None:
+        if self._recovery_synthesis_primitive_catalog_cache is None:
             from cais_spade_llm.resources.resource_primitives import (
                 build_synthesis_primitive_catalog,
             )
 
-            self._bridge_synthesis_primitive_catalog_cache = build_synthesis_primitive_catalog(
-                primitive_catalog=self.bridge_execution_primitive_catalog()
+            self._recovery_synthesis_primitive_catalog_cache = build_synthesis_primitive_catalog(
+                primitive_catalog=self.recovery_execution_primitive_catalog()
             )
-        return deepcopy(self._bridge_synthesis_primitive_catalog_cache)
+        return deepcopy(self._recovery_synthesis_primitive_catalog_cache)
 
-    def invalidate_bridge_primitive_catalog(self) -> None:
+    def invalidate_recovery_primitive_catalog(self) -> None:
         """Clear cached primitive catalogs after resource primitive changes."""
-        self._bridge_execution_primitive_catalog_cache = None
-        self._bridge_synthesis_primitive_catalog_cache = None
+        self._recovery_execution_primitive_catalog_cache = None
+        self._recovery_synthesis_primitive_catalog_cache = None
 
-    def bridge_feasibility_oracle(
+    def check_recovery_physical_feasibility(
         self,
         *,
-        event_instance: Any | None = None,
-        schema: Any | None = None,
-        projection: Any | None = None,
         part_context: dict[str, Any] | None = None,
-        bridge_snapshot: dict[str, Any] | None = None,
+        recovery_snapshot: dict[str, Any] | None = None,
+        grounded_action: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
     ) -> dict[str, Any]:
-        """Default permissive bridge feasibility oracle.
+        """Return the default permissive recovery physical feasibility result.
 
         Subclasses (RobotAgent, PrintingAgent) can override with
         resource-specific checks.
         """
-        del event_instance, schema, projection, part_context, bridge_snapshot
-        return {"allowed": True, "reason": "default permissive oracle"}
+        del part_context, recovery_snapshot, grounded_action
+        return {"allowed": True, "reason": "default permissive physical feasibility check"}
 
-    async def generate_bridge_primitives_batch(
+    async def generate_recovery_primitives_batch(
         self,
         *,
-        bridge_session_id: str = "",
+        recovery_session_id: str = "",
         resource_jid: str = "",
         assigned_outline_events: list[dict[str, Any]] | None = None,
-        prepared_bridge_request: dict[str, Any] | None = None,
+        prepared_recovery_request: dict[str, Any] | None = None,
         carried_session_state: dict[str, Any] | None = None,
         max_turns: int = 24,
         **_kwargs: Any,
     ) -> dict[str, Any]:
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn_primitive_generation import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
             generate_primitive_batch_with_llm_agent,
         )
 
@@ -194,11 +192,11 @@ class ResourceAgent(LlmAgent):
             )
         return await generate_primitive_batch_with_llm_agent(
             llm_agent=self,
-            prepared_bridge_request=dict(prepared_bridge_request or {}),
+            prepared_recovery_request=dict(prepared_recovery_request or {}),
             assigned_outline_events=[
                 dict(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
             ],
-            bridge_session_id=str(bridge_session_id or "").strip(),
+            recovery_session_id=str(recovery_session_id or "").strip(),
             carried_session_state=dict(carried_session_state or {}),
             max_turns=max_turns,
         )
@@ -216,13 +214,13 @@ class ResourceAgent(LlmAgent):
         out_state: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Generic bridge recovery macro executor.
+        """Generic recovery macro executor.
 
         Validates the starting snapshot, semantically validates the primitive
         sequence, executes each primitive on the resolved owner, and applies
-        projected bridge state back onto the resource agent.
+        projected recovery state back onto the resource agent.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
             expand_composite_steps,
@@ -232,8 +230,8 @@ class ResourceAgent(LlmAgent):
             validate_and_project_steps,
         )
         from cais_spade_llm.resources.resource_primitives import (
-            get_resource_bridge_snapshot,
-            sync_agent_from_bridge_snapshot,
+            get_resource_recovery_snapshot,
+            sync_agent_from_recovery_snapshot,
         )
         from cais_spade_llm.resources.resource_profile import (
             get_resource_profile_for_agent,
@@ -241,7 +239,7 @@ class ResourceAgent(LlmAgent):
         )
 
         steps = list(primitive_steps or [])
-        runtime_snapshot = get_resource_bridge_snapshot(self)
+        runtime_snapshot = get_resource_recovery_snapshot(self)
         actual_state = str(
             runtime_snapshot.get("current_state") or getattr(self, "_current_state", "") or ""
         ).strip()
@@ -287,7 +285,7 @@ class ResourceAgent(LlmAgent):
                 "content": f"Recovery macro '{macro_name}' has no primitive steps",
             }
 
-        primitive_catalog = self.bridge_execution_primitive_catalog()
+        primitive_catalog = self.recovery_execution_primitive_catalog()
         try:
             steps = expand_composite_steps(steps, primitive_catalog)
         except Exception as exc:
@@ -457,7 +455,7 @@ class ResourceAgent(LlmAgent):
                     primitive_meta,
                     runtime_snapshot,
                 )
-                sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+                sync_agent_from_recovery_snapshot(self, runtime_snapshot)
 
             event_fact_key, event_fact_error = event_fact_key_for_primitive(
                 primitive=primitive,
@@ -520,7 +518,7 @@ class ResourceAgent(LlmAgent):
                 out_state,
                 profile=profile,
             )
-            sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+            sync_agent_from_recovery_snapshot(self, runtime_snapshot)
 
         return {
             "status": "completed",
@@ -669,7 +667,7 @@ class ResourceAgent(LlmAgent):
                 return
 
             start_safety_mode = str(fn_args.get("start_safety_mode") or "").strip().lower()
-            # Recovery bridge macros keep the legacy default fast path unless
+            # Recovery macros keep the legacy default fast path unless
             # they explicitly request cca_check. Any task can now opt into the
             # same bypass with start_safety_mode=fast_path.
             is_recovery_macro = fn_name == "execute_recovery_macro"

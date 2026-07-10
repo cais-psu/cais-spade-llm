@@ -16,8 +16,8 @@ from cais_spade_llm.agents.intelligent_product.process_recovery_planner import (
 from cais_spade_llm.agents.intelligent_product.replanner.des_search.resource_bidding import (
     compute_bid,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge import (
-    LlmBridgeReplannerMixin,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
+    LlmRecoveryReplannerMixin,
 )
 from cais_spade_llm.product.order import (
     derive_ordering_constraints_from_safety,
@@ -31,7 +31,7 @@ from cais_spade_llm.prompts import (
 )
 
 
-class ProcessPlanner(LlmBridgeReplannerMixin):
+class ProcessPlanner(LlmRecoveryReplannerMixin):
     """
     1. NL → structured requirement nodes   (build_high_level)
     2. requirement nodes → executable task DAG   (expand_requirements_to_tasks)
@@ -45,14 +45,14 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
         self.nodes: list[dict[str, Any]] = []
         self.phase_to_node: dict[str, dict[str, Any]] = {}
         self.global_fsa: dict[str, Any] | None = None
-        self.last_bridge_debug: dict[str, Any] = {}
+        self.last_recovery_debug: dict[str, Any] = {}
         self.product_order_runtime: dict[str, Any] = {}
         self.last_product_order_artifact: dict[str, Any] = {}
         self.recovery_planner = ProcessRecoveryPlanner(self)
         self.recovery_planner.bind_methods()
 
     @staticmethod
-    def _primitive_bridge_macro_tasks(proposal: dict[str, Any]) -> list[dict[str, Any]]:
+    def _primitive_recovery_macro_tasks(proposal: dict[str, Any]) -> list[dict[str, Any]]:
         raw_tasks = proposal.get("macro_tasks")
         if isinstance(raw_tasks, list) and raw_tasks:
             return [dict(task) for task in raw_tasks if isinstance(task, dict)]
@@ -2026,7 +2026,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
             fallback_tool_meta_by_fn.setdefault(fn, row)
 
         def _tool_meta_for_task(task: dict[str, Any]) -> dict[str, Any]:
-            """Look up tool metadata, preferring node-level in_state/out_state for bridge macros."""
+            """Look up tool metadata, preferring node-level in_state/out_state for recovery macros."""
             resource = _resource_short_name(str(task.get("resource_jid", "")).strip())
             fn = str(task.get("function_name", "")).strip()
             catalog_meta = (
@@ -2034,7 +2034,7 @@ class ProcessPlanner(LlmBridgeReplannerMixin):
                 or fallback_tool_meta_by_fn.get(fn)
                 or {}
             )
-            # Prefer node-level metadata (set by bridge macro proposals)
+            # Prefer node-level metadata (set by recovery macro proposals)
             # over shared-catalog metadata.
             if task.get("in_state") or task.get("out_state"):
                 merged = dict(catalog_meta)

@@ -88,7 +88,7 @@ class RobotAgent(ResourceAgent):
         self._current_state: str = "idle"  # idle, at_pick, picked, positioned, placed (placed = at destination, part released)
         self._position: dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}  # Simulated position
         self._gripper_state: str = "open"
-        self._bridge_pose_ref: str | None = None
+        self._recovery_pose_ref: str | None = None
         # Shared task execution context threaded across task-level functions.
         # `_pick_ctx` remains as a temporary compatibility alias.
         self._task_ctx: dict[str, Any] = {}
@@ -797,7 +797,7 @@ class RobotAgent(ResourceAgent):
         helper_name: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Execute a controller-only helper that is not exposed as a bridge primitive."""
+        """Execute a controller-only helper that is not exposed as a recovery primitive."""
         if self.execution_mode == "dry_run":
             self.logger.debug("[Robot] dry_run helper: %s", helper_name)
             return {"success": True, "message": f"Simulated helper: {helper_name}"}
@@ -889,11 +889,11 @@ class RobotAgent(ResourceAgent):
         self.logger.info("[Robot] %s: %s%s", step, message, suffix)
 
     # ------------------------------------------------------------------ #
-    # Bridge-only recovery macro executor
+    # Recovery-only recovery macro executor
     # ------------------------------------------------------------------ #
 
-    # Controller primitives available for bridge macro steps.
-    _BRIDGE_PRIMITIVES = frozenset(
+    # Controller primitives available for recovery macro steps.
+    _RECOVERY_PRIMITIVES = frozenset(
         {
             "move_cartesian",
             "move_pose",
@@ -913,7 +913,7 @@ class RobotAgent(ResourceAgent):
             "get_current_pose",
         }
     )
-    _BRIDGE_OBSERVATION_PRIMITIVES = frozenset(
+    _RECOVERY_OBSERVATION_PRIMITIVES = frozenset(
         {
             "detect_parts",
             "compute_pick_targets",
@@ -922,29 +922,29 @@ class RobotAgent(ResourceAgent):
         }
     )
 
-    async def execute_bridge_observation(
+    async def execute_recovery_observation(
         self,
         primitive: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute one planner-approved observation/generation primitive."""
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
             extract_step_output,
         )
 
         primitive_name = str(primitive or "").strip()
         normalized_params = dict(params or {})
-        if primitive_name not in self._BRIDGE_OBSERVATION_PRIMITIVES:
+        if primitive_name not in self._RECOVERY_OBSERVATION_PRIMITIVES:
             return {
                 "success": False,
                 "message": (
-                    f"bridge observation primitive '{primitive_name}' is not allowed; "
-                    f"allowed={sorted(self._BRIDGE_OBSERVATION_PRIMITIVES)}"
+                    f"recovery observation primitive '{primitive_name}' is not allowed; "
+                    f"allowed={sorted(self._RECOVERY_OBSERVATION_PRIMITIVES)}"
                 ),
             }
 
         step_result = await self._execute_primitive(primitive_name, normalized_params)
-        snapshot = self.get_bridge_snapshot()
+        snapshot = self.get_recovery_snapshot()
         if not step_result.get("success", False):
             return {
                 "success": False,
@@ -1052,7 +1052,7 @@ class RobotAgent(ResourceAgent):
 
         normalized["target_pose"] = observed_pose
         normalized["target_pose_source"] = "observed_pose"
-        # When the bridge already carries a grounded observed pose, use it directly.
+        # When the recovery already carries a grounded observed pose, use it directly.
         # Live perception remains available for cases that do not have target_pose.
         normalized["prefer_live_detection"] = False
         normalized["use_global_min_pick_tcp_z"] = False
@@ -1173,7 +1173,7 @@ class RobotAgent(ResourceAgent):
         step_result: dict[str, Any],
         event_facts: dict[str, Any],
     ) -> None:
-        """Snap direct bridge releases into assembly slot depth when geometry says inserted."""
+        """Snap direct recovery releases into assembly slot depth when geometry says inserted."""
         if str(primitive or "").strip() != "release_part":
             return
         if self.execution_mode != "simulation":
@@ -1242,13 +1242,13 @@ class RobotAgent(ResourceAgent):
         out_state: str | None = None,
         **context: Any,
     ) -> dict[str, Any]:
-        """Execute a bridge-generated recovery macro as an ordered primitive sequence.
+        """Execute a recovery-generated recovery macro as an ordered primitive sequence.
 
         This method is registered in self.executables for runtime dispatch
         but is excluded from function_names and the shared tools catalog.
-        It is only callable through bridge-approved recovery macro tasks.
+        It is only callable through recovery-approved recovery macro tasks.
         """
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_primitives import (
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
             expand_composite_steps,
@@ -1258,8 +1258,8 @@ class RobotAgent(ResourceAgent):
             validate_and_project_steps,
         )
         from cais_spade_llm.resources.resource_primitives import (
-            get_resource_bridge_snapshot,
-            sync_agent_from_bridge_snapshot,
+            get_resource_recovery_snapshot,
+            sync_agent_from_recovery_snapshot,
         )
         from cais_spade_llm.resources.resource_profile import (
             get_resource_profile_for_agent,
@@ -1296,7 +1296,7 @@ class RobotAgent(ResourceAgent):
         # macro so individual primitive steps can skip the async-lock check.
         await self._ensure_controller_prewarmed()
 
-        runtime_snapshot = get_resource_bridge_snapshot(self)
+        runtime_snapshot = get_resource_recovery_snapshot(self)
         if expected_snapshot:
             matches, mismatch_message = snapshot_matches_expected(
                 runtime_snapshot, expected_snapshot
@@ -1383,7 +1383,7 @@ class RobotAgent(ResourceAgent):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
             raw_params = step.get("params", {}) if isinstance(step, dict) else {}
 
-            if primitive not in self._BRIDGE_PRIMITIVES:
+            if primitive not in self._RECOVERY_PRIMITIVES:
                 msg = f"Unknown primitive '{primitive}' at step {step_idx} in macro '{macro_name}'"
                 self.logger.error("[Robot] %s", msg)
                 return {
@@ -1501,7 +1501,7 @@ class RobotAgent(ResourceAgent):
                     primitive_meta,
                     runtime_snapshot,
                 )
-                sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+                sync_agent_from_recovery_snapshot(self, runtime_snapshot)
 
             event_fact_key, event_fact_error = event_fact_key_for_primitive(
                 primitive=primitive,
@@ -1565,7 +1565,7 @@ class RobotAgent(ResourceAgent):
                 out_state,
                 profile=get_resource_profile_for_agent(self),
             )
-            sync_agent_from_bridge_snapshot(self, runtime_snapshot)
+            sync_agent_from_recovery_snapshot(self, runtime_snapshot)
         self.logger.info(
             "[Robot] Recovery macro '%s' completed (%d steps). state=%s",
             macro_name,
@@ -1584,23 +1584,23 @@ class RobotAgent(ResourceAgent):
             },
         }
 
-    def bridge_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
+    def recovery_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
         """Return the robot-owned LLM-facing primitive catalog."""
-        if self._bridge_synthesis_primitive_catalog_cache is None:
+        if self._recovery_synthesis_primitive_catalog_cache is None:
             from cais_spade_llm.resources.robot.robot_primitives import (
                 build_robot_synthesis_primitive_catalog,
             )
 
-            self._bridge_synthesis_primitive_catalog_cache = (
+            self._recovery_synthesis_primitive_catalog_cache = (
                 build_robot_synthesis_primitive_catalog(
-                    primitive_catalog=self.bridge_execution_primitive_catalog()
+                    primitive_catalog=self.recovery_execution_primitive_catalog()
                 )
             )
-        return deepcopy(self._bridge_synthesis_primitive_catalog_cache)
+        return deepcopy(self._recovery_synthesis_primitive_catalog_cache)
 
     def _cached_primitive_catalog(self) -> list:
         """Return the cached primitive catalog, building it on first access."""
-        return self.bridge_execution_primitive_catalog()
+        return self.recovery_execution_primitive_catalog()
 
     async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
@@ -1673,16 +1673,16 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def get_bridge_snapshot(self) -> dict[str, Any]:
-        """Return the current primitive-level bridge snapshot for this robot."""
+    def get_recovery_snapshot(self) -> dict[str, Any]:
+        """Return the current primitive-level recovery snapshot for this robot."""
         from cais_spade_llm.resources.resource_primitives import (
-            get_resource_bridge_snapshot,
+            get_resource_recovery_snapshot,
         )
 
-        return get_resource_bridge_snapshot(self)
+        return get_resource_recovery_snapshot(self)
 
     # ------------------------------------------------------------------ #
-    # Bridge feasibility oracle
+    # Recovery physical feasibility check
     # ------------------------------------------------------------------ #
 
     def _is_pose_in_workspace(
@@ -1717,121 +1717,28 @@ class RobotAgent(ResourceAgent):
             return False, f"pose outside workspace: {', '.join(violations)}"
         return True, "pose within workspace bounds"
 
-    def bridge_feasibility_oracle(
+    def check_recovery_physical_feasibility(
         self,
         *,
-        event_instance: Any | None = None,
-        schema: Any | None = None,
-        projection: Any | None = None,
         part_context: dict[str, Any],
-        bridge_snapshot: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
         operation_kind: str = "",
         part_name: str | None = None,
         grounded_action: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
     ) -> dict[str, Any]:
-        """Workspace-aware feasibility check for bridge recovery events.
-
-        Uses the canonical bridge event instance plus typed projection rather
-        than any derived task/action dict when available. Outline validation
-        can also pass a compiled grounded_action. Falls back to permissive
-        behavior when the event does not expose a pose that can be checked.
-        """
+        """Check whether this robot can physically execute a grounded recovery action."""
         from copy import deepcopy
 
         evidence: dict[str, Any] = {
             "part_context": deepcopy(part_context),
-            "bridge_snapshot": deepcopy(bridge_snapshot),
+            "recovery_snapshot": deepcopy(recovery_snapshot),
             "resource_jid": str(getattr(self, "jid", "") or ""),
-            "event_instance": {
-                "event_schema_id": str(getattr(event_instance, "event_schema_id", "") or ""),
-                "resource_binding": str(getattr(event_instance, "resource_binding", "") or ""),
-                "object_bindings": deepcopy(getattr(event_instance, "object_bindings", {}) or {}),
-                "parameters": deepcopy(getattr(event_instance, "parameters", {}) or {}),
-            },
-            "projection": {
-                "start_state": deepcopy(getattr(projection, "start_state", {}) or {}),
-                "end_state": deepcopy(getattr(projection, "end_state", {}) or {}),
-                "action_target": deepcopy(getattr(projection, "action_target", {}) or {}),
-                "part_name": str(getattr(projection, "part_name", "") or ""),
-                "target_ref": str(getattr(projection, "target_ref", "") or ""),
-            },
         }
 
-        bridge_snapshot = deepcopy(bridge_snapshot or {})
+        recovery_snapshot = deepcopy(recovery_snapshot or {})
         part_context = deepcopy(part_context or {})
         grounded_action = deepcopy(grounded_action or {})
-        schema_id = str(getattr(schema, "schema_id", "") or "").strip().lower()
-        action_type = str(getattr(schema, "action_type", "") or "").strip().lower()
-        if not grounded_action:
-            projection_part_name = str(getattr(projection, "part_name", "") or "").strip()
-            part_name = str(part_name or projection_part_name or "").strip() or None
-            end_state = dict(getattr(projection, "end_state", {}) or {})
-            source_ref: dict[str, Any] = {
-                "location": str(
-                    getattr(event_instance, "object_bindings", {}).get("source_location") or ""
-                ).strip()
-                or None,
-            }
-            if source_ref.get("location") == "observed_pose":
-                source_pose = dict(part_context.get("observed_pose") or {})
-                if source_pose:
-                    source_ref["pose"] = deepcopy(source_pose)
-            expected_resource = {
-                "current_state": str(end_state.get("resource_state") or "").strip() or None,
-                "location": str(
-                    end_state.get("resource_location")
-                    or end_state.get("current_location")
-                    or end_state.get("location")
-                    or end_state.get("named_pose")
-                    or ""
-                ).strip()
-                or None,
-                "held_part": str(end_state.get("held_part") or "").strip() or None,
-            }
-            expected_part = {
-                "state": str(end_state.get("part_state") or "").strip() or None,
-                "location": str(end_state.get("part_location") or "").strip() or None,
-                "holder": str(end_state.get("part_holder_resource_jid") or "").strip() or None,
-            }
-            part_affecting = bool(
-                part_name
-                and any(
-                    expected_part.get(key) not in (None, "", [], {})
-                    for key in ("state", "location", "holder")
-                )
-            )
-            resource_affecting = bool(
-                any(
-                    expected_resource.get(key) not in (None, "", [], {})
-                    for key in ("current_state", "location", "held_part")
-                )
-            )
-            effect_scope = (
-                "resource_and_part"
-                if resource_affecting and part_affecting
-                else "part_only"
-                if part_affecting
-                else "resource_only"
-            )
-            grounded_action = {
-                "resource_jid": str(getattr(self, "jid", "") or ""),
-                "part_name": part_name,
-                "operation_kind": str(action_type or operation_kind or "").strip(),
-                "task_kind": str(action_type or operation_kind or "").strip(),
-                "target": deepcopy(
-                    getattr(projection, "action_target", {}) or part_context.get("target") or {}
-                ),
-                "expected_effect": {
-                    "resource": expected_resource,
-                    "part": expected_part,
-                },
-                "preconditions": {
-                    "source_ref": source_ref,
-                    "part": {"requires_acquisition": schema_id == "pick_part"},
-                },
-                "effect_scope": effect_scope,
-            }
 
         evidence["grounded_action"] = deepcopy(grounded_action)
         target_info = dict(grounded_action.get("target") or part_context.get("target") or {})
@@ -1841,7 +1748,7 @@ class RobotAgent(ResourceAgent):
         source_ref = dict(preconditions.get("source_ref") or {})
         effect_scope = str(grounded_action.get("effect_scope") or "").strip().lower()
         task_kind = (
-            str(grounded_action.get("task_kind") or action_type or operation_kind or "")
+            str(grounded_action.get("task_kind") or operation_kind or "")
             .strip()
             .lower()
         )
@@ -1861,7 +1768,7 @@ class RobotAgent(ResourceAgent):
         available_named_poses = {
             str(name).strip()
             for name in (
-                bridge_snapshot.get("named_poses")
+                recovery_snapshot.get("named_poses")
                 or self.static_capabilities.get("named_poses")
                 or []
             )
@@ -1884,7 +1791,7 @@ class RobotAgent(ResourceAgent):
                 },
             }
 
-        availability = str(bridge_snapshot.get("availability") or "").strip().lower()
+        availability = str(recovery_snapshot.get("availability") or "").strip().lower()
         if availability == "unavailable":
             return {
                 "allowed": False,
@@ -1898,11 +1805,11 @@ class RobotAgent(ResourceAgent):
             }
 
         held_part = str(
-            bridge_snapshot.get("held_part") or part_context.get("resource_held_part") or ""
+            recovery_snapshot.get("held_part") or part_context.get("resource_held_part") or ""
         ).strip()
         gripper_state = (
             str(
-                bridge_snapshot.get("gripper_state")
+                recovery_snapshot.get("gripper_state")
                 or part_context.get("resource_gripper_state")
                 or ""
             )
@@ -1916,7 +1823,7 @@ class RobotAgent(ResourceAgent):
         supported_recovery_states = {
             str(token).strip()
             for token in (
-                bridge_snapshot.get("supported_recovery_states")
+                recovery_snapshot.get("supported_recovery_states")
                 or self.static_capabilities.get("supported_recovery_states")
                 or []
             )
@@ -1928,7 +1835,7 @@ class RobotAgent(ResourceAgent):
         requires_part_acquisition = bool(
             part_name
             and part_affecting
-            and (bool(part_preconditions.get("requires_acquisition")) or schema_id == "pick_part")
+            and bool(part_preconditions.get("requires_acquisition"))
         )
         if (
             effect_scope == "resource_only"

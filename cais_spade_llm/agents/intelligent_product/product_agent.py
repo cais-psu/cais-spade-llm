@@ -33,7 +33,7 @@ from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 
 _UNSET = object()
-_LEGACY_PROCEDURAL_DES_BRIDGE_MODE = "procedural" + "_des_v1"
+_LEGACY_PROCEDURAL_DES_RECOVERY_MODE = "procedural" + "_des_v1"
 _ACK_PROGRESS_RANK = {
     "pending": 0,
     "dispatched": 1,
@@ -183,13 +183,13 @@ class ProductAgent(LlmAgent):
         self._runtime_repair_inflight = False
         self._runtime_repair_fail_streak = 0
         self._runtime_repair_max_attempts = 3
-        self._bridge_generation_mode = "auto"
-        self._bridge_reasoning_mode = "multi_turn"
-        self._runtime_bridge_mode = "pre_ran"
-        self._runtime_bridge_validation_policy = "validated"
-        self._runtime_bridge_archive_path = ""
-        self._runtime_bridge_archive_label = ""
-        self._orphaned_bridge_task_warning_ids: set[str] = set()
+        self._recovery_generation_mode = "auto"
+        self._recovery_reasoning_mode = "multi_turn"
+        self._runtime_recovery_mode = "pre_ran"
+        self._runtime_recovery_validation_policy = "validated"
+        self._runtime_recovery_archive_path = ""
+        self._runtime_recovery_archive_label = ""
+        self._orphaned_recovery_task_warning_ids: set[str] = set()
         self.runtime_repair_state = "idle"
         self.plan_safety_alert: dict[str, Any] | None = None
         self.runtime_recovery: dict[str, Any] = self._empty_runtime_recovery()
@@ -221,26 +221,26 @@ class ProductAgent(LlmAgent):
                 )
             except Exception:
                 self._runtime_repair_max_attempts = 3
-            self._bridge_generation_mode = (
-                str(precomputed_policy.get("bridge_generation_mode", "auto") or "auto")
+            self._recovery_generation_mode = (
+                str(precomputed_policy.get("recovery_generation_mode", "auto") or "auto")
                 .strip()
                 .lower()
             )
-            if self._bridge_generation_mode not in {"auto", "manual"}:
-                self._bridge_generation_mode = "auto"
-            self._bridge_reasoning_mode = (
-                str(precomputed_policy.get("bridge_reasoning_mode", "multi_turn") or "multi_turn")
+            if self._recovery_generation_mode not in {"auto", "manual"}:
+                self._recovery_generation_mode = "auto"
+            self._recovery_reasoning_mode = (
+                str(precomputed_policy.get("recovery_reasoning_mode", "multi_turn") or "multi_turn")
                 .strip()
                 .lower()
             )
-            if self._bridge_reasoning_mode in {
+            if self._recovery_reasoning_mode in {
                 "hybrid",
                 "procedural",
-                _LEGACY_PROCEDURAL_DES_BRIDGE_MODE,
+                _LEGACY_PROCEDURAL_DES_RECOVERY_MODE,
             }:
-                self._bridge_reasoning_mode = "multi_turn"
-            if self._bridge_reasoning_mode != "multi_turn":
-                self._bridge_reasoning_mode = "multi_turn"
+                self._recovery_reasoning_mode = "multi_turn"
+            if self._recovery_reasoning_mode != "multi_turn":
+                self._recovery_reasoning_mode = "multi_turn"
 
         self.logger.info(f"ProductAgent '{name}' initialized.")
 
@@ -1476,9 +1476,9 @@ class ProductAgent(LlmAgent):
             # NOTE: Robot states are NOT cached here - they're collected by CentralControllerAgent
             # and provided in the replan_request message (system_coordination_state)
 
-            handled_bridge_ack = False
+            handled_recovery_ack = False
             if task_node:
-                handled_bridge_ack = await agent._handle_bridge_macro_ack(
+                handled_recovery_ack = await agent._handle_recovery_macro_ack(
                     task_node=task_node,
                     status=str(status),
                     content=content,
@@ -1494,7 +1494,7 @@ class ProductAgent(LlmAgent):
 
             if (
                 updated_node
-                and not handled_bridge_ack
+                and not handled_recovery_ack
                 and _should_persist_ack_state(task_node, str(status))
             ):
                 await asyncio.to_thread(agent._persist_plan_snapshot)
@@ -1791,24 +1791,24 @@ class ProductAgent(LlmAgent):
                 task_id = str(task_node.get("id") or "").strip()
                 planner_status = str(task_node.get("status") or "").strip().lower()
                 tracked_status = str(agent.task_states.get(task_id) or "").strip().lower()
-                current_sequence_for_guard = agent._active_bridge_sequence()
-                bridge_recorded_status = ""
+                current_sequence_for_guard = agent._active_recovery_sequence()
+                recovery_recorded_status = ""
                 if isinstance(current_sequence_for_guard, dict):
                     completed_task_ids = set(
-                        agent._bridge_sequence_task_ids(
-                            current_sequence_for_guard.get("completed_bridge_task_ids") or []
+                        agent._recovery_sequence_task_ids(
+                            current_sequence_for_guard.get("completed_recovery_task_ids") or []
                         )
                     )
                     dispatched_task_ids = set(
-                        agent._bridge_sequence_task_ids(
-                            current_sequence_for_guard.get("dispatched_bridge_task_ids") or []
+                        agent._recovery_sequence_task_ids(
+                            current_sequence_for_guard.get("dispatched_recovery_task_ids") or []
                         )
                     )
                     if task_id in completed_task_ids:
-                        bridge_recorded_status = "completed"
+                        recovery_recorded_status = "completed"
                     elif task_id in dispatched_task_ids:
-                        bridge_recorded_status = "dispatched"
-                effective_tracked_status = bridge_recorded_status or tracked_status
+                        recovery_recorded_status = "dispatched"
+                effective_tracked_status = recovery_recorded_status or tracked_status
                 if planner_status == "pending" and effective_tracked_status in {
                     "accepted",
                     "running",
@@ -1899,16 +1899,16 @@ class ProductAgent(LlmAgent):
                 task_node["status"] = "dispatched"
                 agent.task_states[task_id] = "dispatched"
 
-                is_bridge_task = (
+                is_recovery_task = (
                     str(task_node.get("function_name") or "").strip() == "execute_recovery_macro"
-                    and str(task_node.get("bridge_sequence_id") or "").strip()
+                    and str(task_node.get("recovery_sequence_id") or "").strip()
                 )
-                if is_bridge_task:
-                    current_sequence = agent._active_bridge_sequence()
+                if is_recovery_task:
+                    current_sequence = agent._active_recovery_sequence()
                     if (
                         isinstance(current_sequence, dict)
-                        and str(current_sequence.get("bridge_sequence_id") or "").strip()
-                        == str(task_node.get("bridge_sequence_id") or "").strip()
+                        and str(current_sequence.get("recovery_sequence_id") or "").strip()
+                        == str(task_node.get("recovery_sequence_id") or "").strip()
                     ):
                         repair_task_id = str(current_sequence.get("repair_task_id") or "").strip()
                         repair_target_task_id = str(
@@ -1920,7 +1920,7 @@ class ProductAgent(LlmAgent):
                                 task_id,
                                 repair_target_task_id or "<unknown>",
                             )
-                        next_sequence = agent._bridge_sequence_with_dispatched_task(
+                        next_sequence = agent._recovery_sequence_with_dispatched_task(
                             current_sequence,
                             task_id=task_id,
                         )
@@ -1929,7 +1929,7 @@ class ProductAgent(LlmAgent):
                                 message=str(
                                     agent.runtime_recovery.get("message", "") or ""
                                 ).strip(),
-                                active_bridge_sequence=next_sequence,
+                                active_recovery_sequence=next_sequence,
                             )
 
                 if isinstance(msg, Message):
@@ -1941,7 +1941,7 @@ class ProductAgent(LlmAgent):
                 else:
                     await self.send(msg)
                 agent.logger.info(f"[Product] Dispatched task {task_id} -> {to} ({instruction})")
-                return is_bridge_task
+                return is_recovery_task
 
             task_node = agent._next_dispatchable_task_node()
             if (
@@ -1951,9 +1951,9 @@ class ProductAgent(LlmAgent):
                 if await _maybe_commit_product_order_runtime_parts():
                     await asyncio.sleep(0.01)
                     return
-            if not task_node and agent._active_bridge_blocks_nominal_dispatch():
+            if not task_node and agent._active_recovery_blocks_nominal_dispatch():
                 agent.logger.debug(
-                    "[Product] Active bridge sequence is executing; suppressing nominal DAG dispatch."
+                    "[Product] Active recovery sequence is executing; suppressing nominal DAG dispatch."
                 )
                 await asyncio.sleep(0.05)
                 return
@@ -1973,8 +1973,8 @@ class ProductAgent(LlmAgent):
                 await asyncio.sleep(0.01)
                 return
 
-            is_bridge_task = await _dispatch_task_node(task_node)
-            if is_bridge_task:
+            is_recovery_task = await _dispatch_task_node(task_node)
+            if is_recovery_task:
                 await asyncio.to_thread(agent._persist_plan_snapshot)
                 await asyncio.to_thread(agent._persist_product_state)
 

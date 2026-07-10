@@ -1,7 +1,7 @@
-"""Printing resource agent with bridge-capable job control primitives.
+"""Printing resource agent with recovery-capable job control primitives.
 
 This module keeps the agent thin and defers general behavior to
-ResourceAgent. Printer-specific bridge primitives (pause/resume/cancel)
+ResourceAgent. Printer-specific recovery primitives (pause/resume/cancel)
 are defined here with YAML frontmatter for catalog introspection.
 """
 
@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 
 # --- Printing / Resource Agent ---
 class PrintingAgent(ResourceAgent):
-    """Printing agent with bridge-capable job control primitives."""
+    """Printing agent with recovery-capable job control primitives."""
 
     _RESOURCE_PROFILE = PRINTER_PROFILE
-    _BRIDGE_PRIMITIVES: list[str] = ["pause_job", "resume_job", "cancel_job"]
+    _RECOVERY_PRIMITIVES: list[str] = ["pause_job", "resume_job", "cancel_job"]
 
     # Expose minimal runtime state for replanning context.
     def _snapshot_state(self) -> dict[str, Any]:
@@ -37,7 +37,7 @@ class PrintingAgent(ResourceAgent):
         }
 
     # ------------------------------------------------------------------
-    # Bridge primitives — YAML frontmatter MUST come first in docstring
+    # Recovery primitives — YAML frontmatter MUST come first in docstring
     # for FunctionAnalyzer._extract_yaml_frontmatter() to parse it.
     # ------------------------------------------------------------------
 
@@ -104,26 +104,24 @@ class PrintingAgent(ResourceAgent):
             self._job_state = "idle"
         return {"success": True, "state": "idle"}
 
-    def bridge_feasibility_oracle(
+    def check_recovery_physical_feasibility(
         self,
         *,
-        event_instance: Any | None = None,
-        schema: Any | None = None,
-        projection: Any | None = None,
         part_context: dict[str, Any] | None = None,
-        bridge_snapshot: dict[str, Any] | None = None,
+        recovery_snapshot: dict[str, Any] | None = None,
+        grounded_action: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
     ) -> dict[str, Any]:
-        """Printer-specific bridge feasibility checks."""
-        del event_instance, schema, projection, part_context
-        snapshot = bridge_snapshot or {}
+        """Run printer-specific recovery physical feasibility checks."""
+        del part_context, grounded_action
+        snapshot = recovery_snapshot or {}
         material = str(snapshot.get("material_state") or "").strip()
         bed = str(snapshot.get("bed_state") or "").strip()
 
         if material and material in ("empty", "out"):
             return {
                 "allowed": False,
-                "reason": f"material_state is '{material}' — cannot execute bridge",
+                "reason": f"material_state is '{material}' - cannot execute recovery",
             }
         if bed and bed in ("error", "fault"):
             return {

@@ -65,7 +65,7 @@ class ResourceProfile:
     observation_families: tuple[str, ...] = ()
     grounding_observation_primitives: tuple[str, ...] = ()
     grounding_observation_fact_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
-    example_families: tuple[str, ...] = ("generic_bridge",)
+    example_families: tuple[str, ...] = ("generic_recovery",)
     observation_output_schema_map: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     preview_output_map: Mapping[str, PreviewOutputResolver] = field(default_factory=dict)
     extract_output_map: Mapping[str, ExtractOutputResolver] = field(default_factory=dict)
@@ -503,7 +503,7 @@ _DEFAULT_PROFILE = ResourceProfile(
             "compare_when_present": True,
         },
     },
-    example_families=("generic_bridge",),
+    example_families=("generic_recovery",),
 )
 
 
@@ -536,10 +536,10 @@ def get_resource_profile_for_agent(agent: Any) -> ResourceProfile:
         return profile
 
     resource_type = ""
-    bridge_resource_type = getattr(agent, "bridge_resource_type", None)
-    if callable(bridge_resource_type):
+    recovery_resource_type = getattr(agent, "recovery_resource_type", None)
+    if callable(recovery_resource_type):
         try:
-            resource_type = str(bridge_resource_type() or "").strip().lower()
+            resource_type = str(recovery_resource_type() or "").strip().lower()
         except Exception:
             resource_type = ""
     if not resource_type:
@@ -559,7 +559,7 @@ def all_registered_operation_kinds() -> set[str]:
             str(kind).strip() for kind in profile.family_to_primitive.keys() if str(kind).strip()
         )
         kinds.update(str(kind).strip() for kind in profile.compiler_map.keys() if str(kind).strip())
-    kinds.update({"bridge", "clear", "home"})
+    kinds.update({"recovery", "clear", "home"})
     return {kind for kind in kinds if kind}
 
 

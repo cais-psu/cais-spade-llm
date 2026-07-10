@@ -1,4 +1,4 @@
-"""Built-in printer resource profile and printer-specific bridge helpers."""
+"""Built-in printer resource profile and printer-specific recovery helpers."""
 
 from __future__ import annotations
 
@@ -87,19 +87,19 @@ def _printer_event_contract_validator(
     if operation_family in {"pause_job", "resume_job", "cancel_job"}:
         if part_name:
             return (
-                f"bridge event '{event_name}' is inconsistent for printer resources: "
+                f"recovery event '{event_name}' is inconsistent for printer resources: "
                 f"'{operation_family}' must not declare part_name"
             )
         if part_delta:
             return (
-                f"bridge event '{event_name}' is inconsistent for printer resources: "
+                f"recovery event '{event_name}' is inconsistent for printer resources: "
                 f"'{operation_family}' must not declare expected_part_delta"
             )
         return None
 
     if part_name or part_delta:
         return (
-            f"bridge event '{event_name}' is inconsistent for printer resources: "
+            f"recovery event '{event_name}' is inconsistent for printer resources: "
             "manipulator-style part transitions are not supported by this profile"
         )
     return None
@@ -119,7 +119,7 @@ _PRINTER_PROMPT_ADDENDUM = dedent(
 _PRINTER_REPAIR_EXAMPLE = dedent(
     """\
     JOB CONTROL EXAMPLE:
-    - A job-control bridge event typically compiles to a single primitive step.
+    - A job-control recovery event typically compiles to a single primitive step.
     """
 ).strip()
 
@@ -132,7 +132,7 @@ PRINTER_PROFILE = ResourceProfile(
     occupancy_builder=_printer_occupancy,
     availability_resolver=_printer_availability,
     primitive_owner_resolver=lambda agent: agent
-    if getattr(agent, "_BRIDGE_PRIMITIVES", None)
+    if getattr(agent, "_RECOVERY_PRIMITIVES", None)
     else None,
     sync_map={
         "active_job": "_active_job",
@@ -153,7 +153,7 @@ PRINTER_PROFILE = ResourceProfile(
         "cancel_job": "cancel_job",
     },
     capability_flags={"supports_printer_job_control": True},
-    example_families=("generic_bridge", "printer_job_control"),
+    example_families=("generic_recovery", "printer_job_control"),
     prompt_addendum=_PRINTER_PROMPT_ADDENDUM,
     repair_example=_PRINTER_REPAIR_EXAMPLE,
 )

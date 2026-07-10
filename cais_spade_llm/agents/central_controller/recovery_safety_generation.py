@@ -375,7 +375,7 @@ def _normalize_generated_aps(items: Any) -> list[dict[str, Any]]:
 def _clone_rule_for_scope(rule: dict[str, Any]) -> dict[str, Any]:
     scoped = deepcopy(rule)
     scoped.pop("dfa_dot", None)
-    scoped.pop("bridge_aps", None)
+    scoped.pop("recovery_aps", None)
     scoped.pop("aps", None)
     scoped.pop("ltlf", None)
     return scoped
@@ -1038,7 +1038,7 @@ def _dedupe_ap_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _rule_state_symbols(rule: dict[str, Any]) -> set[str]:
     symbols: set[str] = set()
-    for source_key in ("aps", "bridge_aps"):
+    for source_key in ("aps", "recovery_aps"):
         for ap in rule.get(source_key) or []:
             if not isinstance(ap, dict):
                 continue
@@ -1803,7 +1803,7 @@ async def generate_recovery_safety_bundle(
         "nominal_candidate_tasks": deepcopy(payload.get("nominal_candidate_tasks") or []),
         "nominal_candidate_task_ids": deepcopy(payload.get("nominal_candidate_task_ids") or []),
         "loaded_safety_rules": deepcopy(payload.get("loaded_safety_rules") or []),
-        "bridge_safety_context": deepcopy(payload.get("bridge_safety_context") or {}),
+        "recovery_safety_context": deepcopy(payload.get("recovery_safety_context") or {}),
         "tools_catalog": deepcopy(tools_catalog),
         "recovery_safety_scope_id": str(payload.get("recovery_safety_scope_id") or "").strip(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),

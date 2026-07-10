@@ -28,8 +28,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
-    DEFAULT_BRIDGE_RUNTIME_DATA_DIR,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+    DEFAULT_RECOVERY_RUNTIME_DATA_DIR,
 )
 from cais_spade_llm.bundles import BundleCompiler, BundleStore
 from cais_spade_llm.bundles.models import (
@@ -62,7 +62,7 @@ _RESOURCE_DIR = _BASE / "initialization" / "resources"
 _TOOLS_OUT = _BASE / "initialization" / "tools.json"
 _CCA_INIT = _BASE / "initialization" / "cca.json"
 _MONITOR = _BASE / "monitor"
-_BRIDGE_RUNTIME_DATA_DIR = Path(DEFAULT_BRIDGE_RUNTIME_DATA_DIR)
+_RECOVERY_RUNTIME_DATA_DIR = Path(DEFAULT_RECOVERY_RUNTIME_DATA_DIR)
 _LOG_DIR = _BASE / "log"
 _PRODUCT_REQUIREMENTS_DIR = _BASE / "specification" / "products" / "requirements"
 _PRODUCT_ORDERS_DIR = _BASE / "specification" / "products" / "orders"
@@ -426,19 +426,19 @@ class SystemBridge:
         # Empty string -> use manifest default safety, "__NONE__" -> disable safety,
         # any other value -> explicit safety text file path.
         self.selected_safety_file: str = ""
-        self.runtime_bridge_mode: str = "pre_ran"
-        self.runtime_bridge_validation_policy: str = "validated"
-        self.runtime_bridge_archive_path: str = ""
-        self.runtime_bridge_archive_label: str = ""
-        self._runtime_bridge_archive_cache_signature: tuple[Any, ...] | None = None
-        self._runtime_bridge_archive_cache_entries: list[dict[str, Any]] | None = None
-        preferred_bridge_archive = self._preferred_runtime_bridge_archive_entry()
-        if isinstance(preferred_bridge_archive, dict):
-            self.runtime_bridge_archive_path = str(
-                preferred_bridge_archive.get("path") or ""
+        self.runtime_recovery_mode: str = "pre_ran"
+        self.runtime_recovery_validation_policy: str = "validated"
+        self.runtime_recovery_archive_path: str = ""
+        self.runtime_recovery_archive_label: str = ""
+        self._runtime_recovery_archive_cache_signature: tuple[Any, ...] | None = None
+        self._runtime_recovery_archive_cache_entries: list[dict[str, Any]] | None = None
+        preferred_recovery_archive = self._preferred_runtime_recovery_archive_entry()
+        if isinstance(preferred_recovery_archive, dict):
+            self.runtime_recovery_archive_path = str(
+                preferred_recovery_archive.get("path") or ""
             ).strip()
-            self.runtime_bridge_archive_label = str(
-                preferred_bridge_archive.get("label") or ""
+            self.runtime_recovery_archive_label = str(
+                preferred_recovery_archive.get("label") or ""
             ).strip()
         self.bundle_store = BundleStore(_USER_VERIFIED_PLAN)
         self.bundle_compiler = BundleCompiler(
@@ -506,7 +506,7 @@ class SystemBridge:
         self._maybe_start_agent_creator_prefetch()
 
     @staticmethod
-    def _normalize_runtime_bridge_mode(value: Any) -> str:
+    def _normalize_runtime_recovery_mode(value: Any) -> str:
         token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
         if token in {"manual", "auto", "pre_ran"}:
             return token
@@ -515,7 +515,7 @@ class SystemBridge:
         return "pre_ran"
 
     @staticmethod
-    def _normalize_runtime_bridge_validation_policy(value: Any) -> str:
+    def _normalize_runtime_recovery_validation_policy(value: Any) -> str:
         token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
         if token in {"validated", "no_validation"}:
             return token
@@ -523,44 +523,44 @@ class SystemBridge:
             return "no_validation"
         return "validated"
 
-    def _apply_runtime_bridge_session_settings(self) -> None:
+    def _apply_runtime_recovery_session_settings(self) -> None:
         for agent in list(self.product_agents or []):
-            setter = getattr(agent, "set_runtime_bridge_session_settings", None)
+            setter = getattr(agent, "set_runtime_recovery_session_settings", None)
             if not callable(setter):
                 continue
             try:
                 setter(
-                    mode=self.runtime_bridge_mode,
-                    validation_policy=self.runtime_bridge_validation_policy,
-                    selected_archive_path=self.runtime_bridge_archive_path,
-                    selected_archive_label=self.runtime_bridge_archive_label,
+                    mode=self.runtime_recovery_mode,
+                    validation_policy=self.runtime_recovery_validation_policy,
+                    selected_archive_path=self.runtime_recovery_archive_path,
+                    selected_archive_label=self.runtime_recovery_archive_label,
                 )
             except Exception:
                 log.exception(
-                    "[ui.bridge] Failed to apply runtime bridge session settings to %s",
+                    "[ui.bridge] Failed to apply runtime recovery session settings to %s",
                     getattr(agent, "jid", "<unknown>"),
                 )
 
-    def get_runtime_bridge_settings(self) -> dict[str, Any]:
+    def get_runtime_recovery_settings(self) -> dict[str, Any]:
         if (
-            self._normalize_runtime_bridge_mode(self.runtime_bridge_mode) == "pre_ran"
-            and not str(self.runtime_bridge_archive_path or "").strip()
+            self._normalize_runtime_recovery_mode(self.runtime_recovery_mode) == "pre_ran"
+            and not str(self.runtime_recovery_archive_path or "").strip()
         ):
-            preferred_entry = self._preferred_runtime_bridge_archive_entry()
+            preferred_entry = self._preferred_runtime_recovery_archive_entry()
             if isinstance(preferred_entry, dict):
-                self.runtime_bridge_archive_path = str(preferred_entry.get("path") or "").strip()
-                self.runtime_bridge_archive_label = str(preferred_entry.get("label") or "").strip()
+                self.runtime_recovery_archive_path = str(preferred_entry.get("path") or "").strip()
+                self.runtime_recovery_archive_label = str(preferred_entry.get("label") or "").strip()
         return {
-            "mode": self._normalize_runtime_bridge_mode(self.runtime_bridge_mode),
-            "validation_policy": self._normalize_runtime_bridge_validation_policy(
-                self.runtime_bridge_validation_policy
+            "mode": self._normalize_runtime_recovery_mode(self.runtime_recovery_mode),
+            "validation_policy": self._normalize_runtime_recovery_validation_policy(
+                self.runtime_recovery_validation_policy
             ),
-            "selected_archive_path": str(self.runtime_bridge_archive_path or "").strip(),
-            "selected_archive_label": str(self.runtime_bridge_archive_label or "").strip(),
+            "selected_archive_path": str(self.runtime_recovery_archive_path or "").strip(),
+            "selected_archive_label": str(self.runtime_recovery_archive_label or "").strip(),
         }
 
-    def _preferred_runtime_bridge_archive_entry(self) -> dict[str, Any] | None:
-        entries = self.list_runtime_bridge_archives()
+    def _preferred_runtime_recovery_archive_entry(self) -> dict[str, Any] | None:
+        entries = self.list_runtime_recovery_archives()
         if not entries:
             return None
 
@@ -570,28 +570,28 @@ class SystemBridge:
                 return dict(entry)
         return dict(entries[0])
 
-    def set_runtime_bridge_mode(self, mode: str) -> dict[str, Any]:
-        previous_mode = self._normalize_runtime_bridge_mode(self.runtime_bridge_mode)
-        self.runtime_bridge_mode = self._normalize_runtime_bridge_mode(mode)
-        if self.runtime_bridge_mode == "pre_ran" and previous_mode != "pre_ran":
-            preferred_entry = self._preferred_runtime_bridge_archive_entry()
+    def set_runtime_recovery_mode(self, mode: str) -> dict[str, Any]:
+        previous_mode = self._normalize_runtime_recovery_mode(self.runtime_recovery_mode)
+        self.runtime_recovery_mode = self._normalize_runtime_recovery_mode(mode)
+        if self.runtime_recovery_mode == "pre_ran" and previous_mode != "pre_ran":
+            preferred_entry = self._preferred_runtime_recovery_archive_entry()
             if isinstance(preferred_entry, dict):
-                self.runtime_bridge_archive_path = str(preferred_entry.get("path") or "").strip()
-                self.runtime_bridge_archive_label = str(preferred_entry.get("label") or "").strip()
-        self._apply_runtime_bridge_session_settings()
-        return self.get_runtime_bridge_settings()
+                self.runtime_recovery_archive_path = str(preferred_entry.get("path") or "").strip()
+                self.runtime_recovery_archive_label = str(preferred_entry.get("label") or "").strip()
+        self._apply_runtime_recovery_session_settings()
+        return self.get_runtime_recovery_settings()
 
-    def set_runtime_bridge_validation_policy(
+    def set_runtime_recovery_validation_policy(
         self,
         validation_policy: str,
     ) -> dict[str, Any]:
-        self.runtime_bridge_validation_policy = self._normalize_runtime_bridge_validation_policy(
+        self.runtime_recovery_validation_policy = self._normalize_runtime_recovery_validation_policy(
             validation_policy
         )
-        self._apply_runtime_bridge_session_settings()
-        return self.get_runtime_bridge_settings()
+        self._apply_runtime_recovery_session_settings()
+        return self.get_runtime_recovery_settings()
 
-    def set_runtime_bridge_archive_selection(
+    def set_runtime_recovery_archive_selection(
         self,
         artifact_path: str | None,
         label: str | None = None,
@@ -603,70 +603,85 @@ class SystemBridge:
                 resolved = Path(path).expanduser().resolve()
             except Exception:
                 resolved = Path(path).expanduser()
-            self.runtime_bridge_archive_path = str(resolved)
+            self.runtime_recovery_archive_path = str(resolved)
         else:
-            self.runtime_bridge_archive_path = ""
-        self.runtime_bridge_archive_label = normalized_label
-        self._apply_runtime_bridge_session_settings()
-        return self.get_runtime_bridge_settings()
+            self.runtime_recovery_archive_path = ""
+        self.runtime_recovery_archive_label = normalized_label
+        self._apply_runtime_recovery_session_settings()
+        return self.get_runtime_recovery_settings()
 
-    def _invalidate_runtime_bridge_archive_cache(self) -> None:
-        self._runtime_bridge_archive_cache_signature = None
-        self._runtime_bridge_archive_cache_entries = None
+    def _invalidate_runtime_recovery_archive_cache(self) -> None:
+        self._runtime_recovery_archive_cache_signature = None
+        self._runtime_recovery_archive_cache_entries = None
 
-    def _runtime_bridge_archive_scan_signature(self) -> tuple[Any, ...]:
-        archive_root = _BRIDGE_RUNTIME_DATA_DIR
-        if not archive_root.exists():
-            return ("missing",)
+    def _runtime_recovery_archive_scan_signature(self) -> tuple[Any, ...]:
+        root_signatures: list[tuple[Any, ...]] = []
+        for archive_root in (_RECOVERY_RUNTIME_DATA_DIR,):
+            if not archive_root.exists():
+                root_signatures.append((str(archive_root), "missing"))
+                continue
+            try:
+                root_stat = archive_root.stat()
+                children: list[tuple[str, bool, int]] = []
+                for entry in archive_root.iterdir():
+                    try:
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    children.append((entry.name, entry.is_dir(), int(stat.st_mtime_ns)))
+                children.sort()
+                root_signatures.append(
+                    (
+                        str(archive_root),
+                        "ready",
+                        int(root_stat.st_mtime_ns),
+                        tuple(children),
+                    )
+                )
+            except FileNotFoundError:
+                root_signatures.append((str(archive_root), "missing"))
+            except Exception:
+                log.exception(
+                    "Failed to build runtime recovery archive cache signature: %s",
+                    archive_root,
+                )
+                root_signatures.append((str(archive_root), "error"))
+        return tuple(root_signatures)
 
-        try:
-            root_stat = archive_root.stat()
-            children: list[tuple[str, bool, int]] = []
-            for entry in archive_root.iterdir():
-                try:
-                    stat = entry.stat()
-                except FileNotFoundError:
-                    continue
-                children.append((entry.name, entry.is_dir(), int(stat.st_mtime_ns)))
-            children.sort()
-            return (
-                "ready",
-                int(root_stat.st_mtime_ns),
-                tuple(children),
-            )
-        except FileNotFoundError:
-            return ("missing",)
-        except Exception:
-            log.exception(
-                "Failed to build runtime bridge archive cache signature: %s",
-                archive_root,
-            )
-            return ("error",)
-
-    def list_runtime_bridge_archives(self) -> list[dict[str, Any]]:
-        archive_root = _BRIDGE_RUNTIME_DATA_DIR
-        if not archive_root.exists():
-            self._invalidate_runtime_bridge_archive_cache()
+    def list_runtime_recovery_archives(self) -> list[dict[str, Any]]:
+        archive_roots = (
+            [_RECOVERY_RUNTIME_DATA_DIR] if _RECOVERY_RUNTIME_DATA_DIR.exists() else []
+        )
+        if not archive_roots:
+            self._invalidate_runtime_recovery_archive_cache()
             return []
 
-        signature = self._runtime_bridge_archive_scan_signature()
-        cached_entries = self._runtime_bridge_archive_cache_entries
-        if cached_entries is not None and self._runtime_bridge_archive_cache_signature == signature:
+        signature = self._runtime_recovery_archive_scan_signature()
+        cached_entries = self._runtime_recovery_archive_cache_entries
+        if cached_entries is not None and self._runtime_recovery_archive_cache_signature == signature:
             return [dict(entry) for entry in cached_entries]
 
-        entries: list[dict[str, Any]] = []
+        artifact_entries: list[tuple[Path, Path]] = []
         try:
-            artifact_paths = list(
-                archive_root.rglob("multi_turn_turn*_final_output_response_*.txt")
-            )
+            for archive_root in archive_roots:
+                artifact_entries.extend(
+                    (
+                        archive_root,
+                        artifact_path,
+                    )
+                    for artifact_path in archive_root.rglob(
+                        "multi_turn_turn*_final_output_response_*.txt"
+                    )
+                )
         except FileNotFoundError:
-            self._invalidate_runtime_bridge_archive_cache()
+            self._invalidate_runtime_recovery_archive_cache()
             return []
         except Exception:
-            log.exception("Failed to scan runtime bridge archive directory: %s", archive_root)
+            log.exception("Failed to scan runtime recovery archive directories")
             return []
 
-        for artifact_path in artifact_paths:
+        entries: list[dict[str, Any]] = []
+        for archive_root, artifact_path in artifact_entries:
             if not artifact_path.is_file():
                 continue
             if artifact_path.parent.name != "recovery_final":
@@ -711,6 +726,7 @@ class SystemBridge:
                     "path": str(resolved),
                     "label": label,
                     "relative_path": rel_path,
+                    "source_root": str(archive_root),
                     "accepted_trace_length": accepted_trace_length,
                     "final_output_stage": "primitive_program_ready",
                     "updated_at_utc": datetime.fromtimestamp(
@@ -725,8 +741,8 @@ class SystemBridge:
             ),
             reverse=True,
         )
-        self._runtime_bridge_archive_cache_signature = signature
-        self._runtime_bridge_archive_cache_entries = [dict(entry) for entry in entries]
+        self._runtime_recovery_archive_cache_signature = signature
+        self._runtime_recovery_archive_cache_entries = [dict(entry) for entry in entries]
         return entries
 
     # ------------------------------------------------------------------
@@ -4306,7 +4322,7 @@ class SystemBridge:
                 product_agents=self.product_agents,
                 cca=self.cca,
             )
-            self._apply_runtime_bridge_session_settings()
+            self._apply_runtime_recovery_session_settings()
             self._diag_emit(
                 f"startup#{startup_id} agents created resources={len(self.resource_agents)} "
                 f"products={len(self.product_agents)} in {time.monotonic() - startup_t0:.2f}s"
@@ -4521,15 +4537,15 @@ class SystemBridge:
                 except Exception:
                     pass
             archived_counts[sub] = moved
-        bridge_runtime_dir = _BRIDGE_RUNTIME_DATA_DIR
+        recovery_runtime_dir = _RECOVERY_RUNTIME_DATA_DIR
         moved = 0
-        if bridge_runtime_dir.exists():
+        if recovery_runtime_dir.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            archive = bridge_runtime_dir / "archive" / stamp
+            archive = recovery_runtime_dir / "archive" / stamp
             reserved_dirs = {"archive", "imported"}
             run_dir_pattern = re.compile(r"^\d{8}T\d{6}(?:_\d+)?$")
             entries_to_archive: list[Path] = []
-            for entry in bridge_runtime_dir.iterdir():
+            for entry in recovery_runtime_dir.iterdir():
                 if entry.name in reserved_dirs:
                     continue
                 if (
@@ -4552,8 +4568,8 @@ class SystemBridge:
                         moved += 1
                 except Exception:
                     pass
-        self._invalidate_runtime_bridge_archive_cache()
-        archived_counts["llm_bridge"] = moved
+        self._invalidate_runtime_recovery_archive_cache()
+        archived_counts["llm_recovery"] = moved
         return archived_counts
 
     @staticmethod
@@ -11234,16 +11250,16 @@ class SystemBridge:
             raise RuntimeError("product agent does not support DES runtime recovery retry")
         return self._run_product_agent_coroutine(agent, retry())
 
-    def generate_runtime_bridge_proposal(self, product_jid: str) -> dict[str, Any]:
+    def generate_runtime_recovery_proposal(self, product_jid: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        generate = getattr(agent, "generate_runtime_bridge_proposal", None)
+        generate = getattr(agent, "generate_runtime_recovery_proposal", None)
         if not callable(generate):
-            raise RuntimeError("product agent does not support runtime bridge generation")
+            raise RuntimeError("product agent does not support runtime recovery generation")
         return self._run_product_agent_coroutine(agent, generate())
 
-    def load_runtime_bridge_archive_proposal(
+    def load_runtime_recovery_archive_proposal(
         self,
         product_jid: str,
         artifact_path: str | None = None,
@@ -11251,21 +11267,21 @@ class SystemBridge:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        loader = getattr(agent, "load_runtime_bridge_archive_proposal", None)
+        loader = getattr(agent, "load_runtime_recovery_archive_proposal", None)
         if not callable(loader):
-            raise RuntimeError("product agent does not support archived runtime bridge loading")
+            raise RuntimeError("product agent does not support archived runtime recovery loading")
         return self._run_product_agent_coroutine(
             agent,
             loader(artifact_path),
             timeout_sec=60.0,
-            operation_name="loading archived bridge proposal",
+            operation_name="loading archived recovery proposal",
         )
 
-    def approve_runtime_bridge_outline(self, product_jid: str) -> dict[str, Any]:
+    def approve_runtime_recovery_outline(self, product_jid: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        approve = getattr(agent, "approve_runtime_bridge_outline", None)
+        approve = getattr(agent, "approve_runtime_recovery_outline", None)
         if not callable(approve):
             raise RuntimeError("product agent does not support outline approval")
         return self._run_product_agent_coroutine(
@@ -11275,11 +11291,11 @@ class SystemBridge:
             operation_name="approving outline checkpoint",
         )
 
-    def refine_runtime_bridge_outline(self, product_jid: str, feedback: str) -> dict[str, Any]:
+    def refine_runtime_recovery_outline(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        refine = getattr(agent, "refine_runtime_bridge_outline", None)
+        refine = getattr(agent, "refine_runtime_recovery_outline", None)
         if not callable(refine):
             raise RuntimeError("product agent does not support outline refinement")
         return self._run_product_agent_coroutine(
@@ -11289,20 +11305,20 @@ class SystemBridge:
             operation_name="refining outline checkpoint",
         )
 
-    def reject_runtime_bridge_outline(self, product_jid: str, feedback: str) -> dict[str, Any]:
+    def reject_runtime_recovery_outline(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        reject = getattr(agent, "reject_runtime_bridge_outline", None)
+        reject = getattr(agent, "reject_runtime_recovery_outline", None)
         if not callable(reject):
             raise RuntimeError("product agent does not support outline rejection")
         return self._run_product_agent_coroutine(agent, reject(feedback))
 
-    def approve_runtime_bridge_primitives(self, product_jid: str) -> dict[str, Any]:
+    def approve_runtime_recovery_primitives(self, product_jid: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        approve = getattr(agent, "approve_runtime_bridge_primitives", None)
+        approve = getattr(agent, "approve_runtime_recovery_primitives", None)
         if not callable(approve):
             raise RuntimeError("product agent does not support primitive approval")
         return self._run_product_agent_coroutine(
@@ -11312,11 +11328,11 @@ class SystemBridge:
             operation_name="approving primitive checkpoint",
         )
 
-    def refine_runtime_bridge_primitives(self, product_jid: str, feedback: str) -> dict[str, Any]:
+    def refine_runtime_recovery_primitives(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        refine = getattr(agent, "refine_runtime_bridge_primitives", None)
+        refine = getattr(agent, "refine_runtime_recovery_primitives", None)
         if not callable(refine):
             raise RuntimeError("product agent does not support primitive refinement")
         return self._run_product_agent_coroutine(
@@ -11326,16 +11342,16 @@ class SystemBridge:
             operation_name="refining primitive checkpoint",
         )
 
-    def reject_runtime_bridge_primitives(self, product_jid: str, feedback: str) -> dict[str, Any]:
+    def reject_runtime_recovery_primitives(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        reject = getattr(agent, "reject_runtime_bridge_primitives", None)
+        reject = getattr(agent, "reject_runtime_recovery_primitives", None)
         if not callable(reject):
             raise RuntimeError("product agent does not support primitive rejection")
         return self._run_product_agent_coroutine(agent, reject(feedback))
 
-    def load_preprogrammed_runtime_bridge_scenario(
+    def load_preprogrammed_runtime_recovery_scenario(
         self,
         product_jid: str,
         scenario_id: str,
@@ -11343,21 +11359,21 @@ class SystemBridge:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        loader = getattr(agent, "load_preprogrammed_runtime_bridge_scenario", None)
-        loader_sync = getattr(agent, "load_preprogrammed_runtime_bridge_scenario_sync", None)
+        loader = getattr(agent, "load_preprogrammed_runtime_recovery_scenario", None)
+        loader_sync = getattr(agent, "load_preprogrammed_runtime_recovery_scenario_sync", None)
         if not callable(loader):
             if not callable(loader_sync):
                 raise RuntimeError(
-                    "product agent does not support preprogrammed runtime bridge scenarios"
+                    "product agent does not support preprogrammed runtime recovery scenarios"
                 )
         log.info(
-            "[ui.bridge] Loading preprogrammed runtime bridge scenario product=%s scenario=%s",
+            "[ui.bridge] Loading preprogrammed runtime recovery scenario product=%s scenario=%s",
             product_jid,
             scenario_id,
         )
         if callable(loader_sync):
             log.info(
-                "[ui.bridge] Using direct sync path for preprogrammed runtime bridge scenario product=%s scenario=%s",
+                "[ui.bridge] Using direct sync path for preprogrammed runtime recovery scenario product=%s scenario=%s",
                 product_jid,
                 scenario_id,
             )
@@ -11369,19 +11385,19 @@ class SystemBridge:
             operation_name="loading preprogrammed recovery scenario",
         )
 
-    def approve_runtime_bridge_proposal(self, product_jid: str) -> dict[str, Any]:
+    def approve_runtime_recovery_proposal(self, product_jid: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        approve = getattr(agent, "approve_runtime_bridge_proposal", None)
-        approve_sync = getattr(agent, "approve_runtime_bridge_proposal_sync", None)
+        approve = getattr(agent, "approve_runtime_recovery_proposal", None)
+        approve_sync = getattr(agent, "approve_runtime_recovery_proposal_sync", None)
         if not callable(approve):
             if not callable(approve_sync):
-                raise RuntimeError("product agent does not support runtime bridge approval")
-        log.info("[ui.bridge] Approving runtime bridge proposal product=%s", product_jid)
+                raise RuntimeError("product agent does not support runtime recovery approval")
+        log.info("[ui.bridge] Approving runtime recovery proposal product=%s", product_jid)
         if callable(approve_sync):
             log.info(
-                "[ui.bridge] Using direct sync path for runtime bridge approval product=%s",
+                "[ui.bridge] Using direct sync path for runtime recovery approval product=%s",
                 product_jid,
             )
             return approve_sync()
@@ -11389,16 +11405,16 @@ class SystemBridge:
             agent,
             approve(),
             timeout_sec=60.0,
-            operation_name="approving bridge proposal",
+            operation_name="approving recovery proposal",
         )
 
-    def reject_runtime_bridge_proposal(self, product_jid: str, feedback: str) -> dict[str, Any]:
+    def reject_runtime_recovery_proposal(self, product_jid: str, feedback: str) -> dict[str, Any]:
         if not self.system_running:
             raise RuntimeError("system is not running")
         agent = self._find_product_agent(product_jid)
-        reject = getattr(agent, "reject_runtime_bridge_proposal", None)
+        reject = getattr(agent, "reject_runtime_recovery_proposal", None)
         if not callable(reject):
-            raise RuntimeError("product agent does not support runtime bridge rejection")
+            raise RuntimeError("product agent does not support runtime recovery rejection")
         return self._run_product_agent_coroutine(agent, reject(feedback))
 
     def get_plan_safety_alerts(self) -> list[dict[str, Any]]:

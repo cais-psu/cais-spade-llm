@@ -24,7 +24,7 @@ def _primitive_summary(
     preconditions: dict[str, Any],
     effects: dict[str, Any],
 ) -> str:
-    base = description or "Bridge primitive"
+    base = description or "Recovery primitive"
     pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
     effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
     detail_parts: list[str] = []
@@ -1549,7 +1549,7 @@ def _robot_prompt_composites(
         "name": "grasp_part",
         "resource_type": "robot",
         "description": (
-            "Bridge-only composite primitive that closes the gripper and attaches "
+            "Recovery-only composite primitive that closes the gripper and attaches "
             "the targeted part to the robot."
         ),
         "params": grasp_params,
@@ -1578,7 +1578,7 @@ def _robot_prompt_composites(
         properties={
             "part_name": {
                 "type": "string",
-                "description": "Canonical bridge part name for release trace validation.",
+                "description": "Canonical recovery part name for release trace validation.",
             },
             "model_name": {
                 "type": "string",
@@ -1597,7 +1597,7 @@ def _robot_prompt_composites(
         "name": "release_part",
         "resource_type": "robot",
         "description": (
-            "Bridge-only composite primitive that opens the gripper and detaches "
+            "Recovery-only composite primitive that opens the gripper and detaches "
             "the currently held part."
         ),
         "params": release_params,
@@ -1669,19 +1669,19 @@ def build_robot_synthesis_primitive_catalog(
     return filter_robot_synthesis_primitive_catalog(source_catalog or [])
 
 
-def _bridge_ref(compiler: Any, path: str) -> dict[str, str]:
-    return compiler._bridge_ref(path)
+def _recovery_ref(compiler: Any, path: str) -> dict[str, str]:
+    return compiler._recovery_ref(path)
 
 
-def _part_target_info(prepared_bridge_request: dict[str, Any], *, part_name: str) -> dict[str, Any]:
-    parts = dict((prepared_bridge_request.get("grounding_context") or {}).get("parts") or {})
+def _part_target_info(prepared_recovery_request: dict[str, Any], *, part_name: str) -> dict[str, Any]:
+    parts = dict((prepared_recovery_request.get("grounding_context") or {}).get("parts") or {})
     return dict((parts.get(str(part_name or "").strip()) or {}).get("target") or {})
 
 
 def _part_pick_geometry(
-    prepared_bridge_request: dict[str, Any], *, part_name: str
+    prepared_recovery_request: dict[str, Any], *, part_name: str
 ) -> dict[str, Any]:
-    target = _part_target_info(prepared_bridge_request, part_name=part_name)
+    target = _part_target_info(prepared_recovery_request, part_name=part_name)
     slot_pose = dict(target.get("slot_pose") or {})
     board_top_z = target.get("board_top_z")
     try:
@@ -1715,15 +1715,15 @@ def _named_pose_available(compiler: Any, *, resource_jid: str, pose_name: str) -
 
 
 def _primitive_allows_start_state(
-    prepared_bridge_request: dict[str, Any] | None,
+    prepared_recovery_request: dict[str, Any] | None,
     *,
     resource_jid: str,
     primitive_name: str,
     start_state: str,
 ) -> bool:
-    bridge_resources = dict((prepared_bridge_request or {}).get("bridge_resources") or {})
+    recovery_resources = dict((prepared_recovery_request or {}).get("recovery_resources") or {})
     primitive_catalog = list(
-        dict(bridge_resources.get(resource_jid) or {}).get("primitive_catalog") or []
+        dict(recovery_resources.get(resource_jid) or {}).get("primitive_catalog") or []
     )
     for entry in primitive_catalog:
         if not isinstance(entry, dict):
@@ -1766,9 +1766,9 @@ def _optional_recovery_home_steps(
     return _home_steps(compiler, resource_jid=resource_jid, speed=speed)
 
 
-def _bridge_event_fact_ref(compiler: Any, path: str) -> dict[str, Any]:
+def _recovery_event_fact_ref(compiler: Any, path: str) -> dict[str, Any]:
     normalized = "/".join(token for token in str(path or "").split(".") if token)
-    return _bridge_ref(compiler, f"/event_facts/{normalized}")
+    return _recovery_ref(compiler, f"/event_facts/{normalized}")
 
 
 def _event_fact_ref(path: str) -> dict[str, str]:
@@ -1777,30 +1777,30 @@ def _event_fact_ref(path: str) -> dict[str, str]:
 
 def _orientation_params(compiler: Any, *, fact_path: str) -> dict[str, Any]:
     return {
-        "qx": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qx"),
-        "qy": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qy"),
-        "qz": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qz"),
-        "qw": _bridge_event_fact_ref(compiler, f"{fact_path}.pose.qw"),
+        "qx": _recovery_event_fact_ref(compiler, f"{fact_path}.pose.qx"),
+        "qy": _recovery_event_fact_ref(compiler, f"{fact_path}.pose.qy"),
+        "qz": _recovery_event_fact_ref(compiler, f"{fact_path}.pose.qz"),
+        "qw": _recovery_event_fact_ref(compiler, f"{fact_path}.pose.qw"),
     }
 
 
 def _stage_destination(
-    prepared_bridge_request: dict[str, Any], *, event: dict[str, Any], resource_jid: str
+    prepared_recovery_request: dict[str, Any], *, event: dict[str, Any], resource_jid: str
 ) -> str:
     item_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
     if str(part_delta.get("location_to", "")).strip():
         return str(part_delta.get("location_to")).strip()
     part_context = dict(
-        ((prepared_bridge_request.get("grounding_context") or {}).get("parts") or {}).get(item_name)
+        ((prepared_recovery_request.get("grounding_context") or {}).get("parts") or {}).get(item_name)
         or {}
     )
     for key in ("origin_resource_location", "last_known_location", "location"):
         token = str(part_context.get(key) or "").strip()
         if token and not token.endswith("_gripper"):
             return token
-    bridge_resources = prepared_bridge_request.get("bridge_resources") or {}
-    resource_entry = dict((bridge_resources.get(resource_jid) or {}).get("bridge_snapshot") or {})
+    recovery_resources = prepared_recovery_request.get("recovery_resources") or {}
+    resource_entry = dict((recovery_resources.get(resource_jid) or {}).get("recovery_snapshot") or {})
     manipulator = dict((resource_entry.get("resource_facets") or {}).get("manipulator") or {})
     token = str(
         manipulator.get("current_pose_ref") or resource_entry.get("current_pose_ref") or ""
@@ -1836,7 +1836,7 @@ def _transition_from_event(
 
 def _compile_clear_macro(
     compiler: Any,
-    _prepared_bridge_request: dict[str, Any] | None = None,
+    _prepared_recovery_request: dict[str, Any] | None = None,
     *,
     event: dict[str, Any],
     resource_jid: str,
@@ -1845,7 +1845,7 @@ def _compile_clear_macro(
 ) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
     if _primitive_allows_start_state(
-        _prepared_bridge_request,
+        _prepared_recovery_request,
         resource_jid=resource_jid,
         primitive_name="move_to_named_pose",
         start_state=start_state,
@@ -1857,9 +1857,9 @@ def _compile_clear_macro(
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, "current_pose.pose.x"),
-                    "y": _bridge_event_fact_ref(compiler, "current_pose.pose.y"),
-                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
+                    "x": _recovery_event_fact_ref(compiler, "current_pose.pose.x"),
+                    "y": _recovery_event_fact_ref(compiler, "current_pose.pose.y"),
+                    "z": _recovery_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 0.45,
                 },
             },
@@ -1890,7 +1890,7 @@ def _compile_clear_macro(
 
 def _compile_pick_macro(
     compiler: Any,
-    prepared_bridge_request: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
     *,
     event: dict[str, Any],
     resource_jid: str,
@@ -1898,7 +1898,7 @@ def _compile_pick_macro(
     primitive_name: str = "",
 ) -> dict[str, Any]:
     part_name = str(event.get("part_name", "")).strip()
-    geometry = _part_pick_geometry(prepared_bridge_request, part_name=part_name)
+    geometry = _part_pick_geometry(prepared_recovery_request, part_name=part_name)
     out_state, part_transition = _transition_from_event(
         event=event,
         start_state=start_state,
@@ -1928,18 +1928,18 @@ def _compile_pick_macro(
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
-                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
-                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _recovery_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
                     "speed": 0.45,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
-                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
-                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _recovery_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.45,
                 },
@@ -1948,7 +1948,7 @@ def _compile_pick_macro(
             {
                 "primitive": "attach_part",
                 "params": {
-                    "model_name": _bridge_ref(compiler, f"/parts/{part_name}/target/model_name"),
+                    "model_name": _recovery_ref(compiler, f"/parts/{part_name}/target/model_name"),
                     "part_name": part_name,
                 },
             },
@@ -1962,7 +1962,7 @@ def _compile_pick_macro(
 
 def _compile_release_macro(
     compiler: Any,
-    prepared_bridge_request: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
     *,
     event: dict[str, Any],
     resource_jid: str,
@@ -1971,7 +1971,7 @@ def _compile_release_macro(
 ) -> dict[str, Any]:
     part_name = str(event.get("part_name", "")).strip()
     destination_location = _stage_destination(
-        prepared_bridge_request,
+        prepared_recovery_request,
         event=event,
         resource_jid=resource_jid,
     )
@@ -2009,7 +2009,7 @@ def _compile_release_macro(
             {
                 "primitive": "detach_part",
                 "params": {
-                    "model_name": _bridge_ref(compiler, f"/parts/{part_name}/target/model_name"),
+                    "model_name": _recovery_ref(compiler, f"/parts/{part_name}/target/model_name"),
                     "assume_released_if_open": True,
                 },
             },
@@ -2024,7 +2024,7 @@ def _compile_release_macro(
 
 def _compile_place_macro(
     compiler: Any,
-    prepared_bridge_request: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
     *,
     event: dict[str, Any],
     resource_jid: str,
@@ -2033,12 +2033,12 @@ def _compile_place_macro(
 ) -> dict[str, Any]:
     part_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
-    target_info = _part_target_info(prepared_bridge_request, part_name=part_name)
+    target_info = _part_target_info(prepared_recovery_request, part_name=part_name)
     destination_location = (
         str(part_delta.get("location_to", "")).strip()
         or str(target_info.get("location") or "").strip()
     )
-    geometry = _part_pick_geometry(prepared_bridge_request, part_name=part_name)
+    geometry = _part_pick_geometry(prepared_recovery_request, part_name=part_name)
     out_state, part_transition = _transition_from_event(
         event=event,
         start_state=start_state,
@@ -2074,18 +2074,18 @@ def _compile_place_macro(
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
-                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
-                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
+                    "x": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _recovery_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 0.45,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
-                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
-                    "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.45,
                 },
@@ -2094,7 +2094,7 @@ def _compile_place_macro(
             {
                 "primitive": "detach_part",
                 "params": {
-                    "model_name": _bridge_ref(compiler, f"/parts/{part_name}/target/model_name"),
+                    "model_name": _recovery_ref(compiler, f"/parts/{part_name}/target/model_name"),
                     "assume_released_if_open": True,
                 },
             },
@@ -2109,7 +2109,7 @@ def _compile_place_macro(
 
 def _compile_pick_place_macro(
     compiler: Any,
-    prepared_bridge_request: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
     *,
     event: dict[str, Any],
     resource_jid: str,
@@ -2118,12 +2118,12 @@ def _compile_pick_place_macro(
 ) -> dict[str, Any]:
     part_name = str(event.get("part_name", "")).strip()
     part_delta = dict(event.get("expected_part_delta") or {})
-    target_info = _part_target_info(prepared_bridge_request, part_name=part_name)
+    target_info = _part_target_info(prepared_recovery_request, part_name=part_name)
     destination_location = (
         str(part_delta.get("location_to", "")).strip()
         or str(target_info.get("location") or "").strip()
     )
-    geometry = _part_pick_geometry(prepared_bridge_request, part_name=part_name)
+    geometry = _part_pick_geometry(prepared_recovery_request, part_name=part_name)
     out_state, part_transition = _transition_from_event(
         event=event,
         start_state=start_state,
@@ -2158,18 +2158,18 @@ def _compile_pick_place_macro(
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
-                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
-                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _recovery_event_fact_ref(compiler, f"pick_targets.{part_name}.travel_z"),
                     "speed": 0.45,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
-                    "y": _bridge_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
-                    "z": _bridge_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.x"),
+                    "y": _recovery_event_fact_ref(compiler, f"detected_part.{part_name}.pose.y"),
+                    "z": _recovery_event_fact_ref(compiler, f"pick_targets.{part_name}.pick_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.45,
                 },
@@ -2178,7 +2178,7 @@ def _compile_pick_place_macro(
             {
                 "primitive": "attach_part",
                 "params": {
-                    "model_name": _bridge_ref(compiler, f"/parts/{part_name}/target/model_name"),
+                    "model_name": _recovery_ref(compiler, f"/parts/{part_name}/target/model_name"),
                     "part_name": part_name,
                 },
             },
@@ -2194,18 +2194,18 @@ def _compile_pick_place_macro(
             {
                 "primitive": "move_cartesian",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
-                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
-                    "z": _bridge_event_fact_ref(compiler, "current_pose.pose.z"),
+                    "x": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _recovery_event_fact_ref(compiler, "current_pose.pose.z"),
                     "speed": 0.45,
                 },
             },
             {
                 "primitive": "move_pose",
                 "params": {
-                    "x": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
-                    "y": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
-                    "z": _bridge_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
+                    "x": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_x"),
+                    "y": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.slot_y"),
+                    "z": _recovery_event_fact_ref(compiler, f"place_targets.{part_name}.place_z"),
                     **_orientation_params(compiler, fact_path="current_pose"),
                     "speed": 0.45,
                 },
@@ -2214,7 +2214,7 @@ def _compile_pick_place_macro(
             {
                 "primitive": "detach_part",
                 "params": {
-                    "model_name": _bridge_ref(compiler, f"/parts/{part_name}/target/model_name"),
+                    "model_name": _recovery_ref(compiler, f"/parts/{part_name}/target/model_name"),
                     "assume_released_if_open": True,
                 },
             },
@@ -2228,7 +2228,7 @@ def _compile_pick_place_macro(
 
 
 # Currently used as operation-kind metadata through ResourceProfile. The
-# primitive bridge runtime compiles normalized macro_tasks directly.
+# primitive recovery runtime compiles normalized macro_tasks directly.
 ROBOT_COMPILER_MAP = {
     "clear": _compile_clear_macro,
     "pick": _compile_pick_macro,

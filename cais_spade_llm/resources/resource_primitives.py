@@ -1,4 +1,4 @@
-"""Generic resource primitive catalog and bridge snapshot helpers."""
+"""Generic resource primitive catalog and recovery snapshot helpers."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import inspect
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_resource_adapter import (
-    adapt_bridge_resource_snapshot,
-    bridge_resource_capabilities,
-    resolve_bridge_resource_type,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_resource_adapter import (
+    adapt_recovery_resource_snapshot,
+    recovery_resource_capabilities,
+    resolve_recovery_resource_type,
 )
 from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
@@ -26,7 +26,7 @@ def primitive_summary(
     preconditions: dict[str, Any],
     effects: dict[str, Any],
 ) -> str:
-    base = description or "Bridge primitive"
+    base = description or "Recovery primitive"
     pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
     effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
     detail_parts: list[str] = []
@@ -50,8 +50,8 @@ def _build_catalog_owner(resource_agent: Any) -> tuple[Any, Any]:
     return owner, profile
 
 
-def _raw_bridge_primitive_names(resource_agent: Any) -> list[str]:
-    raw = getattr(resource_agent, "_BRIDGE_PRIMITIVES", ()) or ()
+def _raw_recovery_primitive_names(resource_agent: Any) -> list[str]:
+    raw = getattr(resource_agent, "_RECOVERY_PRIMITIVES", ()) or ()
     if isinstance(raw, (list, tuple)):
         names = [str(name or "").strip() for name in raw if str(name or "").strip()]
     else:
@@ -111,7 +111,7 @@ def _resource_type_for_agent(
     snapshot: dict[str, Any] | None = None,
 ) -> str:
     static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
-    return resolve_bridge_resource_type(
+    return resolve_recovery_resource_type(
         resource=resource_agent,
         snapshot=snapshot or {},
         modeled_state={},
@@ -120,13 +120,13 @@ def _resource_type_for_agent(
 
 
 def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
-    """Build the execution primitive catalog from a resource bridge surface."""
+    """Build the execution primitive catalog from a resource recovery surface."""
     if resource_agent is None:
         return []
     owner, profile = _build_catalog_owner(resource_agent)
     resource_type = _resource_type_for_agent(resource_agent)
     entries: list[dict[str, Any]] = []
-    for primitive_name in _raw_bridge_primitive_names(resource_agent):
+    for primitive_name in _raw_recovery_primitive_names(resource_agent):
         fn = _callable_for_primitive(resource_agent, owner, primitive_name)
         if not callable(fn):
             continue
@@ -247,7 +247,7 @@ def _snapshot_builder_payload(resource_agent: Any, profile: Any) -> dict[str, An
 
 
 def _execution_catalog_for_snapshot(resource_agent: Any) -> list[dict[str, Any]]:
-    method = getattr(resource_agent, "bridge_execution_primitive_catalog", None)
+    method = getattr(resource_agent, "recovery_execution_primitive_catalog", None)
     if callable(method):
         try:
             catalog = method()
@@ -258,8 +258,8 @@ def _execution_catalog_for_snapshot(resource_agent: Any) -> list[dict[str, Any]]
     return build_execution_primitive_catalog(resource_agent)
 
 
-def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
-    """Build the canonical bridge snapshot for a resource without recursion."""
+def get_resource_recovery_snapshot(resource_agent: Any) -> dict[str, Any]:
+    """Build the canonical recovery snapshot for a resource without recursion."""
     if resource_agent is None:
         return {}
     profile = get_resource_profile_for_agent(resource_agent)
@@ -268,21 +268,21 @@ def get_resource_bridge_snapshot(resource_agent: Any) -> dict[str, Any]:
         getattr(resource_agent, "jid", "") or getattr(resource_agent, "agent_name", "") or ""
     ).strip()
     resource_type = _resource_type_for_agent(resource_agent, snapshot=raw_snapshot)
-    adapted_resource = adapt_bridge_resource_snapshot(
+    adapted_resource = adapt_recovery_resource_snapshot(
         resource_jid=resource_jid,
         resource_type=resource_type,
         snapshot=raw_snapshot,
         modeled_state={},
     )
     execution_catalog = _execution_catalog_for_snapshot(resource_agent)
-    adapted_resource["bridge_adapter"] = bridge_resource_capabilities(
+    adapted_resource["recovery_adapter"] = recovery_resource_capabilities(
         resource_type,
         primitive_catalog=execution_catalog,
     )
     return adapted_resource
 
 
-def sync_agent_from_bridge_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:
+def sync_agent_from_recovery_snapshot(resource_agent: Any, snapshot: dict[str, Any]) -> None:
     """Apply canonical snapshot fields back onto the live resource agent."""
     if resource_agent is None:
         return
@@ -315,7 +315,7 @@ __all__ = [
     "build_primitive_reference_card",
     "build_synthesis_primitive_catalog",
     "filter_synthesis_primitive_catalog",
-    "get_resource_bridge_snapshot",
+    "get_resource_recovery_snapshot",
     "primitive_summary",
-    "sync_agent_from_bridge_snapshot",
+    "sync_agent_from_recovery_snapshot",
 ]

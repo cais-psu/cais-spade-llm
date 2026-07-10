@@ -1,4 +1,4 @@
-"""Runtime DES recovery and bridge-plan mutation helpers for ProcessPlanner."""
+"""Runtime DES recovery and recovery-plan mutation helpers for ProcessPlanner."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from cais_spade_llm.prompts import build_replan_prompt
 class ProcessRecoveryPlanner:
     EXPORTED_METHODS = (
         "_build_des_replan_result",
-        "_set_last_bridge_debug",
-        "get_last_bridge_debug",
+        "_set_last_recovery_debug",
+        "get_last_recovery_debug",
         "_tool_signature",
         "_resource_by_jid",
         "_resource_short_name",
@@ -35,15 +35,15 @@ class ProcessRecoveryPlanner:
         "_collect_obligation_targets",
         "_primary_failure_context",
         "_node_exists",
-        "_bridge_sequence_nodes",
-        "remove_bridge_sequence_tail",
+        "_recovery_sequence_nodes",
+        "remove_recovery_sequence_tail",
         "_path_to_recovery_tasks",
         "_gate_tasks_after_recovery_tail",
         "_splice_runtime_des_repair_before_task",
-        "_splice_bridge_chain_before_task",
-        "build_bridge_macro_proposal_patch",
-        "apply_bridge_macro_proposal",
-        "_apply_primitive_bridge_proposal",
+        "_splice_recovery_chain_before_task",
+        "build_recovery_macro_proposal_patch",
+        "apply_recovery_macro_proposal",
+        "_apply_primitive_recovery_proposal",
         "_task_ids_running_in_fsa_state",
         "apply_validation_witness_ordering_repairs",
         "replan_with_feedback_offline",
@@ -77,42 +77,42 @@ class ProcessRecoveryPlanner:
     def _build_des_replan_result(
         *,
         plan_changed: bool = False,
-        used_llm_bridge: bool = False,
+        used_llm_recovery: bool = False,
         human_required: bool = False,
-        awaiting_bridge_approval: bool = False,
-        awaiting_bridge_generation: bool = False,
+        awaiting_recovery_approval: bool = False,
+        awaiting_recovery_generation: bool = False,
         des_recovery_missing: bool = False,
         message: str = "",
-        bridge_summary: list[str] | None = None,
-        bridge_proposal: dict[str, Any] | None = None,
-        bridge_debug: dict[str, Any] | None = None,
-        prepared_bridge_request: dict[str, Any] | None = None,
+        recovery_summary: list[str] | None = None,
+        recovery_proposal: dict[str, Any] | None = None,
+        recovery_debug: dict[str, Any] | None = None,
+        prepared_recovery_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "plan_changed": bool(plan_changed),
-            "used_llm_bridge": bool(used_llm_bridge),
+            "used_llm_recovery": bool(used_llm_recovery),
             "human_required": bool(human_required),
-            "awaiting_bridge_approval": bool(awaiting_bridge_approval),
-            "awaiting_bridge_generation": bool(awaiting_bridge_generation),
+            "awaiting_recovery_approval": bool(awaiting_recovery_approval),
+            "awaiting_recovery_generation": bool(awaiting_recovery_generation),
             "des_recovery_missing": bool(des_recovery_missing),
             "message": str(message).strip(),
-            "bridge_summary": list(bridge_summary or []),
-            "bridge_proposal": deepcopy(bridge_proposal)
-            if isinstance(bridge_proposal, dict)
+            "recovery_summary": list(recovery_summary or []),
+            "recovery_proposal": deepcopy(recovery_proposal)
+            if isinstance(recovery_proposal, dict)
             else None,
-            "bridge_debug": deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None,
-            "prepared_bridge_request": (
-                deepcopy(prepared_bridge_request)
-                if isinstance(prepared_bridge_request, dict)
+            "recovery_debug": deepcopy(recovery_debug) if isinstance(recovery_debug, dict) else None,
+            "prepared_recovery_request": (
+                deepcopy(prepared_recovery_request)
+                if isinstance(prepared_recovery_request, dict)
                 else None
             ),
         }
 
-    def _set_last_bridge_debug(self, payload: dict[str, Any] | None) -> None:
-        self.last_bridge_debug = deepcopy(payload) if isinstance(payload, dict) else {}
+    def _set_last_recovery_debug(self, payload: dict[str, Any] | None) -> None:
+        self.last_recovery_debug = deepcopy(payload) if isinstance(payload, dict) else {}
 
-    def get_last_bridge_debug(self) -> dict[str, Any]:
-        return deepcopy(self.last_bridge_debug)
+    def get_last_recovery_debug(self) -> dict[str, Any]:
+        return deepcopy(self.last_recovery_debug)
 
     @staticmethod
     def _tool_signature(row: dict[str, Any]) -> str:
@@ -722,36 +722,36 @@ class ProcessRecoveryPlanner:
             for node in self.nodes
         )
 
-    def _bridge_sequence_nodes(self, bridge_sequence_id: str) -> list[dict[str, Any]]:
-        """Return bridge macro tasks for a compiled bridge sequence in execution order."""
-        sequence_id = str(bridge_sequence_id or "").strip()
+    def _recovery_sequence_nodes(self, recovery_sequence_id: str) -> list[dict[str, Any]]:
+        """Return recovery macro tasks for a compiled recovery sequence in execution order."""
+        sequence_id = str(recovery_sequence_id or "").strip()
         if not sequence_id:
             return []
         nodes = [
             node
             for node in self.nodes
             if isinstance(node, dict)
-            and str(node.get("bridge_sequence_id") or "").strip() == sequence_id
+            and str(node.get("recovery_sequence_id") or "").strip() == sequence_id
         ]
         return sorted(
             nodes,
             key=lambda node: (
-                int(node.get("bridge_sequence_index") or 0),
+                int(node.get("recovery_sequence_index") or 0),
                 int(node.get("sequence_index") or 0),
                 str(node.get("id") or ""),
             ),
         )
 
-    def remove_bridge_sequence_tail(
+    def remove_recovery_sequence_tail(
         self,
         *,
-        bridge_sequence_id: str,
+        recovery_sequence_id: str,
         completed_task_id: str,
     ) -> list[dict[str, Any]]:
-        """Delete remaining bridge macro tasks that have not started executing."""
+        """Delete remaining recovery macro tasks that have not started executing."""
         completed_task_id = str(completed_task_id or "").strip()
         deletions: list[dict[str, Any]] = []
-        for node in self._bridge_sequence_nodes(bridge_sequence_id):
+        for node in self._recovery_sequence_nodes(recovery_sequence_id):
             node_id = str(node.get("id") or "").strip()
             if not node_id or node_id == completed_task_id:
                 continue
@@ -763,8 +763,8 @@ class ProcessRecoveryPlanner:
                     "id": node_id,
                     "delete": True,
                     "change_reason": (
-                        "Removed unexecuted bridge sequence tail after "
-                        f"{completed_task_id or 'bridge failure'}"
+                        "Removed unexecuted recovery sequence tail after "
+                        f"{completed_task_id or 'recovery failure'}"
                     ),
                 }
             )
@@ -1166,13 +1166,13 @@ class ProcessRecoveryPlanner:
                 new_sequence_index,
             )
 
-    def _splice_bridge_chain_before_task(
+    def _splice_recovery_chain_before_task(
         self,
         modified_tasks: list[dict[str, Any]],
         *,
         repair_tasks: list[dict[str, Any]],
         target_task_id: str,
-        change_prefix: str = "Approved bridge recovery",
+        change_prefix: str = "Approved recovery",
     ) -> None:
         if not repair_tasks:
             raise ValueError("repair task chain is required")
@@ -1182,25 +1182,25 @@ class ProcessRecoveryPlanner:
         tail_task_id = str((repair_tasks[-1] or {}).get("id") or "").strip()
         target_task_id = str(target_task_id or "").strip()
         if not first_repair_task_id:
-            raise ValueError("first bridge task id is required")
+            raise ValueError("first recovery task id is required")
         if not tail_task_id:
-            raise ValueError("bridge tail task id is required")
+            raise ValueError("recovery tail task id is required")
         if not target_task_id:
             raise ValueError("target task id is required")
 
         target_task = self._find_node(target_task_id)
         if not isinstance(target_task, dict):
-            raise ValueError(f"target task '{target_task_id}' was not found for bridge splice")
+            raise ValueError(f"target task '{target_task_id}' was not found for recovery splice")
 
         repair_resource_jid = str(first_repair_task.get("resource_jid") or "").strip()
         target_resource_jid = str(target_task.get("resource_jid") or "").strip()
         if not repair_resource_jid:
-            raise ValueError(f"bridge task '{first_repair_task_id}' is missing resource_jid")
+            raise ValueError(f"recovery task '{first_repair_task_id}' is missing resource_jid")
         if not target_resource_jid:
             raise ValueError(f"target task '{target_task_id}' is missing resource_jid")
         if repair_resource_jid != target_resource_jid:
             raise ValueError(
-                f"bridge task '{first_repair_task_id}' resource '{repair_resource_jid}' "
+                f"recovery task '{first_repair_task_id}' resource '{repair_resource_jid}' "
                 f"does not match target task '{target_task_id}' resource '{target_resource_jid}'"
             )
 
@@ -1237,7 +1237,7 @@ class ProcessRecoveryPlanner:
         if target_requirement_id:
             first_repair_task["requirement_id"] = target_requirement_id
         first_repair_task["change_reason"] = (
-            f"INSERTION: {change_prefix} — splice bridge chain starting at "
+            f"INSERTION: {change_prefix} — splice recovery chain starting at "
             f"{first_repair_task_id} before {target_task_id}"
         )
         modified_tasks.append(first_repair_task)
@@ -1356,7 +1356,7 @@ class ProcessRecoveryPlanner:
                     "id": node_id,
                     "sequence_index": next_sequence_index,
                     "change_reason": (
-                        f"MODIFICATION: {change_prefix} — shift {node_id} after inserted bridge tail {tail_task_id}"
+                        f"MODIFICATION: {change_prefix} — shift {node_id} after inserted recovery tail {tail_task_id}"
                     ),
                 }
             )
@@ -1364,7 +1364,7 @@ class ProcessRecoveryPlanner:
             next_sequence_index += 1
 
         self.logger.info(
-            "[Planner] %s spliced bridge chain [%s -> %s] on %s before %s",
+            "[Planner] %s spliced recovery chain [%s -> %s] on %s before %s",
             change_prefix,
             first_repair_task_id,
             tail_task_id,
@@ -1399,14 +1399,14 @@ class ProcessRecoveryPlanner:
                 new_sequence_index,
             )
 
-    def apply_bridge_macro_proposal(
+    def apply_recovery_macro_proposal(
         self,
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        tasks, patch_rows = self.build_bridge_macro_proposal_patch(
+        tasks, patch_rows = self.build_recovery_macro_proposal_patch(
             proposal,
             anchor_task_id=anchor_task_id,
             splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
@@ -1416,7 +1416,7 @@ class ProcessRecoveryPlanner:
             deepcopy(self._find_node(str(task.get("id") or "").strip()) or task) for task in tasks
         ]
 
-    def build_bridge_macro_proposal_patch(
+    def build_recovery_macro_proposal_patch(
         self,
         proposal: dict[str, Any],
         *,
@@ -1424,12 +1424,12 @@ class ProcessRecoveryPlanner:
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not isinstance(proposal, dict):
-            raise ValueError("bridge proposal is missing")
+            raise ValueError("recovery proposal is missing")
 
         # Primitive-based proposal: compile top-level primitive_steps or ordered macro_tasks[]
         # into one serial execute_recovery_macro chain.
-        if self._primitive_bridge_macro_tasks(proposal):
-            return self._build_primitive_bridge_proposal_patch(
+        if self._primitive_recovery_macro_tasks(proposal):
+            return self._build_primitive_recovery_proposal_patch(
                 proposal,
                 anchor_task_id=anchor_task_id,
                 splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
@@ -1455,13 +1455,13 @@ class ProcessRecoveryPlanner:
             )
 
         if not path:
-            raise ValueError("bridge proposal has no executable macro_steps")
+            raise ValueError("recovery proposal has no executable macro_steps")
 
         tasks = self._path_to_recovery_tasks(
             path,
             anchor_task_id=anchor_task_id,
-            task_prefix="RECOVERY_BRIDGE",
-            change_prefix="Approved bridge recovery",
+            task_prefix="RECOVERY_TASK",
+            change_prefix="Approved recovery",
             macro_name=proposal_name,
         )
         task_groups_by_resource: dict[str, list[dict[str, Any]]] = {}
@@ -1475,11 +1475,11 @@ class ProcessRecoveryPlanner:
             repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
             if not repair_tasks:
                 continue
-            self._splice_bridge_chain_before_task(
+            self._splice_recovery_chain_before_task(
                 patch_rows,
                 repair_tasks=repair_tasks,
                 target_task_id=str(target_task_id or "").strip(),
-                change_prefix="Approved bridge recovery",
+                change_prefix="Approved recovery",
             )
             spliced_task_ids.update(
                 str(task.get("id") or "").strip()
@@ -1493,14 +1493,14 @@ class ProcessRecoveryPlanner:
             patch_rows.append(task)
         return tasks, patch_rows
 
-    def _apply_primitive_bridge_proposal(
+    def _apply_primitive_recovery_proposal(
         self,
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        compiled_nodes, patch_rows = self._build_primitive_bridge_proposal_patch(
+        compiled_nodes, patch_rows = self._build_primitive_recovery_proposal_patch(
             proposal,
             anchor_task_id=anchor_task_id,
             splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
@@ -1511,24 +1511,24 @@ class ProcessRecoveryPlanner:
             for task in compiled_nodes
         ]
 
-    def _build_primitive_bridge_proposal_patch(
+    def _build_primitive_recovery_proposal_patch(
         self,
         proposal: dict[str, Any],
         *,
         anchor_task_id: str = "",
         splice_before_task_ids_by_resource: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Compile one or more primitive-based bridge macro_tasks into ordered task nodes."""
+        """Compile one or more primitive-based recovery macro_tasks into ordered task nodes."""
         from uuid import uuid4
 
-        macro_tasks = self._primitive_bridge_macro_tasks(proposal)
+        macro_tasks = self._primitive_recovery_macro_tasks(proposal)
         if not macro_tasks:
-            raise ValueError("bridge proposal has no primitive_steps/macro_tasks")
+            raise ValueError("recovery proposal has no primitive_steps/macro_tasks")
 
         compiled_nodes: list[dict[str, Any]] = []
         total_tasks = len(macro_tasks)
         primary_obligation = deepcopy(proposal.get("primary_obligation") or {})
-        bridge_sequence_id = f"BRIDGESEQ_{uuid4().hex[:8].upper()}"
+        recovery_sequence_id = f"RECOVERYSEQ_{uuid4().hex[:8].upper()}"
         max_si = 0
         for n in self.nodes:
             si = n.get("sequence_index")
@@ -1544,9 +1544,9 @@ class ProcessRecoveryPlanner:
             macro_name = str(
                 macro_task.get("macro_name")
                 or proposal.get("macro_name")
-                or f"bridge_recovery_macro_{index}"
+                or f"recovery_macro_{index}"
             ).strip()
-            outline_id = str(macro_task.get("outline_id") or f"bridge_outline_{index}").strip()
+            outline_id = str(macro_task.get("outline_id") or f"recovery_outline_{index}").strip()
             llm_outline_id = str(macro_task.get("llm_outline_id") or "").strip()
             resource_jid = str(
                 macro_task.get("resource_jid") or proposal.get("resource_jid") or ""
@@ -1584,11 +1584,11 @@ class ProcessRecoveryPlanner:
             projected_part_entry = macro_task.get("projected_part_entry")
 
             if not resource_jid:
-                raise ValueError(f"bridge macro_task {index} is missing resource_jid")
+                raise ValueError(f"recovery macro_task {index} is missing resource_jid")
             if not primitive_steps:
-                raise ValueError(f"bridge macro_task {index} has no primitive_steps")
+                raise ValueError(f"recovery macro_task {index} has no primitive_steps")
 
-            task_id = f"RECOVERY_BRIDGE_{uuid4().hex[:6].upper()}"
+            task_id = f"RECOVERY_TASK_{uuid4().hex[:6].upper()}"
             predecessor_outline_ids = [
                 str(pred).strip()
                 for pred in (macro_task.get("predecessors") or [])
@@ -1601,14 +1601,14 @@ class ProcessRecoveryPlanner:
             ]
             if missing_predecessor_outline_ids:
                 raise ValueError(
-                    "bridge macro_task "
+                    "recovery macro_task "
                     f"{index} references unresolved predecessor outline ids: "
                     + ", ".join(missing_predecessor_outline_ids)
                 )
             params: dict[str, Any] = {
                 "macro_name": macro_name,
                 "outline_id": outline_id,
-                "bridge_outline_id": outline_id,
+                "recovery_outline_id": outline_id,
                 "primitive_steps": primitive_steps,
                 "expected_start_state": expected_start_state,
                 "product_jid": str(self.product_agent.jid),
@@ -1668,17 +1668,17 @@ class ProcessRecoveryPlanner:
                 "successors": [],
                 "sequence_index": base_si + index,
                 "change_reason": (
-                    f"INSERTION: Approved bridge recovery macro '{macro_name}' "
+                    f"INSERTION: Approved recovery macro '{macro_name}' "
                     f"step {index}/{total_tasks} ({len(primitive_steps)} primitives: {step_summary}) "
                     f"on {resource_jid}"
                 ),
-                "bridge_sequence_id": bridge_sequence_id,
-                "bridge_sequence_index": index,
-                "bridge_sequence_length": total_tasks,
-                "bridge_outline_id": outline_id,
+                "recovery_sequence_id": recovery_sequence_id,
+                "recovery_sequence_index": index,
+                "recovery_sequence_length": total_tasks,
+                "recovery_outline_id": outline_id,
                 "predecessor_outline_ids": list(predecessor_outline_ids),
-                "recovery_group_id": bridge_sequence_id,
-                "recovery_kind": "bridge_macro",
+                "recovery_group_id": recovery_sequence_id,
+                "recovery_kind": "recovery_macro",
             }
             if llm_outline_id:
                 task_node["llm_outline_id"] = llm_outline_id
@@ -1724,11 +1724,11 @@ class ProcessRecoveryPlanner:
             repair_tasks = list(task_groups_by_resource.get(str(resource_jid).strip()) or [])
             if not repair_tasks:
                 continue
-            self._splice_bridge_chain_before_task(
+            self._splice_recovery_chain_before_task(
                 patch_rows,
                 repair_tasks=repair_tasks,
                 target_task_id=str(target_task_id or "").strip(),
-                change_prefix="Approved bridge recovery",
+                change_prefix="Approved recovery",
             )
             spliced_task_ids.update(
                 str(task.get("id") or "").strip()
@@ -1800,30 +1800,30 @@ class ProcessRecoveryPlanner:
         self,
         violations: list[dict],
         system_coordination_state: dict | None = None,
-        bridge_feedback: str = "",
-        bridge_generation_mode: str = "auto",
+        recovery_feedback: str = "",
+        recovery_generation_mode: str = "auto",
     ) -> dict[str, Any] | None:
-        """Online replan — always run DES recovery, then DES bridge fallback if needed."""
+        """Online replan — always run DES recovery, then DES recovery fallback if needed."""
         return await self.replan_with_feedback_des(
             violations,
             system_coordination_state=system_coordination_state,
-            bridge_feedback=bridge_feedback,
-            bridge_generation_mode=bridge_generation_mode,
+            recovery_feedback=recovery_feedback,
+            recovery_generation_mode=recovery_generation_mode,
         )
 
     async def replan_with_feedback_des(
         self,
         violations: list[dict],
         system_coordination_state: dict | None = None,
-        bridge_feedback: str = "",
+        recovery_feedback: str = "",
         *,
-        allow_bridge_fallback: bool = True,
-        bridge_generation_mode: str = "auto",
+        allow_recovery_fallback: bool = True,
+        recovery_generation_mode: str = "auto",
         ignored_task_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """
         DES replanning: PA computes bids per resource, compiles M_e, runs BFS.
-        LLM bridge if stuck. Falls back to human intervention if no path found.
+        LLM recovery if stuck. Falls back to human intervention if no path found.
         """
         from cais_spade_llm.agents.intelligent_product.replanner.des_search.environment_model import (
             compile_environment_model,
@@ -1835,7 +1835,7 @@ class ProcessRecoveryPlanner:
         )
 
         self.logger.info("[Planner] DES replanning triggered (%d violations).", len(violations))
-        self._set_last_bridge_debug({})
+        self._set_last_recovery_debug({})
         ignored_task_ids = {
             str(task_id).strip() for task_id in (ignored_task_ids or set()) if str(task_id).strip()
         }
@@ -1890,8 +1890,8 @@ class ProcessRecoveryPlanner:
         part_locations = {name: info.get("location") for name, info in part_tracker.items()}
         default_resource_state = self._default_resource_state(tools_catalog)
         obligation_targets = self._collect_obligation_targets(violations)
-        bridge_safety_context = self._collect_bridge_safety_context(violations)
-        bridge_summary: list[str] = []
+        recovery_safety_context = self._collect_recovery_safety_context(violations)
+        recovery_summary: list[str] = []
         path: list[dict[str, Any]] | None = None
         x_c: dict[str, Any] | None = None
         stuck_ra_jid = self._identify_stuck_resource(violations, resource_states)
@@ -2067,7 +2067,7 @@ class ProcessRecoveryPlanner:
 
             # If we know the product agent will auto-load a preprogrammed scenario,
             # skip the 8s BFS search entirely.
-            if bridge_generation_mode == "manual":
+            if recovery_generation_mode == "manual":
                 x_c = self._build_resource_search_state(
                     resource_jid=stuck_ra_jid,
                     resource_states=resource_states,
@@ -2076,7 +2076,7 @@ class ProcessRecoveryPlanner:
                     part_locations=part_locations,
                 )
                 self.logger.info(
-                    "[Planner] Fast-tracking to bridge request (skipping DES search for preprogrammed scenarios)."
+                    "[Planner] Fast-tracking to recovery request (skipping DES search for preprogrammed scenarios)."
                 )
             else:
                 if bids:
@@ -2126,21 +2126,21 @@ class ProcessRecoveryPlanner:
                     part_states=part_states,
                     part_locations=part_locations,
                 )
-            if not allow_bridge_fallback:
+            if not allow_recovery_fallback:
                 message = "DES reevaluation found no modeled continuation from the refreshed runtime state."
                 self.logger.info("[Planner] %s", message)
                 return self._build_des_replan_result(
                     des_recovery_missing=True,
-                    used_llm_bridge=False,
+                    used_llm_recovery=False,
                     human_required=False,
                     message=message,
-                    bridge_summary=bridge_summary,
-                    bridge_debug=None,
+                    recovery_summary=recovery_summary,
+                    recovery_debug=None,
                 )
             self.logger.info(
-                "[Planner] DES found no modeled continuation; requesting bridge proposal."
+                "[Planner] DES found no modeled continuation; requesting recovery proposal."
             )
-            prepared_bridge_request = await self.prepare_bridge_request(
+            prepared_recovery_request = await self.prepare_recovery_request(
                 stuck_state=x_c,
                 P_id=P_id,
                 ra_jid=stuck_ra_jid,
@@ -2148,47 +2148,47 @@ class ProcessRecoveryPlanner:
                 tools_catalog=tools_catalog,
                 part_tracker=part_tracker,
                 obligation_targets=obligation_targets,
-                bridge_feedback=bridge_feedback,
+                recovery_feedback=recovery_feedback,
                 resource_states=resource_states,
                 default_resource_state=default_resource_state,
                 part_states=part_states,
                 part_locations=part_locations,
-                bridge_safety_context=bridge_safety_context,
+                recovery_safety_context=recovery_safety_context,
                 failure_context=failure_context_payload,
             )
-            bridge_debug = deepcopy(self.get_last_bridge_debug() or {})
-            runtime_handoff = dict(bridge_debug.get("runtime_handoff") or {})
+            recovery_debug = deepcopy(self.get_last_recovery_debug() or {})
+            runtime_handoff = dict(recovery_debug.get("runtime_handoff") or {})
             runtime_handoff.update(
                 {
                     "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
                     "handoff_owner": "product_agent",
-                    "bridge_generation_mode": str(bridge_generation_mode or "auto").strip().lower()
+                    "recovery_generation_mode": str(recovery_generation_mode or "auto").strip().lower()
                     or "auto",
-                    "auto_start_requested": str(bridge_generation_mode or "auto").strip().lower()
+                    "auto_start_requested": str(recovery_generation_mode or "auto").strip().lower()
                     == "auto",
                     "auto_start_started": False,
                 }
             )
-            bridge_debug["runtime_handoff"] = runtime_handoff
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            if hasattr(self, "_set_last_bridge_debug"):
-                self._set_last_bridge_debug(bridge_debug)
+            recovery_debug["runtime_handoff"] = runtime_handoff
+            prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+            if hasattr(self, "_set_last_recovery_debug"):
+                self._set_last_recovery_debug(recovery_debug)
             message = (
-                "DES found no modeled continuation. Prepared bridge request returned for runtime handoff."
-                if str(bridge_generation_mode or "auto").strip().lower() != "manual"
-                else "DES found no modeled continuation. Review the prepared bridge request and "
+                "DES found no modeled continuation. Prepared recovery request returned for runtime handoff."
+                if str(recovery_generation_mode or "auto").strip().lower() != "manual"
+                else "DES found no modeled continuation. Review the prepared recovery request and "
                 "run LLM exploration from the dashboard when ready."
             )
             self.logger.info("[Planner] %s", message)
             return self._build_des_replan_result(
                 plan_changed=False,
-                used_llm_bridge=False,
+                used_llm_recovery=False,
                 human_required=False,
-                awaiting_bridge_generation=True,
+                awaiting_recovery_generation=True,
                 message=message,
-                bridge_summary=bridge_summary,
-                bridge_debug=bridge_debug,
-                prepared_bridge_request=prepared_bridge_request,
+                recovery_summary=recovery_summary,
+                recovery_debug=recovery_debug,
+                prepared_recovery_request=prepared_recovery_request,
             )
 
         failed_task_id = ""
@@ -2223,11 +2223,11 @@ class ProcessRecoveryPlanner:
         message = f"DES recovery produced {len(tasks)} task(s)."
         return self._build_des_replan_result(
             plan_changed=bool(tasks),
-            used_llm_bridge=False,
+            used_llm_recovery=False,
             human_required=False,
             message=message,
-            bridge_summary=bridge_summary,
-            bridge_debug=None,
+            recovery_summary=recovery_summary,
+            recovery_debug=None,
         )
 
     @staticmethod
@@ -2416,10 +2416,10 @@ class ProcessRecoveryPlanner:
                 "context_mapping",
                 "part_transition",
                 "primary_obligation",
-                "bridge_sequence_id",
-                "bridge_sequence_index",
-                "bridge_sequence_length",
-                "bridge_outline_id",
+                "recovery_sequence_id",
+                "recovery_sequence_index",
+                "recovery_sequence_length",
+                "recovery_outline_id",
                 "predecessor_outline_ids",
                 "recovery_group_id",
                 "recovery_parent_failure_id",
@@ -2504,10 +2504,10 @@ class ProcessRecoveryPlanner:
         system_state: dict | None,
         llm_response: str | None = None,
     ) -> None:
-        """Write a timestamped Markdown report to the llm_bridge runtime-data directory for each replan."""
+        """Write a timestamped Markdown report to the llm_recovery runtime-data directory for each replan."""
         try:
             debug_dir = Path(
-                "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data"
+                "cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/runtime_data"
             )
             debug_dir.mkdir(parents=True, exist_ok=True)
 

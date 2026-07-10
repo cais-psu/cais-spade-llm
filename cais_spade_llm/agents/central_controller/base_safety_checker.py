@@ -84,7 +84,7 @@ class BaseSafetyChecker:
     def _task_id_tokens(cls, params: dict[str, Any]) -> set[str]:
         tokens = {
             str(params.get("task_id") or "").strip(),
-            str(params.get("bridge_outline_id") or "").strip(),
+            str(params.get("recovery_outline_id") or "").strip(),
             str(params.get("outline_id") or "").strip(),
             str(params.get("llm_outline_id") or "").strip(),
         }

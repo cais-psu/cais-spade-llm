@@ -3,7 +3,7 @@
 This folder contains the runtime recovery logic used when the product plan can no longer continue safely.
 
 Runtime replanning is DES-driven. There is no separate top-level runtime
-`replan_mode`; the LLM is used only inside the DES bridge fallback. The older
+`replan_mode`; the LLM is used only inside the DES recovery fallback. The older
 offline LLM plan-repair path remains separate.
 
 ## What Was Implemented
@@ -13,28 +13,28 @@ The recovery path was changed from a generic suffix-search plus synthetic LLM to
 1. The Central Controller Agent (CCA) now derives formal `obligation_targets` from the active structured safety rules.
 2. DES recovery uses those obligation targets to search for real catalog tools that satisfy the required APs.
 3. `"any"` remains only a tool applicability wildcard for `in_state`; it is not used to guess the missing recovery action.
-4. If DES cannot find a catalog-valid obligation-satisfying path, the LLM bridge is used only to propose a high-level recovery macro.
-5. Bridge proposals are approval-gated. They are not executed directly as invented tool names.
+4. If DES cannot find a catalog-valid obligation-satisfying path, the LLM recovery is used only to propose a high-level recovery macro.
+5. Recovery proposals are approval-gated. They are not executed directly as invented tool names.
 6. On approval, the proposal is compiled into ordered `execute_recovery_macro` runtime recovery tasks, and execution resumes automatically.
-7. On rejection, operator feedback is recorded and immediately fed back into bridge regeneration.
-8. If no modeled path exists and the bridge cannot produce a compilable proposal, runtime recovery ends in `human_required`.
+7. On rejection, operator feedback is recorded and immediately fed back into recovery regeneration.
+8. If no modeled path exists and the recovery cannot produce a compilable proposal, runtime recovery ends in `human_required`.
 
 ## Main Files
 
 - `des_search/`
   DES forward search and resource bidding over modeled resource states and tool
   transitions.
-- `llm_bridge/`
-  LLM bridge parsing, primitive semantics, bridge safety, deterministic bridge
-  compilation, and the multi-turn DES-guided bridge loop.
-- `classical_vs_llm_bridge.md`
-  Design note on why the current bridge layer is under-modeled for classical planning alone and why `LLM + ReAct + DES` fits the existing task/primitive split.
-- `tss_based_llm_bridge_v4.md`
-  Design-intent note for the new bridge: current prepare-trace/`llm_input`
+- `llm_recovery/`
+  LLM recovery parsing, primitive semantics, recovery safety, deterministic recovery
+  compilation, and the multi-turn DES-guided recovery loop.
+- `classical_vs_llm_recovery.md`
+  Design note on why the current recovery layer is under-modeled for classical planning alone and why `LLM + ReAct + DES` fits the existing task/primitive split.
+- `tss_based_llm_recovery_v4.md`
+  Design-intent note for the new recovery: current prepare-trace/`llm_input`
   state and the target validated proposal flow.
 - `../process_planner.py`
   Top-level DES recovery orchestration, obligation-driven DES selection, and
-  delegation into the extracted bridge replanner module.
+  delegation into the extracted recovery replanner module.
 - `../../central_controller/central_controller_agent.py`
   Builds formal `obligation_targets` from structured safety rules and current diagnosis.
 - `../product_agent.py`
@@ -85,18 +85,18 @@ This supports both:
 - Event obligations such as `move_home after place_insert`
 - State-sensitive obligations where the satisfying tool must have the correct modeled transition
 
-### 4. Bridge fallback
+### 4. Recovery fallback
 
 If no catalog-valid modeled path exists for the active obligation:
 
-- the planner calls the LLM bridge
-- the bridge must return exactly one proposal object
+- the planner calls the LLM recovery
+- the recovery must return exactly one proposal object
 - the proposal contains one `primary_obligation` and ordered `macro_tasks[]`
 - each `macro_task` chooses a `resource_jid`, carries node-level task metadata,
   and executes controller-level `primitive_steps`
 - the proposal is normalized and semantically validated before approval
 
-This means the bridge is allowed to invent a recovery macro structure, but it
+This means the recovery is allowed to invent a recovery macro structure, but it
 is not allowed to invent a new runtime execution surface outside the approved
 controller primitive set.
 
@@ -104,35 +104,35 @@ controller primitive set.
 
 Runtime recovery stores:
 
-- `bridge_proposal`
-- `bridge_approval_state`
-- `bridge_feedback_history`
+- `recovery_proposal`
+- `recovery_approval_state`
+- `recovery_feedback_history`
 
 When the operator approves:
 
-1. `ProductAgent.approve_runtime_bridge_proposal()` compiles the proposal into
+1. `ProductAgent.approve_runtime_recovery_proposal()` compiles the proposal into
    ordered `execute_recovery_macro` recovery task nodes.
-2. Those nodes are inserted into the runtime plan as a serial bridge sequence.
+2. Those nodes are inserted into the runtime plan as a serial recovery sequence.
 3. The plan FSA is rebuilt and revalidated with the CCA.
 4. Execution resumes automatically after approval.
-5. After each completed bridge macro, Product refreshes the runtime snapshot and
-   either hands control back to DES, trims the remaining bridge tail, or
-   continues the approved bridge sequence.
+5. After each completed recovery macro, Product refreshes the runtime snapshot and
+   either hands control back to DES, trims the remaining recovery tail, or
+   continues the approved recovery sequence.
 
 Implementation detail:
 
-- Approved bridge nodes execute directly through `RobotAgent.execute_recovery_macro`.
-- The bridge remains approval-gated and isolated from the shared DES tools
+- Approved recovery nodes execute directly through `RobotAgent.execute_recovery_macro`.
+- The recovery remains approval-gated and isolated from the shared DES tools
   catalog.
 
 ### 6. Rejection and regeneration
 
-When the operator rejects a bridge proposal:
+When the operator rejects a recovery proposal:
 
-1. rejection feedback is appended to `bridge_feedback_history`
+1. rejection feedback is appended to `recovery_feedback_history`
 2. the active proposal is cleared
 3. DES recovery is re-entered with that feedback
-4. the bridge regenerates immediately within the same runtime recovery session
+4. the recovery regenerates immediately within the same runtime recovery session
 
 No manual retry is required after rejection.
 
@@ -141,11 +141,11 @@ No manual retry is required after rejection.
 Recovery transitions to `human_required` when:
 
 - DES finds no catalog-valid obligation path, and
-- the bridge returns nothing, invalid JSON, a wrong-resource proposal, or a
+- the recovery returns nothing, invalid JSON, a wrong-resource proposal, or a
   normalized proposal that still fails validation or compilation
-- an approved bridge macro fails runtime semantic validation or diverges from
+- an approved recovery macro fails runtime semantic validation or diverges from
   its approved projected post-state
-- the approved bridge tail finishes but DES still has no valid continuation
+- the approved recovery tail finishes but DES still has no valid continuation
 
 ## Verified-Bundle Runtime Recovery
 
@@ -238,7 +238,7 @@ This matters for suffix recovery cases where:
 
 ## Current UI/Operator Semantics
 
-The dashboard recovery panel now shows bridge proposals when runtime recovery enters `llm_bridge`.
+The dashboard recovery panel now shows recovery proposals when runtime recovery enters `llm_recovery`.
 
 The operator can:
 
@@ -250,8 +250,8 @@ The UI displays:
 - proposal macro tasks
 - target resource(s)
 - description and rationale
-- compiled bridge tasks
-- temporary LLM bridge debug trace for prompt/input/output inspection
+- compiled recovery tasks
+- temporary LLM recovery debug trace for prompt/input/output inspection
 
 ## Verified Behavior
 
@@ -266,7 +266,7 @@ Syntax checks were also run with `py_compile` and `git diff --check`.
 
 ## Forward Simulation and DFA-Guided Recovery
 
-Two generalized mechanisms were added to make safety-block recovery smarter and avoid unnecessary LLM bridge fallbacks.
+Two generalized mechanisms were added to make safety-block recovery smarter and avoid unnecessary LLM recovery fallbacks.
 
 ### Forward simulation: wait vs. replan
 
@@ -317,7 +317,7 @@ For mutex rule `SAFE_1` with APs `{place_approach, positioned, placed}` for ur5e
 
 - Removing `ap_state/.../ur5e/placed/...` leads to a safe DFA state.
 - The system finds `move_home` because `in_state=placed` (violating) → `out_state=idle` (not violating).
-- DES receives `candidate_tools=[move_home]` with a valid signature, projects the full modeled suffix snapshot for the target resource, finds the catalog-valid recovery path, and avoids the LLM bridge.
+- DES receives `candidate_tools=[move_home]` with a valid signature, projects the full modeled suffix snapshot for the target resource, finds the catalog-valid recovery path, and avoids the LLM recovery.
 
 The suffix projection step matters. Obligation recovery now searches from a fully consistent modeled resource snapshot:
 
@@ -327,7 +327,7 @@ The suffix projection step matters. Obligation recovery now searches from a full
 - `part_states`
 - `part_locations`
 
-That avoids hybrid search states such as a projected `resource_state='placed'` combined with a live `current_part='MCP'`, which can incorrectly hide pure robot-state recovery actions and force an unnecessary bridge fallback.
+That avoids hybrid search states such as a projected `resource_state='placed'` combined with a live `current_part='MCP'`, which can incorrectly hide pure robot-state recovery actions and force an unnecessary recovery fallback.
 
 If the live product snapshot is stale but the next modeled suffix task provides enough semantic information to reconcile it, the planner aligns the modeled snapshot with that task's catalog preconditions before projecting the suffix. This uses only generic catalog fields such as:
 
@@ -370,7 +370,7 @@ This preserves the intended ordering in the plan FSA. In the mutex example, the 
 - `ur5e.move_home`
 - `xarm6.place_approach`
 
-If a resource still has a pending/running suffix but that suffix cannot be projected consistently, the planner does not fall back to a live-state DES search for that same resource. Doing so would replay already-modeled suffix tasks as duplicate "recovery" work. In that case the planner continues searching other modeled options and only falls through to bridge if no catalog-valid residual recovery exists.
+If a resource still has a pending/running suffix but that suffix cannot be projected consistently, the planner does not fall back to a live-state DES search for that same resource. Doing so would replay already-modeled suffix tasks as duplicate "recovery" work. In that case the planner continues searching other modeled options and only falls through to recovery if no catalog-valid residual recovery exists.
 
 ### Transient blocked-task retry behavior
 
@@ -411,16 +411,16 @@ The forward simulation is invoked in `_SafetyCheckInbox._handle_safety_check()`:
 ## Known Design Boundary
 
 > **Superseded.** The original constraint below has been removed. See
-> [`llm_bridge_construction.md`](llm_bridge_construction.md) for the
-> current design and [`llm_bridge_todo.md`](llm_bridge_todo.md) for the
+> [`llm_recovery_construction.md`](llm_recovery_construction.md) for the
+> current design and [`llm_recovery_todo.md`](llm_recovery_todo.md) for the
 > current implementation status / known issues.
 
-Bridge proposals now embed **controller-level primitive sequences** that
+Recovery proposals now embed **controller-level primitive sequences** that
 execute through `RobotAgent.execute_recovery_macro`. This allows the LLM
-bridge to compose novel recovery actions from low-level motion, gripper,
+recovery to compose novel recovery actions from low-level motion, gripper,
 and perception primitives without being limited to existing catalog
 functions.
 
 The shared `tools.json` catalog and DES planning surface remain
-unchanged — only the bridge path gains access to controller primitives
+unchanged — only the recovery path gains access to controller primitives
 via a private in-memory catalog.

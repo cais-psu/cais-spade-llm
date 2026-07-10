@@ -1,4 +1,4 @@
-"""Runtime recovery, bridge session, and validation helpers for ProductAgent."""
+"""Runtime recovery, recovery session, and validation helpers for ProductAgent."""
 
 from __future__ import annotations
 
@@ -22,17 +22,25 @@ from cais_spade_llm.agents.central_controller.online_safety_monitor import (
     OnlineSafetyMonitor,
 )
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
-from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.bridge_artifacts import (
-    DEFAULT_BRIDGE_DEBUG_DIR,
-    write_bridge_artifacts,
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+    DEFAULT_RECOVERY_DEBUG_DIR,
+    write_recovery_artifacts,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_bridge_scenarios import (
-    build_preprogrammed_bridge_proposal,
+from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_recovery_scenarios import (
+    build_preprogrammed_recovery_proposal,
 )
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.product.profile import ProductProfile
 
 _UNSET = object()
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 class ProductRecoveryController:
@@ -41,29 +49,29 @@ class ProductRecoveryController:
         "_set_plan_safety_alert",
         "_clear_plan_safety_alert",
         "get_plan_safety_alert",
-        "_normalize_runtime_bridge_mode",
-        "_normalize_runtime_bridge_validation_policy",
-        "set_runtime_bridge_session_settings",
-        "_runtime_bridge_session_mode",
-        "_runtime_bridge_session_validation_policy",
-        "_runtime_bridge_session_archive_path",
-        "_runtime_bridge_session_archive_label",
-        "_runtime_bridge_session_artifact_directory",
-        "_bridge_debug_with_runtime_handoff",
-        "_runtime_bridge_turn_token",
-        "_runtime_bridge_progress_message",
-        "report_runtime_bridge_turn_progress",
+        "_normalize_runtime_recovery_mode",
+        "_normalize_runtime_recovery_validation_policy",
+        "set_runtime_recovery_session_settings",
+        "_runtime_recovery_session_mode",
+        "_runtime_recovery_session_validation_policy",
+        "_runtime_recovery_session_archive_path",
+        "_runtime_recovery_session_archive_label",
+        "_runtime_recovery_session_artifact_directory",
+        "_recovery_debug_with_runtime_handoff",
+        "_runtime_recovery_turn_token",
+        "_runtime_recovery_progress_message",
+        "report_runtime_recovery_turn_progress",
         "_runtime_action_feedback_payload",
         "_recovery_result_with_action_feedback",
-        "_bridge_sequence_state",
-        "_bridge_sequence_is_live",
-        "_bridge_sequence_task_ids",
-        "_bridge_proposal_fingerprint",
-        "_bridge_sequence_summary",
+        "_recovery_sequence_state",
+        "_recovery_sequence_is_live",
+        "_recovery_sequence_task_ids",
+        "_recovery_proposal_fingerprint",
+        "_recovery_sequence_summary",
         "_should_ignore_stale_recovery_macro_ack",
-        "_bridge_sequence_with_dispatched_task",
-        "_bridge_sequence_with_completed_task",
-        "_derive_runtime_bridge_stage",
+        "_recovery_sequence_with_dispatched_task",
+        "_recovery_sequence_with_completed_task",
+        "_derive_runtime_recovery_stage",
         "_empty_runtime_recovery",
         "_sync_runtime_repair_state",
         "_set_runtime_recovery",
@@ -80,25 +88,25 @@ class ProductRecoveryController:
         "_dispatch_params_for_task_node",
         "_runtime_recovery_blocks_execution",
         "get_runtime_recovery",
-        "_runtime_bridge_data_root",
-        "_resolve_runtime_bridge_archive_path",
-        "_bridge_feedback_history_with",
-        "_append_bridge_feedback",
-        "_bridge_session_state",
+        "_runtime_recovery_data_root",
+        "_resolve_runtime_recovery_archive_path",
+        "_recovery_feedback_history_with",
+        "_append_recovery_feedback",
+        "_recovery_session_state",
         "_reset_session_for_outline_retry",
         "_reset_session_for_primitive_retry",
-        "_prepare_runtime_bridge_session_state",
-        "_bridge_proposal_from_debug",
-        "_load_runtime_bridge_archive_bundle",
-        "_run_multi_turn_bridge_until",
+        "_prepare_runtime_recovery_session_state",
+        "_recovery_proposal_from_debug",
+        "_load_runtime_recovery_archive_bundle",
+        "_run_multi_turn_recovery_until",
         "_set_kickoff_result",
         "wait_for_kickoff_result",
         "_persist_plan_snapshot",
         "_persist_product_state",
-        "_bridge_debug_directory",
-        "_ensure_live_bridge_per_turn_debug_dir",
-        "_build_runtime_bridge_artifact_payload",
-        "_record_runtime_bridge_artifacts",
+        "_recovery_debug_directory",
+        "_ensure_live_recovery_per_turn_debug_dir",
+        "_build_runtime_recovery_artifact_payload",
+        "_record_runtime_recovery_artifacts",
         "_runtime_recovery_safety_live_root",
         "_allocate_runtime_recovery_safety_worked_dir",
         "_recovery_safety_generation_dirs",
@@ -113,16 +121,16 @@ class ProductRecoveryController:
         "_handle_task_retry_ready",
         "_reactivate_restored_repair_target_from_context",
         "_candidate_task_ids_from_violations",
-        "_active_bridge_sequence",
-        "_bridge_used_llm",
-        "_bridge_execution_policy",
-        "_bridge_requires_complete_full_tail",
-        "_bridge_is_verification_only",
-        "_reconstruct_active_bridge_sequence_for_validation",
-        "_active_bridge_blocks_nominal_dispatch",
+        "_active_recovery_sequence",
+        "_recovery_used_llm",
+        "_recovery_execution_policy",
+        "_recovery_requires_complete_full_tail",
+        "_recovery_is_verification_only",
+        "_reconstruct_active_recovery_sequence_for_validation",
+        "_active_recovery_blocks_nominal_dispatch",
         "_next_dispatchable_task_node",
-        "_active_bridge_next_ready_task",
-        "_bridge_task_predecessors_ready",
+        "_active_recovery_next_ready_task",
+        "_recovery_task_predecessors_ready",
         "_select_runtime_event",
         "_graph_ready_task_nodes",
         "_tool_row_for_task_node",
@@ -149,40 +157,40 @@ class ProductRecoveryController:
         "_try_compile_controllable_repair",
         "_append_acquire_entity_repair_event",
         "_mark_runtime_des_human_required",
-        "_bridge_continuation_disabled_frontier",
-        "_bridge_task_debug_rows",
-        "_bridge_sequence_tail_task_ids",
-        "_refresh_bridge_snapshot",
-        "_system_coordination_state_with_bridge_snapshot",
-        "_bridge_snapshot_mismatch",
-        "_bridge_part_entry_mismatch",
+        "_recovery_continuation_disabled_frontier",
+        "_recovery_task_debug_rows",
+        "_recovery_sequence_tail_task_ids",
+        "_refresh_recovery_snapshot",
+        "_system_coordination_state_with_recovery_snapshot",
+        "_recovery_snapshot_mismatch",
+        "_recovery_part_entry_mismatch",
         "_dispatch_runtime_plan_validation_check",
         "_send_runtime_plan_validation_check",
         "_send_runtime_plan_validation_check_sync",
-        "_fail_closed_bridge_sequence",
-        "_handle_bridge_macro_ack",
+        "_fail_closed_recovery_sequence",
+        "_handle_recovery_macro_ack",
         "_run_des_runtime_recovery_attempt",
         "_handle_runtime_des_replan_request",
         "_handle_runtime_plan_validation_result",
         "submit_runtime_recovery_guidance",
-        "_execute_runtime_bridge_generation",
-        "generate_runtime_bridge_proposal",
-        "load_runtime_bridge_archive_proposal",
-        "approve_runtime_bridge_outline",
-        "refine_runtime_bridge_outline",
-        "reject_runtime_bridge_outline",
-        "approve_runtime_bridge_primitives",
-        "refine_runtime_bridge_primitives",
-        "reject_runtime_bridge_primitives",
-        "_build_preprogrammed_runtime_bridge_bundle",
+        "_execute_runtime_recovery_generation",
+        "generate_runtime_recovery_proposal",
+        "load_runtime_recovery_archive_proposal",
+        "approve_runtime_recovery_outline",
+        "refine_runtime_recovery_outline",
+        "reject_runtime_recovery_outline",
+        "approve_runtime_recovery_primitives",
+        "refine_runtime_recovery_primitives",
+        "reject_runtime_recovery_primitives",
+        "_build_preprogrammed_runtime_recovery_bundle",
         "_derive_preprogrammed_part_observations",
-        "_cache_preprogrammed_runtime_bridge_scenario",
-        "_resolve_preprogrammed_runtime_bridge_bundle",
-        "load_preprogrammed_runtime_bridge_scenario_sync",
-        "load_preprogrammed_runtime_bridge_scenario",
-        "approve_runtime_bridge_proposal_sync",
-        "approve_runtime_bridge_proposal",
-        "reject_runtime_bridge_proposal",
+        "_cache_preprogrammed_runtime_recovery_scenario",
+        "_resolve_preprogrammed_runtime_recovery_bundle",
+        "load_preprogrammed_runtime_recovery_scenario_sync",
+        "load_preprogrammed_runtime_recovery_scenario",
+        "approve_runtime_recovery_proposal_sync",
+        "approve_runtime_recovery_proposal",
+        "reject_runtime_recovery_proposal",
         "retry_runtime_recovery_des",
     )
 
@@ -254,7 +262,7 @@ class ProductRecoveryController:
         return dict(self.plan_safety_alert) if isinstance(self.plan_safety_alert, dict) else None
 
     @staticmethod
-    def _normalize_runtime_bridge_mode(value: Any) -> str:
+    def _normalize_runtime_recovery_mode(value: Any) -> str:
         token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
         if token in {"auto", "manual", "pre_ran"}:
             return token
@@ -263,7 +271,7 @@ class ProductRecoveryController:
         return "pre_ran"
 
     @staticmethod
-    def _normalize_runtime_bridge_validation_policy(value: Any) -> str:
+    def _normalize_runtime_recovery_validation_policy(value: Any) -> str:
         token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
         if token in {"validated", "no_validation"}:
             return token
@@ -271,7 +279,7 @@ class ProductRecoveryController:
             return "no_validation"
         return "validated"
 
-    def set_runtime_bridge_session_settings(
+    def set_runtime_recovery_session_settings(
         self,
         *,
         mode: str | None = None,
@@ -280,87 +288,87 @@ class ProductRecoveryController:
         selected_archive_label: str | None = None,
     ) -> None:
         if mode is not None:
-            self._runtime_bridge_mode = self._normalize_runtime_bridge_mode(mode)
+            self._runtime_recovery_mode = self._normalize_runtime_recovery_mode(mode)
         if validation_policy is not None:
-            self._runtime_bridge_validation_policy = (
-                self._normalize_runtime_bridge_validation_policy(validation_policy)
+            self._runtime_recovery_validation_policy = (
+                self._normalize_runtime_recovery_validation_policy(validation_policy)
             )
         if selected_archive_path is not None:
-            self._runtime_bridge_archive_path = str(selected_archive_path or "").strip()
+            self._runtime_recovery_archive_path = str(selected_archive_path or "").strip()
         if selected_archive_label is not None:
-            self._runtime_bridge_archive_label = str(selected_archive_label or "").strip()
+            self._runtime_recovery_archive_label = str(selected_archive_label or "").strip()
 
         if self._runtime_recovery_context:
             status = str(self.runtime_recovery.get("status", "") or "").strip().lower()
-            self._runtime_recovery_context["bridge_mode"] = self._normalize_runtime_bridge_mode(
-                self._runtime_bridge_mode
+            self._runtime_recovery_context["recovery_mode"] = self._normalize_runtime_recovery_mode(
+                self._runtime_recovery_mode
             )
             self._runtime_recovery_context["validation_policy"] = (
-                self._normalize_runtime_bridge_validation_policy(
-                    self._runtime_bridge_validation_policy
+                self._normalize_runtime_recovery_validation_policy(
+                    self._runtime_recovery_validation_policy
                 )
             )
             self._runtime_recovery_context["selected_archive_path"] = str(
-                self._runtime_bridge_archive_path or ""
+                self._runtime_recovery_archive_path or ""
             ).strip()
             self._runtime_recovery_context["selected_archive_label"] = str(
-                self._runtime_bridge_archive_label or ""
+                self._runtime_recovery_archive_label or ""
             ).strip()
-            prepared_bridge_request = deepcopy(
-                self._runtime_recovery_context.get("prepared_bridge_request") or {}
+            prepared_recovery_request = deepcopy(
+                self._runtime_recovery_context.get("prepared_recovery_request") or {}
             )
-            if prepared_bridge_request:
-                bridge_debug = self._bridge_debug_with_runtime_handoff(
-                    dict(prepared_bridge_request.get("bridge_debug") or {}),
-                    bridge_mode=self._normalize_runtime_bridge_mode(self._runtime_bridge_mode),
-                    validation_policy=self._normalize_runtime_bridge_validation_policy(
-                        self._runtime_bridge_validation_policy
+            if prepared_recovery_request:
+                recovery_debug = self._recovery_debug_with_runtime_handoff(
+                    dict(prepared_recovery_request.get("recovery_debug") or {}),
+                    recovery_mode=self._normalize_runtime_recovery_mode(self._runtime_recovery_mode),
+                    validation_policy=self._normalize_runtime_recovery_validation_policy(
+                        self._runtime_recovery_validation_policy
                     ),
                 )
-                prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                    prepared_bridge_request
+                prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+                self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                    prepared_recovery_request
                 )
-            if status in {"bridge_ready", "llm_bridge", "human_required"}:
+            if status in {"recovery_ready", "llm_recovery", "human_required"}:
                 self._set_runtime_recovery(
                     message=str(self.runtime_recovery.get("message", "") or "").strip(),
                 )
 
-    def _runtime_bridge_session_mode(self) -> str:
+    def _runtime_recovery_session_mode(self) -> str:
         session_mode = str(
-            dict(getattr(self, "_runtime_recovery_context", {}) or {}).get("bridge_mode") or ""
+            dict(getattr(self, "_runtime_recovery_context", {}) or {}).get("recovery_mode") or ""
         ).strip()
         if session_mode:
-            return self._normalize_runtime_bridge_mode(session_mode)
-        return self._normalize_runtime_bridge_mode(self._runtime_bridge_mode)
+            return self._normalize_runtime_recovery_mode(session_mode)
+        return self._normalize_runtime_recovery_mode(self._runtime_recovery_mode)
 
-    def _runtime_bridge_session_validation_policy(self) -> str:
+    def _runtime_recovery_session_validation_policy(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
             candidate = str(runtime_context.get("validation_policy") or "").strip()
             if candidate:
-                return self._normalize_runtime_bridge_validation_policy(candidate)
-        return self._normalize_runtime_bridge_validation_policy(
-            self._runtime_bridge_validation_policy
+                return self._normalize_runtime_recovery_validation_policy(candidate)
+        return self._normalize_runtime_recovery_validation_policy(
+            self._runtime_recovery_validation_policy
         )
 
-    def _runtime_bridge_session_archive_path(self) -> str:
+    def _runtime_recovery_session_archive_path(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
             candidate = str(runtime_context.get("selected_archive_path") or "").strip()
             if candidate:
                 return candidate
-        return str(self._runtime_bridge_archive_path or "").strip()
+        return str(self._runtime_recovery_archive_path or "").strip()
 
-    def _runtime_bridge_session_archive_label(self) -> str:
+    def _runtime_recovery_session_archive_label(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
             candidate = str(runtime_context.get("selected_archive_label") or "").strip()
             if candidate:
                 return candidate
-        return str(self._runtime_bridge_archive_label or "").strip()
+        return str(self._runtime_recovery_archive_label or "").strip()
 
-    def _runtime_bridge_session_artifact_directory(self) -> str:
+    def _runtime_recovery_session_artifact_directory(self) -> str:
         runtime_context = dict(getattr(self, "_runtime_recovery_context", {}) or {})
         if runtime_context:
             candidate = str(runtime_context.get("artifact_directory") or "").strip()
@@ -370,7 +378,7 @@ class ProductRecoveryController:
         candidate = str(runtime_recovery.get("artifact_directory") or "").strip()
         if candidate:
             return candidate
-        recovery_debug = dict(runtime_recovery.get("bridge_debug") or {})
+        recovery_debug = dict(runtime_recovery.get("recovery_debug") or {})
         if isinstance(recovery_debug, dict):
             candidate = str(recovery_debug.get("artifact_directory") or "").strip()
             if candidate:
@@ -378,11 +386,11 @@ class ProductRecoveryController:
         return ""
 
     @staticmethod
-    def _bridge_debug_with_runtime_handoff(
-        bridge_debug: dict[str, Any] | None,
+    def _recovery_debug_with_runtime_handoff(
+        recovery_debug: dict[str, Any] | None,
         **updates: Any,
     ) -> dict[str, Any]:
-        updated = deepcopy(bridge_debug or {})
+        updated = deepcopy(recovery_debug or {})
         runtime_handoff = dict(updated.get("runtime_handoff") or {})
         for key, value in updates.items():
             runtime_handoff[key] = deepcopy(value)
@@ -390,14 +398,14 @@ class ProductRecoveryController:
         return updated
 
     @staticmethod
-    def _runtime_bridge_turn_token(turn_index: int, max_turns: int) -> str:
+    def _runtime_recovery_turn_token(turn_index: int, max_turns: int) -> str:
         max_turns = max(0, int(max_turns or 0))
         turn_index = max(0, int(turn_index or 0))
         width = max(2, len(str(max_turns or turn_index or 0)))
         return f"{turn_index:0{width}d}/{max_turns:0{width}d}"
 
     @classmethod
-    def _runtime_bridge_progress_message(
+    def _runtime_recovery_progress_message(
         cls,
         *,
         session_state: dict[str, Any] | None,
@@ -408,7 +416,7 @@ class ProductRecoveryController:
         elapsed_s: float | None = None,
     ) -> str:
         session = dict(session_state or {})
-        turn_token = cls._runtime_bridge_turn_token(
+        turn_token = cls._runtime_recovery_turn_token(
             int(session.get("turn_index") or 0),
             int(session.get("max_turns") or 0),
         )
@@ -419,14 +427,14 @@ class ProductRecoveryController:
         decision_label = str(decision or "").strip()
         next_phase_label = str(next_phase or "").strip()
         if status_key == "waiting_for_llm":
-            return f"Live bridge turn {turn_token}: {phase_label} (waiting for LLM)."
+            return f"Live recovery turn {turn_token}: {phase_label} (waiting for LLM)."
         if status_key == "still_waiting_for_llm":
             elapsed_text = (
                 f"{max(0.0, float(elapsed_s)):.1f}s elapsed" if elapsed_s is not None else "waiting"
             )
-            return f"Live bridge turn {turn_token}: {phase_label} (still waiting for LLM, {elapsed_text})."
+            return f"Live recovery turn {turn_token}: {phase_label} (still waiting for LLM, {elapsed_text})."
         if status_key == "response_received":
-            return f"Live bridge turn {turn_token}: {phase_label} (LLM response received)."
+            return f"Live recovery turn {turn_token}: {phase_label} (LLM response received)."
         if status_key == "decision":
             tail = ""
             if decision_label and next_phase_label:
@@ -436,10 +444,10 @@ class ProductRecoveryController:
             elif next_phase_label:
                 tail = f"next={next_phase_label}"
             if tail:
-                return f"Live bridge turn {turn_token}: {phase_label} ({tail})."
-        return f"Live bridge turn {turn_token}: {phase_label}."
+                return f"Live recovery turn {turn_token}: {phase_label} ({tail})."
+        return f"Live recovery turn {turn_token}: {phase_label}."
 
-    async def report_runtime_bridge_turn_progress(
+    async def report_runtime_recovery_turn_progress(
         self,
         *,
         session_state: dict[str, Any] | None,
@@ -452,31 +460,31 @@ class ProductRecoveryController:
         if not self._runtime_recovery_context:
             return
         status = str(self.runtime_recovery.get("status", "") or "").strip().lower()
-        if status != "llm_bridge":
+        if status != "llm_recovery":
             return
 
         session_snapshot = deepcopy(session_state or {})
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        bridge_debug = deepcopy(
-            prepared_bridge_request.get("bridge_debug")
-            or self.runtime_recovery.get("bridge_debug")
+        recovery_debug = deepcopy(
+            prepared_recovery_request.get("recovery_debug")
+            or self.runtime_recovery.get("recovery_debug")
             or {}
         )
-        bridge_debug["status"] = (
+        recovery_debug["status"] = (
             str(session_snapshot.get("status") or "running").strip() or "running"
         )
-        bridge_debug["multi_turn_session"] = deepcopy(session_snapshot)
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_snapshot)
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        recovery_debug["multi_turn_session"] = deepcopy(session_snapshot)
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+        prepared_recovery_request["multi_turn_session_state"] = deepcopy(session_snapshot)
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
-        if hasattr(self.process_planner, "_set_last_bridge_debug"):
-            self.process_planner._set_last_bridge_debug(bridge_debug)
+        if hasattr(self.process_planner, "_set_last_recovery_debug"):
+            self.process_planner._set_last_recovery_debug(recovery_debug)
 
-        message = self._runtime_bridge_progress_message(
+        message = self._runtime_recovery_progress_message(
             session_state=session_snapshot,
             current_phase=current_phase,
             status_label=status_label,
@@ -485,13 +493,13 @@ class ProductRecoveryController:
             elapsed_s=elapsed_s,
         )
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             message=message,
-            used_llm_bridge=True,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="generating",
-            bridge_stage="none",
+            used_llm_recovery=True,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="generating",
+            recovery_stage="none",
             append_history=False,
         )
         await asyncio.to_thread(self._persist_product_state)
@@ -520,15 +528,15 @@ class ProductRecoveryController:
         return result
 
     @staticmethod
-    def _bridge_sequence_state(active_bridge_sequence: dict[str, Any] | None) -> str:
-        return str((active_bridge_sequence or {}).get("state") or "").strip().lower()
+    def _recovery_sequence_state(active_recovery_sequence: dict[str, Any] | None) -> str:
+        return str((active_recovery_sequence or {}).get("state") or "").strip().lower()
 
     @classmethod
-    def _bridge_sequence_is_live(cls, active_bridge_sequence: dict[str, Any] | None) -> bool:
-        return cls._bridge_sequence_state(active_bridge_sequence) in {"approved", "executing"}
+    def _recovery_sequence_is_live(cls, active_recovery_sequence: dict[str, Any] | None) -> bool:
+        return cls._recovery_sequence_state(active_recovery_sequence) in {"approved", "executing"}
 
     @staticmethod
-    def _bridge_sequence_task_ids(values: Any) -> list[str]:
+    def _recovery_sequence_task_ids(values: Any) -> list[str]:
         deduped: list[str] = []
         for value in values or []:
             task_id = str(value or "").strip()
@@ -536,89 +544,89 @@ class ProductRecoveryController:
                 deduped.append(task_id)
         return deduped
 
-    def _bridge_proposal_fingerprint(
+    def _recovery_proposal_fingerprint(
         self,
         *,
         proposal: dict[str, Any],
         failed_task_id: str,
-        bridge_debug: dict[str, Any] | None = None,
+        recovery_debug: dict[str, Any] | None = None,
     ) -> str:
-        archive_replay = dict((bridge_debug or {}).get("archive_replay") or {})
+        archive_replay = dict((recovery_debug or {}).get("archive_replay") or {})
         payload = {
             "failed_task_id": str(failed_task_id or "").strip(),
-            "bridge_mode": self._runtime_bridge_session_mode(),
-            "validation_policy": self._runtime_bridge_session_validation_policy(),
+            "recovery_mode": self._runtime_recovery_session_mode(),
+            "validation_policy": self._runtime_recovery_session_validation_policy(),
             "selected_archive_path": str(
                 archive_replay.get("source_path")
-                or self._runtime_bridge_session_archive_path()
+                or self._runtime_recovery_session_archive_path()
                 or ""
             ).strip(),
-            "source": str((bridge_debug or {}).get("source") or "").strip(),
+            "source": str((recovery_debug or {}).get("source") or "").strip(),
             "proposal": deepcopy(proposal or {}),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-    def _bridge_sequence_summary(
+    def _recovery_sequence_summary(
         self,
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        if not isinstance(active_bridge_sequence, dict):
+        if not isinstance(active_recovery_sequence, dict):
             return None
-        bridge_task_ids = self._bridge_sequence_task_ids(
-            active_bridge_sequence.get("bridge_task_ids") or []
+        recovery_task_ids = self._recovery_sequence_task_ids(
+            active_recovery_sequence.get("recovery_task_ids") or []
         )
-        dispatched_task_ids = self._bridge_sequence_task_ids(
-            active_bridge_sequence.get("dispatched_bridge_task_ids") or []
+        dispatched_task_ids = self._recovery_sequence_task_ids(
+            active_recovery_sequence.get("dispatched_recovery_task_ids") or []
         )
-        completed_task_ids = self._bridge_sequence_task_ids(
-            active_bridge_sequence.get("completed_bridge_task_ids") or []
+        completed_task_ids = self._recovery_sequence_task_ids(
+            active_recovery_sequence.get("completed_recovery_task_ids") or []
         )
         return {
-            "bridge_sequence_id": str(
-                active_bridge_sequence.get("bridge_sequence_id") or ""
+            "recovery_sequence_id": str(
+                active_recovery_sequence.get("recovery_sequence_id") or ""
             ).strip(),
             "proposal_fingerprint": str(
-                active_bridge_sequence.get("proposal_fingerprint") or ""
+                active_recovery_sequence.get("proposal_fingerprint") or ""
             ).strip(),
-            "state": str(active_bridge_sequence.get("state") or "").strip(),
-            "bridge_task_ids": bridge_task_ids,
-            "bridge_sequence_length": int(
-                active_bridge_sequence.get("bridge_sequence_length") or len(bridge_task_ids)
+            "state": str(active_recovery_sequence.get("state") or "").strip(),
+            "recovery_task_ids": recovery_task_ids,
+            "recovery_sequence_length": int(
+                active_recovery_sequence.get("recovery_sequence_length") or len(recovery_task_ids)
             ),
-            "compiled_bridge_task_count": len(bridge_task_ids),
-            "dispatched_bridge_task_ids": dispatched_task_ids,
-            "dispatched_bridge_task_count": len(dispatched_task_ids),
-            "completed_bridge_task_ids": completed_task_ids,
-            "completed_bridge_task_count": len(completed_task_ids),
+            "compiled_recovery_task_count": len(recovery_task_ids),
+            "dispatched_recovery_task_ids": dispatched_task_ids,
+            "dispatched_recovery_task_count": len(dispatched_task_ids),
+            "completed_recovery_task_ids": completed_task_ids,
+            "completed_recovery_task_count": len(completed_task_ids),
             "execution_started_at_utc": str(
-                active_bridge_sequence.get("execution_started_at_utc") or ""
+                active_recovery_sequence.get("execution_started_at_utc") or ""
             ).strip(),
             "last_dispatched_task_id": str(
-                active_bridge_sequence.get("last_dispatched_task_id") or ""
+                active_recovery_sequence.get("last_dispatched_task_id") or ""
             ).strip(),
             "last_completed_task_id": str(
-                active_bridge_sequence.get("last_completed_task_id") or ""
+                active_recovery_sequence.get("last_completed_task_id") or ""
             ).strip(),
             "last_completed_macro_name": str(
-                active_bridge_sequence.get("last_completed_macro_name") or ""
+                active_recovery_sequence.get("last_completed_macro_name") or ""
             ).strip(),
-            "source_mode": str(active_bridge_sequence.get("source_mode") or "").strip(),
-            "validation_policy": str(active_bridge_sequence.get("validation_policy") or "").strip(),
+            "source_mode": str(active_recovery_sequence.get("source_mode") or "").strip(),
+            "validation_policy": str(active_recovery_sequence.get("validation_policy") or "").strip(),
             "source_archive_path": str(
-                active_bridge_sequence.get("source_archive_path") or ""
+                active_recovery_sequence.get("source_archive_path") or ""
             ).strip(),
             "source_archive_label": str(
-                active_bridge_sequence.get("source_archive_label") or ""
+                active_recovery_sequence.get("source_archive_label") or ""
             ).strip(),
-            "source": str(active_bridge_sequence.get("source") or "").strip(),
-            "used_llm_bridge": bool(active_bridge_sequence.get("used_llm_bridge", False)),
-            "repair_task_id": str(active_bridge_sequence.get("repair_task_id") or "").strip(),
+            "source": str(active_recovery_sequence.get("source") or "").strip(),
+            "used_llm_recovery": bool(active_recovery_sequence.get("used_llm_recovery", False)),
+            "repair_task_id": str(active_recovery_sequence.get("repair_task_id") or "").strip(),
             "repair_target_task_id": str(
-                active_bridge_sequence.get("repair_target_task_id") or ""
+                active_recovery_sequence.get("repair_target_task_id") or ""
             ).strip(),
-            "repair_operator": str(active_bridge_sequence.get("repair_operator") or "").strip(),
-            "repair_intent": str(active_bridge_sequence.get("repair_intent") or "").strip(),
+            "repair_operator": str(active_recovery_sequence.get("repair_operator") or "").strip(),
+            "repair_intent": str(active_recovery_sequence.get("repair_intent") or "").strip(),
         }
 
     def _should_ignore_stale_recovery_macro_ack(
@@ -632,7 +640,7 @@ class ProductRecoveryController:
         if str(task_node.get("function_name") or "").strip() != "execute_recovery_macro":
             return False
         task_id = str(task_node.get("id") or "").strip()
-        sequence_id = str(task_node.get("bridge_sequence_id") or "").strip()
+        sequence_id = str(task_node.get("recovery_sequence_id") or "").strip()
         if not task_id or not sequence_id:
             return False
         normalized_incoming = str(incoming_status or "").strip().lower()
@@ -647,10 +655,10 @@ class ProductRecoveryController:
         if current_status not in {"completed", "finished"}:
             return False
 
-        active_bridge_sequence = self._active_bridge_sequence()
-        if isinstance(active_bridge_sequence, dict):
-            active_state = self._bridge_sequence_state(active_bridge_sequence)
-            active_sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
+        active_recovery_sequence = self._active_recovery_sequence()
+        if isinstance(active_recovery_sequence, dict):
+            active_state = self._recovery_sequence_state(active_recovery_sequence)
+            active_sequence_id = str(active_recovery_sequence.get("recovery_sequence_id") or "").strip()
             if (
                 active_sequence_id
                 and active_sequence_id == sequence_id
@@ -662,75 +670,75 @@ class ProductRecoveryController:
             ):
                 return True
             completed_ids = set(
-                self._bridge_sequence_task_ids(
-                    active_bridge_sequence.get("completed_bridge_task_ids") or []
+                self._recovery_sequence_task_ids(
+                    active_recovery_sequence.get("completed_recovery_task_ids") or []
                 )
             )
             if task_id in completed_ids:
                 return True
-            active_sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
+            active_sequence_id = str(active_recovery_sequence.get("recovery_sequence_id") or "").strip()
             if active_sequence_id and active_sequence_id != sequence_id:
                 return True
 
-        last_completed_sequence = self.runtime_recovery.get("last_completed_bridge_sequence")
+        last_completed_sequence = self.runtime_recovery.get("last_completed_recovery_sequence")
         if isinstance(last_completed_sequence, dict):
             completed_ids = set(
-                self._bridge_sequence_task_ids(
-                    last_completed_sequence.get("completed_bridge_task_ids") or []
+                self._recovery_sequence_task_ids(
+                    last_completed_sequence.get("completed_recovery_task_ids") or []
                 )
             )
             if task_id in completed_ids:
                 return True
-            last_sequence_id = str(last_completed_sequence.get("bridge_sequence_id") or "").strip()
+            last_sequence_id = str(last_completed_sequence.get("recovery_sequence_id") or "").strip()
             if last_sequence_id and last_sequence_id == sequence_id:
                 return True
 
         return True
 
-    def _bridge_sequence_with_dispatched_task(
+    def _recovery_sequence_with_dispatched_task(
         self,
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
         *,
         task_id: str,
     ) -> dict[str, Any] | None:
-        if not isinstance(active_bridge_sequence, dict):
+        if not isinstance(active_recovery_sequence, dict):
             return None
-        next_sequence = deepcopy(active_bridge_sequence)
-        dispatched_task_ids = self._bridge_sequence_task_ids(
-            next_sequence.get("dispatched_bridge_task_ids") or []
+        next_sequence = deepcopy(active_recovery_sequence)
+        dispatched_task_ids = self._recovery_sequence_task_ids(
+            next_sequence.get("dispatched_recovery_task_ids") or []
         )
         if task_id and task_id not in dispatched_task_ids:
             dispatched_task_ids.append(task_id)
-        next_sequence["dispatched_bridge_task_ids"] = dispatched_task_ids
+        next_sequence["dispatched_recovery_task_ids"] = dispatched_task_ids
         next_sequence["last_dispatched_task_id"] = str(task_id or "").strip()
         next_sequence["state"] = "executing"
         if not str(next_sequence.get("execution_started_at_utc") or "").strip():
             next_sequence["execution_started_at_utc"] = self._utc_now_iso()
         return next_sequence
 
-    def _bridge_sequence_with_completed_task(
+    def _recovery_sequence_with_completed_task(
         self,
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
         *,
         task_id: str,
         macro_name: str,
         terminal: bool = False,
     ) -> dict[str, Any] | None:
-        if not isinstance(active_bridge_sequence, dict):
+        if not isinstance(active_recovery_sequence, dict):
             return None
-        next_sequence = deepcopy(active_bridge_sequence)
-        dispatched_task_ids = self._bridge_sequence_task_ids(
-            next_sequence.get("dispatched_bridge_task_ids") or []
+        next_sequence = deepcopy(active_recovery_sequence)
+        dispatched_task_ids = self._recovery_sequence_task_ids(
+            next_sequence.get("dispatched_recovery_task_ids") or []
         )
         if task_id and task_id not in dispatched_task_ids:
             dispatched_task_ids.append(task_id)
-        next_sequence["dispatched_bridge_task_ids"] = dispatched_task_ids
-        completed_task_ids = self._bridge_sequence_task_ids(
-            next_sequence.get("completed_bridge_task_ids") or []
+        next_sequence["dispatched_recovery_task_ids"] = dispatched_task_ids
+        completed_task_ids = self._recovery_sequence_task_ids(
+            next_sequence.get("completed_recovery_task_ids") or []
         )
         if task_id and task_id not in completed_task_ids:
             completed_task_ids.append(task_id)
-        next_sequence["completed_bridge_task_ids"] = completed_task_ids
+        next_sequence["completed_recovery_task_ids"] = completed_task_ids
         next_sequence["last_completed_task_id"] = str(task_id or "").strip()
         next_sequence["last_completed_macro_name"] = str(macro_name or "").strip()
         next_sequence["last_task_id"] = str(task_id or "").strip()
@@ -740,16 +748,16 @@ class ProductRecoveryController:
         return next_sequence
 
     @staticmethod
-    def _derive_runtime_bridge_stage(recovery: dict[str, Any]) -> str:
+    def _derive_runtime_recovery_stage(recovery: dict[str, Any]) -> str:
         approval_state = (
-            str(recovery.get("bridge_approval_state", "none") or "none").strip().lower()
+            str(recovery.get("recovery_approval_state", "none") or "none").strip().lower()
         )
         if approval_state == "outline_pending":
             return "outline"
         if approval_state == "primitive_pending":
             return "primitive"
         if approval_state in {"pending", "approved"} or isinstance(
-            recovery.get("bridge_proposal"), dict
+            recovery.get("recovery_proposal"), dict
         ):
             return "final"
         return "none"
@@ -767,20 +775,20 @@ class ProductRecoveryController:
             "witness_count": 0,
             "attempts_used": 0,
             "attempts_max": int(self._runtime_repair_max_attempts),
-            "used_llm_bridge": False,
+            "used_llm_recovery": False,
             "operator_guidance": "",
-            "bridge_proposal": None,
-            "bridge_debug": None,
-            "bridge_artifacts": {},
-            "bridge_approval_state": "none",
-            "bridge_stage": "none",
-            "bridge_mode": self._runtime_bridge_session_mode(),
-            "validation_policy": self._runtime_bridge_session_validation_policy(),
-            "selected_archive_path": self._runtime_bridge_session_archive_path(),
-            "selected_archive_label": self._runtime_bridge_session_archive_label(),
-            "artifact_directory": self._runtime_bridge_session_artifact_directory(),
-            "active_bridge_sequence": None,
-            "last_completed_bridge_sequence": None,
+            "recovery_proposal": None,
+            "recovery_debug": None,
+            "recovery_artifacts": {},
+            "recovery_approval_state": "none",
+            "recovery_stage": "none",
+            "recovery_mode": self._runtime_recovery_session_mode(),
+            "validation_policy": self._runtime_recovery_session_validation_policy(),
+            "selected_archive_path": self._runtime_recovery_session_archive_path(),
+            "selected_archive_label": self._runtime_recovery_session_archive_label(),
+            "artifact_directory": self._runtime_recovery_session_artifact_directory(),
+            "active_recovery_sequence": None,
+            "last_completed_recovery_sequence": None,
             "recovery_safety_scope_id": "",
             "recovery_safety_status": "none",
             "recovery_safety_logic_json": "",
@@ -790,7 +798,7 @@ class ProductRecoveryController:
             "recovery_final_dir": "",
             "recovery_final_output_path": "",
             "recovery_enforced_task_ids": [],
-            "bridge_feedback_history": [],
+            "recovery_feedback_history": [],
             "generated_code_verification": None,
             "history": [],
             "updated_at_utc": self._utc_now_iso(),
@@ -799,19 +807,19 @@ class ProductRecoveryController:
     def _sync_runtime_repair_state(self) -> None:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status == "llm_bridge" and approval_state in {
+        if status == "llm_recovery" and approval_state in {
             "pending",
             "outline_pending",
             "primitive_pending",
         }:
             self.runtime_repair_state = "paused_after_failure"
-        elif status in {"des_search", "llm_bridge", "validating"}:
+        elif status in {"des_search", "llm_recovery", "validating"}:
             self.runtime_repair_state = "repairing"
-        elif status in {"bridge_ready", "human_required", "generated_bridge_verified"}:
+        elif status in {"recovery_ready", "human_required", "generated_recovery_verified"}:
             self.runtime_repair_state = "paused_after_failure"
         else:
             self.runtime_repair_state = "idle"
@@ -827,16 +835,16 @@ class ProductRecoveryController:
         message: str | None = None,
         attempts_used: int | None = None,
         attempts_max: int | None = None,
-        used_llm_bridge: bool | None = None,
+        used_llm_recovery: bool | None = None,
         operator_guidance: str | None = None,
-        bridge_proposal: dict[str, Any] | None | object = _UNSET,
-        bridge_debug: dict[str, Any] | None | object = _UNSET,
-        bridge_artifacts: dict[str, Any] | None | object = _UNSET,
-        bridge_approval_state: str | None = None,
-        bridge_stage: str | None = None,
+        recovery_proposal: dict[str, Any] | None | object = _UNSET,
+        recovery_debug: dict[str, Any] | None | object = _UNSET,
+        recovery_artifacts: dict[str, Any] | None | object = _UNSET,
+        recovery_approval_state: str | None = None,
+        recovery_stage: str | None = None,
         artifact_directory: str | None | object = _UNSET,
-        active_bridge_sequence: dict[str, Any] | None | object = _UNSET,
-        last_completed_bridge_sequence: dict[str, Any] | None | object = _UNSET,
+        active_recovery_sequence: dict[str, Any] | None | object = _UNSET,
+        last_completed_recovery_sequence: dict[str, Any] | None | object = _UNSET,
         recovery_safety_scope_id: str | None | object = _UNSET,
         recovery_safety_status: str | None | object = _UNSET,
         recovery_safety_logic_json: str | None | object = _UNSET,
@@ -846,13 +854,17 @@ class ProductRecoveryController:
         recovery_final_dir: str | None | object = _UNSET,
         recovery_final_output_path: str | None | object = _UNSET,
         recovery_enforced_task_ids: list[str] | object = _UNSET,
-        bridge_feedback_history: list[str] | object = _UNSET,
+        recovery_feedback_history: list[str] | object = _UNSET,
         generated_code_verification: dict[str, Any] | None | object = _UNSET,
         violations: list[dict[str, Any]] | None = None,
         append_history: bool = False,
         history_message: str | None = None,
     ) -> dict[str, Any]:
-        current = self._empty_runtime_recovery() if reset else deepcopy(self.runtime_recovery)
+        current = (
+            self._empty_runtime_recovery()
+            if reset
+            else deepcopy(self.runtime_recovery)
+        )
         current["product_name"] = self.agent_name
         current["product_jid"] = str(self.jid)
         current["attempts_max"] = int(self._runtime_repair_max_attempts)
@@ -871,40 +883,40 @@ class ProductRecoveryController:
             current["attempts_used"] = max(0, int(attempts_used))
         if attempts_max is not None:
             current["attempts_max"] = max(0, int(attempts_max))
-        if used_llm_bridge is not None:
-            current["used_llm_bridge"] = bool(used_llm_bridge)
+        if used_llm_recovery is not None:
+            current["used_llm_recovery"] = bool(used_llm_recovery)
         if operator_guidance is not None:
             current["operator_guidance"] = str(operator_guidance).strip()
-        if bridge_proposal is not _UNSET:
-            current["bridge_proposal"] = (
-                deepcopy(bridge_proposal) if isinstance(bridge_proposal, dict) else None
+        if recovery_proposal is not _UNSET:
+            current["recovery_proposal"] = (
+                deepcopy(recovery_proposal) if isinstance(recovery_proposal, dict) else None
             )
-        if bridge_debug is not _UNSET:
-            current["bridge_debug"] = (
-                deepcopy(bridge_debug) if isinstance(bridge_debug, dict) else None
+        if recovery_debug is not _UNSET:
+            current["recovery_debug"] = (
+                deepcopy(recovery_debug) if isinstance(recovery_debug, dict) else None
             )
-        if bridge_artifacts is not _UNSET:
-            current["bridge_artifacts"] = (
-                deepcopy(bridge_artifacts) if isinstance(bridge_artifacts, dict) else {}
+        if recovery_artifacts is not _UNSET:
+            current["recovery_artifacts"] = (
+                deepcopy(recovery_artifacts) if isinstance(recovery_artifacts, dict) else {}
             )
-        if bridge_approval_state is not None:
-            current["bridge_approval_state"] = (
-                str(bridge_approval_state or "none").strip() or "none"
+        if recovery_approval_state is not None:
+            current["recovery_approval_state"] = (
+                str(recovery_approval_state or "none").strip() or "none"
             )
-        if bridge_stage is not None:
-            current["bridge_stage"] = str(bridge_stage or "none").strip() or "none"
+        if recovery_stage is not None:
+            current["recovery_stage"] = str(recovery_stage or "none").strip() or "none"
         if artifact_directory is not _UNSET:
             current["artifact_directory"] = str(artifact_directory or "").strip()
-        if active_bridge_sequence is not _UNSET:
-            current["active_bridge_sequence"] = (
-                deepcopy(active_bridge_sequence)
-                if isinstance(active_bridge_sequence, dict)
+        if active_recovery_sequence is not _UNSET:
+            current["active_recovery_sequence"] = (
+                deepcopy(active_recovery_sequence)
+                if isinstance(active_recovery_sequence, dict)
                 else None
             )
-        if last_completed_bridge_sequence is not _UNSET:
-            current["last_completed_bridge_sequence"] = (
-                deepcopy(last_completed_bridge_sequence)
-                if isinstance(last_completed_bridge_sequence, dict)
+        if last_completed_recovery_sequence is not _UNSET:
+            current["last_completed_recovery_sequence"] = (
+                deepcopy(last_completed_recovery_sequence)
+                if isinstance(last_completed_recovery_sequence, dict)
                 else None
             )
         if recovery_safety_scope_id is not _UNSET:
@@ -931,9 +943,9 @@ class ProductRecoveryController:
                 for task_id in (recovery_enforced_task_ids or [])
                 if str(task_id).strip()
             ]
-        if bridge_feedback_history is not _UNSET:
-            current["bridge_feedback_history"] = [
-                str(item).strip() for item in (bridge_feedback_history or []) if str(item).strip()
+        if recovery_feedback_history is not _UNSET:
+            current["recovery_feedback_history"] = [
+                str(item).strip() for item in (recovery_feedback_history or []) if str(item).strip()
             ]
         if generated_code_verification is not _UNSET:
             current["generated_code_verification"] = (
@@ -946,19 +958,19 @@ class ProductRecoveryController:
             current["violated_rules"] = violated_rules
             current["witness_count"] = witness_count
 
-        current["bridge_mode"] = self._runtime_bridge_session_mode()
-        current["validation_policy"] = self._runtime_bridge_session_validation_policy()
-        current["selected_archive_path"] = self._runtime_bridge_session_archive_path()
-        current["selected_archive_label"] = self._runtime_bridge_session_archive_label()
+        current["recovery_mode"] = self._runtime_recovery_session_mode()
+        current["validation_policy"] = self._runtime_recovery_session_validation_policy()
+        current["selected_archive_path"] = self._runtime_recovery_session_archive_path()
+        current["selected_archive_label"] = self._runtime_recovery_session_archive_label()
         if artifact_directory is _UNSET:
             current["artifact_directory"] = (
-                self._runtime_bridge_session_artifact_directory()
+                self._runtime_recovery_session_artifact_directory()
                 or str(
-                    dict(current.get("bridge_debug") or {}).get("artifact_directory") or ""
+                    dict(current.get("recovery_debug") or {}).get("artifact_directory") or ""
                 ).strip()
             )
-        if bridge_stage is None:
-            current["bridge_stage"] = self._derive_runtime_bridge_stage(current)
+        if recovery_stage is None:
+            current["recovery_stage"] = self._derive_runtime_recovery_stage(current)
 
         event_message = str(
             history_message if history_message is not None else message or ""
@@ -1018,7 +1030,7 @@ class ProductRecoveryController:
             return pose
 
         prepared_request = dict(
-            (getattr(self, "_runtime_recovery_context", {}) or {}).get("prepared_bridge_request")
+            (getattr(self, "_runtime_recovery_context", {}) or {}).get("prepared_recovery_request")
             or {}
         )
         prepared_parts = dict(prepared_request.get("part_tracker") or {})
@@ -1242,10 +1254,10 @@ class ProductRecoveryController:
         function_name = str(task_node.get("function_name") or "").strip()
         if function_name == "execute_recovery_macro":
             params = self._enrich_observed_pose_recovery_params(params)
-            bridge_outline_id = str(task_node.get("bridge_outline_id") or "").strip()
-            if bridge_outline_id:
-                params.setdefault("bridge_outline_id", bridge_outline_id)
-                params.setdefault("outline_id", bridge_outline_id)
+            recovery_outline_id = str(task_node.get("recovery_outline_id") or "").strip()
+            if recovery_outline_id:
+                params.setdefault("recovery_outline_id", recovery_outline_id)
+                params.setdefault("outline_id", recovery_outline_id)
             llm_outline_id = str(task_node.get("llm_outline_id") or "").strip()
             if llm_outline_id:
                 params.setdefault("llm_outline_id", llm_outline_id)
@@ -1269,37 +1281,37 @@ class ProductRecoveryController:
             if geo:
                 params["product_geometry"] = geo
 
-        active_bridge_sequence = self._active_bridge_sequence()
+        active_recovery_sequence = self._active_recovery_sequence()
         active_execution_policy = (
-            active_bridge_sequence.get("execution_policy")
-            if isinstance(active_bridge_sequence, dict)
-            and isinstance(active_bridge_sequence.get("execution_policy"), dict)
+            active_recovery_sequence.get("execution_policy")
+            if isinstance(active_recovery_sequence, dict)
+            and isinstance(active_recovery_sequence.get("execution_policy"), dict)
             else {}
         )
         active_validation_policy = (
             str(
                 active_execution_policy.get("validation_policy")
-                or (active_bridge_sequence or {}).get("validation_policy")
+                or (active_recovery_sequence or {}).get("validation_policy")
                 or self.runtime_recovery.get("validation_policy")
-                or self._runtime_bridge_session_validation_policy()
+                or self._runtime_recovery_session_validation_policy()
                 or ""
             )
             .strip()
             .lower()
         )
         recovery_safety_scope_id = str(
-            (active_bridge_sequence or {}).get("recovery_safety_scope_id")
+            (active_recovery_sequence or {}).get("recovery_safety_scope_id")
             or self.runtime_recovery.get("recovery_safety_scope_id")
             or ""
         ).strip()
-        bridge_dispatch_session = bool(
-            active_bridge_sequence
-            or self.runtime_recovery.get("active_bridge_sequence")
-            or self.runtime_recovery.get("used_llm_bridge")
-            or self.runtime_recovery.get("bridge_approval_state")
-            or self.runtime_recovery.get("bridge_proposal")
+        recovery_dispatch_session = bool(
+            active_recovery_sequence
+            or self.runtime_recovery.get("active_recovery_sequence")
+            or self.runtime_recovery.get("used_llm_recovery")
+            or self.runtime_recovery.get("recovery_approval_state")
+            or self.runtime_recovery.get("recovery_proposal")
         )
-        sequence_task_id_parser = getattr(self, "_bridge_sequence_task_ids", None)
+        sequence_task_id_parser = getattr(self, "_recovery_sequence_task_ids", None)
 
         def _sequence_task_ids(raw_ids: Any) -> list[str]:
             if callable(sequence_task_id_parser):
@@ -1310,10 +1322,10 @@ class ProductRecoveryController:
 
         recovery_enforced_task_ids: set[str] = set()
         for raw_ids in (
-            (active_bridge_sequence or {}).get("recovery_enforced_task_ids"),
+            (active_recovery_sequence or {}).get("recovery_enforced_task_ids"),
             self.runtime_recovery.get("recovery_enforced_task_ids"),
-            (active_bridge_sequence or {}).get("bridge_task_ids"),
-            (active_bridge_sequence or {}).get("dispatched_bridge_task_ids"),
+            (active_recovery_sequence or {}).get("recovery_task_ids"),
+            (active_recovery_sequence or {}).get("dispatched_recovery_task_ids"),
         ):
             for item in _sequence_task_ids(raw_ids or []):
                 token = str(item).strip()
@@ -1321,9 +1333,9 @@ class ProductRecoveryController:
                     recovery_enforced_task_ids.add(token)
 
         has_recovery_fields = bool(
-            str(task_node.get("bridge_sequence_id") or "").strip()
-            or str(task_node.get("bridge_outline_id") or "").strip()
-            or str(params.get("bridge_outline_id") or "").strip()
+            str(task_node.get("recovery_sequence_id") or "").strip()
+            or str(task_node.get("recovery_outline_id") or "").strip()
+            or str(params.get("recovery_outline_id") or "").strip()
             or str(params.get("outline_id") or "").strip()
             or str(task_node.get("repair_operator") or "").strip()
         )
@@ -1353,7 +1365,7 @@ class ProductRecoveryController:
                     message=message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    bridge_approval_state="approved",
+                    recovery_approval_state="approved",
                     recovery_enforced_task_ids=sorted(recovery_enforced_task_ids),
                     violations=[],
                     append_history=True,
@@ -1363,7 +1375,7 @@ class ProductRecoveryController:
         elif assembly_board_task and bool(getattr(self, "safety_text_has_requirements", False)):
             params["start_safety_mode"] = "cca_check"
         elif not recovery_safety_task:
-            if active_validation_policy == "no_validation" and bridge_dispatch_session:
+            if active_validation_policy == "no_validation" and recovery_dispatch_session:
                 return params
             if (
                 not bool(getattr(self, "safety_text_has_requirements", False))
@@ -1377,18 +1389,19 @@ class ProductRecoveryController:
         return status not in {"", "idle", "resolved"}
 
     def get_runtime_recovery(self) -> dict[str, Any]:
-        return (
+        payload = (
             deepcopy(self.runtime_recovery)
             if isinstance(self.runtime_recovery, dict)
             else self._empty_runtime_recovery()
         )
+        return payload
 
-    def _runtime_bridge_data_root(self) -> Path:
-        return Path(DEFAULT_BRIDGE_DEBUG_DIR)
+    def _runtime_recovery_data_root(self) -> Path:
+        return Path(DEFAULT_RECOVERY_DEBUG_DIR)
 
     def _runtime_recovery_safety_live_root(self) -> Path:
         return Path(
-            "cais_spade_llm/agents/intelligent_product/replanner/llm_bridge/runtime_data/imported/worked"
+            "cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/runtime_data/imported/worked"
         )
 
     def _allocate_runtime_recovery_safety_worked_dir(self) -> Path:
@@ -1450,7 +1463,7 @@ class ProductRecoveryController:
         }
 
     @staticmethod
-    def _worked_dir_for_archived_bridge_artifact(
+    def _worked_dir_for_archived_recovery_artifact(
         artifact_path: str | Path,
     ) -> Path | None:
         candidate = Path(artifact_path)
@@ -1472,7 +1485,7 @@ class ProductRecoveryController:
         self,
         artifact_path: str | Path,
     ) -> dict[str, Any]:
-        worked_dir = self._worked_dir_for_archived_bridge_artifact(artifact_path)
+        worked_dir = self._worked_dir_for_archived_recovery_artifact(artifact_path)
         if worked_dir is None:
             return {}
         recovery_safety_dir = worked_dir / "recovery_safety"
@@ -1516,14 +1529,14 @@ class ProductRecoveryController:
 
     @staticmethod
     def _primitive_program_ready_final_output_payload(
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any]:
-        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = dict(prepared_recovery_request.get("recovery_debug") or {})
         for candidate in (
-            bridge_debug.get("final_output"),
-            dict(bridge_debug.get("multi_turn_session") or {}).get("final_output"),
-            prepared_bridge_request.get("multi_turn_session_state", {}).get("final_output")
-            if isinstance(prepared_bridge_request.get("multi_turn_session_state"), dict)
+            recovery_debug.get("final_output"),
+            dict(recovery_debug.get("multi_turn_session") or {}).get("final_output"),
+            prepared_recovery_request.get("multi_turn_session_state", {}).get("final_output")
+            if isinstance(prepared_recovery_request.get("multi_turn_session_state"), dict)
             else {},
         ):
             if not isinstance(candidate, dict) or not candidate:
@@ -1537,12 +1550,12 @@ class ProductRecoveryController:
 
     @staticmethod
     def _primitive_program_ready_final_output_source_path(
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> str:
-        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = dict(prepared_recovery_request.get("recovery_debug") or {})
         session_state = dict(
-            bridge_debug.get("multi_turn_session")
-            or prepared_bridge_request.get("multi_turn_session_state")
+            recovery_debug.get("multi_turn_session")
+            or prepared_recovery_request.get("multi_turn_session_state")
             or {}
         )
         turns = [dict(row) for row in (session_state.get("turns") or []) if isinstance(row, dict)]
@@ -1558,12 +1571,12 @@ class ProductRecoveryController:
 
     @staticmethod
     def _primitive_program_ready_final_output_turn_index(
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> int:
-        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = dict(prepared_recovery_request.get("recovery_debug") or {})
         session_state = dict(
-            bridge_debug.get("multi_turn_session")
-            or prepared_bridge_request.get("multi_turn_session_state")
+            recovery_debug.get("multi_turn_session")
+            or prepared_recovery_request.get("multi_turn_session_state")
             or {}
         )
         turns = [dict(row) for row in (session_state.get("turns") or []) if isinstance(row, dict)]
@@ -1578,12 +1591,12 @@ class ProductRecoveryController:
     def _write_recovery_final_bundle(
         self,
         *,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, str]:
-        if not isinstance(prepared_bridge_request, dict) or not prepared_bridge_request:
+        if not isinstance(prepared_recovery_request, dict) or not prepared_recovery_request:
             return {}
         final_output_payload = self._primitive_program_ready_final_output_payload(
-            prepared_bridge_request
+            prepared_recovery_request
         )
         if not final_output_payload:
             return {}
@@ -1598,10 +1611,10 @@ class ProductRecoveryController:
 
         recovery_final_dir = self._recovery_final_dir()
         source_final_output_path = self._primitive_program_ready_final_output_source_path(
-            prepared_bridge_request
+            prepared_recovery_request
         )
         final_output_turn_index = self._primitive_program_ready_final_output_turn_index(
-            prepared_bridge_request
+            prepared_recovery_request
         )
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         if source_final_output_path:
@@ -1639,15 +1652,15 @@ class ProductRecoveryController:
             shutil.copy2(source_dfa_path, target_dfa_path)
             dfa_dot_files.append(str(target_dfa_path.resolve()))
 
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        bridge_debug["recovery_safety_logic_json"] = str(target_logic_path.resolve())
-        bridge_debug["recovery_final_safety_logic_json"] = str(target_logic_path.resolve())
-        bridge_debug["recovery_final_dir"] = str(recovery_final_dir)
-        bridge_debug["recovery_final_output_path"] = str(target_final_output_path.resolve())
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
+        recovery_debug["recovery_safety_logic_json"] = str(target_logic_path.resolve())
+        recovery_debug["recovery_final_safety_logic_json"] = str(target_logic_path.resolve())
+        recovery_debug["recovery_final_dir"] = str(recovery_final_dir)
+        recovery_debug["recovery_final_output_path"] = str(target_final_output_path.resolve())
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
         if isinstance(self._runtime_recovery_context, dict):
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
             self._runtime_recovery_context["recovery_safety_logic_json"] = str(
                 target_logic_path.resolve()
@@ -1681,7 +1694,7 @@ class ProductRecoveryController:
     def _maybe_write_recovery_final_bundle(
         self,
         *,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, str]:
         recovery_safety_status = (
             str(self.runtime_recovery.get("recovery_safety_status") or "none").strip().lower()
@@ -1689,13 +1702,13 @@ class ProductRecoveryController:
         if recovery_safety_status != "ready":
             return {}
         return self._write_recovery_final_bundle(
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
 
     def _build_recovery_safety_generation_payload(
         self,
         *,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
         recovery_safety_scope_id: str,
         request_id: str,
         recovery_safety_dir: str,
@@ -1712,14 +1725,14 @@ class ProductRecoveryController:
                 if str(row.get("id") or row.get("task_id") or "").strip()
             }
             requirement_task_index = dict(
-                prepared_bridge_request.get("requirement_task_index") or {}
+                prepared_recovery_request.get("requirement_task_index") or {}
             )
-            task_requirement_map = dict(prepared_bridge_request.get("task_requirement_map") or {})
-            bridge_resources = dict(prepared_bridge_request.get("bridge_resources") or {})
+            task_requirement_map = dict(prepared_recovery_request.get("task_requirement_map") or {})
+            recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
             pending_task_rows_by_id: dict[str, dict[str, Any]] = {}
             active_requirement_ids: set[str] = set()
 
-            for resource_entry in bridge_resources.values():
+            for resource_entry in recovery_resources.values():
                 if not isinstance(resource_entry, dict):
                     continue
                 for task in resource_entry.get("pending_tasks") or []:
@@ -1816,11 +1829,11 @@ class ProductRecoveryController:
                     )
             return candidate_rows
 
-        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = dict(prepared_recovery_request.get("recovery_debug") or {})
         session_candidates = [
-            dict(bridge_debug.get("multi_turn_session") or {}),
-            dict(prepared_bridge_request.get("multi_turn_session_state") or {}),
-            dict(prepared_bridge_request.get("multi_turn_session_seed") or {}),
+            dict(recovery_debug.get("multi_turn_session") or {}),
+            dict(prepared_recovery_request.get("multi_turn_session_state") or {}),
+            dict(prepared_recovery_request.get("multi_turn_session_seed") or {}),
         ]
         session_state = next(
             (candidate for candidate in session_candidates if candidate),
@@ -1863,7 +1876,7 @@ class ProductRecoveryController:
             projected_outline_state = deepcopy(
                 dict(session_state.get("final_output") or {}).get("projected_outline_state") or {}
             )
-        llm_input = dict(prepared_bridge_request.get("llm_input") or {})
+        llm_input = dict(prepared_recovery_request.get("llm_input") or {})
         modeled_continuation_gap = dict(llm_input.get("modeled_continuation_gap") or {})
         pending_nominal_tasks = [
             deepcopy(row)
@@ -1875,7 +1888,7 @@ class ProductRecoveryController:
             for task_id in (
                 modeled_continuation_gap.get("pending_nominal_task_ids")
                 or (
-                    dict(prepared_bridge_request.get("context_summary") or {}).get(
+                    dict(prepared_recovery_request.get("context_summary") or {}).get(
                         "modeled_continuation_gap"
                     )
                     or {}
@@ -1903,11 +1916,11 @@ class ProductRecoveryController:
             ],
             "loaded_safety_rules": [
                 deepcopy(rule)
-                for rule in (prepared_bridge_request.get("loaded_safety_rules") or [])
+                for rule in (prepared_recovery_request.get("loaded_safety_rules") or [])
                 if isinstance(rule, dict)
             ],
-            "bridge_safety_context": deepcopy(
-                prepared_bridge_request.get("bridge_safety_context") or {}
+            "recovery_safety_context": deepcopy(
+                prepared_recovery_request.get("recovery_safety_context") or {}
             ),
             "tools_catalog": deepcopy(getattr(self, "tools_catalog", []) or []),
             "recovery_safety_dir": str(recovery_safety_dir or "").strip(),
@@ -1918,13 +1931,13 @@ class ProductRecoveryController:
     def _dispatch_recovery_safety_generation_request(
         self,
         *,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
         recovery_safety_scope_id: str,
     ) -> dict[str, Any]:
         request_id = f"recovery_safety_generate_{uuid.uuid4().hex}"
         dirs = self._recovery_safety_generation_dirs()
         payload = self._build_recovery_safety_generation_payload(
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
             recovery_safety_scope_id=recovery_safety_scope_id,
             request_id=request_id,
             recovery_safety_dir=str(dirs.get("recovery_safety_dir") or "").strip(),
@@ -2018,27 +2031,27 @@ class ProductRecoveryController:
                 append_history=True,
                 history_message=message,
             )
-            prepared_bridge_request = deepcopy(
-                self._runtime_recovery_context.get("prepared_bridge_request") or {}
+            prepared_recovery_request = deepcopy(
+                self._runtime_recovery_context.get("prepared_recovery_request") or {}
             )
-            if prepared_bridge_request:
+            if prepared_recovery_request:
                 self._maybe_write_recovery_final_bundle(
-                    prepared_bridge_request=prepared_bridge_request,
+                    prepared_recovery_request=prepared_recovery_request,
                 )
             self.logger.info("[Product] %s", message)
             if (
-                self._runtime_bridge_session_mode() == "pre_ran"
-                and str(self.runtime_recovery.get("status") or "").strip().lower() == "llm_bridge"
-                and str(self.runtime_recovery.get("bridge_approval_state") or "").strip().lower()
+                self._runtime_recovery_session_mode() == "pre_ran"
+                and str(self.runtime_recovery.get("status") or "").strip().lower() == "llm_recovery"
+                and str(self.runtime_recovery.get("recovery_approval_state") or "").strip().lower()
                 == "pending"
-                and str(self.runtime_recovery.get("bridge_stage") or "").strip().lower() == "final"
-                and isinstance(self.runtime_recovery.get("bridge_proposal"), dict)
+                and str(self.runtime_recovery.get("recovery_stage") or "").strip().lower() == "final"
+                and isinstance(self.runtime_recovery.get("recovery_proposal"), dict)
             ):
                 self.logger.info(
-                    "[Product] Auto-approving pre-ran archived bridge after recovery safety ready: scope=%s",
+                    "[Product] Auto-approving pre-ran archived recovery after recovery safety ready: scope=%s",
                     recovery_safety_scope_id or "<missing>",
                 )
-                await asyncio.to_thread(self.approve_runtime_bridge_proposal_sync)
+                await asyncio.to_thread(self.approve_runtime_recovery_proposal_sync)
                 return True
         else:
             failure_reason = str(payload.get("failure_reason") or "unknown failure").strip()
@@ -2060,20 +2073,20 @@ class ProductRecoveryController:
         await asyncio.to_thread(self._persist_product_state)
         return True
 
-    def _resolve_runtime_bridge_archive_path(self, artifact_path: str | None = None) -> Path:
-        candidate = str(artifact_path or self._runtime_bridge_session_archive_path() or "").strip()
+    def _resolve_runtime_recovery_archive_path(self, artifact_path: str | None = None) -> Path:
+        candidate = str(artifact_path or self._runtime_recovery_session_archive_path() or "").strip()
         if not candidate:
-            raise ValueError("no archived bridge run is selected")
+            raise ValueError("no archived recovery run is selected")
         resolved = Path(candidate).expanduser()
         try:
             resolved = resolved.resolve()
         except Exception:
             pass
-        root = self._runtime_bridge_data_root()
+        recovery_data_root = self._runtime_recovery_data_root()
         try:
-            root_resolved = root.resolve()
+            allowed_roots = [recovery_data_root.resolve()]
         except Exception:
-            root_resolved = root
+            allowed_roots = [recovery_data_root]
         if resolved.parent.name != "recovery_final":
             recovery_final_candidate = resolved.parent / "recovery_final" / resolved.name
             if recovery_final_candidate.exists() and recovery_final_candidate.is_file():
@@ -2081,16 +2094,17 @@ class ProductRecoveryController:
                     resolved = recovery_final_candidate.resolve()
                 except Exception:
                     resolved = recovery_final_candidate
-        try:
-            resolved.relative_to(root_resolved)
-        except Exception as exc:
-            raise ValueError(f"archived bridge run must be inside {root_resolved}") from exc
+        if not any(
+            _path_is_relative_to(resolved, allowed_root) for allowed_root in allowed_roots
+        ):
+            roots_text = ", ".join(str(root) for root in allowed_roots)
+            raise ValueError(f"archived recovery run must be inside one of: {roots_text}")
         if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError(f"archived bridge run does not exist: {resolved}")
+            raise FileNotFoundError(f"archived recovery run does not exist: {resolved}")
         return resolved
 
     @staticmethod
-    def _bridge_feedback_history_with(
+    def _recovery_feedback_history_with(
         items: list[str] | None,
         feedback: str,
     ) -> list[str]:
@@ -2100,37 +2114,37 @@ class ProductRecoveryController:
             history.append(feedback_text)
         return history
 
-    def _append_bridge_feedback(self, feedback: str) -> list[str]:
+    def _append_recovery_feedback(self, feedback: str) -> list[str]:
         feedback_text = str(feedback or "").strip()
         if not feedback_text:
-            raise ValueError("bridge feedback is empty")
-        feedback_history = self._bridge_feedback_history_with(
-            self.runtime_recovery.get("bridge_feedback_history") or [],
+            raise ValueError("recovery feedback is empty")
+        feedback_history = self._recovery_feedback_history_with(
+            self.runtime_recovery.get("recovery_feedback_history") or [],
             feedback_text,
         )
         if self._runtime_recovery_context:
-            self._runtime_recovery_context["bridge_feedback_history"] = list(feedback_history)
-            prepared_bridge_request = deepcopy(
-                self._runtime_recovery_context.get("prepared_bridge_request") or {}
+            self._runtime_recovery_context["recovery_feedback_history"] = list(feedback_history)
+            prepared_recovery_request = deepcopy(
+                self._runtime_recovery_context.get("prepared_recovery_request") or {}
             )
-            if prepared_bridge_request:
-                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-                operator_feedback_history = self._bridge_feedback_history_with(
-                    bridge_session.get("operator_feedback_history") or [],
+            if prepared_recovery_request:
+                recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
+                operator_feedback_history = self._recovery_feedback_history_with(
+                    recovery_session.get("operator_feedback_history") or [],
                     feedback_text,
                 )
-                bridge_session["operator_feedback_history"] = operator_feedback_history[-12:]
-                prepared_bridge_request["bridge_session"] = bridge_session
-                prepared_bridge_request["bridge_feedback"] = feedback_text
-                self._runtime_recovery_context["prepared_bridge_request"] = prepared_bridge_request
+                recovery_session["operator_feedback_history"] = operator_feedback_history[-12:]
+                prepared_recovery_request["recovery_session"] = recovery_session
+                prepared_recovery_request["recovery_feedback"] = feedback_text
+                self._runtime_recovery_context["prepared_recovery_request"] = prepared_recovery_request
         return feedback_history
 
     @staticmethod
-    def _bridge_session_state(prepared_bridge_request: dict[str, Any]) -> dict[str, Any]:
-        session_state = deepcopy(prepared_bridge_request.get("multi_turn_session_state") or {})
+    def _recovery_session_state(prepared_recovery_request: dict[str, Any]) -> dict[str, Any]:
+        session_state = deepcopy(prepared_recovery_request.get("multi_turn_session_state") or {})
         if session_state:
             return session_state
-        return deepcopy(prepared_bridge_request.get("multi_turn_session_seed") or {})
+        return deepcopy(prepared_recovery_request.get("multi_turn_session_seed") or {})
 
     @staticmethod
     def _reset_session_for_outline_retry(session_state: dict[str, Any]) -> dict[str, Any]:
@@ -2181,17 +2195,17 @@ class ProductRecoveryController:
         updated.pop("final_output_adapter", None)
         return updated
 
-    def _prepare_runtime_bridge_session_state(
+    def _prepare_runtime_recovery_session_state(
         self,
         *,
         stage: str,
     ) -> dict[str, Any]:
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
-        session_state = self._bridge_session_state(prepared_bridge_request)
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
+        session_state = self._recovery_session_state(prepared_recovery_request)
         if not session_state:
             raise RuntimeError("no multi-turn session state is available")
         if stage == "outline":
@@ -2199,136 +2213,136 @@ class ProductRecoveryController:
         elif stage == "primitive":
             session_state = self._reset_session_for_primitive_retry(session_state)
         else:
-            raise ValueError(f"unsupported bridge stage reset: {stage}")
-        prepared_bridge_request["multi_turn_session_state"] = deepcopy(session_state)
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        bridge_debug.pop("bridge_proposal", None)
-        bridge_debug.pop("final_output", None)
-        bridge_debug.pop("final_output_adapter", None)
-        bridge_debug["multi_turn_session"] = deepcopy(session_state)
-        bridge_debug["status"] = "pending"
-        prepared_bridge_request["bridge_debug"] = bridge_debug
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+            raise ValueError(f"unsupported recovery stage reset: {stage}")
+        prepared_recovery_request["multi_turn_session_state"] = deepcopy(session_state)
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
+        recovery_debug.pop("recovery_proposal", None)
+        recovery_debug.pop("final_output", None)
+        recovery_debug.pop("final_output_adapter", None)
+        recovery_debug["multi_turn_session"] = deepcopy(session_state)
+        recovery_debug["status"] = "pending"
+        prepared_recovery_request["recovery_debug"] = recovery_debug
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
-        return prepared_bridge_request
+        return prepared_recovery_request
 
     @staticmethod
-    def _bridge_proposal_from_debug(
-        prepared_bridge_request: dict[str, Any],
+    def _recovery_proposal_from_debug(
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any] | None:
-        bridge_debug = dict(prepared_bridge_request.get("bridge_debug") or {})
-        adapter = dict(bridge_debug.get("final_output_adapter") or {})
-        proposal = adapter.get("bridge_proposal")
+        recovery_debug = dict(prepared_recovery_request.get("recovery_debug") or {})
+        adapter = dict(recovery_debug.get("final_output_adapter") or {})
+        proposal = adapter.get("recovery_proposal")
         if isinstance(proposal, dict):
             return deepcopy(proposal)
-        proposal = bridge_debug.get("bridge_proposal")
+        proposal = recovery_debug.get("recovery_proposal")
         if isinstance(proposal, dict):
             return deepcopy(proposal)
-        final_output = bridge_debug.get("final_output")
+        final_output = recovery_debug.get("final_output")
         if isinstance(final_output, dict):
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-                build_multi_turn_bridge_proposal,
+            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
+                build_multi_turn_recovery_proposal,
             )
 
-            adapter = build_multi_turn_bridge_proposal(
+            adapter = build_multi_turn_recovery_proposal(
                 final_output_payload=deepcopy(final_output),
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            proposal = adapter.get("bridge_proposal")
+            proposal = adapter.get("recovery_proposal")
             if isinstance(proposal, dict):
-                bridge_debug["final_output_adapter"] = deepcopy(adapter)
-                bridge_debug["bridge_proposal"] = deepcopy(proposal)
-                prepared_bridge_request["bridge_debug"] = bridge_debug
+                recovery_debug["final_output_adapter"] = deepcopy(adapter)
+                recovery_debug["recovery_proposal"] = deepcopy(proposal)
+                prepared_recovery_request["recovery_debug"] = recovery_debug
                 return deepcopy(proposal)
-        session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
+        session_state = dict(prepared_recovery_request.get("multi_turn_session_state") or {})
         proposal = session_state.get("proposal")
         if isinstance(proposal, dict):
             return deepcopy(proposal)
         return None
 
-    def _load_runtime_bridge_archive_bundle(
+    def _load_runtime_recovery_archive_bundle(
         self,
         *,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
         artifact_path: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], Path]:
-        resolved_path = self._resolve_runtime_bridge_archive_path(artifact_path)
+        resolved_path = self._resolve_runtime_recovery_archive_path(artifact_path)
         try:
             final_output_payload = json.loads(resolved_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise RuntimeError(f"failed to parse archived bridge run: {exc}") from exc
+            raise RuntimeError(f"failed to parse archived recovery run: {exc}") from exc
         if not isinstance(final_output_payload, dict):
-            raise RuntimeError("archived bridge run did not contain a JSON object")
+            raise RuntimeError("archived recovery run did not contain a JSON object")
         engine = str(final_output_payload.get("engine") or "").strip().lower()
         if engine and not engine.startswith("multi_turn"):
-            raise RuntimeError("archived bridge run engine must be multi_turn-compatible")
+            raise RuntimeError("archived recovery run engine must be multi_turn-compatible")
         if (
             str(final_output_payload.get("final_output_stage") or "").strip()
             != "primitive_program_ready"
         ):
-            raise RuntimeError("archived bridge run is not a primitive_program_ready artifact")
+            raise RuntimeError("archived recovery run is not a primitive_program_ready artifact")
         if not bool(final_output_payload.get("primitive_program_complete")):
-            raise RuntimeError("archived bridge run does not contain a complete primitive program")
+            raise RuntimeError("archived recovery run does not contain a complete primitive program")
 
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes.multi_turn import (
-            build_multi_turn_bridge_proposal,
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
+            build_multi_turn_recovery_proposal,
         )
 
-        adapter_result = build_multi_turn_bridge_proposal(
+        adapter_result = build_multi_turn_recovery_proposal(
             final_output_payload=deepcopy(final_output_payload),
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        proposal = adapter_result.get("bridge_proposal")
+        proposal = adapter_result.get("recovery_proposal")
         if not isinstance(proposal, dict):
             raise RuntimeError(
                 str(
-                    adapter_result.get("reason") or "archived bridge run proposal build failed"
+                    adapter_result.get("reason") or "archived recovery run proposal build failed"
                 ).strip()
-                or "archived bridge run proposal build failed"
+                or "archived recovery run proposal build failed"
             )
         return deepcopy(final_output_payload), deepcopy(adapter_result), resolved_path
 
-    async def _run_multi_turn_bridge_until(
+    async def _run_multi_turn_recovery_until(
         self,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
         *,
         stop_after: str,
     ) -> dict[str, Any] | None:
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-            execute_multi_turn_bridge as _resume_multi_turn_bridge,
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+            execute_multi_turn_recovery as _resume_multi_turn_recovery,
         )
 
         target = str(stop_after or "final").strip().lower()
-        self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        prepared_bridge_request["_stop_after_multi_turn_phase"] = (
+        self._ensure_live_recovery_per_turn_debug_dir(prepared_recovery_request)
+        prepared_recovery_request["_stop_after_multi_turn_phase"] = (
             target if target in {"outline", "primitive"} else ""
         )
-        session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
+        session_state = dict(prepared_recovery_request.get("multi_turn_session_state") or {})
         if session_state:
-            proposal = await _resume_multi_turn_bridge(
+            proposal = await _resume_multi_turn_recovery(
                 self.process_planner,
-                prepared_bridge_request,
+                prepared_recovery_request,
                 session_state=session_state,
             )
         else:
-            proposal = await self.process_planner.execute_prepared_bridge_request(
-                prepared_bridge_request
+            proposal = await self.process_planner.execute_prepared_recovery_request(
+                prepared_recovery_request
             )
 
-        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
         max_resume = max(
             10,
             int(
-                bridge_session.get("max_turns")
-                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get(
+                recovery_session.get("max_turns")
+                or dict(prepared_recovery_request.get("multi_turn_session_seed") or {}).get(
                     "max_turns"
                 )
                 or 0
             ),
         )
         for _resume_idx in range(max_resume):
-            session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
+            session_state = dict(prepared_recovery_request.get("multi_turn_session_state") or {})
             pause_status = str(session_state.get("status") or "").strip().lower()
             if target == "outline":
                 if pause_status in {"paused_after_outline_turn", "ready_for_primitive_generation"}:
@@ -2350,12 +2364,12 @@ class ProductRecoveryController:
                 }
                 if not resume_needed:
                     break
-            proposal = await _resume_multi_turn_bridge(
+            proposal = await _resume_multi_turn_recovery(
                 self.process_planner,
-                prepared_bridge_request,
+                prepared_recovery_request,
                 session_state=session_state,
             )
-        prepared_bridge_request["_stop_after_multi_turn_phase"] = ""
+        prepared_recovery_request["_stop_after_multi_turn_phase"] = ""
         return proposal
 
     def _set_kickoff_result(
@@ -2466,18 +2480,18 @@ class ProductRecoveryController:
         except Exception:
             self.logger.exception("[Product] Failed to persist product state.")
 
-    def _bridge_debug_directory(self) -> Path:
-        return DEFAULT_BRIDGE_DEBUG_DIR
+    def _recovery_debug_directory(self) -> Path:
+        return DEFAULT_RECOVERY_DEBUG_DIR
 
-    def _ensure_live_bridge_per_turn_debug_dir(
+    def _ensure_live_recovery_per_turn_debug_dir(
         self,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any]:
-        if not isinstance(prepared_bridge_request, dict):
+        if not isinstance(prepared_recovery_request, dict):
             return {}
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
         artifact_directory = str(
-            bridge_debug.get("artifact_directory")
+            recovery_debug.get("artifact_directory")
             or getattr(self, "_runtime_recovery_context", {}).get("artifact_directory")
             or self.runtime_recovery.get("artifact_directory")
             or ""
@@ -2486,73 +2500,73 @@ class ProductRecoveryController:
             artifact_directory = str(self._allocate_runtime_recovery_safety_worked_dir())
         candidate_dir = Path(artifact_directory)
         candidate_dir.mkdir(parents=True, exist_ok=True)
-        bridge_debug["artifact_directory"] = artifact_directory
-        bridge_debug["per_turn_debug_dir"] = artifact_directory
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        recovery_debug["artifact_directory"] = artifact_directory
+        recovery_debug["per_turn_debug_dir"] = artifact_directory
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
         if self._runtime_recovery_context is not None:
             self._runtime_recovery_context["artifact_directory"] = artifact_directory
-        return bridge_debug
+        return recovery_debug
 
-    def _build_runtime_bridge_artifact_payload(
+    def _build_runtime_recovery_artifact_payload(
         self,
         *,
         phase: str,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any]:
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
         return {
             "phase": str(phase or "").strip(),
             "product_name": self.agent_name,
             "product_jid": str(self.jid),
             "runtime_recovery": deepcopy(self.runtime_recovery),
-            "prepared_bridge_request": deepcopy(prepared_bridge_request),
-            "bridge_debug": bridge_debug,
+            "prepared_recovery_request": deepcopy(prepared_recovery_request),
+            "recovery_debug": recovery_debug,
             "updated_at_utc": self._utc_now_iso(),
         }
 
-    def _record_runtime_bridge_artifacts(
+    def _record_runtime_recovery_artifacts(
         self,
         *,
         phase: str,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, str]:
-        artifact_payload = self._build_runtime_bridge_artifact_payload(
+        artifact_payload = self._build_runtime_recovery_artifact_payload(
             phase=phase,
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        bridge_debug = self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        artifact_directory = str(bridge_debug.get("artifact_directory") or "").strip()
-        artifact_paths = write_bridge_artifacts(
+        recovery_debug = self._ensure_live_recovery_per_turn_debug_dir(prepared_recovery_request)
+        artifact_directory = str(recovery_debug.get("artifact_directory") or "").strip()
+        artifact_paths = write_recovery_artifacts(
             artifact_payload,
             phase_label=phase,
-            debug_dir=artifact_directory or self._bridge_debug_directory(),
+            debug_dir=artifact_directory or self._recovery_debug_directory(),
             write_latest=False,
             write_session_transcript=True,
-            filename_prefix=f"bridge_runtime_{phase}",
+            filename_prefix=f"recovery_runtime_{phase}",
         )
 
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        bridge_artifacts = deepcopy(bridge_debug.get("artifacts") or {})
-        if not isinstance(bridge_artifacts, dict):
-            bridge_artifacts = {}
-        bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
-        bridge_debug["artifacts"] = bridge_artifacts
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
+        recovery_artifacts = deepcopy(recovery_debug.get("artifacts") or {})
+        if not isinstance(recovery_artifacts, dict):
+            recovery_artifacts = {}
+        recovery_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
+        recovery_debug["artifacts"] = recovery_artifacts
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
 
-        if hasattr(self.process_planner, "_set_last_bridge_debug"):
-            self.process_planner._set_last_bridge_debug(bridge_debug)
+        if hasattr(self.process_planner, "_set_last_recovery_debug"):
+            self.process_planner._set_last_recovery_debug(recovery_debug)
 
-        runtime_bridge_artifacts = deepcopy(self.runtime_recovery.get("bridge_artifacts") or {})
-        if not isinstance(runtime_bridge_artifacts, dict):
-            runtime_bridge_artifacts = {}
-        runtime_bridge_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
+        runtime_recovery_artifacts = deepcopy(self.runtime_recovery.get("recovery_artifacts") or {})
+        if not isinstance(runtime_recovery_artifacts, dict):
+            runtime_recovery_artifacts = {}
+        runtime_recovery_artifacts[str(phase or "").strip() or "runtime"] = deepcopy(artifact_paths)
         self._set_runtime_recovery(
-            bridge_debug=bridge_debug,
-            bridge_artifacts=runtime_bridge_artifacts,
+            recovery_debug=recovery_debug,
+            recovery_artifacts=runtime_recovery_artifacts,
             artifact_directory=artifact_directory,
         )
         self.logger.info(
-            "[Product] Wrote bridge %s artifacts: prompt=%s response=%s session=%s",
+            "[Product] Wrote recovery %s artifacts: prompt=%s response=%s session=%s",
             str(phase or "").strip() or "runtime",
             artifact_paths.get("prompt_artifact_path", ""),
             artifact_paths.get("response_artifact_path", ""),
@@ -2582,8 +2596,8 @@ class ProductRecoveryController:
     def _get_part_transition(
         self, function_name: str, task_node: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Look up the part_transition map, preferring node-level for bridge macros."""
-        # Prefer node-level part_transition (set by bridge macro proposals).
+        """Look up the part_transition map, preferring node-level for recovery macros."""
+        # Prefer node-level part_transition (set by recovery macro proposals).
         if task_node and task_node.get("part_transition"):
             return dict(task_node["part_transition"])
         type(self._agent)._load_shared_tools_catalogue()
@@ -2594,7 +2608,7 @@ class ProductRecoveryController:
         self,
         task_node: dict[str, Any] | None,
     ) -> str:
-        """Resolve the canonical part name for one task node, including bridge macros."""
+        """Resolve the canonical part name for one task node, including recovery macros."""
         if not isinstance(task_node, dict):
             return ""
         params = task_node.get("params") or {}
@@ -2873,105 +2887,105 @@ class ProductRecoveryController:
                     candidate_ids.update(str(value) for value in values if value)
         return candidate_ids
 
-    def _active_bridge_sequence(self) -> dict[str, Any] | None:
-        payload = self.runtime_recovery.get("active_bridge_sequence")
+    def _active_recovery_sequence(self) -> dict[str, Any] | None:
+        payload = self.runtime_recovery.get("active_recovery_sequence")
         return deepcopy(payload) if isinstance(payload, dict) else None
 
     @staticmethod
-    def _bridge_used_llm(
-        active_bridge_sequence: dict[str, Any] | None,
+    def _recovery_used_llm(
+        active_recovery_sequence: dict[str, Any] | None,
         runtime_recovery: dict[str, Any] | None = None,
     ) -> bool:
-        if isinstance(active_bridge_sequence, dict) and "used_llm_bridge" in active_bridge_sequence:
-            return bool(active_bridge_sequence.get("used_llm_bridge", False))
+        if isinstance(active_recovery_sequence, dict) and "used_llm_recovery" in active_recovery_sequence:
+            return bool(active_recovery_sequence.get("used_llm_recovery", False))
         if isinstance(runtime_recovery, dict):
-            return bool(runtime_recovery.get("used_llm_bridge", False))
+            return bool(runtime_recovery.get("used_llm_recovery", False))
         return False
 
     @staticmethod
-    def _bridge_execution_policy(active_bridge_sequence: dict[str, Any] | None) -> dict[str, Any]:
+    def _recovery_execution_policy(active_recovery_sequence: dict[str, Any] | None) -> dict[str, Any]:
         payload = (
-            active_bridge_sequence.get("execution_policy")
-            if isinstance(active_bridge_sequence, dict)
+            active_recovery_sequence.get("execution_policy")
+            if isinstance(active_recovery_sequence, dict)
             else {}
         )
         return deepcopy(payload) if isinstance(payload, dict) else {}
 
-    def _bridge_requires_complete_full_tail(
+    def _recovery_requires_complete_full_tail(
         self,
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
     ) -> bool:
-        return bool(self._bridge_execution_policy(active_bridge_sequence).get("complete_full_tail"))
+        return bool(self._recovery_execution_policy(active_recovery_sequence).get("complete_full_tail"))
 
-    def _bridge_is_verification_only(
+    def _recovery_is_verification_only(
         self,
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
     ) -> bool:
-        return bool(self._bridge_execution_policy(active_bridge_sequence).get("verification_only"))
+        return bool(self._recovery_execution_policy(active_recovery_sequence).get("verification_only"))
 
-    def _reconstruct_active_bridge_sequence_for_validation(self) -> dict[str, Any] | None:
+    def _reconstruct_active_recovery_sequence_for_validation(self) -> dict[str, Any] | None:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
         if status != "validating" or approval_state != "approved":
             return None
-        if isinstance(self.runtime_recovery.get("last_completed_bridge_sequence"), dict):
+        if isinstance(self.runtime_recovery.get("last_completed_recovery_sequence"), dict):
             return None
 
-        bridge_debug = dict(self.runtime_recovery.get("bridge_debug") or {})
-        approval = dict(bridge_debug.get("approval") or {})
-        compiled_bridge_task_ids = self._bridge_sequence_task_ids(
-            approval.get("compiled_bridge_task_ids") or []
+        recovery_debug = dict(self.runtime_recovery.get("recovery_debug") or {})
+        approval = dict(recovery_debug.get("approval") or {})
+        compiled_recovery_task_ids = self._recovery_sequence_task_ids(
+            approval.get("compiled_recovery_task_ids") or []
         )
-        if not compiled_bridge_task_ids:
+        if not compiled_recovery_task_ids:
             return None
 
         ordered_nodes: list[dict[str, Any]] = []
-        for task_id in compiled_bridge_task_ids:
+        for task_id in compiled_recovery_task_ids:
             node = self.process_planner._find_node(task_id)
             if isinstance(node, dict):
                 ordered_nodes.append(node)
         if not ordered_nodes:
             return None
 
-        bridge_sequence_id = str(ordered_nodes[0].get("bridge_sequence_id") or "").strip()
-        if not bridge_sequence_id:
+        recovery_sequence_id = str(ordered_nodes[0].get("recovery_sequence_id") or "").strip()
+        if not recovery_sequence_id:
             return None
 
-        sequence_nodes = self.process_planner._bridge_sequence_nodes(bridge_sequence_id)
+        sequence_nodes = self.process_planner._recovery_sequence_nodes(recovery_sequence_id)
         if sequence_nodes:
             ordered_nodes = [
                 node
                 for node in sequence_nodes
-                if str(node.get("id") or "").strip() in set(compiled_bridge_task_ids)
+                if str(node.get("id") or "").strip() in set(compiled_recovery_task_ids)
             ]
             if not ordered_nodes:
                 ordered_nodes = sequence_nodes
 
-        prepared_bridge_request = dict(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = dict(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
         modeled_gap = dict(
-            dict(prepared_bridge_request.get("context_summary") or {}).get(
+            dict(prepared_recovery_request.get("context_summary") or {}).get(
                 "modeled_continuation_gap"
             )
             or {}
         )
-        archive_replay = dict(bridge_debug.get("archive_replay") or {})
-        execution_policy = dict(bridge_debug.get("execution_policy") or {})
+        archive_replay = dict(recovery_debug.get("archive_replay") or {})
+        execution_policy = dict(recovery_debug.get("execution_policy") or {})
         if not bool(execution_policy.get("verification_only")):
             execution_policy.setdefault("complete_full_tail", True)
 
-        bridge_task_ids = [
+        recovery_task_ids = [
             str(node.get("id") or "").strip()
             for node in ordered_nodes
             if str(node.get("id") or "").strip()
         ]
-        dispatched_bridge_task_ids: list[str] = []
-        completed_bridge_task_ids: list[str] = []
+        dispatched_recovery_task_ids: list[str] = []
+        completed_recovery_task_ids: list[str] = []
         for node in ordered_nodes:
             task_id = str(node.get("id") or "").strip()
             task_status = str(node.get("status") or "").strip().lower()
@@ -2983,14 +2997,14 @@ class ProductRecoveryController:
                 "failed",
                 "blocked",
             }:
-                dispatched_bridge_task_ids.append(task_id)
+                dispatched_recovery_task_ids.append(task_id)
             if task_status == "completed":
-                completed_bridge_task_ids.append(task_id)
+                completed_recovery_task_ids.append(task_id)
 
         reconstructed_sequence: dict[str, Any] = {
-            "bridge_sequence_id": bridge_sequence_id,
-            "bridge_task_ids": bridge_task_ids,
-            "bridge_sequence_length": len(bridge_task_ids),
+            "recovery_sequence_id": recovery_sequence_id,
+            "recovery_task_ids": recovery_task_ids,
+            "recovery_sequence_length": len(recovery_task_ids),
             "trigger": str(self._runtime_recovery_context.get("trigger", "")),
             "failed_task_id": str(
                 self.runtime_recovery.get("failed_task_id")
@@ -2998,25 +3012,25 @@ class ProductRecoveryController:
                 or ""
             ).strip(),
             "violations": deepcopy(list(self._runtime_recovery_context.get("violations") or [])),
-            "used_llm_bridge": bool(self.runtime_recovery.get("used_llm_bridge", False)),
+            "used_llm_recovery": bool(self.runtime_recovery.get("used_llm_recovery", False)),
             "system_coordination_state": deepcopy(
                 self._runtime_recovery_context.get("system_coordination_state") or {}
             ),
             "proposal_fingerprint": str(approval.get("proposal_fingerprint") or "").strip(),
-            "state": "executing" if dispatched_bridge_task_ids else "approved",
-            "dispatched_bridge_task_ids": dispatched_bridge_task_ids,
-            "completed_bridge_task_ids": completed_bridge_task_ids,
+            "state": "executing" if dispatched_recovery_task_ids else "approved",
+            "dispatched_recovery_task_ids": dispatched_recovery_task_ids,
+            "completed_recovery_task_ids": completed_recovery_task_ids,
             "execution_started_at_utc": str(
-                dict(self.runtime_recovery.get("bridge_artifacts") or {}).get(
+                dict(self.runtime_recovery.get("recovery_artifacts") or {}).get(
                     "execution_started_at_utc"
                 )
                 or ""
             ).strip(),
             "last_dispatched_task_id": (
-                dispatched_bridge_task_ids[-1] if dispatched_bridge_task_ids else ""
+                dispatched_recovery_task_ids[-1] if dispatched_recovery_task_ids else ""
             ),
             "last_completed_task_id": (
-                completed_bridge_task_ids[-1] if completed_bridge_task_ids else ""
+                completed_recovery_task_ids[-1] if completed_recovery_task_ids else ""
             ),
             "continuation_requirements": deepcopy(
                 self._strip_continuation_requirement_actuals(
@@ -3026,14 +3040,14 @@ class ProductRecoveryController:
             "pending_nominal_task_ids": deepcopy(modeled_gap.get("pending_nominal_task_ids") or []),
             "continuation_repair_attempts": 0,
             "source_mode": str(
-                bridge_debug.get("bridge_mode")
-                or self.runtime_recovery.get("bridge_mode")
-                or self._runtime_bridge_session_mode()
+                recovery_debug.get("recovery_mode")
+                or self.runtime_recovery.get("recovery_mode")
+                or self._runtime_recovery_session_mode()
                 or ""
             ).strip(),
             "validation_policy": str(
                 self.runtime_recovery.get("validation_policy")
-                or self._runtime_bridge_session_validation_policy()
+                or self._runtime_recovery_session_validation_policy()
                 or ""
             ).strip(),
             "source_archive_path": str(
@@ -3049,10 +3063,10 @@ class ProductRecoveryController:
         }
         if execution_policy:
             reconstructed_sequence["execution_policy"] = deepcopy(execution_policy)
-        source = str(bridge_debug.get("source") or "").strip()
+        source = str(recovery_debug.get("source") or "").strip()
         if source:
             reconstructed_sequence["source"] = source
-        scenario_id = str(bridge_debug.get("scenario_id") or "").strip()
+        scenario_id = str(recovery_debug.get("scenario_id") or "").strip()
         if scenario_id:
             reconstructed_sequence["scenario_id"] = scenario_id
         repair_task_id = str(self._runtime_recovery_context.get("repair_task_id") or "").strip()
@@ -3070,20 +3084,20 @@ class ProductRecoveryController:
             reconstructed_sequence["generated_code_verification"] = generated_code_verification
 
         self.logger.warning(
-            "[Product] Reconstructed missing active bridge sequence %s during runtime validation from compiled bridge task metadata.",
-            bridge_sequence_id,
+            "[Product] Reconstructed missing active recovery sequence %s during runtime validation from compiled recovery task metadata.",
+            recovery_sequence_id,
         )
         self._set_runtime_recovery(
             message=str(self.runtime_recovery.get("message", "") or "").strip(),
-            active_bridge_sequence=reconstructed_sequence,
+            active_recovery_sequence=reconstructed_sequence,
         )
         return reconstructed_sequence
 
-    def _active_bridge_blocks_nominal_dispatch(self) -> bool:
-        active_bridge_sequence = self._active_bridge_sequence()
-        if not active_bridge_sequence:
+    def _active_recovery_blocks_nominal_dispatch(self) -> bool:
+        active_recovery_sequence = self._active_recovery_sequence()
+        if not active_recovery_sequence:
             return False
-        state = self._bridge_sequence_state(active_bridge_sequence)
+        state = self._recovery_sequence_state(active_recovery_sequence)
         return state in {
             "continuation_blocked",
             "human_required",
@@ -3093,53 +3107,53 @@ class ProductRecoveryController:
     def _next_dispatchable_task_node(self) -> dict[str, Any] | None:
         return self._select_runtime_event()
 
-    def _active_bridge_next_ready_task(self) -> dict[str, Any] | None:
-        """Return the next pending active bridge task, prioritizing recovery over nominal work."""
-        active_bridge_sequence = self._active_bridge_sequence()
-        if not active_bridge_sequence:
+    def _active_recovery_next_ready_task(self) -> dict[str, Any] | None:
+        """Return the next pending active recovery task, prioritizing recovery over nominal work."""
+        active_recovery_sequence = self._active_recovery_sequence()
+        if not active_recovery_sequence:
             return None
-        sequence_id = str(active_bridge_sequence.get("bridge_sequence_id") or "").strip()
+        sequence_id = str(active_recovery_sequence.get("recovery_sequence_id") or "").strip()
         if not sequence_id:
             return None
-        bridge_task_ids = [
+        recovery_task_ids = [
             str(task_id or "").strip()
-            for task_id in (active_bridge_sequence.get("bridge_task_ids") or [])
+            for task_id in (active_recovery_sequence.get("recovery_task_ids") or [])
             if str(task_id or "").strip()
         ]
-        if not bridge_task_ids:
-            bridge_task_ids = [
+        if not recovery_task_ids:
+            recovery_task_ids = [
                 str(node.get("id") or "").strip()
-                for node in self.process_planner._bridge_sequence_nodes(sequence_id)
+                for node in self.process_planner._recovery_sequence_nodes(sequence_id)
                 if str(node.get("id") or "").strip()
             ]
-        bridge_task_id_set = set(bridge_task_ids)
+        recovery_task_id_set = set(recovery_task_ids)
         failed_task_id = str(
-            active_bridge_sequence.get("failed_task_id")
+            active_recovery_sequence.get("failed_task_id")
             or self.runtime_recovery.get("failed_task_id")
             or ""
         ).strip()
 
-        for task_id in bridge_task_ids:
+        for task_id in recovery_task_ids:
             node = self.process_planner._find_node(task_id)
             if not isinstance(node, dict):
                 continue
-            if str(node.get("bridge_sequence_id") or "").strip() != sequence_id:
+            if str(node.get("recovery_sequence_id") or "").strip() != sequence_id:
                 continue
             if str(node.get("status") or "").strip() != "pending":
                 continue
-            if self._bridge_task_predecessors_ready(
+            if self._recovery_task_predecessors_ready(
                 node,
-                bridge_task_ids=bridge_task_id_set,
+                recovery_task_ids=recovery_task_id_set,
                 failed_task_id=failed_task_id,
             ):
                 return node
         return None
 
-    def _bridge_task_predecessors_ready(
+    def _recovery_task_predecessors_ready(
         self,
         task_node: dict[str, Any],
         *,
-        bridge_task_ids: set[str],
+        recovery_task_ids: set[str],
         failed_task_id: str = "",
     ) -> bool:
         for pred_id in [
@@ -3153,7 +3167,7 @@ class ProductRecoveryController:
             pred_status = str(pred_node.get("status") or "").strip().lower()
             if pred_status == "completed":
                 continue
-            if pred_id in bridge_task_ids:
+            if pred_id in recovery_task_ids:
                 return False
             if pred_id == failed_task_id and pred_status.startswith("failed"):
                 continue
@@ -3161,41 +3175,41 @@ class ProductRecoveryController:
         return True
 
     def _select_runtime_event(self) -> dict[str, Any] | None:
-        """Select the next DES-style runtime event: bridge first, then guarded nominal."""
-        if self._active_bridge_blocks_nominal_dispatch():
+        """Select the next DES-style runtime event: recovery first, then guarded nominal."""
+        if self._active_recovery_blocks_nominal_dispatch():
             return None
 
         graph_ready = self._graph_ready_task_nodes()
         if not graph_ready:
             return None
 
-        active_bridge_sequence = self._active_bridge_sequence()
-        if not active_bridge_sequence:
-            active_bridge_sequence = self._reconstruct_active_bridge_sequence_for_validation()
-        active_bridge_sequence_id = str(
-            (active_bridge_sequence or {}).get("bridge_sequence_id") or ""
+        active_recovery_sequence = self._active_recovery_sequence()
+        if not active_recovery_sequence:
+            active_recovery_sequence = self._reconstruct_active_recovery_sequence_for_validation()
+        active_recovery_sequence_id = str(
+            (active_recovery_sequence or {}).get("recovery_sequence_id") or ""
         ).strip()
         filtered_graph_ready: list[dict[str, Any]] = []
-        orphaned_bridge_task_ids: list[str] = []
+        orphaned_recovery_task_ids: list[str] = []
         for node in graph_ready:
-            bridge_sequence_id = str(node.get("bridge_sequence_id") or "").strip()
-            if not bridge_sequence_id:
+            recovery_sequence_id = str(node.get("recovery_sequence_id") or "").strip()
+            if not recovery_sequence_id:
                 filtered_graph_ready.append(node)
                 continue
-            if active_bridge_sequence_id and bridge_sequence_id == active_bridge_sequence_id:
+            if active_recovery_sequence_id and recovery_sequence_id == active_recovery_sequence_id:
                 filtered_graph_ready.append(node)
                 continue
-            orphaned_bridge_task_ids.append(str(node.get("id") or "").strip())
-        new_orphaned_bridge_task_ids = [
+            orphaned_recovery_task_ids.append(str(node.get("id") or "").strip())
+        new_orphaned_recovery_task_ids = [
             task_id
-            for task_id in orphaned_bridge_task_ids
-            if task_id and task_id not in self._orphaned_bridge_task_warning_ids
+            for task_id in orphaned_recovery_task_ids
+            if task_id and task_id not in self._orphaned_recovery_task_warning_ids
         ]
-        if new_orphaned_bridge_task_ids:
-            self._orphaned_bridge_task_warning_ids.update(new_orphaned_bridge_task_ids)
+        if new_orphaned_recovery_task_ids:
+            self._orphaned_recovery_task_warning_ids.update(new_orphaned_recovery_task_ids)
             self.logger.warning(
-                "[Product] Skipping orphaned bridge task(s) without matching active bridge sequence: %s",
-                new_orphaned_bridge_task_ids,
+                "[Product] Skipping orphaned recovery task(s) without matching active recovery sequence: %s",
+                new_orphaned_recovery_task_ids,
             )
         graph_ready = filtered_graph_ready
         if not graph_ready:
@@ -3317,11 +3331,11 @@ class ProductRecoveryController:
         resource_jids: Iterable[str] | None = None,
         base_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        active_bridge_sequence = self._active_bridge_sequence()
+        active_recovery_sequence = self._active_recovery_sequence()
         system_state = deepcopy(
             base_state
             if isinstance(base_state, dict)
-            else (active_bridge_sequence or {}).get("system_coordination_state") or {}
+            else (active_recovery_sequence or {}).get("system_coordination_state") or {}
         )
         if not isinstance(system_state, dict):
             system_state = {}
@@ -3329,12 +3343,12 @@ class ProductRecoveryController:
         for resource_jid in {
             str(item or "").strip() for item in (resource_jids or []) if str(item or "").strip()
         }:
-            snapshot = self._refresh_bridge_snapshot(resource_jid)
+            snapshot = self._refresh_recovery_snapshot(resource_jid)
             if isinstance(snapshot, dict):
-                system_state = self._system_coordination_state_with_bridge_snapshot(
+                system_state = self._system_coordination_state_with_recovery_snapshot(
                     base_state=system_state,
                     resource_jid=resource_jid,
-                    bridge_snapshot=snapshot,
+                    recovery_snapshot=snapshot,
                 )
         return {
             "resources": dict(self.process_planner._extract_resource_states(system_state)),
@@ -3487,10 +3501,10 @@ class ProductRecoveryController:
             "projected_repair_effects": deepcopy(projected_repair_effects or {}),
             "updated_at_utc": self._utc_now_iso(),
         }
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        if isinstance(bridge_debug, dict):
-            bridge_debug["runtime_des_supervisor"] = trace
-            self.runtime_recovery["bridge_debug"] = bridge_debug
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        if isinstance(recovery_debug, dict):
+            recovery_debug["runtime_des_supervisor"] = trace
+            self.runtime_recovery["recovery_debug"] = recovery_debug
 
     def _resource_can_reach_location(self, resource_jid: str, location: str) -> bool:
         location_key = str(location or "").strip()
@@ -3523,18 +3537,18 @@ class ProductRecoveryController:
         if reachable:
             return True
 
-        bridge_proposal = dict(
-            (getattr(self, "runtime_recovery", {}) or {}).get("bridge_proposal") or {}
+        recovery_proposal = dict(
+            (getattr(self, "runtime_recovery", {}) or {}).get("recovery_proposal") or {}
         )
-        bridge_macro_tasks = []
-        if bridge_proposal and hasattr(self.process_planner, "_primitive_bridge_macro_tasks"):
+        recovery_macro_tasks = []
+        if recovery_proposal and hasattr(self.process_planner, "_primitive_recovery_macro_tasks"):
             try:
-                bridge_macro_tasks = self.process_planner._primitive_bridge_macro_tasks(
-                    bridge_proposal
+                recovery_macro_tasks = self.process_planner._primitive_recovery_macro_tasks(
+                    recovery_proposal
                 )
             except Exception:
-                bridge_macro_tasks = []
-        for task in bridge_macro_tasks:
+                recovery_macro_tasks = []
+        for task in recovery_macro_tasks:
             if not isinstance(task, dict):
                 continue
             if str(task.get("resource_jid") or "").strip() != str(resource_jid or "").strip():
@@ -3595,7 +3609,7 @@ class ProductRecoveryController:
         part_name: str,
         *,
         disabled_event: dict[str, Any] | None = None,
-        active_bridge_sequence: dict[str, Any] | None = None,
+        active_recovery_sequence: dict[str, Any] | None = None,
     ) -> str:
         part_key = str(part_name or "").strip()
         if not part_key:
@@ -3605,7 +3619,7 @@ class ProductRecoveryController:
             dict((getattr(self, "part_tracker", {}) or {}).get(part_key) or {}),
             disabled_event or {},
             dict((disabled_event or {}).get("params") or {}),
-            active_bridge_sequence or {},
+            active_recovery_sequence or {},
             dict(getattr(self, "product_geometry", {}) or {}),
         ]
         try:
@@ -3618,7 +3632,7 @@ class ProductRecoveryController:
             )
 
         runtime_context = getattr(self, "_runtime_recovery_context", {}) or {}
-        prepared_request = dict(runtime_context.get("prepared_bridge_request") or {})
+        prepared_request = dict(runtime_context.get("prepared_recovery_request") or {})
         candidates.append(prepared_request)
         candidates.append(dict((prepared_request.get("part_tracker") or {}).get(part_key) or {}))
 
@@ -3729,7 +3743,7 @@ class ProductRecoveryController:
         resource = self.process_planner._resource_by_jid(resource_jid)
         if resource is None:
             return []
-        method = getattr(resource, "bridge_execution_primitive_catalog", None)
+        method = getattr(resource, "recovery_execution_primitive_catalog", None)
         if callable(method):
             try:
                 catalog = method()
@@ -3811,16 +3825,16 @@ class ProductRecoveryController:
         operator: str,
         message: str,
     ) -> None:
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        bridge_debug.setdefault("runtime_des_supervisor", {})
-        bridge_debug["runtime_des_supervisor"].update(
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        recovery_debug.setdefault("runtime_des_supervisor", {})
+        recovery_debug["runtime_des_supervisor"].update(
             {
                 "selected_repair_operator": str(operator or "").strip(),
                 "repair_compile_error": str(message or "").strip(),
                 "disabled_event": deepcopy(disabled_event),
             }
         )
-        self.runtime_recovery["bridge_debug"] = bridge_debug
+        self.runtime_recovery["recovery_debug"] = recovery_debug
 
     @staticmethod
     def _strip_continuation_requirement_actuals(
@@ -3899,16 +3913,16 @@ class ProductRecoveryController:
         self,
         *,
         task_node: dict[str, Any],
-        active_bridge_sequence: dict[str, Any],
+        active_recovery_sequence: dict[str, Any],
         observations: dict[str, Any] | None,
         trigger: str,
-        used_llm_bridge: bool,
+        used_llm_recovery: bool,
         feedback_history: list[Any],
     ) -> dict[str, Any] | None:
         release_observation = self._failed_release_primitive_observation(observations)
         if not release_observation:
             return None
-        retry_attempts = int(active_bridge_sequence.get("release_retry_attempts") or 0)
+        retry_attempts = int(active_recovery_sequence.get("release_retry_attempts") or 0)
         if retry_attempts >= 1:
             return None
 
@@ -3923,7 +3937,7 @@ class ProductRecoveryController:
             model_name = self._part_model_name_for_repair(
                 part_name,
                 disabled_event=task_node,
-                active_bridge_sequence=active_bridge_sequence,
+                active_recovery_sequence=active_recovery_sequence,
             )
         if not model_name:
             self._record_repair_compile_error(
@@ -4018,7 +4032,7 @@ class ProductRecoveryController:
             "function_name": "execute_recovery_macro",
             "resource_jid": resource_jid,
             "params": {
-                "macro_name": f"retry_release_for_{original_task_id or 'bridge_macro'}",
+                "macro_name": f"retry_release_for_{original_task_id or 'recovery_macro'}",
                 "primitive_steps": primitive_steps,
                 "expected_start_state": str(state_after.get("current_state") or "picked"),
                 "product_jid": str(self.jid),
@@ -4029,9 +4043,9 @@ class ProductRecoveryController:
             },
             "predecessors": [],
             "successors": [],
-            "bridge_sequence_id": sequence_id,
-            "bridge_sequence_index": 1,
-            "bridge_sequence_length": 1,
+            "recovery_sequence_id": sequence_id,
+            "recovery_sequence_index": 1,
+            "recovery_sequence_length": 1,
             "in_state": "picked",
             "out_state": "idle",
             "part_transition": deepcopy(task_node.get("part_transition") or {}),
@@ -4042,7 +4056,7 @@ class ProductRecoveryController:
             "repair_intent": "release_retry",
             "retry_of_task_id": original_task_id,
             "change_reason": (
-                "INSERTION: Runtime DES retry event for failed bridge release "
+                "INSERTION: Runtime DES retry event for failed recovery release "
                 f"{original_task_id or '-'}"
             ),
         }
@@ -4050,24 +4064,24 @@ class ProductRecoveryController:
             retry_node["params"]["expected_snapshot"] = expected_snapshot
         self.process_planner.nodes.append(retry_node)
 
-        next_sequence = deepcopy(active_bridge_sequence)
+        next_sequence = deepcopy(active_recovery_sequence)
         next_sequence.update(
             {
-                "bridge_sequence_id": sequence_id,
-                "bridge_task_ids": [retry_task_id],
-                "bridge_sequence_length": 1,
+                "recovery_sequence_id": sequence_id,
+                "recovery_task_ids": [retry_task_id],
+                "recovery_sequence_length": 1,
                 "state": "executing",
                 "trigger": str(trigger or "").strip() or next_sequence.get("trigger", ""),
-                "used_llm_bridge": bool(used_llm_bridge),
+                "used_llm_recovery": bool(used_llm_recovery),
                 "release_retry_attempts": retry_attempts + 1,
                 "repair_operator": "retry_event",
                 "repair_intent": "release_retry",
                 "retry_source_task_id": original_task_id,
             }
         )
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        bridge_debug.setdefault("runtime_des_supervisor", {})
-        bridge_debug["runtime_des_supervisor"].update(
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        recovery_debug.setdefault("runtime_des_supervisor", {})
+        recovery_debug["runtime_des_supervisor"].update(
             {
                 "selected_repair_operator": "retry_event",
                 "repair_intent": "release_retry",
@@ -4085,19 +4099,19 @@ class ProductRecoveryController:
                 or self.runtime_recovery.get("failed_task_id")
                 or ""
             ),
-            message=("Runtime DES supervisor inserted retry_event for failed bridge release."),
+            message=("Runtime DES supervisor inserted retry_event for failed recovery release."),
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=bool(used_llm_bridge),
-            bridge_debug=bridge_debug,
-            bridge_approval_state="approved",
-            active_bridge_sequence=next_sequence,
-            bridge_feedback_history=feedback_history,
+            used_llm_recovery=bool(used_llm_recovery),
+            recovery_debug=recovery_debug,
+            recovery_approval_state="approved",
+            active_recovery_sequence=next_sequence,
+            recovery_feedback_history=feedback_history,
             violations=[],
             append_history=True,
             history_message=(
                 f"Runtime DES release retry event {retry_task_id} inserted for "
-                f"{original_task_id or 'bridge macro'}."
+                f"{original_task_id or 'recovery macro'}."
             ),
         )
         return retry_node
@@ -4107,10 +4121,10 @@ class ProductRecoveryController:
         *,
         disabled_frontier: list[dict[str, Any]],
         trigger: str,
-        active_bridge_sequence: dict[str, Any] | None = None,
+        active_recovery_sequence: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Compile a generic repair event when guard/effect matching proves it safe."""
-        active = deepcopy(active_bridge_sequence or self._active_bridge_sequence() or {})
+        active = deepcopy(active_recovery_sequence or self._active_recovery_sequence() or {})
         repair_attempts = int(active.get("continuation_repair_attempts") or 0) if active else 0
         if repair_attempts >= 1:
             return None
@@ -4163,34 +4177,34 @@ class ProductRecoveryController:
                 part_name=part_name,
                 source_location=source_location,
                 disabled_event=disabled_event,
-                active_bridge_sequence=active,
+                active_recovery_sequence=active,
                 trigger=trigger,
             )
             if repair_node:
                 return repair_node
         return None
 
-    def _bridge_projected_plant_state_for_resource(
+    def _recovery_projected_plant_state_for_resource(
         self,
         *,
         resource_jid: str,
-        bridge_tasks: list[dict[str, Any]],
+        recovery_tasks: list[dict[str, Any]],
     ) -> dict[str, Any]:
         projected_plant = self._build_runtime_plant_state(resource_jids=[resource_jid])
         resources = dict(projected_plant.get("resources") or {})
         resource_entry = dict(resources.get(resource_jid) or {})
         parts = deepcopy(dict(projected_plant.get("parts") or {}))
 
-        for bridge_task in bridge_tasks:
-            if not isinstance(bridge_task, dict):
+        for recovery_task in recovery_tasks:
+            if not isinstance(recovery_task, dict):
                 continue
-            projected_snapshot = dict(bridge_task.get("projected_snapshot") or {})
+            projected_snapshot = dict(recovery_task.get("projected_snapshot") or {})
             if projected_snapshot:
                 resource_entry.update(deepcopy(projected_snapshot))
             part_name = str(
-                bridge_task.get("part_name") or self._tracked_part_name_for_task(bridge_task) or ""
+                recovery_task.get("part_name") or self._tracked_part_name_for_task(recovery_task) or ""
             ).strip()
-            projected_part_entry = dict(bridge_task.get("projected_part_entry") or {})
+            projected_part_entry = dict(recovery_task.get("projected_part_entry") or {})
             if part_name and projected_part_entry:
                 part_entry = dict(parts.get(part_name) or {})
                 part_entry.update(deepcopy(projected_part_entry))
@@ -4208,7 +4222,7 @@ class ProductRecoveryController:
         part_name: str,
         source_location: str,
         disabled_event: dict[str, Any],
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
         sequence_id: str = "",
         sequence_index: int = 1,
         sequence_length: int = 1,
@@ -4223,7 +4237,7 @@ class ProductRecoveryController:
         model_name = self._part_model_name_for_repair(
             part_name,
             disabled_event=disabled_event,
-            active_bridge_sequence=active_bridge_sequence,
+            active_recovery_sequence=active_recovery_sequence,
         )
         if not model_name:
             self._record_repair_compile_error(
@@ -4407,9 +4421,9 @@ class ProductRecoveryController:
             },
             "predecessors": [],
             "successors": [],
-            "bridge_sequence_id": sequence_token,
-            "bridge_sequence_index": int(sequence_index or 1),
-            "bridge_sequence_length": int(sequence_length or 1),
+            "recovery_sequence_id": sequence_token,
+            "recovery_sequence_index": int(sequence_index or 1),
+            "recovery_sequence_length": int(sequence_length or 1),
             "in_state": "idle",
             "out_state": "picked",
             "part_transition": {
@@ -4461,7 +4475,7 @@ class ProductRecoveryController:
             node["requirement_id"] = requirement_token
         return node
 
-    def _append_bridge_resume_entry_acquire_entity_repair_if_needed(
+    def _append_recovery_resume_entry_acquire_entity_repair_if_needed(
         self,
         *,
         tasks: list[dict[str, Any]],
@@ -4478,15 +4492,15 @@ class ProductRecoveryController:
             resume_task_id = str(entry_task_id or "").strip()
             if not resource_jid or not resume_task_id:
                 continue
-            bridge_tasks = list(task_groups_by_resource.get(resource_jid) or [])
-            if not bridge_tasks:
+            recovery_tasks = list(task_groups_by_resource.get(resource_jid) or [])
+            if not recovery_tasks:
                 continue
             entry_task = self.process_planner._find_node(resume_task_id)
             if not isinstance(entry_task, dict):
                 continue
-            projected_plant = self._bridge_projected_plant_state_for_resource(
+            projected_plant = self._recovery_projected_plant_state_for_resource(
                 resource_jid=resource_jid,
-                bridge_tasks=bridge_tasks,
+                recovery_tasks=recovery_tasks,
             )
             violations = self._event_guard_violations(
                 entry_task,
@@ -4517,26 +4531,26 @@ class ProductRecoveryController:
                 "guard_violations": violations,
                 "params": deepcopy(entry_task.get("params") or {}),
             }
-            next_bridge_length = len(tasks) + 1
-            sequence_id = str(bridge_tasks[0].get("bridge_sequence_id") or "").strip()
+            next_recovery_length = len(tasks) + 1
+            sequence_id = str(recovery_tasks[0].get("recovery_sequence_id") or "").strip()
             repair_node = self._compile_acquire_entity_repair_node(
                 resource_jid=resource_jid,
                 part_name=part_name,
                 source_location=source_location,
                 disabled_event=disabled_event,
-                active_bridge_sequence=None,
+                active_recovery_sequence=None,
                 sequence_id=sequence_id,
-                sequence_index=next_bridge_length,
-                sequence_length=next_bridge_length,
+                sequence_index=next_recovery_length,
+                sequence_length=next_recovery_length,
                 requirement_id=str(entry_task.get("requirement_id") or "").strip(),
                 change_reason=(
-                    "INSERTION: Approved bridge recovery — splice acquire_entity "
+                    "INSERTION: Approved recovery — splice acquire_entity "
                     f"before {resume_task_id}"
                 ),
             )
             if repair_node is None:
                 raise ValueError(
-                    "Approved bridge recovery could not compile acquire_entity before "
+                    "Approved recovery could not compile acquire_entity before "
                     f"{resume_task_id}"
                 )
 
@@ -4545,25 +4559,25 @@ class ProductRecoveryController:
                 repair_patch_rows,
                 repair_task=repair_node,
                 target_task_id=resume_task_id,
-                change_prefix="Approved bridge recovery",
+                change_prefix="Approved recovery",
             )
-            for bridge_task in list(tasks) + [repair_node]:
-                bridge_task_id = str(bridge_task.get("id") or "").strip()
-                if not bridge_task_id:
+            for recovery_task in list(tasks) + [repair_node]:
+                recovery_task_id = str(recovery_task.get("id") or "").strip()
+                if not recovery_task_id:
                     continue
                 repair_patch_rows.append(
                     {
-                        "id": bridge_task_id,
-                        "bridge_sequence_length": next_bridge_length,
+                        "id": recovery_task_id,
+                        "recovery_sequence_length": next_recovery_length,
                     }
                 )
             if patch_rows is not None:
                 patch_rows.extend(repair_patch_rows)
-                repair_node["bridge_sequence_length"] = next_bridge_length
+                repair_node["recovery_sequence_length"] = next_recovery_length
                 tasks.append(deepcopy(repair_node))
                 task_groups_by_resource.setdefault(resource_jid, []).append(deepcopy(repair_node))
-                for bridge_task in tasks:
-                    bridge_task["bridge_sequence_length"] = next_bridge_length
+                for recovery_task in tasks:
+                    recovery_task["recovery_sequence_length"] = next_recovery_length
                 continue
 
             self.process_planner._apply_replan_patch(repair_patch_rows)
@@ -4571,7 +4585,7 @@ class ProductRecoveryController:
                 str(repair_node.get("id") or "").strip()
             )
             if isinstance(inserted_repair_node, dict):
-                inserted_repair_node["bridge_sequence_length"] = next_bridge_length
+                inserted_repair_node["recovery_sequence_length"] = next_recovery_length
                 self.task_states[str(inserted_repair_node.get("id") or "").strip()] = (
                     str(inserted_repair_node.get("status") or "pending").strip() or "pending"
                 )
@@ -4579,10 +4593,10 @@ class ProductRecoveryController:
                 task_groups_by_resource.setdefault(resource_jid, []).append(
                     deepcopy(inserted_repair_node)
                 )
-            for bridge_task in tasks:
-                bridge_task["bridge_sequence_length"] = next_bridge_length
+            for recovery_task in tasks:
+                recovery_task["recovery_sequence_length"] = next_recovery_length
 
-    def _prune_redundant_bridge_resume_move_home_if_satisfied(
+    def _prune_redundant_recovery_resume_move_home_if_satisfied(
         self,
         *,
         tasks: list[dict[str, Any]],
@@ -4604,8 +4618,8 @@ class ProductRecoveryController:
             resume_task_id = str(entry_task_id or "").strip()
             if not resource_jid or not resume_task_id:
                 continue
-            bridge_tasks = list(task_groups_by_resource.get(resource_jid) or [])
-            if not bridge_tasks:
+            recovery_tasks = list(task_groups_by_resource.get(resource_jid) or [])
+            if not recovery_tasks:
                 continue
             entry_task = self.process_planner._find_node(resume_task_id)
             if not isinstance(entry_task, dict):
@@ -4613,9 +4627,9 @@ class ProductRecoveryController:
             if str(entry_task.get("function_name") or "").strip() != "move_home":
                 continue
 
-            projected_plant = self._bridge_projected_plant_state_for_resource(
+            projected_plant = self._recovery_projected_plant_state_for_resource(
                 resource_jid=resource_jid,
-                bridge_tasks=bridge_tasks,
+                recovery_tasks=recovery_tasks,
             )
             projected_state = str(
                 self._plant_resource_field(
@@ -4655,7 +4669,7 @@ class ProductRecoveryController:
                 "id": resume_task_id,
                 "delete": True,
                 "change_reason": (
-                    "DELETION: Approved bridge recovery already leaves "
+                    "DELETION: Approved recovery already leaves "
                     f"{resource_jid} at home idle before redundant move_home task "
                     f"{resume_task_id}"
                 ),
@@ -4700,7 +4714,7 @@ class ProductRecoveryController:
         part_name: str,
         source_location: str,
         disabled_event: dict[str, Any],
-        active_bridge_sequence: dict[str, Any] | None,
+        active_recovery_sequence: dict[str, Any] | None,
         trigger: str,
     ) -> dict[str, Any] | None:
         sequence_id = f"DESREPAIR_{uuid.uuid4().hex[:8].upper()}"
@@ -4709,7 +4723,7 @@ class ProductRecoveryController:
             part_name=part_name,
             source_location=source_location,
             disabled_event=disabled_event,
-            active_bridge_sequence=active_bridge_sequence,
+            active_recovery_sequence=active_recovery_sequence,
             sequence_id=sequence_id,
             sequence_index=1,
             sequence_length=1,
@@ -4746,16 +4760,16 @@ class ProductRecoveryController:
                 str(planner_owned_node.get("status") or "pending").strip() or "pending"
             )
 
-        next_sequence = deepcopy(active_bridge_sequence or {})
+        next_sequence = deepcopy(active_recovery_sequence or {})
         next_sequence.update(
             {
-                "bridge_sequence_id": sequence_id,
-                "bridge_task_ids": [task_id],
-                "bridge_sequence_length": 1,
+                "recovery_sequence_id": sequence_id,
+                "recovery_task_ids": [task_id],
+                "recovery_sequence_length": 1,
                 "state": "approved",
                 "last_task_id": task_id,
                 "trigger": str(trigger or "").strip() or next_sequence.get("trigger", ""),
-                "used_llm_bridge": bool(next_sequence.get("used_llm_bridge", False)),
+                "used_llm_recovery": bool(next_sequence.get("used_llm_recovery", False)),
                 "continuation_repair_attempts": int(
                     next_sequence.get("continuation_repair_attempts") or 0
                 )
@@ -4766,9 +4780,9 @@ class ProductRecoveryController:
                 "repair_target_task_id": disabled_task_id,
             }
         )
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        bridge_debug.setdefault("runtime_des_supervisor", {})
-        bridge_debug["runtime_des_supervisor"].update(
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        recovery_debug.setdefault("runtime_des_supervisor", {})
+        recovery_debug["runtime_des_supervisor"].update(
             {
                 "selected_repair_operator": "acquire_entity",
                 "projected_repair_effects": {
@@ -4811,7 +4825,7 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("system_coordination_state")
             or {}
         )
-        current_feedback_history = list(self.runtime_recovery.get("bridge_feedback_history") or [])
+        current_feedback_history = list(self.runtime_recovery.get("recovery_feedback_history") or [])
         validation_message = (
             f"Runtime DES repair {task_id} inserted before {disabled_task_id or '-'}; "
             "validating repaired continuation before dispatch."
@@ -4821,7 +4835,7 @@ class ProductRecoveryController:
             "failed_task_id": current_failed_task_id,
             "violations": deepcopy(current_violations),
             "system_coordination_state": current_system_state,
-            "bridge_feedback_history": list(current_feedback_history),
+            "recovery_feedback_history": list(current_feedback_history),
             "repair_task_id": task_id,
             "repair_target_task_id": disabled_task_id,
         }
@@ -4833,10 +4847,10 @@ class ProductRecoveryController:
             message=validation_message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=bool(next_sequence.get("used_llm_bridge", False)),
-            bridge_debug=bridge_debug,
-            bridge_approval_state="approved",
-            active_bridge_sequence=next_sequence,
+            used_llm_recovery=bool(next_sequence.get("used_llm_recovery", False)),
+            recovery_debug=recovery_debug,
+            recovery_approval_state="approved",
+            active_recovery_sequence=next_sequence,
             violations=current_violations,
             append_history=True,
             history_message=(
@@ -4866,10 +4880,10 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=bool(next_sequence.get("used_llm_bridge", False)),
-                bridge_debug=bridge_debug,
-                bridge_approval_state="approved",
-                active_bridge_sequence=next_sequence,
+                used_llm_recovery=bool(next_sequence.get("used_llm_recovery", False)),
+                recovery_debug=recovery_debug,
+                recovery_approval_state="approved",
+                active_recovery_sequence=next_sequence,
                 violations=current_violations,
                 append_history=True,
                 history_message=message,
@@ -4884,9 +4898,9 @@ class ProductRecoveryController:
         disabled_frontier: list[dict[str, Any]],
         message: str,
     ) -> None:
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        bridge_debug.setdefault("runtime_des_supervisor", {})
-        bridge_debug["runtime_des_supervisor"].update(
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        recovery_debug.setdefault("runtime_des_supervisor", {})
+        recovery_debug["runtime_des_supervisor"].update(
             {
                 "disabled_frontier": deepcopy(disabled_frontier),
                 "selected_repair_operator": "",
@@ -4898,20 +4912,20 @@ class ProductRecoveryController:
             message=message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            bridge_debug=bridge_debug,
-            active_bridge_sequence=self._active_bridge_sequence(),
+            recovery_debug=recovery_debug,
+            active_recovery_sequence=self._active_recovery_sequence(),
             violations=[],
             append_history=True,
             history_message=message,
         )
 
-    def _bridge_continuation_disabled_frontier(
+    def _recovery_continuation_disabled_frontier(
         self,
-        active_bridge_sequence: dict[str, Any],
+        active_recovery_sequence: dict[str, Any],
     ) -> list[dict[str, Any]]:
         requirements = [
             dict(item)
-            for item in (active_bridge_sequence.get("continuation_requirements") or [])
+            for item in (active_recovery_sequence.get("continuation_requirements") or [])
             if isinstance(item, dict)
         ]
         if not requirements:
@@ -4922,7 +4936,7 @@ class ProductRecoveryController:
                 for item in requirements
                 if str(item.get("entity_kind") or "").strip() == "resource"
             ],
-            base_state=active_bridge_sequence.get("system_coordination_state") or {},
+            base_state=active_recovery_sequence.get("system_coordination_state") or {},
         )
         grouped: dict[str, dict[str, Any]] = {}
         for requirement in requirements:
@@ -4972,7 +4986,7 @@ class ProductRecoveryController:
             )
         return list(grouped.values())
 
-    def _bridge_task_debug_rows(self, task_ids: list[str] | None) -> list[dict[str, Any]]:
+    def _recovery_task_debug_rows(self, task_ids: list[str] | None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         lookup = {
             str(node.get("id", "")).strip(): node
@@ -4996,10 +5010,10 @@ class ProductRecoveryController:
                     "predecessors": list(node.get("predecessors") or []),
                     "successors": list(node.get("successors") or []),
                     "params": deepcopy(node.get("params") or {}),
-                    "bridge_sequence_id": str(node.get("bridge_sequence_id", "")).strip(),
-                    "bridge_sequence_index": int(node.get("bridge_sequence_index") or 0),
-                    "bridge_sequence_length": int(node.get("bridge_sequence_length") or 0),
-                    "bridge_outline_id": str(node.get("bridge_outline_id", "")).strip(),
+                    "recovery_sequence_id": str(node.get("recovery_sequence_id", "")).strip(),
+                    "recovery_sequence_index": int(node.get("recovery_sequence_index") or 0),
+                    "recovery_sequence_length": int(node.get("recovery_sequence_length") or 0),
+                    "recovery_outline_id": str(node.get("recovery_outline_id", "")).strip(),
                     "predecessor_outline_ids": deepcopy(node.get("predecessor_outline_ids") or []),
                     "recovery_group_id": str(node.get("recovery_group_id", "")).strip(),
                     "recovery_parent_failure_id": str(
@@ -5014,15 +5028,15 @@ class ProductRecoveryController:
             )
         return rows
 
-    def _bridge_sequence_tail_task_ids(
+    def _recovery_sequence_tail_task_ids(
         self,
         *,
-        bridge_sequence_id: str,
+        recovery_sequence_id: str,
         completed_task_id: str,
     ) -> list[str]:
         completed_task_id = str(completed_task_id or "").strip()
         tail_ids: list[str] = []
-        for node in self.process_planner._bridge_sequence_nodes(bridge_sequence_id):
+        for node in self.process_planner._recovery_sequence_nodes(recovery_sequence_id):
             node_id = str(node.get("id", "")).strip()
             if not node_id or node_id == completed_task_id:
                 continue
@@ -5032,26 +5046,26 @@ class ProductRecoveryController:
             tail_ids.append(node_id)
         return tail_ids
 
-    def _refresh_bridge_snapshot(self, resource_jid: str) -> dict[str, Any] | None:
+    def _refresh_recovery_snapshot(self, resource_jid: str) -> dict[str, Any] | None:
         resource = self.process_planner._resource_by_jid(resource_jid)
-        if resource is None or not hasattr(resource, "get_bridge_snapshot"):
+        if resource is None or not hasattr(resource, "get_recovery_snapshot"):
             return None
         try:
-            snapshot = resource.get_bridge_snapshot()
+            snapshot = resource.get_recovery_snapshot()
         except Exception:
             self.logger.exception(
-                "[Product] Failed to refresh bridge snapshot for %s.",
+                "[Product] Failed to refresh recovery snapshot for %s.",
                 resource_jid,
             )
             return None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
-    def _system_coordination_state_with_bridge_snapshot(
+    def _system_coordination_state_with_recovery_snapshot(
         self,
         *,
         base_state: dict[str, Any] | None,
         resource_jid: str,
-        bridge_snapshot: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         from cais_spade_llm.resources.resource_profile import (
             get_resource_profile,
@@ -5062,9 +5076,9 @@ class ProductRecoveryController:
         system_state = deepcopy(base_state or {})
         resource_states = dict(self.process_planner._extract_resource_states(system_state))
         resource_entry = dict(resource_states.get(resource_jid) or {})
-        resource_core = dict(bridge_snapshot.get("resource_core") or {})
+        resource_core = dict(recovery_snapshot.get("resource_core") or {})
         resource_type = (
-            str(resource_core.get("resource_type") or bridge_snapshot.get("resource_type") or "")
+            str(resource_core.get("resource_type") or recovery_snapshot.get("resource_type") or "")
             .strip()
             .lower()
         )
@@ -5072,38 +5086,38 @@ class ProductRecoveryController:
         update: dict[str, Any] = {
             "resource_type": resource_type or None,
             "current_state": resource_core.get("current_state")
-            or bridge_snapshot.get("current_state"),
+            or recovery_snapshot.get("current_state"),
             "current_location": (
                 resource_core.get("current_location")
                 if resource_core.get("current_location") is not None
-                else bridge_snapshot.get("current_location")
-                if bridge_snapshot.get("current_location") is not None
+                else recovery_snapshot.get("current_location")
+                if recovery_snapshot.get("current_location") is not None
                 else resource_snapshot_field_value(
-                    bridge_snapshot,
+                    recovery_snapshot,
                     "current_pose_ref",
                     profile=profile,
                 )
             ),
-            "active_work": resource_core.get("active_work") or bridge_snapshot.get("active_work"),
+            "active_work": resource_core.get("active_work") or recovery_snapshot.get("active_work"),
         }
         for field in profile.snapshot_fields:
             if field == "current_state":
                 continue
             if not resource_snapshot_has_field(
-                bridge_snapshot,
+                recovery_snapshot,
                 field,
                 profile=profile,
             ):
                 continue
             value = resource_snapshot_field_value(
-                bridge_snapshot,
+                recovery_snapshot,
                 field,
                 profile=profile,
             )
             update[field] = value
-        if resource_snapshot_has_field(bridge_snapshot, "current_pose_ref", profile=profile):
+        if resource_snapshot_has_field(recovery_snapshot, "current_pose_ref", profile=profile):
             update["current_pose_ref"] = resource_snapshot_field_value(
-                bridge_snapshot,
+                recovery_snapshot,
                 "current_pose_ref",
                 profile=profile,
             )
@@ -5113,7 +5127,7 @@ class ProductRecoveryController:
         return system_state
 
     @staticmethod
-    def _bridge_snapshot_mismatch(
+    def _recovery_snapshot_mismatch(
         *,
         actual_snapshot: dict[str, Any],
         projected_snapshot: dict[str, Any],
@@ -5170,7 +5184,7 @@ class ProductRecoveryController:
                 return f"projected {key}={projected_value!r} but runtime observed {actual_value!r}"
         return ""
 
-    def _bridge_part_entry_mismatch(
+    def _recovery_part_entry_mismatch(
         self,
         *,
         part_name: str,
@@ -5194,7 +5208,7 @@ class ProductRecoveryController:
         skip_recovery_safety_validation: bool = False,
     ) -> None:
         # Always recompile the FSA so that newly-inserted tasks (e.g.,
-        # recovery bridge macros) are present in the transition table.
+        # recovery macros) are present in the transition table.
         # skip_revalidation only skips the CCA-side safety-rule check.
         self.process_planner.compile_global_fsa()
         self.process_planner.save_global_fsa(self.global_fsa_path)
@@ -5251,21 +5265,21 @@ class ProductRecoveryController:
             skip_recovery_safety_validation=skip_recovery_safety_validation,
         )
 
-    async def _fail_closed_bridge_sequence(
+    async def _fail_closed_recovery_sequence(
         self,
         *,
         task_node: dict[str, Any],
         status: str,
         message: str,
-        active_bridge_sequence: dict[str, Any],
+        active_recovery_sequence: dict[str, Any],
         content: str = "",
         observations: dict[str, Any] | None = None,
     ) -> None:
-        sequence = deepcopy(active_bridge_sequence)
-        sequence_id = str(sequence.get("bridge_sequence_id", "")).strip()
+        sequence = deepcopy(active_recovery_sequence)
+        sequence_id = str(sequence.get("recovery_sequence_id", "")).strip()
         if sequence_id:
-            deletions = self.process_planner.remove_bridge_sequence_tail(
-                bridge_sequence_id=sequence_id,
+            deletions = self.process_planner.remove_recovery_sequence_tail(
+                recovery_sequence_id=sequence_id,
                 completed_task_id=str(task_node.get("id", "")).strip(),
             )
             if deletions:
@@ -5285,7 +5299,7 @@ class ProductRecoveryController:
         violations = deepcopy(list(sequence.get("violations") or []))
         trigger = str(sequence.get("trigger", "")).strip()
         failed_task_id = str(sequence.get("failed_task_id", "")).strip()
-        used_llm_bridge = self._bridge_used_llm(sequence, self.runtime_recovery)
+        used_llm_recovery = self._recovery_used_llm(sequence, self.runtime_recovery)
         generated_code_verification = deepcopy(
             self.runtime_recovery.get("generated_code_verification") or {}
         )
@@ -5300,10 +5314,10 @@ class ProductRecoveryController:
                 "runtime_status": str(status or "").strip(),
                 "observations": deepcopy(observations or {}),
             }
-            if isinstance(self.runtime_recovery.get("bridge_debug"), dict):
-                bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
-                self.runtime_recovery["bridge_debug"] = bridge_debug
+            if isinstance(self.runtime_recovery.get("recovery_debug"), dict):
+                recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+                recovery_debug["generated_code_verification"] = deepcopy(generated_code_verification)
+                self.runtime_recovery["recovery_debug"] = recovery_debug
         self._runtime_recovery_context = {}
         self._set_runtime_recovery(
             status="human_required",
@@ -5313,11 +5327,11 @@ class ProductRecoveryController:
             message=message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=used_llm_bridge,
-            bridge_proposal=None,
-            bridge_approval_state="approved",
-            active_bridge_sequence=sequence,
-            bridge_feedback_history=self.runtime_recovery.get("bridge_feedback_history") or [],
+            used_llm_recovery=used_llm_recovery,
+            recovery_proposal=None,
+            recovery_approval_state="approved",
+            active_recovery_sequence=sequence,
+            recovery_feedback_history=self.runtime_recovery.get("recovery_feedback_history") or [],
             generated_code_verification=generated_code_verification or None,
             violations=violations,
             append_history=True,
@@ -5335,7 +5349,7 @@ class ProductRecoveryController:
         await asyncio.to_thread(self._persist_product_state)
         await asyncio.to_thread(self._persist_resource_state)
 
-    async def _handle_bridge_macro_ack(
+    async def _handle_recovery_macro_ack(
         self,
         *,
         task_node: dict[str, Any],
@@ -5346,39 +5360,39 @@ class ProductRecoveryController:
         if str(task_node.get("function_name", "")).strip() != "execute_recovery_macro":
             return False
 
-        active_bridge_sequence = self._active_bridge_sequence()
-        if not active_bridge_sequence:
+        active_recovery_sequence = self._active_recovery_sequence()
+        if not active_recovery_sequence:
             return False
 
-        sequence_id = str(task_node.get("bridge_sequence_id", "")).strip()
+        sequence_id = str(task_node.get("recovery_sequence_id", "")).strip()
         if (
             not sequence_id
-            or sequence_id != str(active_bridge_sequence.get("bridge_sequence_id", "")).strip()
+            or sequence_id != str(active_recovery_sequence.get("recovery_sequence_id", "")).strip()
         ):
             return False
 
         macro_name = str(
             (task_node.get("params") or {}).get("macro_name")
             or task_node.get("id")
-            or "bridge_macro"
+            or "recovery_macro"
         ).strip()
         failed_task_id = str(
-            active_bridge_sequence.get("failed_task_id")
+            active_recovery_sequence.get("failed_task_id")
             or self.runtime_recovery.get("failed_task_id", "")
         ).strip()
-        trigger = str(active_bridge_sequence.get("trigger", "")).strip()
-        violations = deepcopy(list(active_bridge_sequence.get("violations") or []))
-        feedback_history = self.runtime_recovery.get("bridge_feedback_history") or []
-        used_llm_bridge = self._bridge_used_llm(active_bridge_sequence, self.runtime_recovery)
-        verification_only = self._bridge_is_verification_only(active_bridge_sequence)
+        trigger = str(active_recovery_sequence.get("trigger", "")).strip()
+        violations = deepcopy(list(active_recovery_sequence.get("violations") or []))
+        feedback_history = self.runtime_recovery.get("recovery_feedback_history") or []
+        used_llm_recovery = self._recovery_used_llm(active_recovery_sequence, self.runtime_recovery)
+        verification_only = self._recovery_is_verification_only(active_recovery_sequence)
 
         if isinstance(status, str) and status.startswith("failed"):
             retry_node = self._try_compile_release_retry_event(
                 task_node=task_node,
-                active_bridge_sequence=active_bridge_sequence,
+                active_recovery_sequence=active_recovery_sequence,
                 observations=observations,
                 trigger=trigger,
-                used_llm_bridge=used_llm_bridge,
+                used_llm_recovery=used_llm_recovery,
                 feedback_history=list(feedback_history),
             )
             if retry_node:
@@ -5390,15 +5404,15 @@ class ProductRecoveryController:
             if not detail and isinstance(observations, dict):
                 detail = json.dumps(observations, sort_keys=True, default=str)
             message = (
-                f"{self.agent_name}: bridge macro '{macro_name}' failed during execution"
+                f"{self.agent_name}: recovery macro '{macro_name}' failed during execution"
                 + (f" ({detail})." if detail else ".")
                 + " Human intervention required."
             )
-            await self._fail_closed_bridge_sequence(
+            await self._fail_closed_recovery_sequence(
                 task_node=task_node,
                 status=status,
                 message=message,
-                active_bridge_sequence=active_bridge_sequence,
+                active_recovery_sequence=active_recovery_sequence,
                 content=content,
                 observations=observations,
             )
@@ -5407,26 +5421,26 @@ class ProductRecoveryController:
         if str(status).strip().lower() != "completed":
             return False
 
-        completed_sequence = self._bridge_sequence_with_completed_task(
-            active_bridge_sequence,
+        completed_sequence = self._recovery_sequence_with_completed_task(
+            active_recovery_sequence,
             task_id=str(task_node.get("id", "")).strip(),
             macro_name=macro_name,
         )
         if not isinstance(completed_sequence, dict):
-            completed_sequence = deepcopy(active_bridge_sequence)
+            completed_sequence = deepcopy(active_recovery_sequence)
 
         resource_jid = str(task_node.get("resource_jid", "")).strip()
-        actual_snapshot = self._refresh_bridge_snapshot(resource_jid)
+        actual_snapshot = self._refresh_recovery_snapshot(resource_jid)
         if not isinstance(actual_snapshot, dict):
             message = (
-                f"{self.agent_name}: bridge macro '{macro_name}' completed but the runtime "
-                f"bridge snapshot for {resource_jid} could not be refreshed. Human intervention required."
+                f"{self.agent_name}: recovery macro '{macro_name}' completed but the runtime "
+                f"recovery snapshot for {resource_jid} could not be refreshed. Human intervention required."
             )
-            await self._fail_closed_bridge_sequence(
+            await self._fail_closed_recovery_sequence(
                 task_node=task_node,
                 status=status,
                 message=message,
-                active_bridge_sequence=completed_sequence,
+                active_recovery_sequence=completed_sequence,
                 content=content,
                 observations=observations,
             )
@@ -5437,13 +5451,13 @@ class ProductRecoveryController:
         projected_part_entry = dict(task_node.get("projected_part_entry") or {})
         mismatch = ""
         if projected_snapshot:
-            mismatch = self._bridge_snapshot_mismatch(
+            mismatch = self._recovery_snapshot_mismatch(
                 actual_snapshot=actual_snapshot,
                 projected_snapshot=projected_snapshot,
                 allow_missing_current_location=bool(projected_part_entry),
             )
         if not mismatch and part_name and projected_part_entry:
-            mismatch = self._bridge_part_entry_mismatch(
+            mismatch = self._recovery_part_entry_mismatch(
                 part_name=part_name,
                 projected_part_entry=projected_part_entry,
             )
@@ -5455,31 +5469,31 @@ class ProductRecoveryController:
                 divergence["projected_part_entry"] = deepcopy(projected_part_entry)
                 divergence["actual_part_entry"] = deepcopy(self.part_tracker.get(part_name) or {})
             message = (
-                f"{self.agent_name}: bridge macro '{macro_name}' diverged from its approved "
+                f"{self.agent_name}: recovery macro '{macro_name}' diverged from its approved "
                 f"projected post-state ({mismatch}). Human intervention required."
             )
-            await self._fail_closed_bridge_sequence(
+            await self._fail_closed_recovery_sequence(
                 task_node=task_node,
                 status=status,
                 message=message,
-                active_bridge_sequence=completed_sequence,
+                active_recovery_sequence=completed_sequence,
                 content=content,
                 observations=divergence,
             )
             return True
 
-        tail_task_ids = self._bridge_sequence_tail_task_ids(
-            bridge_sequence_id=sequence_id,
+        tail_task_ids = self._recovery_sequence_tail_task_ids(
+            recovery_sequence_id=sequence_id,
             completed_task_id=str(task_node.get("id", "")).strip(),
         )
-        refreshed_system_state = self._system_coordination_state_with_bridge_snapshot(
-            base_state=active_bridge_sequence.get("system_coordination_state") or {},
+        refreshed_system_state = self._system_coordination_state_with_recovery_snapshot(
+            base_state=active_recovery_sequence.get("system_coordination_state") or {},
             resource_jid=resource_jid,
-            bridge_snapshot=actual_snapshot,
+            recovery_snapshot=actual_snapshot,
         )
         generated_code_verification = deepcopy(
             self.runtime_recovery.get("generated_code_verification")
-            or active_bridge_sequence.get("generated_code_verification")
+            or active_recovery_sequence.get("generated_code_verification")
             or {}
         )
         if generated_code_verification:
@@ -5510,27 +5524,27 @@ class ProductRecoveryController:
             next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
             if generated_code_verification:
                 next_sequence["generated_code_verification"] = deepcopy(generated_code_verification)
-            bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
+            recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
             if generated_code_verification:
-                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
+                recovery_debug["generated_code_verification"] = deepcopy(generated_code_verification)
             if tail_task_ids:
                 next_sequence["state"] = "executing"
-                continue_message = f"Bridge macro '{macro_name}' matched projection; continuing generated-code verification tail."
+                continue_message = f"Recovery macro '{macro_name}' matched projection; continuing generated-code verification tail."
                 self._set_runtime_recovery(
                     status="resolved",
-                    resolution_class="generated_bridge_verification",
+                    resolution_class="generated_recovery_verification",
                     trigger=trigger,
                     failed_task_id=failed_task_id,
                     message=continue_message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=used_llm_bridge,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="approved",
-                    active_bridge_sequence=next_sequence,
+                    used_llm_recovery=used_llm_recovery,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="approved",
+                    active_recovery_sequence=next_sequence,
                     generated_code_verification=generated_code_verification or None,
-                    bridge_feedback_history=feedback_history,
+                    recovery_feedback_history=feedback_history,
                     violations=[],
                     append_history=True,
                     history_message=continue_message,
@@ -5538,7 +5552,7 @@ class ProductRecoveryController:
                 await asyncio.to_thread(self._persist_product_state)
                 return True
 
-            disabled_frontier = self._bridge_continuation_disabled_frontier(next_sequence)
+            disabled_frontier = self._recovery_continuation_disabled_frontier(next_sequence)
             if disabled_frontier:
                 self._record_runtime_des_trace(
                     graph_ready_event_ids=list(next_sequence.get("pending_nominal_task_ids") or []),
@@ -5547,15 +5561,15 @@ class ProductRecoveryController:
                 )
                 repair_node = self._try_compile_controllable_repair(
                     disabled_frontier=disabled_frontier,
-                    trigger="bridge_continuation_guard",
-                    active_bridge_sequence=next_sequence,
+                    trigger="recovery_continuation_guard",
+                    active_recovery_sequence=next_sequence,
                 )
                 if repair_node:
-                    bridge_debug = deepcopy(
-                        self.runtime_recovery.get("bridge_debug") or bridge_debug
+                    recovery_debug = deepcopy(
+                        self.runtime_recovery.get("recovery_debug") or recovery_debug
                     )
                     if generated_code_verification:
-                        bridge_debug["generated_code_verification"] = deepcopy(
+                        recovery_debug["generated_code_verification"] = deepcopy(
                             generated_code_verification
                         )
                         self.runtime_recovery["generated_code_verification"] = deepcopy(
@@ -5569,7 +5583,7 @@ class ProductRecoveryController:
                     disabled_frontier[0] if disabled_frontier else {},
                     human_required=True,
                 ) or (
-                    "Generated bridge verification matched macro projections, but "
+                    "Generated recovery verification matched macro projections, but "
                     "the runtime DES continuation guard is still disabled. Human "
                     "intervention required."
                 )
@@ -5594,34 +5608,34 @@ class ProductRecoveryController:
                         generated_code_verification.get("snapshot_match_details") or []
                     ),
                     "message": (
-                        "Generated bridge macro sequence executed in Gazebo and matched the projected post-state."
+                        "Generated recovery macro sequence executed in Gazebo and matched the projected post-state."
                     ),
                 }
                 next_sequence["generated_code_verification"] = deepcopy(generated_code_verification)
-                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
+                recovery_debug["generated_code_verification"] = deepcopy(generated_code_verification)
             verified_message = (
-                f"Generated bridge verification completed after macro '{macro_name}'; "
+                f"Generated recovery verification completed after macro '{macro_name}'; "
                 "resuming nominal execution."
             )
             if next_sequence:
-                bridge_debug["verified_bridge_sequence"] = deepcopy(next_sequence)
+                recovery_debug["verified_recovery_sequence"] = deepcopy(next_sequence)
             self._runtime_recovery_context = {}
             self._set_runtime_recovery(
                 status="resolved",
-                resolution_class="generated_bridge_verified",
+                resolution_class="generated_recovery_verified",
                 trigger=trigger,
                 failed_task_id=failed_task_id,
                 message=verified_message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=used_llm_bridge,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="approved",
-                active_bridge_sequence=None,
-                last_completed_bridge_sequence=self._bridge_sequence_summary(next_sequence),
+                used_llm_recovery=used_llm_recovery,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="approved",
+                active_recovery_sequence=None,
+                last_completed_recovery_sequence=self._recovery_sequence_summary(next_sequence),
                 generated_code_verification=generated_code_verification or None,
-                bridge_feedback_history=feedback_history,
+                recovery_feedback_history=feedback_history,
                 violations=[],
                 append_history=True,
                 history_message=verified_message,
@@ -5632,24 +5646,24 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_resource_state)
             return True
 
-        if tail_task_ids and self._bridge_requires_complete_full_tail(active_bridge_sequence):
+        if tail_task_ids and self._recovery_requires_complete_full_tail(active_recovery_sequence):
             next_sequence = deepcopy(completed_sequence)
             next_sequence["state"] = "executing"
             next_sequence["system_coordination_state"] = deepcopy(refreshed_system_state)
-            continue_message = f"Bridge macro '{macro_name}' matched projection; continuing the approved bridge tail."
+            continue_message = f"Recovery macro '{macro_name}' matched projection; continuing the approved recovery tail."
             self._set_runtime_recovery(
                 status="resolved",
-                resolution_class="des_with_llm_bridge",
+                resolution_class="des_with_llm_recovery",
                 trigger=trigger,
                 failed_task_id=failed_task_id,
                 message=continue_message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=used_llm_bridge,
-                bridge_proposal=None,
-                bridge_approval_state="approved",
-                active_bridge_sequence=next_sequence,
-                bridge_feedback_history=feedback_history,
+                used_llm_recovery=used_llm_recovery,
+                recovery_proposal=None,
+                recovery_approval_state="approved",
+                active_recovery_sequence=next_sequence,
+                recovery_feedback_history=feedback_history,
                 violations=[],
                 append_history=True,
                 history_message=continue_message,
@@ -5657,7 +5671,7 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_product_state)
             return True
 
-        terminal_sequence = self._bridge_sequence_with_completed_task(
+        terminal_sequence = self._recovery_sequence_with_completed_task(
             completed_sequence,
             task_id=str(task_node.get("id", "")).strip(),
             macro_name=macro_name,
@@ -5668,7 +5682,7 @@ class ProductRecoveryController:
             "failed_task_id": failed_task_id,
             "violations": deepcopy(violations),
             "system_coordination_state": deepcopy(refreshed_system_state),
-            "bridge_feedback_history": list(feedback_history),
+            "recovery_feedback_history": list(feedback_history),
             "repair_task_id": str(terminal_sequence.get("repair_task_id") or "").strip(),
             "repair_target_task_id": str(
                 terminal_sequence.get("repair_target_task_id") or ""
@@ -5676,7 +5690,7 @@ class ProductRecoveryController:
         }
         repair_task_id = str(terminal_sequence.get("repair_task_id") or "").strip()
         repair_target_task_id = str(terminal_sequence.get("repair_target_task_id") or "").strip()
-        disabled_frontier = self._bridge_continuation_disabled_frontier(terminal_sequence)
+        disabled_frontier = self._recovery_continuation_disabled_frontier(terminal_sequence)
         if disabled_frontier:
             self._record_runtime_des_trace(
                 graph_ready_event_ids=list(terminal_sequence.get("pending_nominal_task_ids") or []),
@@ -5685,15 +5699,15 @@ class ProductRecoveryController:
             )
             repair_node = self._try_compile_controllable_repair(
                 disabled_frontier=disabled_frontier,
-                trigger="bridge_continuation_guard",
-                active_bridge_sequence=terminal_sequence,
+                trigger="recovery_continuation_guard",
+                active_recovery_sequence=terminal_sequence,
             )
             if repair_node:
                 await asyncio.to_thread(self._persist_plan_snapshot)
                 await asyncio.to_thread(self._persist_product_state)
                 return True
         validation_message = (
-            f"Bridge macro '{macro_name}' completed the approved recovery bridge; "
+            f"Recovery macro '{macro_name}' completed the approved recovery; "
             "validating updated plan."
         )
         if repair_task_id and repair_task_id == str(task_node.get("id", "")).strip():
@@ -5706,11 +5720,11 @@ class ProductRecoveryController:
                 repair_task_id,
                 repair_target_task_id or "<unknown>",
             )
-        active_validation_policy = self._normalize_runtime_bridge_validation_policy(
-            dict(active_bridge_sequence.get("execution_policy") or {}).get("validation_policy")
-            or active_bridge_sequence.get("validation_policy")
+        active_validation_policy = self._normalize_runtime_recovery_validation_policy(
+            dict(active_recovery_sequence.get("execution_policy") or {}).get("validation_policy")
+            or active_recovery_sequence.get("validation_policy")
             or self.runtime_recovery.get("validation_policy")
-            or self._runtime_bridge_session_validation_policy()
+            or self._runtime_recovery_session_validation_policy()
         )
         self._set_runtime_recovery(
             status="validating",
@@ -5720,12 +5734,12 @@ class ProductRecoveryController:
             message=validation_message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=used_llm_bridge,
-            bridge_proposal=None,
-            bridge_approval_state="approved",
-            active_bridge_sequence=None,
-            last_completed_bridge_sequence=self._bridge_sequence_summary(terminal_sequence),
-            bridge_feedback_history=feedback_history,
+            used_llm_recovery=used_llm_recovery,
+            recovery_proposal=None,
+            recovery_approval_state="approved",
+            active_recovery_sequence=None,
+            last_completed_recovery_sequence=self._recovery_sequence_summary(terminal_sequence),
+            recovery_feedback_history=feedback_history,
             violations=violations,
             append_history=True,
             history_message=validation_message,
@@ -5748,7 +5762,7 @@ class ProductRecoveryController:
         system_coordination_state: dict | None = None,
         reset_attempts: bool = False,
         history_message: str | None = None,
-        bridge_feedback: str = "",
+        recovery_feedback: str = "",
     ) -> dict[str, Any]:
         if reset_attempts:
             self._runtime_repair_fail_streak = 0
@@ -5757,26 +5771,26 @@ class ProductRecoveryController:
         self._runtime_repair_fail_streak = attempt_number
         feedback_history = [
             str(item).strip()
-            for item in (self.runtime_recovery.get("bridge_feedback_history") or [])
+            for item in (self.runtime_recovery.get("recovery_feedback_history") or [])
             if str(item).strip()
         ]
-        feedback_text = str(bridge_feedback or "").strip()
+        feedback_text = str(recovery_feedback or "").strip()
         if feedback_text:
             feedback_history.append(feedback_text)
-        session_bridge_mode = self._normalize_runtime_bridge_mode(self._runtime_bridge_mode)
-        session_validation_policy = self._normalize_runtime_bridge_validation_policy(
-            self._runtime_bridge_validation_policy
+        session_recovery_mode = self._normalize_runtime_recovery_mode(self._runtime_recovery_mode)
+        session_validation_policy = self._normalize_runtime_recovery_validation_policy(
+            self._runtime_recovery_validation_policy
         )
         self._runtime_recovery_context = {
             "trigger": str(trigger or "").strip(),
             "failed_task_id": str(failed_task_id or "").strip(),
             "violations": deepcopy(list(violations or [])),
             "system_coordination_state": deepcopy(system_coordination_state or {}),
-            "bridge_feedback_history": list(feedback_history),
-            "bridge_mode": session_bridge_mode,
+            "recovery_feedback_history": list(feedback_history),
+            "recovery_mode": session_recovery_mode,
             "validation_policy": session_validation_policy,
-            "selected_archive_path": str(self._runtime_bridge_archive_path or "").strip(),
-            "selected_archive_label": str(self._runtime_bridge_archive_label or "").strip(),
+            "selected_archive_path": str(self._runtime_recovery_archive_path or "").strip(),
+            "selected_archive_label": str(self._runtime_recovery_archive_label or "").strip(),
         }
         self._set_runtime_recovery(
             status="des_search",
@@ -5789,13 +5803,13 @@ class ProductRecoveryController:
             ),
             attempts_used=attempt_number,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=False,
-            bridge_proposal=None,
-            bridge_debug=None,
-            bridge_approval_state="none",
-            bridge_stage="none",
-            active_bridge_sequence=None,
-            bridge_feedback_history=feedback_history,
+            used_llm_recovery=False,
+            recovery_proposal=None,
+            recovery_debug=None,
+            recovery_approval_state="none",
+            recovery_stage="none",
+            active_recovery_sequence=None,
+            recovery_feedback_history=feedback_history,
             violations=violations,
             append_history=True,
             history_message=history_message
@@ -5805,60 +5819,60 @@ class ProductRecoveryController:
         )
 
         scenario_hint = ""
-        bridge_generation_mode = "auto" if session_bridge_mode == "auto" else "manual"
+        recovery_generation_mode = "auto" if session_recovery_mode == "auto" else "manual"
 
         self._runtime_repair_inflight = True
         try:
             result = await self.process_planner.replan_with_feedback_online(
                 violations,
                 system_coordination_state=system_coordination_state,
-                bridge_feedback=feedback_text,
-                bridge_generation_mode=bridge_generation_mode,
+                recovery_feedback=feedback_text,
+                recovery_generation_mode=recovery_generation_mode,
             )
             if not isinstance(result, dict):
                 result = {}
 
             plan_changed = bool(result.get("plan_changed", False))
-            used_llm_bridge = bool(result.get("used_llm_bridge", False))
+            used_llm_recovery = bool(result.get("used_llm_recovery", False))
             human_required = bool(result.get("human_required", False))
-            awaiting_bridge_approval = bool(result.get("awaiting_bridge_approval", False))
-            awaiting_bridge_generation = bool(result.get("awaiting_bridge_generation", False))
+            awaiting_recovery_approval = bool(result.get("awaiting_recovery_approval", False))
+            awaiting_recovery_generation = bool(result.get("awaiting_recovery_generation", False))
             base_message = str(result.get("message", "")).strip()
-            bridge_summary = result.get("bridge_summary") or []
-            bridge_proposal = result.get("bridge_proposal")
-            bridge_debug = result.get("bridge_debug")
-            prepared_bridge_request = result.get("prepared_bridge_request")
-            if awaiting_bridge_generation and isinstance(prepared_bridge_request, dict):
-                bridge_debug = deepcopy(
-                    prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
+            recovery_summary = result.get("recovery_summary") or []
+            recovery_proposal = result.get("recovery_proposal")
+            recovery_debug = result.get("recovery_debug")
+            prepared_recovery_request = result.get("prepared_recovery_request")
+            if awaiting_recovery_generation and isinstance(prepared_recovery_request, dict):
+                recovery_debug = deepcopy(
+                    prepared_recovery_request.get("recovery_debug") or recovery_debug or {}
                 )
-                bridge_debug = self._bridge_debug_with_runtime_handoff(
-                    bridge_debug,
+                recovery_debug = self._recovery_debug_with_runtime_handoff(
+                    recovery_debug,
                     handoff_owner="product_agent",
-                    bridge_mode=session_bridge_mode,
+                    recovery_mode=session_recovery_mode,
                     validation_policy=session_validation_policy,
-                    auto_start_requested=bool(session_bridge_mode == "auto"),
+                    auto_start_requested=bool(session_recovery_mode == "auto"),
                     auto_start_started=False,
                 )
-                prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-                bridge_debug = self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                    prepared_bridge_request
+                prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+                recovery_debug = self._ensure_live_recovery_per_turn_debug_dir(prepared_recovery_request)
+                self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                    prepared_recovery_request
                 )
                 self.logger.info(
-                    "[Product] Prepared bridge request returned to ProductAgent. mode=%s",
-                    session_bridge_mode,
+                    "[Product] Prepared recovery request returned to ProductAgent. mode=%s",
+                    session_recovery_mode,
                 )
                 if hasattr(self.process_planner, "emit_prepare_trace_summary"):
                     try:
-                        self.process_planner.emit_prepare_trace_summary(prepared_bridge_request)
+                        self.process_planner.emit_prepare_trace_summary(prepared_recovery_request)
                     except Exception:
                         self.logger.exception(
-                            "[Product] Failed to emit prepare-trace summary for runtime bridge request."
+                            "[Product] Failed to emit prepare-trace summary for runtime recovery request."
                         )
-                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-                active_bridge_phase = str(bridge_session.get("phase") or "").strip().lower()
-                allow_preprogrammed_autoload = active_bridge_phase not in {"prepare_trace"}
+                recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
+                active_recovery_phase = str(recovery_session.get("phase") or "").strip().lower()
+                allow_preprogrammed_autoload = active_recovery_phase not in {"prepare_trace"}
                 if scenario_hint and allow_preprogrammed_autoload:
                     self.logger.info(
                         "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
@@ -5868,32 +5882,32 @@ class ProductRecoveryController:
                         (
                             scenario_key,
                             normalized,
-                            bridge_debug,
-                            bridge_summary,
-                        ) = self._resolve_preprogrammed_runtime_bridge_bundle(
+                            recovery_debug,
+                            recovery_summary,
+                        ) = self._resolve_preprogrammed_runtime_recovery_bundle(
                             scenario_id=scenario_hint,
-                            prepared_bridge_request=prepared_bridge_request,
+                            prepared_recovery_request=prepared_recovery_request,
                         )
-                        bridge_text = (
-                            ", ".join(str(item) for item in bridge_summary if item) or scenario_key
+                        recovery_text = (
+                            ", ".join(str(item) for item in recovery_summary if item) or scenario_key
                         )
                         recovery = self._set_runtime_recovery(
-                            status="llm_bridge",
+                            status="llm_recovery",
                             trigger=trigger,
                             failed_task_id=failed_task_id,
                             message="Preprogrammed recovery scenario loaded; auto-approving.",
                             attempts_used=attempt_number,
                             attempts_max=self._runtime_repair_max_attempts,
-                            used_llm_bridge=False,
-                            bridge_proposal=normalized,
-                            bridge_debug=bridge_debug,
-                            bridge_approval_state="pending",
-                            active_bridge_sequence=None,
-                            bridge_feedback_history=feedback_history,
+                            used_llm_recovery=False,
+                            recovery_proposal=normalized,
+                            recovery_debug=recovery_debug,
+                            recovery_approval_state="pending",
+                            active_recovery_sequence=None,
+                            recovery_feedback_history=feedback_history,
                             violations=violations,
                             append_history=True,
                             history_message=(
-                                f"Automatically loaded preprogrammed recovery scenario: {bridge_text}."
+                                f"Automatically loaded preprogrammed recovery scenario: {recovery_text}."
                             ),
                         )
                         self._clear_plan_safety_alert()
@@ -5901,7 +5915,7 @@ class ProductRecoveryController:
                             "[Product] Auto-approving preprogrammed recovery scenario after DES handoff: scenario_id=%s",
                             scenario_key,
                         )
-                        return self.approve_runtime_bridge_proposal_sync()
+                        return self.approve_runtime_recovery_proposal_sync()
                     except Exception:
                         self.logger.exception(
                             "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
@@ -5909,73 +5923,73 @@ class ProductRecoveryController:
                         )
                 elif scenario_hint and not allow_preprogrammed_autoload:
                     self.logger.info(
-                        "[Product] Active bridge mode left runtime recovery at prepare-trace checkpoint; "
+                        "[Product] Active recovery mode left runtime recovery at prepare-trace checkpoint; "
                         "skipping preprogrammed auto-load for scenario_id=%s",
                         scenario_hint,
                     )
-                selected_archive_path = self._runtime_bridge_session_archive_path()
-                selected_archive_label = self._runtime_bridge_session_archive_label()
+                selected_archive_path = self._runtime_recovery_session_archive_path()
+                selected_archive_label = self._runtime_recovery_session_archive_label()
                 message = base_message or (
-                    "DES found no modeled continuation. Selected archived bridge run will auto-load and auto-run."
-                    if session_bridge_mode == "pre_ran" and selected_archive_path
-                    else "Pre-ran mode is selected, but no archived bridge run is selected."
-                    if session_bridge_mode == "pre_ran"
-                    else "DES found no modeled continuation. Bridge session is ready for LLM reasoning."
+                    "DES found no modeled continuation. Selected archived recovery run will auto-load and auto-run."
+                    if session_recovery_mode == "pre_ran" and selected_archive_path
+                    else "Pre-ran mode is selected, but no archived recovery run is selected."
+                    if session_recovery_mode == "pre_ran"
+                    else "DES found no modeled continuation. Recovery session is ready for LLM reasoning."
                 )
                 recovery = self._set_runtime_recovery(
-                    status="bridge_ready",
+                    status="recovery_ready",
                     trigger=trigger,
                     failed_task_id=failed_task_id,
                     message=message,
                     attempts_used=attempt_number,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=False,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug,
-                    bridge_approval_state="ready",
-                    bridge_stage="none",
-                    artifact_directory=str(bridge_debug.get("artifact_directory") or "").strip(),
-                    active_bridge_sequence=None,
-                    bridge_feedback_history=feedback_history,
+                    used_llm_recovery=False,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug,
+                    recovery_approval_state="ready",
+                    recovery_stage="none",
+                    artifact_directory=str(recovery_debug.get("artifact_directory") or "").strip(),
+                    active_recovery_sequence=None,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
                     history_message=message,
                 )
-                self._record_runtime_bridge_artifacts(
+                self._record_runtime_recovery_artifacts(
                     phase="prepare",
-                    prepared_bridge_request=prepared_bridge_request,
+                    prepared_recovery_request=prepared_recovery_request,
                 )
-                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                    prepared_bridge_request
+                self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                    prepared_recovery_request
                 )
                 recovery = deepcopy(self.runtime_recovery)
                 self._clear_plan_safety_alert()
-                autostart_pre_ran = bool(session_bridge_mode == "pre_ran" and selected_archive_path)
+                autostart_pre_ran = bool(session_recovery_mode == "pre_ran" and selected_archive_path)
                 if not autostart_pre_ran:
                     await asyncio.to_thread(self._persist_product_state)
-                if session_bridge_mode == "pre_ran":
+                if session_recovery_mode == "pre_ran":
                     if not selected_archive_path:
                         warning = (
-                            "Pre-ran mode is selected, but no archived bridge run is selected."
+                            "Pre-ran mode is selected, but no archived recovery run is selected."
                         )
                         self.logger.warning(
-                            "[Product] Runtime recovery paused at bridge_ready without archived bridge selection."
+                            "[Product] Runtime recovery paused at recovery_ready without archived recovery selection."
                         )
                         recovery = self._set_runtime_recovery(
-                            status="bridge_ready",
+                            status="recovery_ready",
                             resolution_class="none",
                             trigger=trigger,
                             failed_task_id=failed_task_id,
                             message=warning,
                             attempts_used=attempt_number,
                             attempts_max=self._runtime_repair_max_attempts,
-                            used_llm_bridge=False,
-                            bridge_proposal=None,
-                            bridge_debug=bridge_debug,
-                            bridge_approval_state="ready",
-                            bridge_stage="none",
-                            active_bridge_sequence=None,
-                            bridge_feedback_history=feedback_history,
+                            used_llm_recovery=False,
+                            recovery_proposal=None,
+                            recovery_debug=recovery_debug,
+                            recovery_approval_state="ready",
+                            recovery_stage="none",
+                            active_recovery_sequence=None,
+                            recovery_feedback_history=feedback_history,
                             violations=violations,
                             append_history=True,
                             history_message=warning,
@@ -5988,18 +6002,18 @@ class ProductRecoveryController:
                         )
                     archive_ref = selected_archive_label or selected_archive_path
                     self.logger.info(
-                        "[Product] Auto-starting pre-ran archived bridge after DES handoff: archive=%s validation_policy=%s",
+                        "[Product] Auto-starting pre-ran archived recovery after DES handoff: archive=%s validation_policy=%s",
                         archive_ref,
                         session_validation_policy,
                     )
                     self._runtime_repair_inflight = False
                     try:
-                        await self.load_runtime_bridge_archive_proposal(
+                        await self.load_runtime_recovery_archive_proposal(
                             selected_archive_path,
                         )
                     except Exception as exc:
                         warning = (
-                            f"Pre-ran auto-start failed for archived bridge run '{selected_archive_path}': "
+                            f"Pre-ran auto-start failed for archived recovery run '{selected_archive_path}': "
                             f"{exc}. Execution remains paused."
                         )
                         self.logger.warning(
@@ -6007,20 +6021,20 @@ class ProductRecoveryController:
                             warning,
                         )
                         recovery = self._set_runtime_recovery(
-                            status="bridge_ready",
+                            status="recovery_ready",
                             resolution_class="none",
                             trigger=trigger,
                             failed_task_id=failed_task_id,
                             message=warning,
                             attempts_used=attempt_number,
                             attempts_max=self._runtime_repair_max_attempts,
-                            used_llm_bridge=False,
-                            bridge_proposal=None,
-                            bridge_debug=bridge_debug,
-                            bridge_approval_state="ready",
-                            bridge_stage="none",
-                            active_bridge_sequence=None,
-                            bridge_feedback_history=feedback_history,
+                            used_llm_recovery=False,
+                            recovery_proposal=None,
+                            recovery_debug=recovery_debug,
+                            recovery_approval_state="ready",
+                            recovery_stage="none",
+                            active_recovery_sequence=None,
+                            recovery_feedback_history=feedback_history,
                             violations=violations,
                             append_history=True,
                             history_message=warning,
@@ -6032,39 +6046,39 @@ class ProductRecoveryController:
                             text=warning,
                         )
                     self.logger.info(
-                        "[Product] Auto-approving pre-ran archived bridge after DES handoff: archive=%s validation_policy=%s",
+                        "[Product] Auto-approving pre-ran archived recovery after DES handoff: archive=%s validation_policy=%s",
                         archive_ref,
                         session_validation_policy,
                     )
-                    return self.approve_runtime_bridge_proposal_sync()
-                if session_bridge_mode == "auto":
+                    return self.approve_runtime_recovery_proposal_sync()
+                if session_recovery_mode == "auto":
                     self.logger.info(
-                        "[Product] Auto-starting live runtime bridge generation from the prepared request."
+                        "[Product] Auto-starting live runtime recovery generation from the prepared request."
                     )
                     self._runtime_repair_inflight = False
-                    return await self.generate_runtime_bridge_proposal()
+                    return await self.generate_runtime_recovery_proposal()
                 return recovery
-            if awaiting_bridge_approval and isinstance(bridge_proposal, dict):
-                bridge_text = (
-                    ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+            if awaiting_recovery_approval and isinstance(recovery_proposal, dict):
+                recovery_text = (
+                    ", ".join(str(item) for item in recovery_summary if item) or "recovery step(s)"
                 )
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     trigger=trigger,
                     failed_task_id=failed_task_id,
                     message=base_message
-                    or "Validated bridge proposal is ready for final approval.",
+                    or "Validated recovery proposal is ready for final approval.",
                     attempts_used=attempt_number,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=bridge_proposal,
-                    bridge_debug=bridge_debug,
-                    bridge_approval_state="pending",
-                    active_bridge_sequence=None,
-                    bridge_feedback_history=feedback_history,
+                    used_llm_recovery=True,
+                    recovery_proposal=recovery_proposal,
+                    recovery_debug=recovery_debug,
+                    recovery_approval_state="pending",
+                    active_recovery_sequence=None,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
-                    history_message=f"LLM bridge proposed {bridge_text}. Awaiting approval.",
+                    history_message=f"LLM recovery proposed {recovery_text}. Awaiting approval.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
@@ -6083,12 +6097,12 @@ class ProductRecoveryController:
                     message=message,
                     attempts_used=attempt_number,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=used_llm_bridge,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug,
-                    bridge_approval_state="none",
-                    active_bridge_sequence=None,
-                    bridge_feedback_history=feedback_history,
+                    used_llm_recovery=used_llm_recovery,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug,
+                    recovery_approval_state="none",
+                    active_recovery_sequence=None,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
                     history_message=message,
@@ -6115,8 +6129,8 @@ class ProductRecoveryController:
 
             validation_message = (
                 "DES recovery candidate generated; validating updated plan."
-                if not used_llm_bridge
-                else "DES + LLM bridge candidate generated; validating updated plan."
+                if not used_llm_recovery
+                else "DES + LLM recovery candidate generated; validating updated plan."
             )
             recovery = self._set_runtime_recovery(
                 status="validating",
@@ -6126,12 +6140,12 @@ class ProductRecoveryController:
                 message=validation_message,
                 attempts_used=attempt_number,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=used_llm_bridge,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if used_llm_bridge else None,
-                bridge_approval_state="approved" if used_llm_bridge else "none",
-                active_bridge_sequence=None,
-                bridge_feedback_history=feedback_history,
+                used_llm_recovery=used_llm_recovery,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if used_llm_recovery else None,
+                recovery_approval_state="approved" if used_llm_recovery else "none",
+                active_recovery_sequence=None,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=validation_message,
@@ -6156,10 +6170,10 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=attempt_number,
                 attempts_max=self._runtime_repair_max_attempts,
-                bridge_proposal=None,
-                bridge_approval_state="none",
-                active_bridge_sequence=None,
-                bridge_feedback_history=feedback_history,
+                recovery_proposal=None,
+                recovery_approval_state="none",
+                active_recovery_sequence=None,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -6186,26 +6200,26 @@ class ProductRecoveryController:
         system_coordination_state: dict | None = None,
     ) -> dict[str, Any]:
         current_status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        active_bridge_sequence = self._active_bridge_sequence()
-        active_bridge_state = self._bridge_sequence_state(active_bridge_sequence)
+        active_recovery_sequence = self._active_recovery_sequence()
+        active_recovery_state = self._recovery_sequence_state(active_recovery_sequence)
         if (
             current_status == "resolved"
-            and active_bridge_sequence
-            and active_bridge_state in {"approved", "executing"}
+            and active_recovery_sequence
+            and active_recovery_state in {"approved", "executing"}
         ):
             self.logger.warning(
-                "[Product] Runtime bridge sequence already executing for %s; ignoring duplicate replan request for %s.",
+                "[Product] Runtime recovery sequence already executing for %s; ignoring duplicate replan request for %s.",
                 self.runtime_recovery.get("failed_task_id") or failed_task_id,
                 failed_task_id,
             )
             return self.get_runtime_recovery()
         if current_status in {
             "des_search",
-            "bridge_ready",
-            "llm_bridge",
+            "recovery_ready",
+            "llm_recovery",
             "validating",
             "human_required",
-            "generated_bridge_verified",
+            "generated_recovery_verified",
         }:
             self.logger.warning(
                 "[Product] Runtime recovery already active for %s; ignoring duplicate replan request.",
@@ -6223,10 +6237,10 @@ class ProductRecoveryController:
             message=f"Runtime DES recovery triggered by {reason}.",
             attempts_used=0,
             attempts_max=self._runtime_repair_max_attempts,
-            bridge_proposal=None,
-            bridge_approval_state="none",
-            active_bridge_sequence=None,
-            bridge_feedback_history=[],
+            recovery_proposal=None,
+            recovery_approval_state="none",
+            active_recovery_sequence=None,
+            recovery_feedback_history=[],
             violations=violations,
             append_history=True,
             history_message=f"Runtime DES recovery triggered by {reason}.",
@@ -6263,21 +6277,21 @@ class ProductRecoveryController:
                 return True
             if not expected_request_id:
                 self.logger.info(
-                    "[Product] Ignoring unexpected plan_safety_result request_id=%s because no runtime bridge plan validation is active.",
+                    "[Product] Ignoring unexpected plan_safety_result request_id=%s because no runtime recovery plan validation is active.",
                     incoming_request_id,
                 )
                 return True
             self._runtime_recovery_context.pop("active_runtime_plan_validation_request_id", None)
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        validation_policy = self._normalize_runtime_bridge_validation_policy(
+        validation_policy = self._normalize_runtime_recovery_validation_policy(
             self.runtime_recovery.get("validation_policy")
             or (
                 self._runtime_recovery_context.get("validation_policy")
                 if isinstance(self._runtime_recovery_context, dict)
                 else ""
             )
-            or self._runtime_bridge_session_validation_policy()
+            or self._runtime_recovery_session_validation_policy()
         )
         if (
             validation_policy == "no_validation"
@@ -6285,54 +6299,54 @@ class ProductRecoveryController:
             and status in {"", "idle", "resolved"}
         ):
             self.logger.info(
-                "[Product] Ignoring plan_safety_result because validation_policy=no_validation and no runtime bridge plan validation is active."
+                "[Product] Ignoring plan_safety_result because validation_policy=no_validation and no runtime recovery plan validation is active."
             )
             return True
         if not self._runtime_recovery_context and status in {"", "idle", "resolved"}:
             return False
 
-        active_bridge_sequence = self._active_bridge_sequence()
-        if not active_bridge_sequence:
-            active_bridge_sequence = self._reconstruct_active_bridge_sequence_for_validation()
+        active_recovery_sequence = self._active_recovery_sequence()
+        if not active_recovery_sequence:
+            active_recovery_sequence = self._reconstruct_active_recovery_sequence_for_validation()
 
         if ok:
-            verification_only = self._bridge_is_verification_only(active_bridge_sequence)
-            repair_task_id = str((active_bridge_sequence or {}).get("repair_task_id") or "").strip()
+            verification_only = self._recovery_is_verification_only(active_recovery_sequence)
+            repair_task_id = str((active_recovery_sequence or {}).get("repair_task_id") or "").strip()
             repair_target_task_id = str(
-                (active_bridge_sequence or {}).get("repair_target_task_id") or ""
+                (active_recovery_sequence or {}).get("repair_target_task_id") or ""
             ).strip()
             resolution_class = (
-                "generated_bridge_verification"
+                "generated_recovery_verification"
                 if verification_only
-                else "des_with_llm_bridge"
-                if bool(self.runtime_recovery.get("used_llm_bridge", False))
+                else "des_with_llm_recovery"
+                if bool(self.runtime_recovery.get("used_llm_recovery", False))
                 else "des_only"
             )
             attempts_used = self._runtime_repair_fail_streak
             self._runtime_repair_fail_streak = 0
             reactivated_task_id = ""
-            if not active_bridge_sequence:
+            if not active_recovery_sequence:
                 reactivated_task_id = self._reactivate_restored_repair_target_from_context()
             success_message = (
-                "CCA runtime plan validation passed; generated bridge verification is executing."
-                if active_bridge_sequence and verification_only
+                "CCA runtime plan validation passed; generated recovery verification is executing."
+                if active_recovery_sequence and verification_only
                 else (
                     f"CCA runtime plan validation passed; runtime DES repair {repair_task_id} is validated "
                     f"for restored task {repair_target_task_id or '<unknown>'} and ready to dispatch."
                 )
-                if active_bridge_sequence and repair_task_id
-                else "CCA runtime plan validation passed; approved bridge sequence is executing."
-                if active_bridge_sequence
+                if active_recovery_sequence and repair_task_id
+                else "CCA runtime plan validation passed; approved recovery sequence is executing."
+                if active_recovery_sequence
                 else f"CCA runtime plan validation passed; restored continuation task {reactivated_task_id} reactivated."
                 if reactivated_task_id
                 else "CCA runtime plan validation passed; runtime recovery resolved."
             )
             self.logger.info(
-                "[Product] Runtime plan validation passed: active_bridge_sequence=%s status_before=%s",
-                bool(active_bridge_sequence),
+                "[Product] Runtime plan validation passed: active_recovery_sequence=%s status_before=%s",
+                bool(active_recovery_sequence),
                 status,
             )
-            if active_bridge_sequence and repair_task_id:
+            if active_recovery_sequence and repair_task_id:
                 self.logger.info(
                     "[Product] Runtime DES repair %s validated; enabling dispatch before restored task %s.",
                     repair_task_id,
@@ -6343,14 +6357,14 @@ class ProductRecoveryController:
                 resolution_class=resolution_class,
                 message=success_message,
                 attempts_used=attempts_used,
-                used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
-                bridge_proposal=None,
-                bridge_approval_state=(
+                used_llm_recovery=bool(self.runtime_recovery.get("used_llm_recovery", False)),
+                recovery_proposal=None,
+                recovery_approval_state=(
                     "approved"
-                    if bool(self.runtime_recovery.get("used_llm_bridge", False))
+                    if bool(self.runtime_recovery.get("used_llm_recovery", False))
                     else "none"
                 ),
-                active_bridge_sequence=active_bridge_sequence,
+                active_recovery_sequence=active_recovery_sequence,
                 generated_code_verification=self.runtime_recovery.get(
                     "generated_code_verification"
                 ),
@@ -6358,7 +6372,7 @@ class ProductRecoveryController:
                 append_history=True,
                 history_message=success_message,
             )
-            if not active_bridge_sequence:
+            if not active_recovery_sequence:
                 self._runtime_recovery_context = {}
             elif isinstance(self._runtime_recovery_context, dict):
                 self._runtime_recovery_context.pop(
@@ -6424,9 +6438,9 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                bridge_proposal=None,
-                bridge_approval_state="none",
-                active_bridge_sequence=None,
+                recovery_proposal=None,
+                recovery_approval_state="none",
+                active_recovery_sequence=None,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -6456,10 +6470,10 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
-                bridge_proposal=None,
-                bridge_approval_state="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=bool(self.runtime_recovery.get("used_llm_recovery", False)),
+                recovery_proposal=None,
+                recovery_approval_state="none",
+                active_recovery_sequence=None,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -6498,65 +6512,65 @@ class ProductRecoveryController:
             raise ValueError("operator guidance is empty")
         feedback_history = [
             str(item).strip()
-            for item in (self.runtime_recovery.get("bridge_feedback_history") or [])
+            for item in (self.runtime_recovery.get("recovery_feedback_history") or [])
             if str(item).strip()
         ]
         feedback_history.append(guidance)
         if self._runtime_recovery_context:
-            self._runtime_recovery_context["bridge_feedback_history"] = list(feedback_history)
-            prepared_bridge_request = deepcopy(
-                self._runtime_recovery_context.get("prepared_bridge_request") or {}
+            self._runtime_recovery_context["recovery_feedback_history"] = list(feedback_history)
+            prepared_recovery_request = deepcopy(
+                self._runtime_recovery_context.get("prepared_recovery_request") or {}
             )
-            if prepared_bridge_request:
-                bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+            if prepared_recovery_request:
+                recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
                 operator_feedback_history = [
                     str(item).strip()
-                    for item in (bridge_session.get("operator_feedback_history") or [])
+                    for item in (recovery_session.get("operator_feedback_history") or [])
                     if str(item).strip()
                 ]
                 operator_feedback_history.append(guidance)
-                bridge_session["operator_feedback_history"] = operator_feedback_history[-12:]
-                prepared_bridge_request["bridge_session"] = bridge_session
-                prepared_bridge_request["bridge_feedback"] = guidance
-                self._runtime_recovery_context["prepared_bridge_request"] = prepared_bridge_request
+                recovery_session["operator_feedback_history"] = operator_feedback_history[-12:]
+                prepared_recovery_request["recovery_session"] = recovery_session
+                prepared_recovery_request["recovery_feedback"] = guidance
+                self._runtime_recovery_context["prepared_recovery_request"] = prepared_recovery_request
         recovery = self._set_runtime_recovery(
             operator_guidance=guidance,
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             append_history=True,
             history_message=f"Operator guidance recorded: {guidance}",
         )
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    async def _execute_runtime_bridge_generation(
+    async def _execute_runtime_recovery_generation(
         self,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any] | None:
-        self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        proposal = await self.process_planner.execute_prepared_bridge_request(
-            prepared_bridge_request
+        self._ensure_live_recovery_per_turn_debug_dir(prepared_recovery_request)
+        proposal = await self.process_planner.execute_prepared_recovery_request(
+            prepared_recovery_request
         )
-        bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
-        reasoning_mode = str(bridge_session.get("reasoning_mode") or "").strip().lower()
+        recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
+        reasoning_mode = str(recovery_session.get("reasoning_mode") or "").strip().lower()
         if reasoning_mode != "multi_turn":
             return proposal
 
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_bridge.modes import (
-            execute_multi_turn_bridge as _resume_multi_turn_bridge,
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+            execute_multi_turn_recovery as _resume_multi_turn_recovery,
         )
 
         max_resume = max(
             10,
             int(
-                bridge_session.get("max_turns")
-                or dict(prepared_bridge_request.get("multi_turn_session_seed") or {}).get(
+                recovery_session.get("max_turns")
+                or dict(prepared_recovery_request.get("multi_turn_session_seed") or {}).get(
                     "max_turns"
                 )
                 or 0
             ),
         )
         for resume_idx in range(max_resume):
-            session_state = dict(prepared_bridge_request.get("multi_turn_session_state") or {})
+            session_state = dict(prepared_recovery_request.get("multi_turn_session_state") or {})
             pause_status = str(session_state.get("status") or "").strip().lower()
             if pause_status not in {
                 "paused_after_outline_turn",
@@ -6565,52 +6579,52 @@ class ProductRecoveryController:
             }:
                 break
             self.logger.info(
-                "[Product] Resuming multi-turn bridge session: status=%s round=%d/%d",
+                "[Product] Resuming multi-turn recovery session: status=%s round=%d/%d",
                 pause_status,
                 resume_idx + 1,
                 max_resume,
             )
-            proposal = await _resume_multi_turn_bridge(
+            proposal = await _resume_multi_turn_recovery(
                 self.process_planner,
-                prepared_bridge_request,
+                prepared_recovery_request,
                 session_state=session_state,
             )
         return proposal
 
-    async def generate_runtime_bridge_proposal(self) -> dict[str, Any]:
+    async def generate_runtime_recovery_proposal(self) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
-        active_bridge_sequence = self._active_bridge_sequence()
-        if self._bridge_sequence_is_live(active_bridge_sequence):
-            warning = "Live bridge generation is blocked while the approved bridge sequence is still active."
+        active_recovery_sequence = self._active_recovery_sequence()
+        if self._recovery_sequence_is_live(active_recovery_sequence):
+            warning = "Live recovery generation is blocked while the approved recovery sequence is still active."
             self.logger.warning(
-                "[Product] %s product=%s bridge_sequence_id=%s",
+                "[Product] %s product=%s recovery_sequence_id=%s",
                 warning,
                 self.agent_name,
-                str((active_bridge_sequence or {}).get("bridge_sequence_id") or "").strip(),
+                str((active_recovery_sequence or {}).get("recovery_sequence_id") or "").strip(),
             )
             return self._recovery_result_with_action_feedback(
                 self.get_runtime_recovery(),
                 kind="warning",
                 text=warning,
             )
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
         if self._runtime_repair_inflight:
             raise RuntimeError("runtime recovery is already in progress")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status not in {"bridge_ready", "llm_bridge", "human_required"}:
+        if status not in {"recovery_ready", "llm_recovery", "human_required"}:
             raise RuntimeError(
-                "bridge exploration can only be started from bridge_ready, llm_bridge, or human_required"
+                "recovery exploration can only be started from recovery_ready, llm_recovery, or human_required"
             )
-        session_bridge_mode = self._runtime_bridge_session_mode()
-        if status == "bridge_ready" and session_bridge_mode == "pre_ran":
+        session_recovery_mode = self._runtime_recovery_session_mode()
+        if status == "recovery_ready" and session_recovery_mode == "pre_ran":
             raise RuntimeError(
-                "pre-ran mode requires loading an archived bridge run instead of live bridge generation"
+                "pre-ran mode requires loading an archived recovery run instead of live recovery generation"
             )
 
         failed_task_id = str(
@@ -6618,178 +6632,178 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        bridge_debug = deepcopy(
-            prepared_bridge_request.get("bridge_debug")
-            or self.runtime_recovery.get("bridge_debug")
+        recovery_debug = deepcopy(
+            prepared_recovery_request.get("recovery_debug")
+            or self.runtime_recovery.get("recovery_debug")
             or {}
         )
-        bridge_debug = self._bridge_debug_with_runtime_handoff(
-            bridge_debug,
+        recovery_debug = self._recovery_debug_with_runtime_handoff(
+            recovery_debug,
             handoff_owner="product_agent",
-            bridge_mode=session_bridge_mode,
-            validation_policy=self._runtime_bridge_session_validation_policy(),
-            auto_start_requested=bool(session_bridge_mode == "auto"),
-            auto_start_started=bool(session_bridge_mode == "auto"),
+            recovery_mode=session_recovery_mode,
+            validation_policy=self._runtime_recovery_session_validation_policy(),
+            auto_start_requested=bool(session_recovery_mode == "auto"),
+            auto_start_started=bool(session_recovery_mode == "auto"),
             generation_started_at_utc=self._utc_now_iso(),
         )
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        bridge_debug = self._ensure_live_bridge_per_turn_debug_dir(prepared_bridge_request)
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+        recovery_debug = self._ensure_live_recovery_per_turn_debug_dir(prepared_recovery_request)
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
-        if hasattr(self.process_planner, "_set_last_bridge_debug"):
-            self.process_planner._set_last_bridge_debug(bridge_debug)
+        if hasattr(self.process_planner, "_set_last_recovery_debug"):
+            self.process_planner._set_last_recovery_debug(recovery_debug)
 
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
             message=(
-                "Running bounded LLM bridge reasoning to the outline review checkpoint."
-                if session_bridge_mode == "manual"
-                else "Running live LLM bridge reasoning from the prepared session."
+                "Running bounded LLM recovery reasoning to the outline review checkpoint."
+                if session_recovery_mode == "manual"
+                else "Running live LLM recovery reasoning from the prepared session."
             ),
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="generating",
-            bridge_stage="none",
-            active_bridge_sequence=None,
-            bridge_feedback_history=list(
-                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="generating",
+            recovery_stage="none",
+            active_recovery_sequence=None,
+            recovery_feedback_history=list(
+                self._runtime_recovery_context.get("recovery_feedback_history") or []
             ),
             violations=violations,
             append_history=True,
             history_message=(
-                "Operator started live bridge reasoning to the outline checkpoint."
-                if session_bridge_mode == "manual"
-                else "Auto-started live runtime bridge generation from the prepared request."
+                "Operator started live recovery reasoning to the outline checkpoint."
+                if session_recovery_mode == "manual"
+                else "Auto-started live runtime recovery generation from the prepared request."
             ),
         )
         await asyncio.to_thread(self._persist_product_state)
 
-        if session_bridge_mode == "manual":
+        if session_recovery_mode == "manual":
             self.logger.info(
-                "[Product] Starting live runtime bridge generation from the prepared request after operator action."
+                "[Product] Starting live runtime recovery generation from the prepared request after operator action."
             )
-        per_turn_debug_dir = str(bridge_debug.get("per_turn_debug_dir") or "").strip()
+        per_turn_debug_dir = str(recovery_debug.get("per_turn_debug_dir") or "").strip()
         if per_turn_debug_dir:
             self.logger.info(
-                "[Product] Live bridge per-turn artifacts will be written under %s",
+                "[Product] Live recovery per-turn artifacts will be written under %s",
                 per_turn_debug_dir,
             )
 
         self._runtime_repair_inflight = True
         try:
-            if session_bridge_mode == "manual":
-                proposal = await self._run_multi_turn_bridge_until(
-                    prepared_bridge_request,
+            if session_recovery_mode == "manual":
+                proposal = await self._run_multi_turn_recovery_until(
+                    prepared_recovery_request,
                     stop_after="outline",
                 )
             else:
-                proposal = await self._execute_runtime_bridge_generation(prepared_bridge_request)
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug")
-                or self.process_planner.get_last_bridge_debug()
+                proposal = await self._execute_runtime_recovery_generation(prepared_recovery_request)
+            recovery_debug = deepcopy(
+                prepared_recovery_request.get("recovery_debug")
+                or self.process_planner.get_last_recovery_debug()
                 or {}
             )
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            self._record_runtime_bridge_artifacts(
+            self._record_runtime_recovery_artifacts(
                 phase="multi_turn",
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug") or bridge_debug or {}
+            recovery_debug = deepcopy(
+                prepared_recovery_request.get("recovery_debug") or recovery_debug or {}
             )
-            bridge_status = str((bridge_debug or {}).get("status") or "").strip().lower()
-            if session_bridge_mode == "manual" and bridge_status in {
+            recovery_status = str((recovery_debug or {}).get("status") or "").strip().lower()
+            if session_recovery_mode == "manual" and recovery_status in {
                 "paused_after_outline_turn",
                 "ready_for_primitive_generation",
             }:
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Bridge outline is ready for operator review.",
+                    message="Recovery outline is ready for operator review.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="outline_pending",
-                    bridge_stage="outline",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="outline_pending",
+                    recovery_stage="outline",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge outline paused for operator approval.",
+                    history_message="Recovery outline paused for operator approval.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
             if isinstance(proposal, dict):
-                bridge_summary = self.process_planner._bridge_summary(proposal)
-                bridge_text = (
-                    ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+                recovery_summary = self.process_planner._recovery_summary(proposal)
+                recovery_text = (
+                    ", ".join(str(item) for item in recovery_summary if item) or "recovery step(s)"
                 )
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Validated LLM bridge proposal is ready for final approval.",
+                    message="Validated LLM recovery proposal is ready for final approval.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=proposal,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="pending",
-                    bridge_stage="final",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=proposal,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="pending",
+                    recovery_stage="final",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message=f"LLM bridge proposed {bridge_text}.",
+                    history_message=f"LLM recovery proposed {recovery_text}.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
-            if bridge_status == "paused_after_grounding":
-                message = "LLM bridge grounding completed and is paused before outline generation for review."
+            if recovery_status == "paused_after_grounding":
+                message = "LLM recovery grounding completed and is paused before outline generation for review."
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
                     message=message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="generating",
-                    bridge_stage="none",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="generating",
+                    recovery_stage="none",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
@@ -6798,29 +6812,29 @@ class ProductRecoveryController:
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
-            if bridge_status in {
+            if recovery_status in {
                 "paused_after_outline_turn",
                 "ready_for_primitive_generation",
                 "paused_after_primitive_turn",
             }:
-                message = "LLM bridge paused for another bounded multi-turn reasoning step."
+                message = "LLM recovery paused for another bounded multi-turn reasoning step."
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
                     message=message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="generating",
-                    bridge_stage="none",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="generating",
+                    recovery_stage="none",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
@@ -6829,8 +6843,8 @@ class ProductRecoveryController:
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
-            if bridge_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
-                message = "LLM bridge primitive generation stalled before producing a validated final plan."
+            if recovery_status in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}:
+                message = "LLM recovery primitive generation stalled before producing a validated final plan."
                 recovery = self._set_runtime_recovery(
                     status="human_required",
                     resolution_class="human_required",
@@ -6839,15 +6853,15 @@ class ProductRecoveryController:
                     message=message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="none",
-                    bridge_stage="none",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="none",
+                    recovery_stage="none",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
@@ -6864,7 +6878,7 @@ class ProductRecoveryController:
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
-            message = "LLM bridge reasoning produced no validated final plan. Review the trace, refine, or retry DES."
+            message = "LLM recovery reasoning produced no validated final plan. Review the trace, refine, or retry DES."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -6873,15 +6887,15 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=list(
-                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                recovery_feedback_history=list(
+                    self._runtime_recovery_context.get("recovery_feedback_history") or []
                 ),
                 violations=violations,
                 append_history=True,
@@ -6898,9 +6912,9 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_product_state)
             return recovery
         except Exception as exc:
-            self.logger.exception("[Product] LLM bridge exploration failed.")
-            bridge_debug = self.process_planner.get_last_bridge_debug()
-            message = f"{self.agent_name}: LLM bridge exploration failed ({exc})."
+            self.logger.exception("[Product] LLM recovery exploration failed.")
+            recovery_debug = self.process_planner.get_last_recovery_debug()
+            message = f"{self.agent_name}: LLM recovery exploration failed ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -6909,17 +6923,17 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=self.runtime_recovery.get(
                     "generated_code_verification"
                 ),
-                bridge_feedback_history=list(
-                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                recovery_feedback_history=list(
+                    self._runtime_recovery_context.get("recovery_feedback_history") or []
                 ),
                 violations=violations,
                 append_history=True,
@@ -6938,20 +6952,20 @@ class ProductRecoveryController:
         finally:
             self._runtime_repair_inflight = False
 
-    async def load_runtime_bridge_archive_proposal(
+    async def load_runtime_recovery_archive_proposal(
         self,
         artifact_path: str | None = None,
     ) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
-        active_bridge_sequence = self._active_bridge_sequence()
-        if self._bridge_sequence_is_live(active_bridge_sequence):
-            warning = "Archived bridge loading is blocked while the approved bridge sequence is still active."
+        active_recovery_sequence = self._active_recovery_sequence()
+        if self._recovery_sequence_is_live(active_recovery_sequence):
+            warning = "Archived recovery loading is blocked while the approved recovery sequence is still active."
             self.logger.warning(
-                "[Product] %s product=%s bridge_sequence_id=%s",
+                "[Product] %s product=%s recovery_sequence_id=%s",
                 warning,
                 self.agent_name,
-                str((active_bridge_sequence or {}).get("bridge_sequence_id") or "").strip(),
+                str((active_recovery_sequence or {}).get("recovery_sequence_id") or "").strip(),
             )
             return self._recovery_result_with_action_feedback(
                 self.get_runtime_recovery(),
@@ -6960,61 +6974,61 @@ class ProductRecoveryController:
             )
         if self._runtime_repair_inflight:
             raise RuntimeError("runtime recovery is already in progress")
-        if self._runtime_bridge_session_mode() != "pre_ran":
-            raise RuntimeError("archived bridge loading is only available in pre-ran mode")
+        if self._runtime_recovery_session_mode() != "pre_ran":
+            raise RuntimeError("archived recovery loading is only available in pre-ran mode")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status not in {"bridge_ready", "human_required", "llm_bridge"}:
+        if status not in {"recovery_ready", "human_required", "llm_recovery"}:
             raise RuntimeError(
-                "archived bridge loading is only available from bridge_ready, llm_bridge, or human_required"
+                "archived recovery loading is only available from recovery_ready, llm_recovery, or human_required"
             )
 
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
 
         final_output_payload, adapter_result, resolved_path = (
-            self._load_runtime_bridge_archive_bundle(
-                prepared_bridge_request=prepared_bridge_request,
+            self._load_runtime_recovery_archive_bundle(
+                prepared_recovery_request=prepared_recovery_request,
                 artifact_path=artifact_path,
             )
         )
-        proposal = deepcopy(adapter_result.get("bridge_proposal") or {})
+        proposal = deepcopy(adapter_result.get("recovery_proposal") or {})
         if not isinstance(proposal, dict) or not proposal:
-            raise RuntimeError("archived bridge run proposal build did not produce a proposal")
+            raise RuntimeError("archived recovery run proposal build did not produce a proposal")
 
-        validation_policy = self._runtime_bridge_session_validation_policy()
-        bridge_debug = deepcopy(prepared_bridge_request.get("bridge_debug") or {})
-        bridge_debug["source"] = "archived_final_output"
-        bridge_debug["status"] = "archive_replay_ready"
-        bridge_debug["message"] = "Loaded archived bridge final output for final operator approval."
-        bridge_debug["validation_policy"] = validation_policy
-        bridge_debug["archive_replay"] = {
+        validation_policy = self._runtime_recovery_session_validation_policy()
+        recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
+        recovery_debug["source"] = "archived_final_output"
+        recovery_debug["status"] = "archive_replay_ready"
+        recovery_debug["message"] = "Loaded archived recovery final output for final operator approval."
+        recovery_debug["validation_policy"] = validation_policy
+        recovery_debug["archive_replay"] = {
             "source_path": str(resolved_path),
-            "selected_label": self._runtime_bridge_session_archive_label(),
+            "selected_label": self._runtime_recovery_session_archive_label(),
             "load_status": "loaded",
             "proposal_build_status": "accepted",
             "validation_policy": validation_policy,
         }
-        execution_policy = deepcopy(bridge_debug.get("execution_policy") or {})
+        execution_policy = deepcopy(recovery_debug.get("execution_policy") or {})
         if not bool(execution_policy.get("verification_only")):
             execution_policy["complete_full_tail"] = True
         execution_policy["validation_policy"] = validation_policy
         execution_policy.pop("skip_runtime_plan_validation", None)
-        bridge_debug["execution_policy"] = execution_policy
-        bridge_debug = self._bridge_debug_with_runtime_handoff(
-            bridge_debug,
-            bridge_mode=self._runtime_bridge_session_mode(),
+        recovery_debug["execution_policy"] = execution_policy
+        recovery_debug = self._recovery_debug_with_runtime_handoff(
+            recovery_debug,
+            recovery_mode=self._runtime_recovery_session_mode(),
             validation_policy=validation_policy,
         )
-        bridge_debug["final_output"] = deepcopy(final_output_payload)
-        bridge_debug["final_output_adapter"] = deepcopy(adapter_result)
-        bridge_debug["bridge_proposal"] = deepcopy(proposal)
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        recovery_debug["final_output"] = deepcopy(final_output_payload)
+        recovery_debug["final_output_adapter"] = deepcopy(adapter_result)
+        recovery_debug["recovery_proposal"] = deepcopy(proposal)
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
 
         archived_recovery_safety_result: dict[str, Any] = {}
@@ -7054,7 +7068,7 @@ class ProductRecoveryController:
                 self._runtime_recovery_context["recovery_safety_result"] = deepcopy(
                     archived_recovery_safety_result
                 )
-                bridge_debug["archived_recovery_safety"] = {
+                recovery_debug["archived_recovery_safety"] = {
                     "status": "loaded",
                     "recovery_safety_scope_id": recovery_safety_scope_id,
                     "recovery_safety_status": recovery_safety_status,
@@ -7064,16 +7078,16 @@ class ProductRecoveryController:
                         or ""
                     ).strip(),
                 }
-                prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                    prepared_bridge_request
+                prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+                self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                    prepared_recovery_request
                 )
             else:
                 recovery_safety_scope_id = (
                     recovery_safety_scope_id or f"recovery_scope_{uuid.uuid4().hex[:8]}"
                 )
                 recovery_safety_payload = self._dispatch_recovery_safety_generation_request(
-                    prepared_bridge_request=prepared_bridge_request,
+                    prepared_recovery_request=prepared_recovery_request,
                     recovery_safety_scope_id=recovery_safety_scope_id,
                 )
                 recovery_safety_status = "generating"
@@ -7087,28 +7101,28 @@ class ProductRecoveryController:
                 recovery_safery_dir = str(
                     recovery_safety_payload.get("recovery_safery_dir") or ""
                 ).strip()
-                bridge_debug["archived_recovery_safety"] = {
+                recovery_debug["archived_recovery_safety"] = {
                     "status": "generating",
                     "recovery_safety_scope_id": recovery_safety_scope_id,
                     "recovery_safety_status": recovery_safety_status,
                 }
-                prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-                self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                    prepared_bridge_request
+                prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+                self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                    prepared_recovery_request
                 )
         self.logger.info(
-            "[Product] Archived bridge replay loaded: archive=%s validation_policy=%s",
+            "[Product] Archived recovery replay loaded: archive=%s validation_policy=%s",
             resolved_path,
             validation_policy,
         )
-        if hasattr(self.process_planner, "_set_last_bridge_debug"):
-            self.process_planner._set_last_bridge_debug(bridge_debug)
-        self._record_runtime_bridge_artifacts(
+        if hasattr(self.process_planner, "_set_last_recovery_debug"):
+            self.process_planner._set_last_recovery_debug(recovery_debug)
+        self._record_runtime_recovery_artifacts(
             phase="multi_turn",
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
 
         failed_task_id = str(
@@ -7116,29 +7130,29 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        bridge_summary = self.process_planner._bridge_summary(proposal)
-        bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+        recovery_summary = self.process_planner._recovery_summary(proposal)
+        recovery_text = ", ".join(str(item) for item in recovery_summary if item) or "recovery step(s)"
         recovery_message = (
-            "Archived bridge proposal loaded and ready for final approval. Recovery Safety Check is enabled for recovery_safety runtime enforcement."
+            "Archived recovery proposal loaded and ready for final approval. Recovery Safety Check is enabled for recovery_safety runtime enforcement."
             if validation_policy == "validated" and recovery_safety_status == "ready"
-            else "Archived bridge proposal loaded; Recovery Safety Check is generating recovery_safety runtime enforcement before final approval."
+            else "Archived recovery proposal loaded; Recovery Safety Check is generating recovery_safety runtime enforcement before final approval."
             if validation_policy == "validated"
-            else "Archived bridge proposal loaded and ready for final approval. No Recovery Safety Check is enabled for recovery_safety runtime enforcement."
+            else "Archived recovery proposal loaded and ready for final approval. No Recovery Safety Check is enabled for recovery_safety runtime enforcement."
         )
         recovery = self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
             message=recovery_message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=proposal,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="pending",
-            bridge_stage="final",
-            active_bridge_sequence=None,
+            used_llm_recovery=True,
+            recovery_proposal=proposal,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="pending",
+            recovery_stage="final",
+            active_recovery_sequence=None,
             recovery_safety_scope_id=recovery_safety_scope_id,
             recovery_safety_status=recovery_safety_status,
             recovery_safety_logic_json=recovery_safety_logic_json,
@@ -7146,20 +7160,20 @@ class ProductRecoveryController:
             recovery_plan_dir=recovery_plan_dir,
             recovery_safery_dir=recovery_safery_dir,
             generated_code_verification=None,
-            bridge_feedback_history=list(
-                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            recovery_feedback_history=list(
+                self._runtime_recovery_context.get("recovery_feedback_history") or []
             ),
             violations=violations,
             append_history=True,
             history_message=(
-                f"Loaded archived bridge proposal: {bridge_text} (recovery_safety mode: {validation_policy})."
+                f"Loaded archived recovery proposal: {recovery_text} (recovery_safety mode: {validation_policy})."
             ),
         )
         self._clear_plan_safety_alert()
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    async def approve_runtime_bridge_outline(self) -> dict[str, Any]:
+    async def approve_runtime_recovery_outline(self) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         if self._runtime_repair_inflight:
@@ -7167,11 +7181,11 @@ class ProductRecoveryController:
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "outline_pending":
+        if status != "llm_recovery" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting approval")
 
         failed_task_id = str(
@@ -7179,27 +7193,27 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
         recovery_safety_scope_id = f"recovery_scope_{uuid.uuid4().hex[:8]}"
 
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
-            message="Outline approved. Continuing live bridge reasoning to the primitive review checkpoint.",
+            message="Outline approved. Continuing live recovery reasoning to the primitive review checkpoint.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=self.runtime_recovery.get("bridge_debug"),
-            bridge_approval_state="generating",
-            bridge_stage="outline",
-            active_bridge_sequence=None,
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=self.runtime_recovery.get("recovery_debug"),
+            recovery_approval_state="generating",
+            recovery_stage="outline",
+            active_recovery_sequence=None,
             recovery_safety_scope_id=recovery_safety_scope_id,
             recovery_safety_status="generating",
             recovery_safety_logic_json="",
@@ -7210,18 +7224,18 @@ class ProductRecoveryController:
             recovery_final_output_path="",
             recovery_enforced_task_ids=[],
             generated_code_verification=None,
-            bridge_feedback_history=list(
-                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            recovery_feedback_history=list(
+                self._runtime_recovery_context.get("recovery_feedback_history") or []
             ),
             violations=violations,
             append_history=True,
-            history_message="Operator approved the bridge outline.",
+            history_message="Operator approved the recovery outline.",
         )
         await asyncio.to_thread(self._persist_product_state)
 
         try:
             recovery_safety_payload = self._dispatch_recovery_safety_generation_request(
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
                 recovery_safety_scope_id=recovery_safety_scope_id,
             )
         except Exception as exc:
@@ -7240,12 +7254,12 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=self.runtime_recovery.get("bridge_debug"),
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=self.runtime_recovery.get("recovery_debug"),
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 recovery_safety_scope_id=recovery_safety_scope_id,
                 recovery_safety_status="failed",
                 recovery_safety_logic_json="",
@@ -7256,8 +7270,8 @@ class ProductRecoveryController:
                 recovery_final_output_path="",
                 recovery_enforced_task_ids=[],
                 generated_code_verification=None,
-                bridge_feedback_history=list(
-                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                recovery_feedback_history=list(
+                    self._runtime_recovery_context.get("recovery_feedback_history") or []
                 ),
                 violations=violations,
                 append_history=True,
@@ -7293,55 +7307,55 @@ class ProductRecoveryController:
 
         self._runtime_repair_inflight = True
         try:
-            proposal = await self._run_multi_turn_bridge_until(
-                prepared_bridge_request,
+            proposal = await self._run_multi_turn_recovery_until(
+                prepared_recovery_request,
                 stop_after="primitive",
             )
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug")
-                or self.process_planner.get_last_bridge_debug()
+            recovery_debug = deepcopy(
+                prepared_recovery_request.get("recovery_debug")
+                or self.process_planner.get_last_recovery_debug()
                 or {}
             )
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            self._record_runtime_bridge_artifacts(
+            self._record_runtime_recovery_artifacts(
                 phase="multi_turn",
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
             self._maybe_write_recovery_final_bundle(
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            bridge_status = str(bridge_debug.get("status") or "").strip().lower()
-            if bridge_status in {
+            recovery_status = str(recovery_debug.get("status") or "").strip().lower()
+            if recovery_status in {
                 "paused_after_primitive_generation",
                 "paused_after_primitive_turn",
             }:
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Bridge primitives are ready for operator review.",
+                    message="Recovery primitives are ready for operator review.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="primitive_pending",
-                    bridge_stage="primitive",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="primitive_pending",
+                    recovery_stage="primitive",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge primitive generation paused for operator approval.",
+                    history_message="Recovery primitive generation paused for operator approval.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
@@ -7349,36 +7363,36 @@ class ProductRecoveryController:
 
             if isinstance(proposal, dict):
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Validated LLM bridge proposal is ready for final approval.",
+                    message="Validated LLM recovery proposal is ready for final approval.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=proposal,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="pending",
-                    bridge_stage="final",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=proposal,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="pending",
+                    recovery_stage="final",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=list(
-                        self._runtime_recovery_context.get("bridge_feedback_history") or []
+                    recovery_feedback_history=list(
+                        self._runtime_recovery_context.get("recovery_feedback_history") or []
                     ),
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge primitive generation completed and produced a final proposal.",
+                    history_message="Recovery primitive generation completed and produced a final proposal.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
             message = (
-                "LLM bridge primitive generation did not produce a reviewable primitive program."
-                if bridge_status
+                "LLM recovery primitive generation did not produce a reviewable primitive program."
+                if recovery_status
                 not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
-                else "LLM bridge primitive generation stalled before producing a reviewable primitive program."
+                else "LLM recovery primitive generation stalled before producing a reviewable primitive program."
             )
             recovery = self._set_runtime_recovery(
                 status="human_required",
@@ -7388,15 +7402,15 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=list(
-                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                recovery_feedback_history=list(
+                    self._runtime_recovery_context.get("recovery_feedback_history") or []
                 ),
                 violations=violations,
                 append_history=True,
@@ -7413,9 +7427,9 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_product_state)
             return recovery
         except Exception as exc:
-            self.logger.exception("[Product] Outline approval bridge continuation failed.")
-            bridge_debug = self.process_planner.get_last_bridge_debug()
-            message = f"{self.agent_name}: outline approval failed while continuing bridge reasoning ({exc})."
+            self.logger.exception("[Product] Outline approval recovery continuation failed.")
+            recovery_debug = self.process_planner.get_last_recovery_debug()
+            message = f"{self.agent_name}: outline approval failed while continuing recovery reasoning ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -7424,15 +7438,15 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=list(
-                    self._runtime_recovery_context.get("bridge_feedback_history") or []
+                recovery_feedback_history=list(
+                    self._runtime_recovery_context.get("recovery_feedback_history") or []
                 ),
                 violations=violations,
                 append_history=True,
@@ -7451,7 +7465,7 @@ class ProductRecoveryController:
         finally:
             self._runtime_repair_inflight = False
 
-    async def refine_runtime_bridge_outline(self, feedback: str) -> dict[str, Any]:
+    async def refine_runtime_recovery_outline(self, feedback: str) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         if self._runtime_repair_inflight:
@@ -7459,86 +7473,86 @@ class ProductRecoveryController:
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "outline_pending":
+        if status != "llm_recovery" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting refinement")
 
-        feedback_history = self._append_bridge_feedback(feedback)
+        feedback_history = self._append_recovery_feedback(feedback)
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        prepared_bridge_request = self._prepare_runtime_bridge_session_state(stage="outline")
+        prepared_recovery_request = self._prepare_runtime_recovery_session_state(stage="outline")
 
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
-            message="Outline guidance recorded. Re-running live bridge reasoning to regenerate the outline checkpoint.",
+            message="Outline guidance recorded. Re-running live recovery reasoning to regenerate the outline checkpoint.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=prepared_bridge_request.get("bridge_debug"),
-            bridge_approval_state="generating",
-            bridge_stage="outline",
-            active_bridge_sequence=None,
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=prepared_recovery_request.get("recovery_debug"),
+            recovery_approval_state="generating",
+            recovery_stage="outline",
+            active_recovery_sequence=None,
             generated_code_verification=None,
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             violations=violations,
             append_history=True,
-            history_message=f"Operator refined the bridge outline: {str(feedback).strip()}",
+            history_message=f"Operator refined the recovery outline: {str(feedback).strip()}",
         )
         await asyncio.to_thread(self._persist_product_state)
 
         self._runtime_repair_inflight = True
         try:
-            proposal = await self._run_multi_turn_bridge_until(
-                prepared_bridge_request,
+            proposal = await self._run_multi_turn_recovery_until(
+                prepared_recovery_request,
                 stop_after="outline",
             )
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug")
-                or self.process_planner.get_last_bridge_debug()
+            recovery_debug = deepcopy(
+                prepared_recovery_request.get("recovery_debug")
+                or self.process_planner.get_last_recovery_debug()
                 or {}
             )
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            self._record_runtime_bridge_artifacts(
+            self._record_runtime_recovery_artifacts(
                 phase="multi_turn",
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            bridge_status = str(bridge_debug.get("status") or "").strip().lower()
-            if bridge_status in {"paused_after_outline_turn", "ready_for_primitive_generation"}:
+            recovery_status = str(recovery_debug.get("status") or "").strip().lower()
+            if recovery_status in {"paused_after_outline_turn", "ready_for_primitive_generation"}:
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Bridge outline is ready for operator review.",
+                    message="Recovery outline is ready for operator review.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="outline_pending",
-                    bridge_stage="outline",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="outline_pending",
+                    recovery_stage="outline",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=feedback_history,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge outline regenerated for operator approval.",
+                    history_message="Recovery outline regenerated for operator approval.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
@@ -7546,30 +7560,30 @@ class ProductRecoveryController:
 
             if isinstance(proposal, dict):
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Validated LLM bridge proposal is ready for final approval.",
+                    message="Validated LLM recovery proposal is ready for final approval.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=proposal,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="pending",
-                    bridge_stage="final",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=proposal,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="pending",
+                    recovery_stage="final",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=feedback_history,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge refinement produced a final proposal.",
+                    history_message="Recovery refinement produced a final proposal.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
-            message = "LLM bridge outline regeneration did not produce a reviewable outline."
+            message = "LLM recovery outline regeneration did not produce a reviewable outline."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -7578,14 +7592,14 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=feedback_history,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -7601,9 +7615,9 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_product_state)
             return recovery
         except Exception as exc:
-            self.logger.exception("[Product] Outline refinement bridge continuation failed.")
-            bridge_debug = self.process_planner.get_last_bridge_debug()
-            message = f"{self.agent_name}: outline refinement failed while continuing bridge reasoning ({exc})."
+            self.logger.exception("[Product] Outline refinement recovery continuation failed.")
+            recovery_debug = self.process_planner.get_last_recovery_debug()
+            message = f"{self.agent_name}: outline refinement failed while continuing recovery reasoning ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -7612,14 +7626,14 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=feedback_history,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -7637,49 +7651,49 @@ class ProductRecoveryController:
         finally:
             self._runtime_repair_inflight = False
 
-    async def reject_runtime_bridge_outline(self, feedback: str) -> dict[str, Any]:
+    async def reject_runtime_recovery_outline(self, feedback: str) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "outline_pending":
+        if status != "llm_recovery" or approval_state != "outline_pending":
             raise RuntimeError("no outline checkpoint is awaiting rejection")
 
         feedback_text = str(feedback or "").strip()
         if not feedback_text:
             raise ValueError("outline rejection feedback is empty")
-        feedback_history = self._append_bridge_feedback(feedback_text)
+        feedback_history = self._append_recovery_feedback(feedback_text)
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
         recovery = self._set_runtime_recovery(
             status="human_required",
             resolution_class="human_required",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
-            message="Operator rejected the bridge outline. Runtime recovery is paused for manual intervention.",
+            message="Operator rejected the recovery outline. Runtime recovery is paused for manual intervention.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=(
-                self.process_planner.get_last_bridge_debug()
-                or self.runtime_recovery.get("bridge_debug")
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=(
+                self.process_planner.get_last_recovery_debug()
+                or self.runtime_recovery.get("recovery_debug")
             ),
-            bridge_approval_state="none",
-            bridge_stage="none",
-            active_bridge_sequence=None,
+            recovery_approval_state="none",
+            recovery_stage="none",
+            active_recovery_sequence=None,
             generated_code_verification=None,
             violations=violations,
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             append_history=True,
-            history_message=f"Operator rejected bridge outline: {feedback_text}",
+            history_message=f"Operator rejected recovery outline: {feedback_text}",
         )
         self._set_plan_safety_alert(
             stage="runtime",
-            message=str(recovery.get("message", "") or "Bridge outline rejected."),
+            message=str(recovery.get("message", "") or "Recovery outline rejected."),
             retries_used=self._runtime_repair_fail_streak,
             retries_max=self._runtime_repair_max_attempts,
             violations=violations,
@@ -7688,49 +7702,49 @@ class ProductRecoveryController:
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    async def approve_runtime_bridge_primitives(self) -> dict[str, Any]:
+    async def approve_runtime_recovery_primitives(self) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "primitive_pending":
+        if status != "llm_recovery" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting approval")
 
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
 
-        proposal = self._bridge_proposal_from_debug(prepared_bridge_request)
+        proposal = self._recovery_proposal_from_debug(prepared_recovery_request)
         if not isinstance(proposal, dict):
             raise RuntimeError(
-                "completed primitive bridge output could not be built into a final proposal"
+                "completed primitive recovery output could not be built into a final proposal"
             )
-        bridge_debug = deepcopy(
-            prepared_bridge_request.get("bridge_debug")
-            or self.process_planner.get_last_bridge_debug()
+        recovery_debug = deepcopy(
+            prepared_recovery_request.get("recovery_debug")
+            or self.process_planner.get_last_recovery_debug()
             or {}
         )
-        bridge_debug["bridge_proposal"] = deepcopy(proposal)
-        prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        recovery_debug["recovery_proposal"] = deepcopy(proposal)
+        prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
-        self._record_runtime_bridge_artifacts(
+        self._record_runtime_recovery_artifacts(
             phase="multi_turn",
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-            prepared_bridge_request
+        self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+            prepared_recovery_request
         )
         self._maybe_write_recovery_final_bundle(
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
 
         failed_task_id = str(
@@ -7738,35 +7752,35 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        bridge_summary = self.process_planner._bridge_summary(proposal)
-        bridge_text = ", ".join(str(item) for item in bridge_summary if item) or "bridge step(s)"
+        recovery_summary = self.process_planner._recovery_summary(proposal)
+        recovery_text = ", ".join(str(item) for item in recovery_summary if item) or "recovery step(s)"
         recovery = self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
-            message="Validated LLM bridge proposal is ready for final approval.",
+            message="Validated LLM recovery proposal is ready for final approval.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=proposal,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="pending",
-            bridge_stage="final",
-            active_bridge_sequence=None,
+            used_llm_recovery=True,
+            recovery_proposal=proposal,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="pending",
+            recovery_stage="final",
+            active_recovery_sequence=None,
             generated_code_verification=None,
-            bridge_feedback_history=list(
-                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            recovery_feedback_history=list(
+                self._runtime_recovery_context.get("recovery_feedback_history") or []
             ),
             violations=violations,
             append_history=True,
-            history_message=f"Operator approved bridge primitives: {bridge_text}.",
+            history_message=f"Operator approved recovery primitives: {recovery_text}.",
         )
         self._clear_plan_safety_alert()
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    async def refine_runtime_bridge_primitives(self, feedback: str) -> dict[str, Any]:
+    async def refine_runtime_recovery_primitives(self, feedback: str) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         if self._runtime_repair_inflight:
@@ -7774,92 +7788,92 @@ class ProductRecoveryController:
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "primitive_pending":
+        if status != "llm_recovery" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting refinement")
 
-        feedback_history = self._append_bridge_feedback(feedback)
+        feedback_history = self._append_recovery_feedback(feedback)
         failed_task_id = str(
             self.runtime_recovery.get("failed_task_id")
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        prepared_bridge_request = self._prepare_runtime_bridge_session_state(stage="primitive")
+        prepared_recovery_request = self._prepare_runtime_recovery_session_state(stage="primitive")
 
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
-            message="Primitive guidance recorded. Re-running live bridge primitive generation.",
+            message="Primitive guidance recorded. Re-running live recovery primitive generation.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=prepared_bridge_request.get("bridge_debug"),
-            bridge_approval_state="generating",
-            bridge_stage="primitive",
-            active_bridge_sequence=None,
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=prepared_recovery_request.get("recovery_debug"),
+            recovery_approval_state="generating",
+            recovery_stage="primitive",
+            active_recovery_sequence=None,
             generated_code_verification=None,
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             violations=violations,
             append_history=True,
-            history_message=f"Operator refined bridge primitives: {str(feedback).strip()}",
+            history_message=f"Operator refined recovery primitives: {str(feedback).strip()}",
         )
         await asyncio.to_thread(self._persist_product_state)
 
         self._runtime_repair_inflight = True
         try:
-            proposal = await self._run_multi_turn_bridge_until(
-                prepared_bridge_request,
+            proposal = await self._run_multi_turn_recovery_until(
+                prepared_recovery_request,
                 stop_after="primitive",
             )
-            bridge_debug = deepcopy(
-                prepared_bridge_request.get("bridge_debug")
-                or self.process_planner.get_last_bridge_debug()
+            recovery_debug = deepcopy(
+                prepared_recovery_request.get("recovery_debug")
+                or self.process_planner.get_last_recovery_debug()
                 or {}
             )
-            prepared_bridge_request["bridge_debug"] = deepcopy(bridge_debug)
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
-            self._record_runtime_bridge_artifacts(
+            self._record_runtime_recovery_artifacts(
                 phase="multi_turn",
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            self._runtime_recovery_context["prepared_bridge_request"] = deepcopy(
-                prepared_bridge_request
+            self._runtime_recovery_context["prepared_recovery_request"] = deepcopy(
+                prepared_recovery_request
             )
             self._maybe_write_recovery_final_bundle(
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
-            bridge_status = str(bridge_debug.get("status") or "").strip().lower()
-            if bridge_status in {
+            recovery_status = str(recovery_debug.get("status") or "").strip().lower()
+            if recovery_status in {
                 "paused_after_primitive_generation",
                 "paused_after_primitive_turn",
             }:
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Bridge primitives are ready for operator review.",
+                    message="Recovery primitives are ready for operator review.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=None,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="primitive_pending",
-                    bridge_stage="primitive",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=None,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="primitive_pending",
+                    recovery_stage="primitive",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=feedback_history,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge primitive generation regenerated for operator approval.",
+                    history_message="Recovery primitive generation regenerated for operator approval.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
@@ -7867,34 +7881,34 @@ class ProductRecoveryController:
 
             if isinstance(proposal, dict):
                 recovery = self._set_runtime_recovery(
-                    status="llm_bridge",
+                    status="llm_recovery",
                     resolution_class="none",
                     trigger=str(self._runtime_recovery_context.get("trigger", "")),
                     failed_task_id=failed_task_id,
-                    message="Validated LLM bridge proposal is ready for final approval.",
+                    message="Validated LLM recovery proposal is ready for final approval.",
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=True,
-                    bridge_proposal=proposal,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="pending",
-                    bridge_stage="final",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=True,
+                    recovery_proposal=proposal,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="pending",
+                    recovery_stage="final",
+                    active_recovery_sequence=None,
                     generated_code_verification=None,
-                    bridge_feedback_history=feedback_history,
+                    recovery_feedback_history=feedback_history,
                     violations=violations,
                     append_history=True,
-                    history_message="Bridge primitive refinement produced a final proposal.",
+                    history_message="Recovery primitive refinement produced a final proposal.",
                 )
                 self._clear_plan_safety_alert()
                 await asyncio.to_thread(self._persist_product_state)
                 return recovery
 
             message = (
-                "LLM bridge primitive regeneration did not produce a reviewable primitive program."
-                if bridge_status
+                "LLM recovery primitive regeneration did not produce a reviewable primitive program."
+                if recovery_status
                 not in {"paused_after_primitive_blocked", "paused_after_primitive_stuck"}
-                else "LLM bridge primitive generation stalled before producing a reviewable primitive program."
+                else "LLM recovery primitive generation stalled before producing a reviewable primitive program."
             )
             recovery = self._set_runtime_recovery(
                 status="human_required",
@@ -7904,14 +7918,14 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=feedback_history,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -7927,9 +7941,9 @@ class ProductRecoveryController:
             await asyncio.to_thread(self._persist_product_state)
             return recovery
         except Exception as exc:
-            self.logger.exception("[Product] Primitive refinement bridge continuation failed.")
-            bridge_debug = self.process_planner.get_last_bridge_debug()
-            message = f"{self.agent_name}: primitive refinement failed while continuing bridge reasoning ({exc})."
+            self.logger.exception("[Product] Primitive refinement recovery continuation failed.")
+            recovery_debug = self.process_planner.get_last_recovery_debug()
+            message = f"{self.agent_name}: primitive refinement failed while continuing recovery reasoning ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
@@ -7938,14 +7952,14 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=True,
-                bridge_proposal=None,
-                bridge_debug=bridge_debug if bridge_debug else None,
-                bridge_approval_state="none",
-                bridge_stage="none",
-                active_bridge_sequence=None,
+                used_llm_recovery=True,
+                recovery_proposal=None,
+                recovery_debug=recovery_debug if recovery_debug else None,
+                recovery_approval_state="none",
+                recovery_stage="none",
+                active_recovery_sequence=None,
                 generated_code_verification=None,
-                bridge_feedback_history=feedback_history,
+                recovery_feedback_history=feedback_history,
                 violations=violations,
                 append_history=True,
                 history_message=message,
@@ -7963,49 +7977,49 @@ class ProductRecoveryController:
         finally:
             self._runtime_repair_inflight = False
 
-    async def reject_runtime_bridge_primitives(self, feedback: str) -> dict[str, Any]:
+    async def reject_runtime_recovery_primitives(self, feedback: str) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
         approval_state = (
-            str(self.runtime_recovery.get("bridge_approval_state", "none") or "none")
+            str(self.runtime_recovery.get("recovery_approval_state", "none") or "none")
             .strip()
             .lower()
         )
-        if status != "llm_bridge" or approval_state != "primitive_pending":
+        if status != "llm_recovery" or approval_state != "primitive_pending":
             raise RuntimeError("no primitive checkpoint is awaiting rejection")
 
         feedback_text = str(feedback or "").strip()
         if not feedback_text:
             raise ValueError("primitive rejection feedback is empty")
-        feedback_history = self._append_bridge_feedback(feedback_text)
+        feedback_history = self._append_recovery_feedback(feedback_text)
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
         recovery = self._set_runtime_recovery(
             status="human_required",
             resolution_class="human_required",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
-            message="Operator rejected the bridge primitive program. Runtime recovery is paused for manual intervention.",
+            message="Operator rejected the recovery primitive program. Runtime recovery is paused for manual intervention.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=True,
-            bridge_proposal=None,
-            bridge_debug=(
-                self.process_planner.get_last_bridge_debug()
-                or self.runtime_recovery.get("bridge_debug")
+            used_llm_recovery=True,
+            recovery_proposal=None,
+            recovery_debug=(
+                self.process_planner.get_last_recovery_debug()
+                or self.runtime_recovery.get("recovery_debug")
             ),
-            bridge_approval_state="none",
-            bridge_stage="none",
-            active_bridge_sequence=None,
+            recovery_approval_state="none",
+            recovery_stage="none",
+            active_recovery_sequence=None,
             generated_code_verification=None,
             violations=violations,
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             append_history=True,
-            history_message=f"Operator rejected bridge primitives: {feedback_text}",
+            history_message=f"Operator rejected recovery primitives: {feedback_text}",
         )
         self._set_plan_safety_alert(
             stage="runtime",
-            message=str(recovery.get("message", "") or "Bridge primitive program rejected."),
+            message=str(recovery.get("message", "") or "Recovery primitive program rejected."),
             retries_used=self._runtime_repair_fail_streak,
             retries_max=self._runtime_repair_max_attempts,
             violations=violations,
@@ -8014,36 +8028,36 @@ class ProductRecoveryController:
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    def _build_preprogrammed_runtime_bridge_bundle(
+    def _build_preprogrammed_runtime_recovery_bundle(
         self,
         *,
         scenario_id: str,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any]:
-        scenario_request = deepcopy(prepared_bridge_request)
+        scenario_request = deepcopy(prepared_recovery_request)
         preprogrammed_part_observations = self._derive_preprogrammed_part_observations()
         if preprogrammed_part_observations:
             scenario_request["preprogrammed_part_observations"] = preprogrammed_part_observations
-        proposal = build_preprogrammed_bridge_proposal(
+        proposal = build_preprogrammed_recovery_proposal(
             scenario_id=scenario_id,
-            prepared_bridge_request=scenario_request,
+            prepared_recovery_request=scenario_request,
         )
-        normalized = self.process_planner.validate_preprogrammed_bridge_proposal(
+        normalized = self.process_planner.validate_preprogrammed_recovery_proposal(
             proposal=proposal,
-            prepared_bridge_request=scenario_request,
+            prepared_recovery_request=scenario_request,
             source="preprogrammed_scenario",
             scenario_id=scenario_id,
         )
-        raw_bridge_debug = self.process_planner.get_last_bridge_debug()
-        bridge_debug = deepcopy(raw_bridge_debug) if isinstance(raw_bridge_debug, dict) else {}
-        bridge_debug["source"] = "preprogrammed_scenario"
-        bridge_debug["scenario_id"] = scenario_id
-        bridge_debug["execution_policy"] = {"complete_full_tail": True}
-        bridge_summary = self.process_planner._bridge_summary(normalized)
+        raw_recovery_debug = self.process_planner.get_last_recovery_debug()
+        recovery_debug = deepcopy(raw_recovery_debug) if isinstance(raw_recovery_debug, dict) else {}
+        recovery_debug["source"] = "preprogrammed_scenario"
+        recovery_debug["scenario_id"] = scenario_id
+        recovery_debug["execution_policy"] = {"complete_full_tail": True}
+        recovery_summary = self.process_planner._recovery_summary(normalized)
         return {
             "proposal": normalized,
-            "bridge_debug": bridge_debug,
-            "bridge_summary": bridge_summary,
+            "recovery_debug": recovery_debug,
+            "recovery_summary": recovery_summary,
         }
 
     def _derive_preprogrammed_part_observations(self) -> dict[str, dict[str, float]]:
@@ -8088,26 +8102,26 @@ class ProductRecoveryController:
                 derived[part_name] = deepcopy(pose_candidate)
         return derived
 
-    def _cache_preprogrammed_runtime_bridge_scenario(
+    def _cache_preprogrammed_runtime_recovery_scenario(
         self,
         *,
         scenario_id: str,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
     ) -> dict[str, Any]:
-        bundle = self._build_preprogrammed_runtime_bridge_bundle(
+        bundle = self._build_preprogrammed_runtime_recovery_bundle(
             scenario_id=scenario_id,
-            prepared_bridge_request=prepared_bridge_request,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        cache = dict(self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {})
+        cache = dict(self._runtime_recovery_context.get("preprogrammed_recovery_cache") or {})
         cache[str(scenario_id)] = deepcopy(bundle)
-        self._runtime_recovery_context["preprogrammed_bridge_cache"] = cache
+        self._runtime_recovery_context["preprogrammed_recovery_cache"] = cache
         return bundle
 
-    def _resolve_preprogrammed_runtime_bridge_bundle(
+    def _resolve_preprogrammed_runtime_recovery_bundle(
         self,
         *,
         scenario_id: str,
-        prepared_bridge_request: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
         started_at: float | None = None,
     ) -> tuple[str, dict[str, Any], dict[str, Any], list[str]]:
         scenario_key = str(scenario_id or "").strip()
@@ -8116,79 +8130,79 @@ class ProductRecoveryController:
 
         elapsed = time.perf_counter() - started_at if started_at is not None else 0.0
         cached_bundle = deepcopy(
-            (self._runtime_recovery_context.get("preprogrammed_bridge_cache") or {}).get(
+            (self._runtime_recovery_context.get("preprogrammed_recovery_cache") or {}).get(
                 scenario_key
             )
             or {}
         )
         if isinstance(cached_bundle.get("proposal"), dict):
             normalized = deepcopy(cached_bundle["proposal"])
-            bridge_debug = deepcopy(cached_bundle.get("bridge_debug") or {})
-            bridge_summary = list(cached_bundle.get("bridge_summary") or [])
+            recovery_debug = deepcopy(cached_bundle.get("recovery_debug") or {})
+            recovery_summary = list(cached_bundle.get("recovery_summary") or [])
             self.logger.info(
-                "[Product] Preprogrammed runtime bridge scenario cache hit: scenario_id=%s elapsed=%.3fs",
+                "[Product] Preprogrammed runtime recovery scenario cache hit: scenario_id=%s elapsed=%.3fs",
                 scenario_key,
                 elapsed,
             )
         else:
-            bundle = self._cache_preprogrammed_runtime_bridge_scenario(
+            bundle = self._cache_preprogrammed_runtime_recovery_scenario(
                 scenario_id=scenario_key,
-                prepared_bridge_request=prepared_bridge_request,
+                prepared_recovery_request=prepared_recovery_request,
             )
             normalized = deepcopy(bundle.get("proposal") or {})
-            bridge_debug = deepcopy(bundle.get("bridge_debug") or {})
-            bridge_summary = list(bundle.get("bridge_summary") or [])
+            recovery_debug = deepcopy(bundle.get("recovery_debug") or {})
+            recovery_summary = list(bundle.get("recovery_summary") or [])
             self.logger.info(
-                "[Product] Preprogrammed runtime bridge scenario built+validated: scenario_id=%s elapsed=%.3fs",
+                "[Product] Preprogrammed runtime recovery scenario built+validated: scenario_id=%s elapsed=%.3fs",
                 scenario_key,
                 elapsed,
             )
 
-        if not isinstance(bridge_debug, dict):
-            bridge_debug = {}
-        bridge_debug["source"] = "preprogrammed_scenario"
-        bridge_debug["scenario_id"] = scenario_key
-        bridge_debug["execution_policy"] = {"complete_full_tail": True}
-        return scenario_key, normalized, bridge_debug, bridge_summary
+        if not isinstance(recovery_debug, dict):
+            recovery_debug = {}
+        recovery_debug["source"] = "preprogrammed_scenario"
+        recovery_debug["scenario_id"] = scenario_key
+        recovery_debug["execution_policy"] = {"complete_full_tail": True}
+        return scenario_key, normalized, recovery_debug, recovery_summary
 
-    def load_preprogrammed_runtime_bridge_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
+    def load_preprogrammed_runtime_recovery_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
         started_at = time.perf_counter()
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
 
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if not prepared_bridge_request:
-            raise RuntimeError("no prepared bridge request is available")
+        if not prepared_recovery_request:
+            raise RuntimeError("no prepared recovery request is available")
         if self._runtime_repair_inflight:
             raise RuntimeError("runtime recovery is already in progress")
 
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status != "bridge_ready":
+        if status != "recovery_ready":
             raise RuntimeError(
-                "preprogrammed bridge scenarios can only be loaded from the bridge-ready state"
+                "preprogrammed recovery scenarios can only be loaded from the recovery-ready state"
             )
 
         scenario_key = str(scenario_id or "").strip()
         if not scenario_key:
             raise ValueError("scenario_id is empty")
         self.logger.info(
-            "[Product] Loading preprogrammed runtime bridge scenario start: scenario_id=%s elapsed=%.3fs",
+            "[Product] Loading preprogrammed runtime recovery scenario start: scenario_id=%s elapsed=%.3fs",
             scenario_key,
             time.perf_counter() - started_at,
         )
         try:
-            scenario_key, normalized, bridge_debug, bridge_summary = (
-                self._resolve_preprogrammed_runtime_bridge_bundle(
+            scenario_key, normalized, recovery_debug, recovery_summary = (
+                self._resolve_preprogrammed_runtime_recovery_bundle(
                     scenario_id=scenario_key,
-                    prepared_bridge_request=prepared_bridge_request,
+                    prepared_recovery_request=prepared_recovery_request,
                     started_at=started_at,
                 )
             )
         except Exception:
             self.logger.exception(
-                "[Product] Loading preprogrammed runtime bridge scenario failed: scenario_id=%s",
+                "[Product] Loading preprogrammed runtime recovery scenario failed: scenario_id=%s",
                 scenario_key,
             )
             raise
@@ -8198,74 +8212,74 @@ class ProductRecoveryController:
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
         violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        if not bridge_summary:
-            bridge_summary = self.process_planner._bridge_summary(normalized)
-        bridge_text = ", ".join(str(item) for item in bridge_summary if item) or scenario_key
+        if not recovery_summary:
+            recovery_summary = self.process_planner._recovery_summary(normalized)
+        recovery_text = ", ".join(str(item) for item in recovery_summary if item) or scenario_key
         self._set_runtime_recovery(
-            status="llm_bridge",
+            status="llm_recovery",
             resolution_class="none",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=failed_task_id,
             message="Preprogrammed recovery scenario loaded; auto-approving.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=False,
-            bridge_proposal=normalized,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="pending",
-            active_bridge_sequence=None,
-            bridge_feedback_history=list(
-                self._runtime_recovery_context.get("bridge_feedback_history") or []
+            used_llm_recovery=False,
+            recovery_proposal=normalized,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="pending",
+            active_recovery_sequence=None,
+            recovery_feedback_history=list(
+                self._runtime_recovery_context.get("recovery_feedback_history") or []
             ),
             violations=violations,
             append_history=True,
-            history_message=f"Loaded preprogrammed recovery scenario: {bridge_text}.",
+            history_message=f"Loaded preprogrammed recovery scenario: {recovery_text}.",
         )
         self._clear_plan_safety_alert()
         self.logger.info(
-            "[Product] Preprogrammed runtime bridge scenario ready: scenario_id=%s elapsed=%.3fs",
+            "[Product] Preprogrammed runtime recovery scenario ready: scenario_id=%s elapsed=%.3fs",
             scenario_key,
             time.perf_counter() - started_at,
         )
         self.logger.info(
-            "[Product] Auto-approving preprogrammed runtime bridge scenario: scenario_id=%s",
+            "[Product] Auto-approving preprogrammed runtime recovery scenario: scenario_id=%s",
             scenario_key,
         )
-        return self.approve_runtime_bridge_proposal_sync()
+        return self.approve_runtime_recovery_proposal_sync()
 
-    async def load_preprogrammed_runtime_bridge_scenario(self, scenario_id: str) -> dict[str, Any]:
-        return self.load_preprogrammed_runtime_bridge_scenario_sync(scenario_id)
+    async def load_preprogrammed_runtime_recovery_scenario(self, scenario_id: str) -> dict[str, Any]:
+        return self.load_preprogrammed_runtime_recovery_scenario_sync(scenario_id)
 
-    def approve_runtime_bridge_proposal_sync(self) -> dict[str, Any]:
+    def approve_runtime_recovery_proposal_sync(self) -> dict[str, Any]:
         started_at = time.perf_counter()
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        proposal = self.runtime_recovery.get("bridge_proposal")
-        bridge_debug = deepcopy(self.runtime_recovery.get("bridge_debug") or {})
-        active_bridge_sequence = self._active_bridge_sequence()
+        proposal = self.runtime_recovery.get("recovery_proposal")
+        recovery_debug = deepcopy(self.runtime_recovery.get("recovery_debug") or {})
+        active_recovery_sequence = self._active_recovery_sequence()
         recovery_safety_scope_id = str(
             self.runtime_recovery.get("recovery_safety_scope_id") or ""
         ).strip()
         recovery_safety_status = (
             str(self.runtime_recovery.get("recovery_safety_status") or "none").strip().lower()
         )
-        if status != "llm_bridge":
-            if self._bridge_sequence_is_live(active_bridge_sequence):
-                warning = "Bridge already approved/executing for this recovery session."
+        if status != "llm_recovery":
+            if self._recovery_sequence_is_live(active_recovery_sequence):
+                warning = "Recovery already approved/executing for this recovery session."
                 return self._recovery_result_with_action_feedback(
                     self.get_runtime_recovery(),
                     kind="warning",
                     text=warning,
                 )
-            raise RuntimeError("no pending bridge proposal is awaiting approval")
+            raise RuntimeError("no pending recovery proposal is awaiting approval")
         if not isinstance(proposal, dict):
-            raise RuntimeError("bridge proposal is missing")
+            raise RuntimeError("recovery proposal is missing")
         if (
-            self._runtime_bridge_session_validation_policy() == "validated"
+            self._runtime_recovery_session_validation_policy() == "validated"
             and not recovery_safety_scope_id
         ):
             warning = (
                 "Recovery Safety Check is enabled, but no recovery_safety_scope_id "
-                "is ready for this bridge proposal."
+                "is ready for this recovery proposal."
             )
             return self._recovery_result_with_action_feedback(
                 self.get_runtime_recovery(),
@@ -8295,12 +8309,12 @@ class ProductRecoveryController:
                     message=message,
                     attempts_used=self._runtime_repair_fail_streak,
                     attempts_max=self._runtime_repair_max_attempts,
-                    used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
-                    bridge_proposal=proposal,
-                    bridge_debug=bridge_debug if bridge_debug else None,
-                    bridge_approval_state="primitive_pending",
-                    bridge_stage="primitive",
-                    active_bridge_sequence=None,
+                    used_llm_recovery=bool(self.runtime_recovery.get("used_llm_recovery", False)),
+                    recovery_proposal=proposal,
+                    recovery_debug=recovery_debug if recovery_debug else None,
+                    recovery_approval_state="primitive_pending",
+                    recovery_stage="primitive",
+                    active_recovery_sequence=None,
                     recovery_safety_scope_id=recovery_safety_scope_id,
                     recovery_safety_status="failed",
                     recovery_safety_logic_json=str(
@@ -8349,7 +8363,7 @@ class ProductRecoveryController:
                 kind="warning",
                 text=warning,
             )
-        used_llm_bridge = bool(self.runtime_recovery.get("used_llm_bridge", False))
+        used_llm_recovery = bool(self.runtime_recovery.get("used_llm_recovery", False))
         generated_code_verification = deepcopy(
             self.runtime_recovery.get("generated_code_verification") or {}
         )
@@ -8358,19 +8372,19 @@ class ProductRecoveryController:
             self.runtime_recovery.get("failed_task_id")
             or self._runtime_recovery_context.get("failed_task_id", "")
         ).strip()
-        proposal_fingerprint = self._bridge_proposal_fingerprint(
+        proposal_fingerprint = self._recovery_proposal_fingerprint(
             proposal=proposal,
             failed_task_id=failed_task_id,
-            bridge_debug=bridge_debug if isinstance(bridge_debug, dict) else None,
+            recovery_debug=recovery_debug if isinstance(recovery_debug, dict) else None,
         )
-        if self._bridge_sequence_is_live(active_bridge_sequence):
+        if self._recovery_sequence_is_live(active_recovery_sequence):
             existing_fingerprint = str(
-                (active_bridge_sequence or {}).get("proposal_fingerprint") or ""
+                (active_recovery_sequence or {}).get("proposal_fingerprint") or ""
             ).strip()
             if existing_fingerprint and existing_fingerprint == proposal_fingerprint:
-                warning = "Bridge already approved/executing for this recovery session."
+                warning = "Recovery already approved/executing for this recovery session."
                 self.logger.warning(
-                    "[Product] Duplicate bridge approval ignored: product=%s failed_task_id=%s fingerprint=%s",
+                    "[Product] Duplicate recovery approval ignored: product=%s failed_task_id=%s fingerprint=%s",
                     self.agent_name,
                     failed_task_id,
                     proposal_fingerprint[:12],
@@ -8381,14 +8395,14 @@ class ProductRecoveryController:
                     text=warning,
                 )
             warning = (
-                "Another bridge sequence is already active for this recovery session. "
-                "Reset or retry DES instead of stacking bridge branches."
+                "Another recovery sequence is already active for this recovery session. "
+                "Reset or retry DES instead of stacking recovery branches."
             )
             self.logger.warning(
-                "[Product] Conflicting bridge approval blocked: product=%s failed_task_id=%s active_bridge_sequence_id=%s fingerprint=%s",
+                "[Product] Conflicting recovery approval blocked: product=%s failed_task_id=%s active_recovery_sequence_id=%s fingerprint=%s",
                 self.agent_name,
                 failed_task_id,
-                str((active_bridge_sequence or {}).get("bridge_sequence_id") or "").strip(),
+                str((active_recovery_sequence or {}).get("recovery_sequence_id") or "").strip(),
                 proposal_fingerprint[:12],
             )
             return self._recovery_result_with_action_feedback(
@@ -8398,23 +8412,23 @@ class ProductRecoveryController:
             )
         violations = list(self._runtime_recovery_context.get("violations") or [])
         self.logger.info(
-            "[Product] Approving runtime bridge proposal start: failed_task_id=%s elapsed=%.3fs",
+            "[Product] Approving runtime recovery proposal start: failed_task_id=%s elapsed=%.3fs",
             failed_task_id,
             time.perf_counter() - started_at,
         )
         planner_nodes_snapshot = deepcopy(self.process_planner.nodes)
         planner_global_fsa_snapshot = deepcopy(self.process_planner.global_fsa)
         execution_policy = (
-            deepcopy(bridge_debug.get("execution_policy") or {})
-            if isinstance(bridge_debug, dict)
+            deepcopy(recovery_debug.get("execution_policy") or {})
+            if isinstance(recovery_debug, dict)
             else {}
         )
-        session_validation_policy = self._runtime_bridge_session_validation_policy()
+        session_validation_policy = self._runtime_recovery_session_validation_policy()
         verification_only_approval = bool(execution_policy.get("verification_only"))
         if not verification_only_approval:
             execution_policy["complete_full_tail"] = True
-            if isinstance(bridge_debug, dict):
-                bridge_debug["execution_policy"] = deepcopy(execution_policy)
+            if isinstance(recovery_debug, dict):
+                recovery_debug["execution_policy"] = deepcopy(execution_policy)
         anchor_task_id = failed_task_id
         if failed_task_id:
             direct_predecessors = self._direct_predecessors_from_nodes(
@@ -8430,11 +8444,11 @@ class ProductRecoveryController:
         if failed_task_id and not verification_only_approval:
             deleted_task_ids = [failed_task_id]
 
-        prepared_bridge_request = dict(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        prepared_recovery_request = dict(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
         modeled_gap = dict(
-            dict(prepared_bridge_request.get("context_summary") or {}).get(
+            dict(prepared_recovery_request.get("context_summary") or {}).get(
                 "modeled_continuation_gap"
             )
             or {}
@@ -8472,7 +8486,7 @@ class ProductRecoveryController:
                 if earliest_task_id:
                     splice_before_task_ids_by_resource[resource_jid] = earliest_task_id
         self.logger.info(
-            "[Product] Bridge approval plan: anchor=%s verification_only=%s delete=%s resume=%s splice=%s",
+            "[Product] Recovery approval plan: anchor=%s verification_only=%s delete=%s resume=%s splice=%s",
             anchor_task_id or "<none>",
             verification_only_approval,
             deleted_task_ids,
@@ -8508,12 +8522,12 @@ class ProductRecoveryController:
 
             self.process_planner.nodes = deepcopy(staged_nodes)
             self.process_planner.global_fsa = None
-            tasks, bridge_patch_rows = self.process_planner.build_bridge_macro_proposal_patch(
+            tasks, recovery_patch_rows = self.process_planner.build_recovery_macro_proposal_patch(
                 proposal,
                 anchor_task_id=anchor_task_id,
                 splice_before_task_ids_by_resource=splice_before_task_ids_by_resource,
             )
-            _stage_approval_patch(bridge_patch_rows)
+            _stage_approval_patch(recovery_patch_rows)
             tasks = _refresh_staged_tasks(tasks)
             tail_task_ids_by_resource: dict[str, str] = {}
             for task in tasks:
@@ -8531,7 +8545,7 @@ class ProductRecoveryController:
                             "id": task_id,
                             "delete": True,
                             "change_reason": (
-                                f"DELETION: Approved bridge recovery replaces failed task branch task {task_id}"
+                                f"DELETION: Approved recovery replaces failed task branch task {task_id}"
                             ),
                         }
                         for task_id in deleted_task_ids
@@ -8545,7 +8559,7 @@ class ProductRecoveryController:
                     tail_task_ids_by_resource=tail_task_ids_by_resource,
                     before_task_ids=resumable_task_ids,
                     deleted_task_ids=deleted_task_ids,
-                    change_prefix="Approved bridge recovery",
+                    change_prefix="Approved recovery",
                     recovery_tasks=tasks,
                 )
             if post_updates:
@@ -8553,7 +8567,7 @@ class ProductRecoveryController:
                 tasks = _refresh_staged_tasks(tasks)
             if tasks and splice_before_task_ids_by_resource:
                 prune_patch_rows: list[dict[str, Any]] = []
-                self._prune_redundant_bridge_resume_move_home_if_satisfied(
+                self._prune_redundant_recovery_resume_move_home_if_satisfied(
                     tasks=tasks,
                     resumable_task_ids=resumable_task_ids,
                     resumable_task_ids_by_resource=resumable_task_ids_by_resource,
@@ -8565,7 +8579,7 @@ class ProductRecoveryController:
                     _stage_approval_patch(prune_patch_rows)
                     tasks = _refresh_staged_tasks(tasks)
                 acquire_entity_patch_rows: list[dict[str, Any]] = []
-                self._append_bridge_resume_entry_acquire_entity_repair_if_needed(
+                self._append_recovery_resume_entry_acquire_entity_repair_if_needed(
                     tasks=tasks,
                     resume_entry_task_ids_by_resource=splice_before_task_ids_by_resource,
                     patch_rows=acquire_entity_patch_rows,
@@ -8588,7 +8602,7 @@ class ProductRecoveryController:
                 if isinstance(node, dict):
                     self.task_states[task_id] = str(node.get("status", "pending") or "pending")
         except Exception as exc:
-            self.logger.exception("[Product] Failed to materialize approved bridge proposal.")
+            self.logger.exception("[Product] Failed to materialize approved recovery proposal.")
             try:
                 self.process_planner.nodes = planner_nodes_snapshot
                 self.process_planner.global_fsa = deepcopy(planner_global_fsa_snapshot)
@@ -8600,15 +8614,15 @@ class ProductRecoveryController:
                 self.logger.exception(
                     "[Product] Failed to roll back planner state after approval failure."
                 )
-            message = f"{self.agent_name}: approved bridge proposal could not be compiled ({exc})."
+            message = f"{self.agent_name}: approved recovery proposal could not be compiled ({exc})."
             recovery = self._set_runtime_recovery(
                 status="human_required",
                 resolution_class="human_required",
                 message=message,
-                used_llm_bridge=used_llm_bridge,
-                bridge_approval_state="none",
-                bridge_debug=bridge_debug if bridge_debug else None,
-                active_bridge_sequence=None,
+                used_llm_recovery=used_llm_recovery,
+                recovery_approval_state="none",
+                recovery_debug=recovery_debug if recovery_debug else None,
+                active_recovery_sequence=None,
                 generated_code_verification=generated_code_verification or None,
                 violations=violations,
                 append_history=True,
@@ -8629,39 +8643,39 @@ class ProductRecoveryController:
             ).start()
             return recovery
 
-        bridge_sequence_id = str(tasks[0].get("bridge_sequence_id", "")).strip() if tasks else ""
-        active_bridge_sequence = None
-        if bridge_sequence_id:
+        recovery_sequence_id = str(tasks[0].get("recovery_sequence_id", "")).strip() if tasks else ""
+        active_recovery_sequence = None
+        if recovery_sequence_id:
             archive_replay = (
-                dict(bridge_debug.get("archive_replay") or {})
-                if isinstance(bridge_debug, dict)
+                dict(recovery_debug.get("archive_replay") or {})
+                if isinstance(recovery_debug, dict)
                 else {}
             )
             source_archive_path = str(
                 archive_replay.get("source_path")
-                or self._runtime_bridge_session_archive_path()
+                or self._runtime_recovery_session_archive_path()
                 or ""
             ).strip()
-            active_bridge_sequence = {
-                "bridge_sequence_id": bridge_sequence_id,
-                "bridge_task_ids": [
+            active_recovery_sequence = {
+                "recovery_sequence_id": recovery_sequence_id,
+                "recovery_task_ids": [
                     str(task.get("id", "")).strip()
                     for task in tasks
                     if str(task.get("id", "")).strip()
                 ],
-                "bridge_sequence_length": len(tasks),
-                "recovery_group_id": bridge_sequence_id,
+                "recovery_sequence_length": len(tasks),
+                "recovery_group_id": recovery_sequence_id,
                 "trigger": str(self._runtime_recovery_context.get("trigger", "")),
                 "failed_task_id": failed_task_id,
                 "violations": deepcopy(violations),
-                "used_llm_bridge": used_llm_bridge,
+                "used_llm_recovery": used_llm_recovery,
                 "system_coordination_state": deepcopy(
                     self._runtime_recovery_context.get("system_coordination_state") or {}
                 ),
                 "proposal_fingerprint": proposal_fingerprint,
                 "state": "approved",
-                "dispatched_bridge_task_ids": [],
-                "completed_bridge_task_ids": [],
+                "dispatched_recovery_task_ids": [],
+                "completed_recovery_task_ids": [],
                 "execution_started_at_utc": "",
                 "last_dispatched_task_id": "",
                 "last_completed_task_id": "",
@@ -8674,10 +8688,10 @@ class ProductRecoveryController:
                     modeled_gap.get("pending_nominal_task_ids") or []
                 ),
                 "continuation_repair_attempts": 0,
-                "source_mode": self._runtime_bridge_session_mode(),
-                "validation_policy": self._runtime_bridge_session_validation_policy(),
+                "source_mode": self._runtime_recovery_session_mode(),
+                "validation_policy": self._runtime_recovery_session_validation_policy(),
                 "source_archive_path": source_archive_path,
-                "source_archive_label": self._runtime_bridge_session_archive_label(),
+                "source_archive_label": self._runtime_recovery_session_archive_label(),
                 "recovery_safety_scope_id": recovery_safety_scope_id,
                 "recovery_safety_status": recovery_safety_status,
                 "recovery_safety_logic_json": str(
@@ -8696,22 +8710,22 @@ class ProductRecoveryController:
                     self.runtime_recovery.get("recovery_final_output_path") or ""
                 ).strip(),
             }
-            if isinstance(bridge_debug, dict):
-                execution_policy = bridge_debug.get("execution_policy")
+            if isinstance(recovery_debug, dict):
+                execution_policy = recovery_debug.get("execution_policy")
                 if isinstance(execution_policy, dict) and execution_policy:
-                    active_bridge_sequence["execution_policy"] = deepcopy(execution_policy)
-                source = str(bridge_debug.get("source", "")).strip()
+                    active_recovery_sequence["execution_policy"] = deepcopy(execution_policy)
+                source = str(recovery_debug.get("source", "")).strip()
                 if source:
-                    active_bridge_sequence["source"] = source
-                scenario_id = str(bridge_debug.get("scenario_id", "")).strip()
+                    active_recovery_sequence["source"] = source
+                scenario_id = str(recovery_debug.get("scenario_id", "")).strip()
                 if scenario_id:
-                    active_bridge_sequence["scenario_id"] = scenario_id
+                    active_recovery_sequence["scenario_id"] = scenario_id
                 if generated_code_verification:
-                    active_bridge_sequence["generated_code_verification"] = deepcopy(
+                    active_recovery_sequence["generated_code_verification"] = deepcopy(
                         generated_code_verification
                     )
-        if bridge_debug:
-            bridge_debug["approval"] = {
+        if recovery_debug:
+            recovery_debug["approval"] = {
                 "approved_at_utc": self._utc_now_iso(),
                 "entry_task_ids": deepcopy(resumable_task_ids),
                 "splice_before_task_ids_by_resource": deepcopy(splice_before_task_ids_by_resource),
@@ -8719,59 +8733,59 @@ class ProductRecoveryController:
                 "anchor_task_id": anchor_task_id,
                 "proposal_fingerprint": proposal_fingerprint,
                 "validation_policy": session_validation_policy,
-                "compiled_bridge_task_ids": (
-                    deepcopy(active_bridge_sequence.get("bridge_task_ids") or [])
-                    if isinstance(active_bridge_sequence, dict)
+                "compiled_recovery_task_ids": (
+                    deepcopy(active_recovery_sequence.get("recovery_task_ids") or [])
+                    if isinstance(active_recovery_sequence, dict)
                     else []
                 ),
-                "compiled_bridge_tasks": self._bridge_task_debug_rows(
-                    list(active_bridge_sequence.get("bridge_task_ids") or [])
-                    if isinstance(active_bridge_sequence, dict)
+                "compiled_recovery_tasks": self._recovery_task_debug_rows(
+                    list(active_recovery_sequence.get("recovery_task_ids") or [])
+                    if isinstance(active_recovery_sequence, dict)
                     else []
                 ),
             }
             if generated_code_verification:
                 generated_code_verification["status"] = "executing"
                 generated_code_verification["updated_at_utc"] = self._utc_now_iso()
-                bridge_debug["generated_code_verification"] = deepcopy(generated_code_verification)
-                if isinstance(active_bridge_sequence, dict):
-                    active_bridge_sequence["generated_code_verification"] = deepcopy(
+                recovery_debug["generated_code_verification"] = deepcopy(generated_code_verification)
+                if isinstance(active_recovery_sequence, dict):
+                    active_recovery_sequence["generated_code_verification"] = deepcopy(
                         generated_code_verification
                     )
 
-        bridge_source = str((active_bridge_sequence or {}).get("source", "")).strip().lower()
-        archived_replay_approval = bridge_source == "archived_final_output"
-        if isinstance(active_bridge_sequence, dict):
+        recovery_source = str((active_recovery_sequence or {}).get("source", "")).strip().lower()
+        archived_replay_approval = recovery_source == "archived_final_output"
+        if isinstance(active_recovery_sequence, dict):
             sequence_execution_policy = deepcopy(
-                active_bridge_sequence.get("execution_policy") or {}
+                active_recovery_sequence.get("execution_policy") or {}
             )
             sequence_execution_policy["validation_policy"] = session_validation_policy
             sequence_execution_policy.pop("skip_runtime_plan_validation", None)
-            active_bridge_sequence["execution_policy"] = sequence_execution_policy
-            active_bridge_sequence["recovery_enforced_task_ids"] = self._bridge_sequence_task_ids(
-                list(active_bridge_sequence.get("bridge_task_ids") or [])
+            active_recovery_sequence["execution_policy"] = sequence_execution_policy
+            active_recovery_sequence["recovery_enforced_task_ids"] = self._recovery_sequence_task_ids(
+                list(active_recovery_sequence.get("recovery_task_ids") or [])
             )
-        if isinstance(bridge_debug, dict):
-            bridge_debug["validation_policy"] = session_validation_policy
-            debug_execution_policy = deepcopy(bridge_debug.get("execution_policy") or {})
+        if isinstance(recovery_debug, dict):
+            recovery_debug["validation_policy"] = session_validation_policy
+            debug_execution_policy = deepcopy(recovery_debug.get("execution_policy") or {})
             debug_execution_policy["validation_policy"] = session_validation_policy
             debug_execution_policy.pop("skip_runtime_plan_validation", None)
-            bridge_debug["execution_policy"] = debug_execution_policy
+            recovery_debug["execution_policy"] = debug_execution_policy
 
         if verification_only_approval:
             validation_message = (
-                f"Approved generated bridge verification proposal compiled to {len(tasks)} task(s); "
-                "waiting for the CCA runtime plan validation before executing bridge macros."
+                f"Approved generated recovery verification proposal compiled to {len(tasks)} task(s); "
+                "waiting for the CCA runtime plan validation before executing recovery macros."
             )
         elif archived_replay_approval:
             validation_message = (
-                f"Approved archived bridge proposal compiled to {len(tasks)} task(s); "
-                "waiting for the CCA runtime plan validation before executing bridge macros."
+                f"Approved archived recovery proposal compiled to {len(tasks)} task(s); "
+                "waiting for the CCA runtime plan validation before executing recovery macros."
             )
         else:
             validation_message = (
-                f"Approved bridge proposal '{proposal.get('macro_name') or proposal.get('function_name') or 'bridge_recovery'}' compiled to "
-                f"{len(tasks)} task(s); waiting for the CCA runtime plan validation before executing bridge macros."
+                f"Approved recovery proposal '{proposal.get('macro_name') or proposal.get('function_name') or 'recovery'}' compiled to "
+                f"{len(tasks)} task(s); waiting for the CCA runtime plan validation before executing recovery macros."
             )
         recovery = self._set_runtime_recovery(
             status="validating",
@@ -8781,12 +8795,12 @@ class ProductRecoveryController:
             message=validation_message,
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=used_llm_bridge,
-            bridge_proposal=proposal,
-            bridge_debug=bridge_debug if bridge_debug else None,
-            bridge_approval_state="approved",
-            active_bridge_sequence=active_bridge_sequence,
-            last_completed_bridge_sequence=None,
+            used_llm_recovery=used_llm_recovery,
+            recovery_proposal=proposal,
+            recovery_debug=recovery_debug if recovery_debug else None,
+            recovery_approval_state="approved",
+            active_recovery_sequence=active_recovery_sequence,
+            last_completed_recovery_sequence=None,
             recovery_safety_scope_id=recovery_safety_scope_id,
             recovery_safety_status=recovery_safety_status,
             recovery_safety_logic_json=str(
@@ -8800,7 +8814,7 @@ class ProductRecoveryController:
                 self.runtime_recovery.get("recovery_final_output_path") or ""
             ).strip(),
             recovery_enforced_task_ids=list(
-                dict(active_bridge_sequence or {}).get("recovery_enforced_task_ids") or []
+                dict(active_recovery_sequence or {}).get("recovery_enforced_task_ids") or []
             ),
             generated_code_verification=generated_code_verification or None,
             violations=violations,
@@ -8809,14 +8823,14 @@ class ProductRecoveryController:
         )
         self._clear_plan_safety_alert()
         self.logger.info(
-            "[Product] Approved runtime bridge proposal compiled: tasks=%d elapsed=%.3fs",
+            "[Product] Approved runtime recovery proposal compiled: tasks=%d elapsed=%.3fs",
             len(tasks),
             time.perf_counter() - started_at,
         )
         try:
             self.logger.info(
-                "[Product] Approved bridge proposal finalization started: sending the CCA runtime plan validation source=%s validation_policy=%s.",
-                bridge_source or "<unknown>",
+                "[Product] Approved recovery proposal finalization started: sending the CCA runtime plan validation source=%s validation_policy=%s.",
+                recovery_source or "<unknown>",
                 session_validation_policy,
             )
             self._send_runtime_plan_validation_check_sync(
@@ -8824,7 +8838,7 @@ class ProductRecoveryController:
                 skip_recovery_safety_validation=(session_validation_policy == "no_validation"),
             )
             self.logger.info(
-                "[Product] Approved bridge proposal CCA runtime plan validation sent successfully; persisting updated runtime state."
+                "[Product] Approved recovery proposal CCA runtime plan validation sent successfully; persisting updated runtime state."
             )
             threading.Thread(
                 target=self._persist_plan_snapshot,
@@ -8843,10 +8857,10 @@ class ProductRecoveryController:
             ).start()
         except Exception as exc:
             self.logger.exception(
-                "[Product] Approved bridge proposal CCA runtime plan validation dispatch failed."
+                "[Product] Approved recovery proposal CCA runtime plan validation dispatch failed."
             )
             message = (
-                f"{self.agent_name}: approved bridge proposal could not start runtime "
+                f"{self.agent_name}: approved recovery proposal could not start runtime "
                 f"plan validation ({exc})."
             )
             recovery = self._set_runtime_recovery(
@@ -8857,11 +8871,11 @@ class ProductRecoveryController:
                 message=message,
                 attempts_used=self._runtime_repair_fail_streak,
                 attempts_max=self._runtime_repair_max_attempts,
-                used_llm_bridge=used_llm_bridge,
-                bridge_proposal=None,
-                bridge_approval_state="approved",
-                bridge_debug=bridge_debug if bridge_debug else None,
-                active_bridge_sequence=None,
+                used_llm_recovery=used_llm_recovery,
+                recovery_proposal=None,
+                recovery_approval_state="approved",
+                recovery_debug=recovery_debug if recovery_debug else None,
+                active_recovery_sequence=None,
                 generated_code_verification=generated_code_verification or None,
                 violations=violations,
                 append_history=True,
@@ -8882,71 +8896,71 @@ class ProductRecoveryController:
             ).start()
             return recovery
         self.logger.info(
-            "[Product] Approved runtime bridge proposal dispatched runtime validation: elapsed=%.3fs",
+            "[Product] Approved runtime recovery proposal dispatched runtime validation: elapsed=%.3fs",
             time.perf_counter() - started_at,
         )
         return recovery
 
-    async def approve_runtime_bridge_proposal(self) -> dict[str, Any]:
-        return self.approve_runtime_bridge_proposal_sync()
+    async def approve_runtime_recovery_proposal(self) -> dict[str, Any]:
+        return self.approve_runtime_recovery_proposal_sync()
 
-    async def reject_runtime_bridge_proposal(self, feedback: str) -> dict[str, Any]:
+    async def reject_runtime_recovery_proposal(self, feedback: str) -> dict[str, Any]:
         if not self._runtime_recovery_context:
             raise RuntimeError("no active runtime DES recovery context is available")
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status != "llm_bridge":
-            raise RuntimeError("no pending bridge proposal is awaiting rejection")
+        if status != "llm_recovery":
+            raise RuntimeError("no pending recovery proposal is awaiting rejection")
 
         feedback_text = str(feedback or "").strip()
         if not feedback_text:
-            raise ValueError("bridge rejection feedback is empty")
+            raise ValueError("recovery rejection feedback is empty")
 
         feedback_history = [
             str(item).strip()
-            for item in (self.runtime_recovery.get("bridge_feedback_history") or [])
+            for item in (self.runtime_recovery.get("recovery_feedback_history") or [])
             if str(item).strip()
         ]
         feedback_history.append(feedback_text)
-        self._runtime_recovery_context["bridge_feedback_history"] = list(feedback_history)
-        prepared_bridge_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_bridge_request") or {}
+        self._runtime_recovery_context["recovery_feedback_history"] = list(feedback_history)
+        prepared_recovery_request = deepcopy(
+            self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        if prepared_bridge_request:
-            bridge_session = dict(prepared_bridge_request.get("bridge_session") or {})
+        if prepared_recovery_request:
+            recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
             operator_feedback_history = [
                 str(item).strip()
-                for item in (bridge_session.get("operator_feedback_history") or [])
+                for item in (recovery_session.get("operator_feedback_history") or [])
                 if str(item).strip()
             ]
             operator_feedback_history.append(feedback_text)
-            bridge_session["operator_feedback_history"] = operator_feedback_history[-12:]
-            prepared_bridge_request["bridge_session"] = bridge_session
-            self._runtime_recovery_context["prepared_bridge_request"] = prepared_bridge_request
+            recovery_session["operator_feedback_history"] = operator_feedback_history[-12:]
+            prepared_recovery_request["recovery_session"] = recovery_session
+            self._runtime_recovery_context["prepared_recovery_request"] = prepared_recovery_request
 
         recovery = self._set_runtime_recovery(
             status="human_required",
             resolution_class="human_required",
             trigger=str(self._runtime_recovery_context.get("trigger", "")),
             failed_task_id=str(self._runtime_recovery_context.get("failed_task_id", "")),
-            message="Operator rejected the bridge proposal. Add guidance and rerun bridge reasoning when ready.",
+            message="Operator rejected the recovery proposal. Add guidance and rerun recovery reasoning when ready.",
             attempts_used=self._runtime_repair_fail_streak,
             attempts_max=self._runtime_repair_max_attempts,
-            used_llm_bridge=bool(self.runtime_recovery.get("used_llm_bridge", False)),
-            bridge_proposal=None,
-            bridge_debug=(
-                self.process_planner.get_last_bridge_debug()
-                or self.runtime_recovery.get("bridge_debug")
+            used_llm_recovery=bool(self.runtime_recovery.get("used_llm_recovery", False)),
+            recovery_proposal=None,
+            recovery_debug=(
+                self.process_planner.get_last_recovery_debug()
+                or self.runtime_recovery.get("recovery_debug")
             ),
-            bridge_approval_state="none",
-            active_bridge_sequence=None,
+            recovery_approval_state="none",
+            active_recovery_sequence=None,
             violations=list(self._runtime_recovery_context.get("violations") or []),
-            bridge_feedback_history=feedback_history,
+            recovery_feedback_history=feedback_history,
             append_history=True,
-            history_message=f"Operator rejected bridge proposal: {feedback_text}",
+            history_message=f"Operator rejected recovery proposal: {feedback_text}",
         )
         self._set_plan_safety_alert(
             stage="runtime",
-            message=str(recovery.get("message", "") or "Bridge proposal rejected."),
+            message=str(recovery.get("message", "") or "Recovery proposal rejected."),
             retries_used=self._runtime_repair_fail_streak,
             retries_max=self._runtime_repair_max_attempts,
             violations=list(self._runtime_recovery_context.get("violations") or []),
@@ -8956,14 +8970,14 @@ class ProductRecoveryController:
         return recovery
 
     async def retry_runtime_recovery_des(self) -> dict[str, Any]:
-        active_bridge_sequence = self._active_bridge_sequence()
-        if self._bridge_sequence_is_live(active_bridge_sequence):
-            warning = "DES retry is blocked while the approved bridge sequence is still active."
+        active_recovery_sequence = self._active_recovery_sequence()
+        if self._recovery_sequence_is_live(active_recovery_sequence):
+            warning = "DES retry is blocked while the approved recovery sequence is still active."
             self.logger.warning(
-                "[Product] %s product=%s bridge_sequence_id=%s",
+                "[Product] %s product=%s recovery_sequence_id=%s",
                 warning,
                 self.agent_name,
-                str((active_bridge_sequence or {}).get("bridge_sequence_id") or "").strip(),
+                str((active_recovery_sequence or {}).get("recovery_sequence_id") or "").strip(),
             )
             return self._recovery_result_with_action_feedback(
                 self.get_runtime_recovery(),
