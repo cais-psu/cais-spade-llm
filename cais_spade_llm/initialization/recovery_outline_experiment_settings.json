@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "recovery_selection_mode": "pure_llm",
+  "action_horizon": 1,
+  "candidate_count": "auto"
+}

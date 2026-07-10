@@ -152,8 +152,80 @@ def _outline_incremental_response_schema() -> dict[str, Any]:
 def _outline_candidates_response_schema(
     *,
     candidate_bound: int = _DEFAULT_CANDIDATE_BOUND,
+    candidate_count: int | str = "auto",
+    recovery_selection_mode: str = "pure_llm",
+    action_horizon: str = "1",
+    action_horizon_steps: int | str | None = None,
+    action_horizon_k: int = 3,
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
+    normalized_candidate_count: int | str
+    if isinstance(candidate_count, str):
+        candidate_count_token = candidate_count.strip().lower()
+        if candidate_count_token in {"auto", "n"}:
+            normalized_candidate_count = "auto"
+        else:
+            try:
+                normalized_candidate_count = max(1, int(candidate_count_token))
+            except ValueError:
+                normalized_candidate_count = "auto"
+    else:
+        try:
+            normalized_candidate_count = max(1, int(candidate_count))
+        except (TypeError, ValueError):
+            normalized_candidate_count = "auto"
+    if normalized_candidate_count == "auto":
+        candidate_min_items = 1
+        candidate_max_items = normalized_bound
+    else:
+        candidate_min_items = int(normalized_candidate_count)
+        candidate_max_items = int(normalized_candidate_count)
+    normalized_selection_mode = str(recovery_selection_mode or "pure_llm").strip().lower()
+    if normalized_selection_mode not in {"pure_llm", "neurosymbolic"}:
+        normalized_selection_mode = "pure_llm"
+    normalized_horizon = str(action_horizon or "1").strip().lower()
+    if normalized_horizon not in {"1", "k", "full"}:
+        normalized_horizon = "1"
+    if normalized_horizon == "k" and action_horizon_steps not in (None, "", "full"):
+        normalized_horizon_k = max(1, int(action_horizon_steps or action_horizon_k or 3))
+    else:
+        normalized_horizon_k = max(1, int(action_horizon_k or 3))
+    required = ["thought"]
+    if normalized_selection_mode == "pure_llm":
+        required.append("selected_candidate_index")
+    if normalized_horizon == "1":
+        candidate_property_name = "candidate_events"
+        required.append(candidate_property_name)
+        candidate_property = {
+            "type": "array",
+            "minItems": candidate_min_items,
+            "maxItems": candidate_max_items,
+            "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+        }
+    else:
+        candidate_property_name = "candidate_traces"
+        required.append(candidate_property_name)
+        event_array_schema: dict[str, Any] = {
+            "type": "array",
+            "minItems": 1,
+            "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+        }
+        if normalized_horizon == "k":
+            event_array_schema["maxItems"] = normalized_horizon_k
+        candidate_property = {
+            "type": "array",
+            "minItems": candidate_min_items,
+            "maxItems": candidate_max_items,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "events": event_array_schema,
+                    "rationale": {"type": "string"},
+                },
+                "required": ["events"],
+            },
+        }
     return {
         "name": "multi_turn_outline_candidates_response",
         "strict": False,
@@ -164,16 +236,11 @@ def _outline_candidates_response_schema(
                 "selected_candidate_index": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": max(0, normalized_bound - 1),
+                    "maximum": max(0, candidate_max_items - 1),
                 },
-                "candidate_events": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": normalized_bound,
-                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
-                },
+                candidate_property_name: candidate_property,
             },
-            "required": ["thought", "selected_candidate_index", "candidate_events"],
+            "required": required,
         },
     }
 
@@ -306,6 +373,11 @@ def multi_turn_phase_response_schema(
     *,
     outline_mode: str = "incremental",
     candidate_bound: int | None = None,
+    candidate_count: int | str = "auto",
+    recovery_selection_mode: str = "pure_llm",
+    action_horizon: str = "1",
+    action_horizon_steps: int | str | None = None,
+    action_horizon_k: int = 3,
 ) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
     normalized = phase.strip().lower()
@@ -315,6 +387,11 @@ def multi_turn_phase_response_schema(
         if outline_mode == "incremental_candidates_validated":
             return _outline_candidates_response_schema(
                 candidate_bound=max(1, int(candidate_bound or _DEFAULT_CANDIDATE_BOUND)),
+                candidate_count=candidate_count,
+                recovery_selection_mode=recovery_selection_mode,
+                action_horizon=action_horizon,
+                action_horizon_steps=action_horizon_steps,
+                action_horizon_k=action_horizon_k,
             )
         return _outline_incremental_response_schema()
     if normalized == "grounding":
@@ -2773,6 +2850,42 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     candidate_rejection_history = _candidate_rejection_history(session_state)
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
+    recovery_selection_mode = (
+        str(session_state.get("recovery_selection_mode") or "pure_llm").strip().lower()
+    )
+    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+        recovery_selection_mode = "pure_llm"
+    action_horizon = str(session_state.get("action_horizon") or "1").strip().lower()
+    if action_horizon not in {"1", "k", "full"}:
+        action_horizon = "1"
+    try:
+        action_horizon_k = max(1, int(session_state.get("action_horizon_k") or 3))
+    except (TypeError, ValueError):
+        action_horizon_k = 3
+    action_horizon_steps = session_state.get("action_horizon_steps")
+    if action_horizon_steps in (None, ""):
+        if action_horizon == "full":
+            action_horizon_steps = "full"
+        elif action_horizon == "k":
+            action_horizon_steps = action_horizon_k
+        else:
+            action_horizon_steps = 1
+    raw_candidate_count = session_state.get("candidate_count", "auto")
+    candidate_count: int | str
+    if isinstance(raw_candidate_count, str):
+        candidate_count_token = raw_candidate_count.strip().lower()
+        if candidate_count_token in {"auto", "n"}:
+            candidate_count = "auto"
+        else:
+            try:
+                candidate_count = max(1, int(candidate_count_token))
+            except ValueError:
+                candidate_count = "auto"
+    else:
+        try:
+            candidate_count = max(1, int(raw_candidate_count))
+        except (TypeError, ValueError):
+            candidate_count = "auto"
     recent_candidate_diagnostic_signatures = (
         _candidate_rejection_diagnostic_signatures(
             history=candidate_rejection_history,
@@ -2812,13 +2925,33 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Author the expected symbolic start and end states directly."
         )
     elif is_candidate_mode:
-        candidate_bound = int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND)
+        candidate_count_unit = (
+            "candidate" if candidate_count != "auto" and int(candidate_count) == 1 else "candidates"
+        )
+        candidate_count_line = (
+            "- Propose as many distinct useful candidates as needed; do not pad weak duplicates."
+            if candidate_count == "auto"
+            else f"- Propose exactly {candidate_count} {candidate_count_unit}."
+        )
+        selection_owner_text = (
+            "You must choose the best candidate by setting `selected_candidate_index`."
+            if recovery_selection_mode == "pure_llm"
+            else "Do not choose the winner; Product Agent validation and cost-based selection will choose after you propose candidates."
+        )
+        horizon_text = {
+            "1": "Each candidate contains exactly one next recovery event.",
+            "k": (
+                f"Each candidate contains a sequence of up to {action_horizon_steps} next recovery events."
+            ),
+            "full": "Each candidate contains a complete recovery outline trace.",
+        }[action_horizon]
         role_text = (
             "You are the active replanner for a bridge recovery session.\n"
-            "Current phase: Recovery Event Candidate Selection.\n"
-            "Choose grounded symbolic recovery transitions enabled by the current symbolic state.\n"
+            "Current phase: Recovery Event Candidate Proposal.\n"
+            "Propose grounded symbolic recovery transitions enabled by the current symbolic state.\n"
             "Accepted events extend the recovery trace toward marked-state conditions.\n"
-            "The runtime supervisor may validate and commit at most one event.\n"
+            f"{horizon_text}\n"
+            f"{selection_owner_text}\n"
             "Return authored symbolic rows only; Product validates the stated transition."
         )
         if candidate_rejection_feedback or candidate_rejection_history:
@@ -2898,7 +3031,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         sections.extend(
             [
                 "",
-                f"Enabled Event Candidate Budget: {candidate_bound}",
+                f"Candidate Count: {candidate_count}",
+                f"Action Horizon: {action_horizon_steps}",
+                f"Selection Mode: {recovery_selection_mode}",
                 "",
                 "Open Guard / Marking Conditions",
                 _current_recovery_blockers_summary(current_recovery_blockers),
@@ -2985,48 +3120,110 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         )
 
     if is_candidate_mode:
+        selected_candidate_line = (
+            "- Return `selected_candidate_index` pointing at your chosen candidate."
+            if recovery_selection_mode == "pure_llm"
+            else "- Do not return `selected_candidate_index`; Product Agent validation and cost-based selection will choose the candidate."
+        )
+        selected_candidate_example = (
+            '  "selected_candidate_index": 0,\n' if recovery_selection_mode == "pure_llm" else ""
+        )
+        if action_horizon == "1":
+            response_contract_lines = [
+                "- Return one JSON object with top-level fields `thought` and `candidate_events`.",
+                selected_candidate_line,
+                candidate_count_line,
+                "- Each candidate row is one physical action by one listed resource.",
+            ]
+            response_example = (
+                "```json\n"
+                "{\n"
+                '  "thought": "<why these symbolic transitions are enabled from the current plant state>",\n'
+                f"{selected_candidate_example}"
+                '  "candidate_events": [\n'
+                "    {\n"
+                '      "outline_id": "<required_outline_id>",\n'
+                '      "event_name": "<free_form_event_name>",\n'
+                '      "resource_jid": "<resource_jid>",\n'
+                '      "part_name": "<optional_part_name>",\n'
+                '      "expected_start_state": {\n'
+                '        "resource_state": "<required_resource_state>",\n'
+                '        "resource_location": "<optional_resource_location>",\n'
+                '        "held_part": "<required_when_part_name_is_present>",\n'
+                '        "part_state": "<required_when_part_name_is_present>",\n'
+                '        "part_location": "<optional_part_location>"\n'
+                "      },\n"
+                '      "expected_end_state": {\n'
+                '        "resource_state": "<required_resource_state>",\n'
+                '        "resource_location": "<optional_resource_location>",\n'
+                '        "held_part": "<required_when_part_name_is_present>",\n'
+                '        "part_state": "<required_when_part_name_is_present>",\n'
+                '        "part_location": "<optional_part_location>"\n'
+                "      },\n"
+                '      "rationale": "<why this recovery transition is enabled and helpful now>"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "```"
+            )
+        else:
+            horizon_count_text = (
+                f"up to {action_horizon_steps} next recovery rows"
+                if action_horizon == "k"
+                else "a complete recovery outline trace"
+            )
+            response_contract_lines = [
+                "- Return one JSON object with top-level fields `thought` and `candidate_traces`.",
+                selected_candidate_line,
+                candidate_count_line,
+                f"- Each candidate trace contains `events`, an ordered list with {horizon_count_text}.",
+                "- Each event row is one physical action by one listed resource.",
+            ]
+            response_example = (
+                "```json\n"
+                "{\n"
+                '  "thought": "<why these symbolic candidate traces are enabled from the current plant state>",\n'
+                f"{selected_candidate_example}"
+                '  "candidate_traces": [\n'
+                "    {\n"
+                '      "events": [\n'
+                "        {\n"
+                '          "outline_id": "<required_outline_id>",\n'
+                '          "event_name": "<free_form_event_name>",\n'
+                '          "resource_jid": "<resource_jid>",\n'
+                '          "part_name": "<optional_part_name>",\n'
+                '          "expected_start_state": {\n'
+                '            "resource_state": "<required_resource_state>",\n'
+                '            "held_part": "<required_when_part_name_is_present>",\n'
+                '            "part_state": "<required_when_part_name_is_present>"\n'
+                "          },\n"
+                '          "expected_end_state": {\n'
+                '            "resource_state": "<required_resource_state>",\n'
+                '            "held_part": "<required_when_part_name_is_present>",\n'
+                '            "part_state": "<required_when_part_name_is_present>"\n'
+                "          },\n"
+                '          "rationale": "<why this recovery transition is enabled and helpful now>"\n'
+                "        }\n"
+                "      ],\n"
+                '      "rationale": "<why this candidate trace helps recovery>"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+                "```"
+            )
         sections.extend(
             [
                 "",
                 "Outline Candidate Contract",
-                "- Return one JSON object with top-level fields `thought`, `selected_candidate_index`, and `candidate_events`.",
-                f"- Propose 1 to {candidate_bound} candidate rows and set `selected_candidate_index` to the row you choose.",
-                "- Each candidate row is one physical action by one listed resource; split compound recoveries like fetch+place into separate rows.",
+                *response_contract_lines,
+                "- Split compound recoveries like fetch+place into separate rows.",
                 "- Each row must include `outline_id`, `event_name`, `resource_jid`, `expected_start_state`, `expected_end_state`, and `rationale`.",
                 "- Use top-level `resource_jid` and optional top-level `part_name`. `resource_location` and `part_location` are optional: include `resource_location` only when the row constrains a resource-only location change, and include `part_location` only when the row constrains a part location.",
                 "- Do not emit execution-layer fields such as `source_ref`, `target_ref`, `ppr_ontology`, `event_schema_id`, bindings objects, parameters, surface fields, or `predecessors`.",
                 "- If `part_name` is present, both state objects must include `held_part` and `part_state`; include `part_location` only when the row constrains a part location. If `part_name` is absent, omit part-specific state keys.",
                 "- Bind only listed resources, parts, and grounded location tokens from the current plant state.",
                 "- `rationale` should explain enabledness, blocker clearing, or why the action reduces the marked-state gap.",
-                """```json
-{
-  "thought": "<why these symbolic transitions are enabled from the current plant state>",
-  "selected_candidate_index": 0,
-  "candidate_events": [
-    {
-      "outline_id": "<required_outline_id>",
-      "event_name": "<free_form_event_name>",
-      "resource_jid": "<resource_jid>",
-      "part_name": "<optional_part_name>",
-      "expected_start_state": {
-        "resource_state": "<required_resource_state>",
-        "resource_location": "<optional_resource_location>",
-        "held_part": "<required_when_part_name_is_present>",
-        "part_state": "<required_when_part_name_is_present>",
-        "part_location": "<optional_part_location>"
-      },
-      "expected_end_state": {
-        "resource_state": "<required_resource_state>",
-        "resource_location": "<optional_resource_location>",
-        "held_part": "<required_when_part_name_is_present>",
-        "part_state": "<required_when_part_name_is_present>",
-        "part_location": "<optional_part_location>"
-      },
-      "rationale": "<why this recovery transition is enabled and helpful now>"
-    }
-  ]
-}
-```""",
+                response_example,
             ]
         )
 

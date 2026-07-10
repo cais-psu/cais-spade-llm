@@ -340,52 +340,424 @@ async def _handle_outline_incremental_validated(
     return decision, turn_entry
 
 
-async def _handle_outline_incremental_candidates_validated(
+def _recovery_selection_mode(session_state: dict[str, Any]) -> str:
+    mode = str(session_state.get("recovery_selection_mode") or "pure_llm").strip().lower()
+    return mode if mode in {"pure_llm", "neurosymbolic"} else "pure_llm"
+
+
+def _action_horizon(session_state: dict[str, Any]) -> str:
+    horizon = str(session_state.get("action_horizon") or "1").strip().lower()
+    return horizon if horizon in {"1", "k", "full"} else "1"
+
+
+def _action_horizon_k(session_state: dict[str, Any]) -> int:
+    try:
+        return max(1, int(session_state.get("action_horizon_k") or 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _action_horizon_steps(session_state: dict[str, Any], *, action_horizon: str) -> int | str:
+    raw_steps = session_state.get("action_horizon_steps")
+    if raw_steps not in (None, ""):
+        return raw_steps
+    if action_horizon == "full":
+        return "full"
+    if action_horizon == "k":
+        return _action_horizon_k(session_state)
+    return 1
+
+
+def _candidate_count(session_state: dict[str, Any]) -> int | str:
+    raw_candidate_count = session_state.get("candidate_count", "auto")
+    if isinstance(raw_candidate_count, str):
+        candidate_count_token = raw_candidate_count.strip().lower()
+        if candidate_count_token in {"auto", "n"}:
+            return "auto"
+        try:
+            return max(1, int(candidate_count_token))
+        except ValueError:
+            return "auto"
+    try:
+        return max(1, int(raw_candidate_count))
+    except (TypeError, ValueError):
+        return "auto"
+
+
+def _candidate_sequences_from_response(
+    parsed_response: dict[str, Any],
+    *,
+    action_horizon: str,
+) -> list[dict[str, Any]]:
+    if action_horizon == "1":
+        return [
+            {
+                "candidate_index": candidate_index,
+                "surface_events": [dict(row)],
+            }
+            for candidate_index, row in enumerate(
+                _shared._parsed_response_rows(
+                    parsed_response,
+                    primary_key="candidate_events",
+                )
+            )
+        ]
+
+    candidate_traces: list[dict[str, Any]] = []
+    for candidate_index, row in enumerate(
+        _shared._parsed_response_rows(
+            parsed_response,
+            primary_key="candidate_traces",
+        )
+    ):
+        trace = dict(row or {})
+        candidate_traces.append(
+            {
+                "candidate_index": candidate_index,
+                "surface_events": [
+                    dict(event) for event in (trace.get("events") or []) if isinstance(event, dict)
+                ],
+                "rationale": str(trace.get("rationale") or "").strip(),
+            }
+        )
+    if candidate_traces:
+        return candidate_traces
+    return [
+        {
+            "candidate_index": candidate_index,
+            "surface_events": [dict(row)],
+        }
+        for candidate_index, row in enumerate(
+            _shared._parsed_response_rows(
+                parsed_response,
+                primary_key="candidate_events",
+            )
+        )
+    ]
+
+
+def _llm_selected_candidate_index(parsed_response: dict[str, Any]) -> int | None:
+    raw_index = parsed_response.get("selected_candidate_index")
+    if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+        return None
+    return int(raw_index)
+
+
+def _resource_switch_count(events: list[dict[str, Any]]) -> int:
+    resource_jids = [
+        str(event.get("resource_jid") or "").strip()
+        for event in events
+        if str(event.get("resource_jid") or "").strip()
+    ]
+    if not resource_jids:
+        return 0
+    return sum(
+        1
+        for previous, current in zip(resource_jids, resource_jids[1:], strict=False)
+        if previous != current
+    )
+
+
+def _selection_score(
+    *,
+    progress_score: int,
+    remaining_blocked_issues: int,
+    event_count: int,
+    resource_switch_count: int,
+) -> int:
+    return (
+        int(progress_score) * 100
+        - int(remaining_blocked_issues) * 50
+        - int(event_count) * 10
+        - int(resource_switch_count) * 2
+    )
+
+
+def _validate_candidate_sequence(
+    *,
+    candidate: dict[str, Any],
+    sequence_index: int,
+    action_horizon: str,
+    action_horizon_k: int,
+    session_state: dict[str, Any],
+    prepared_bridge_request: dict[str, Any],
+    planner: Any,
+) -> dict[str, Any]:
+    candidate_index = int(candidate.get("candidate_index") or 0)
+    surface_events = [
+        deepcopy(row) for row in (candidate.get("surface_events") or []) if isinstance(row, dict)
+    ]
+    evaluation: dict[str, Any] = {
+        "candidate_index": candidate_index,
+        "surface_events": deepcopy(surface_events),
+        "event_count": len(surface_events),
+        "action_horizon": action_horizon,
+    }
+    if surface_events:
+        evaluation["surface_task"] = deepcopy(surface_events[0])
+        evaluation["task"] = deepcopy(surface_events[0])
+    if str(candidate.get("rationale") or "").strip():
+        evaluation["rationale"] = str(candidate.get("rationale") or "").strip()
+
+    if not surface_events:
+        evaluation["valid"] = False
+        evaluation["validation_findings"] = [
+            _shared._candidate_schema_finding(
+                task={},
+                reason="candidate trace must include at least one event",
+                evidence={"candidate_index": candidate_index},
+            )
+        ]
+        return evaluation
+    if action_horizon == "1" and len(surface_events) != 1:
+        evaluation["valid"] = False
+        evaluation["validation_findings"] = [
+            _shared._candidate_schema_finding(
+                task=surface_events[0],
+                reason="action_horizon=1 candidate must include exactly one event",
+                evidence={"candidate_index": candidate_index, "event_count": len(surface_events)},
+            )
+        ]
+        return evaluation
+    if action_horizon == "k" and len(surface_events) > action_horizon_k:
+        evaluation["valid"] = False
+        evaluation["validation_findings"] = [
+            _shared._candidate_schema_finding(
+                task=surface_events[0],
+                reason="action_horizon=k candidate exceeds action_horizon_k",
+                evidence={
+                    "candidate_index": candidate_index,
+                    "event_count": len(surface_events),
+                    "action_horizon_k": action_horizon_k,
+                },
+            )
+        ]
+        return evaluation
+
+    working_session_state = deepcopy(session_state)
+    validated_events: list[dict[str, Any]] = []
+    committed_events: list[dict[str, Any]] = []
+    grounded_actions: list[dict[str, Any]] = []
+    progress_score = 0
+    progress_details: list[dict[str, Any]] = []
+
+    for event_index, surface_event in enumerate(surface_events):
+        working_task = deepcopy(surface_event)
+        evaluation["task"] = deepcopy(working_task)
+        validated_task, schema_findings = _shared._derive_candidate_outline_task(
+            candidate_task=working_task,
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        if schema_findings or not validated_task:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = deepcopy(schema_findings)
+            evaluation["failed_event_index"] = event_index
+            return evaluation
+        evaluation["validated_task"] = deepcopy(validated_task)
+
+        pruned_row = _shared._matching_active_pruned_action(
+            task=validated_task,
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        if pruned_row is not None:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = [
+                _shared._retarget_candidate_finding_to_task(
+                    dict(pruned_row.get("guard") or {}),
+                    dict(validated_task or working_task),
+                )
+            ]
+            evaluation["pruned_match"] = True
+            evaluation["failed_event_index"] = event_index
+            return evaluation
+
+        findings, grounded_action = _shared._validate_single_outline_task(
+            planner=planner,
+            task=dict(validated_task or {}),
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        if findings:
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = deepcopy(findings)
+            evaluation["failed_event_index"] = event_index
+            return evaluation
+        if grounded_action:
+            grounded_actions.append(deepcopy(grounded_action))
+
+        event_progress_score, event_progress_detail = _shared._candidate_progress_score(
+            task=dict(validated_task or {}),
+            session_state=working_session_state,
+            prepared_bridge_request=prepared_bridge_request,
+        )
+        progress_score += int(event_progress_score or 0)
+        progress_details.append(deepcopy(event_progress_detail or {}))
+
+        committed_event = _shared._commit_selected_candidate_task(
+            task=dict(validated_task or {}),
+            sequence_index=sequence_index + event_index,
+        )
+        accepted_prefix = list(working_session_state.get("accepted_outline_prefix") or [])
+        accepted_prefix.append(deepcopy(committed_event))
+        working_session_state["accepted_outline_prefix"] = accepted_prefix
+        _shared._sync_des_recovery_aliases(working_session_state)
+        _shared._apply_task_effects_to_symbolic_state(
+            committed_event,
+            working_session_state,
+        )
+        validated_events.append(deepcopy(validated_task))
+        committed_events.append(deepcopy(committed_event))
+
+    remaining_findings, remaining_conditions = _shared._remaining_blocked_issue_counts(
+        session_state=working_session_state,
+        prepared_bridge_request=prepared_bridge_request,
+    )
+    remaining_blocked_issues = int(remaining_findings or 0) + int(remaining_conditions or 0)
+    if action_horizon == "full" and remaining_blocked_issues > 0:
+        evaluation["valid"] = False
+        evaluation["validation_findings"] = [
+            _shared._candidate_schema_finding(
+                task=committed_events[-1] if committed_events else {},
+                reason="action_horizon=full candidate did not reconnect to the nominal plant",
+                evidence={
+                    "candidate_index": candidate_index,
+                    "remaining_blocked_issues": remaining_blocked_issues,
+                },
+            )
+        ]
+        return evaluation
+
+    resource_switches = _resource_switch_count(committed_events)
+    evaluation["valid"] = True
+    evaluation["validation_findings"] = []
+    evaluation["validated_events"] = deepcopy(validated_events)
+    evaluation["committed_events"] = deepcopy(committed_events)
+    evaluation["grounded_actions"] = deepcopy(grounded_actions)
+    evaluation["progress_score"] = progress_score
+    evaluation["progress_details"] = deepcopy(progress_details)
+    evaluation["remaining_blocked_issues"] = remaining_blocked_issues
+    evaluation["resource_switch_count"] = resource_switches
+    evaluation["selection_score"] = _selection_score(
+        progress_score=progress_score,
+        remaining_blocked_issues=remaining_blocked_issues,
+        event_count=len(committed_events),
+        resource_switch_count=resource_switches,
+    )
+    if validated_events:
+        evaluation["task"] = deepcopy(validated_events[0])
+        evaluation["validated_task"] = deepcopy(validated_events[0])
+    if grounded_actions:
+        evaluation["grounded_action"] = deepcopy(grounded_actions[0])
+    return evaluation
+
+
+def _select_neurosymbolic_candidate(
+    candidate_evaluations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    valid_candidates = [
+        row for row in candidate_evaluations if isinstance(row, dict) and bool(row.get("valid"))
+    ]
+    if not valid_candidates:
+        return None
+    return max(
+        valid_candidates,
+        key=lambda row: (
+            int(row.get("selection_score") or 0),
+            -int(row.get("remaining_blocked_issues") or 0),
+            -int(row.get("event_count") or 0),
+            -int(row.get("candidate_index") or 0),
+        ),
+    )
+
+
+async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
     *,
     session_state: dict[str, Any],
     parsed_response: dict[str, Any],
     prepared_bridge_request: dict[str, Any],
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
-    """Incremental with multiple candidate next tasks and LLM-owned selection."""
+    """Incremental with multiple candidate rows or traces and selectable ownership."""
     turn_entry: dict[str, Any] = {}
     sequence_index = _shared._next_recovery_sequence_index(session_state)
+    recovery_selection_mode = _recovery_selection_mode(session_state)
+    action_horizon = _action_horizon(session_state)
+    action_horizon_k = _action_horizon_k(session_state)
+    action_horizon_steps = _action_horizon_steps(
+        session_state,
+        action_horizon=action_horizon,
+    )
+    candidate_count = _candidate_count(session_state)
+    turn_entry["recovery_selection_mode"] = recovery_selection_mode
+    turn_entry["action_horizon"] = action_horizon_steps
+    turn_entry["candidate_count"] = candidate_count
     session_state["outline_validation_findings"] = []
     session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_bridge_request,
     )
 
-    candidate_events = [
-        dict(row)
-        for row in _shared._parsed_response_rows(
-            parsed_response,
-            primary_key="candidate_events",
-        )
-    ]
-    turn_entry["candidate_events"] = deepcopy(candidate_events)
-
+    candidate_sequences = _candidate_sequences_from_response(
+        parsed_response,
+        action_horizon=action_horizon,
+    )
+    if action_horizon == "1":
+        turn_entry["candidate_events"] = [
+            deepcopy(row["surface_events"][0])
+            for row in candidate_sequences
+            if row.get("surface_events")
+        ]
+    else:
+        turn_entry["candidate_traces"] = [
+            {
+                "events": deepcopy(row.get("surface_events") or []),
+                **(
+                    {"rationale": str(row.get("rationale") or "").strip()}
+                    if str(row.get("rationale") or "").strip()
+                    else {}
+                ),
+            }
+            for row in candidate_sequences
+        ]
     candidate_bound = int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND)
-    if not (1 <= len(candidate_events) <= candidate_bound):
-        turn_entry["error"] = (
-            f"outline response must include 1 to {candidate_bound} candidate_events"
+    if candidate_count == "auto":
+        count_is_valid = 1 <= len(candidate_sequences) <= candidate_bound
+        count_error = (
+            "outline response must include at least 1 candidate "
+            "and stay within the runtime schema limit"
         )
+        expected_count_log = "1-%d"
+        expected_count_args = (candidate_bound,)
+    else:
+        count_is_valid = len(candidate_sequences) == int(candidate_count)
+        count_error = (
+            f"outline response must include exactly {candidate_count} candidate"
+            f"{'' if int(candidate_count) == 1 else 's'}"
+        )
+        expected_count_log = "%d"
+        expected_count_args = (int(candidate_count),)
+    if not count_is_valid:
+        turn_entry["error"] = count_error
         _logger.warning(
-            "[MultiTurn] outline incremental_candidates_validated: expected 1-%d candidate_events, got %d",
-            candidate_bound,
-            len(candidate_events),
+            "[MultiTurn] outline incremental_candidates_validated: expected "
+            + expected_count_log
+            + " candidates, got %d",
+            *expected_count_args,
+            len(candidate_sequences),
         )
         return "need_revision", turn_entry
 
-    selected_candidate_index_raw = parsed_response.get("selected_candidate_index")
-    if not isinstance(selected_candidate_index_raw, int) or isinstance(
-        selected_candidate_index_raw, bool
-    ):
+    llm_selected_candidate_index = _llm_selected_candidate_index(parsed_response)
+    if llm_selected_candidate_index is not None:
+        turn_entry["llm_selected_candidate_index"] = llm_selected_candidate_index
+    if recovery_selection_mode == "pure_llm" and llm_selected_candidate_index is None:
         finding = _shared._candidate_schema_finding(
             task={},
             reason=(
                 "outline response must include integer selected_candidate_index "
-                "pointing at candidate_events"
+                "pointing at the proposed candidates"
             ),
             evidence={"field": "selected_candidate_index"},
         )
@@ -398,16 +770,18 @@ async def _handle_outline_incremental_candidates_validated(
         session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
-    selected_candidate_index = int(selected_candidate_index_raw)
-    turn_entry["selected_candidate_index"] = selected_candidate_index
-    if not (0 <= selected_candidate_index < len(candidate_events)):
+    if (
+        recovery_selection_mode == "pure_llm"
+        and llm_selected_candidate_index is not None
+        and not (0 <= llm_selected_candidate_index < len(candidate_sequences))
+    ):
         finding = _shared._candidate_schema_finding(
             task={},
-            reason=("selected_candidate_index must reference an item in candidate_events"),
+            reason="selected_candidate_index must reference a proposed candidate",
             evidence={
                 "field": "selected_candidate_index",
-                "selected_candidate_index": selected_candidate_index,
-                "candidate_count": len(candidate_events),
+                "selected_candidate_index": llm_selected_candidate_index,
+                "candidate_count": len(candidate_sequences),
             },
         )
         turn_entry["validation_findings"] = [deepcopy(finding)]
@@ -420,56 +794,18 @@ async def _handle_outline_incremental_candidates_validated(
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
 
-    candidate_evaluations: list[dict[str, Any]] = []
-    for candidate_index, task in enumerate(candidate_events):
-        surface_task = deepcopy(task)
-        working_task = deepcopy(task)
-        evaluation: dict[str, Any] = {
-            "candidate_index": candidate_index,
-            "surface_task": deepcopy(surface_task),
-            "task": deepcopy(working_task),
-        }
-
-        validated_task, schema_findings = _shared._derive_candidate_outline_task(
-            candidate_task=working_task,
+    candidate_evaluations = [
+        _validate_candidate_sequence(
+            candidate=dict(candidate),
+            sequence_index=sequence_index,
+            action_horizon=action_horizon,
+            action_horizon_k=action_horizon_k,
             session_state=session_state,
             prepared_bridge_request=prepared_bridge_request,
-        )
-        if schema_findings or not validated_task:
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(schema_findings)
-            candidate_evaluations.append(evaluation)
-            continue
-        evaluation["validated_task"] = deepcopy(validated_task)
-
-        pruned_row = _shared._matching_active_pruned_action(
-            task=validated_task,
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-        if pruned_row is not None:
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = [
-                _shared._retarget_candidate_finding_to_task(
-                    dict(pruned_row.get("guard") or {}),
-                    dict(validated_task or working_task),
-                )
-            ]
-            evaluation["pruned_match"] = True
-            candidate_evaluations.append(evaluation)
-            continue
-
-        findings, grounded_action = _shared._validate_single_outline_task(
             planner=planner,
-            task=dict(validated_task or {}),
-            session_state=session_state,
-            prepared_bridge_request=prepared_bridge_request,
         )
-        evaluation["valid"] = bool(validated_task) and not findings
-        evaluation["validation_findings"] = deepcopy(findings)
-        if grounded_action:
-            evaluation["grounded_action"] = deepcopy(grounded_action)
-        candidate_evaluations.append(evaluation)
+        for candidate in candidate_sequences
+    ]
 
     turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
     _shared._promote_durable_candidate_rejections(
@@ -478,15 +814,25 @@ async def _handle_outline_incremental_candidates_validated(
         candidate_evaluations=candidate_evaluations,
     )
 
-    selected = next(
-        (
-            row
-            for row in candidate_evaluations
-            if isinstance(row, dict)
-            and int(row.get("candidate_index", -1)) == selected_candidate_index
-        ),
-        None,
-    )
+    if recovery_selection_mode == "pure_llm":
+        selected_candidate_index = int(llm_selected_candidate_index or 0)
+        selected_by = "pure_llm"
+        selected = next(
+            (
+                row
+                for row in candidate_evaluations
+                if isinstance(row, dict)
+                and int(row.get("candidate_index", -1)) == selected_candidate_index
+            ),
+            None,
+        )
+    else:
+        selected = _select_neurosymbolic_candidate(candidate_evaluations)
+        selected_candidate_index = (
+            int(selected.get("candidate_index") or 0) if isinstance(selected, dict) else -1
+        )
+        selected_by = "neurosymbolic"
+
     feedback_rows = _shared._candidate_feedback_rows(candidate_evaluations)
     selected_valid = bool(selected and selected.get("valid"))
     if not selected_valid:
@@ -499,13 +845,15 @@ async def _handle_outline_incremental_candidates_validated(
         turn_entry["transition_validation"] = {
             "status": "rejected",
             "selected_candidate_index": selected_candidate_index,
+            "selected_by": selected_by,
             "findings": deepcopy(feedback_rows),
         }
         session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["rejected_turn_thought"] = str(parsed_response.get("thought") or "").strip()
         _logger.info(
-            "[MultiTurn] outline incremental_candidates_validated: rejected selected candidate %d",
-            selected_candidate_index + 1,
+            "[MultiTurn] outline incremental_candidates_validated: rejected selected candidate %d (%s)",
+            selected_candidate_index + 1 if selected_candidate_index >= 0 else 0,
+            selected_by,
         )
         stagnation = int(session_state.get("outline_stagnation_count") or 0) + 1
         session_state["outline_stagnation_count"] = stagnation
@@ -547,26 +895,37 @@ async def _handle_outline_incremental_candidates_validated(
     session_state["outline_stagnation_count"] = 0
 
     selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
-    selected_validated_task = deepcopy(dict(selected.get("validated_task") or {}))
-    selected_transition = _shared._commit_selected_candidate_task(
-        task=selected_validated_task,
-        sequence_index=sequence_index,
+    selected_committed_events = [
+        deepcopy(row) for row in (selected.get("committed_events") or []) if isinstance(row, dict)
+    ]
+    selected_transition = (
+        deepcopy(selected_committed_events[0]) if selected_committed_events else {}
     )
-    selected_grounded_action = deepcopy(dict(selected.get("grounded_action") or {}))
+    selected_grounded_actions = [
+        deepcopy(row) for row in (selected.get("grounded_actions") or []) if isinstance(row, dict)
+    ]
 
     turn_entry["selected_candidate_index"] = selected_candidate_index
+    turn_entry["selected_by"] = selected_by
+    turn_entry["selection_score"] = int(selected.get("selection_score") or 0)
     turn_entry["selected_transition"] = deepcopy(selected_transition)
+    turn_entry["selected_transition_sequence"] = deepcopy(selected_committed_events)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
+    turn_entry["selected_candidate_trace"] = deepcopy(selected.get("surface_events") or [])
     turn_entry["next_transition"] = deepcopy(selected_transition)
     turn_entry["transition_validation"] = {
         "status": "passed",
         "selected_candidate_index": selected_candidate_index,
+        "selected_by": selected_by,
     }
-    if selected_grounded_action:
-        turn_entry["grounded_action"] = deepcopy(selected_grounded_action)
+    if llm_selected_candidate_index is not None:
+        turn_entry["llm_selected_candidate_index"] = llm_selected_candidate_index
+    if selected_grounded_actions:
+        turn_entry["grounded_action"] = deepcopy(selected_grounded_actions[0])
+        turn_entry["grounded_actions"] = deepcopy(selected_grounded_actions)
 
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
-    accepted_prefix.append(deepcopy(selected_transition))
+    accepted_prefix.extend(deepcopy(selected_committed_events))
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = []
     session_state["candidate_rejection_feedback"] = []
@@ -577,7 +936,8 @@ async def _handle_outline_incremental_candidates_validated(
         transition_validation=turn_entry["transition_validation"],
     )
 
-    _shared._apply_task_effects_to_symbolic_state(selected_transition, session_state)
+    for selected_event in selected_committed_events:
+        _shared._apply_task_effects_to_symbolic_state(selected_event, session_state)
     session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_bridge_request,
@@ -592,10 +952,13 @@ async def _handle_outline_incremental_candidates_validated(
     decision = "outline_ready" if outline_complete else "need_next_task"
 
     _logger.info(
-        "[MultiTurn] outline incremental_candidates_validated: accepted LLM-selected candidate %d (%s) "
-        "(prefix now %d events, complete=%s)",
+        "[MultiTurn] outline incremental_candidates_validated: accepted %s-selected candidate %d (%s) "
+        "(events=%d, score=%d, prefix now %d events, complete=%s)",
+        selected_by,
         selected_candidate_index + 1,
         str(selected_transition.get("outline_id") or "").strip(),
+        len(selected_committed_events),
+        int(selected.get("selection_score") or 0),
         len(accepted_prefix),
         outline_complete,
     )

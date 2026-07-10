@@ -210,14 +210,54 @@ def build_multi_turn_session_seed(
     )
     if feedback_render_style not in {"des_event_diagnostic", "raw_code"}:
         feedback_render_style = "des_event_diagnostic"
+    recovery_selection_mode = (
+        str(bridge_session.get("recovery_selection_mode") or "pure_llm").strip().lower()
+    )
+    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+        recovery_selection_mode = "pure_llm"
+    action_horizon = str(bridge_session.get("action_horizon") or "1").strip().lower()
+    if action_horizon not in {"1", "k", "full"}:
+        action_horizon = "1"
+    try:
+        action_horizon_k = max(1, int(bridge_session.get("action_horizon_k") or 3))
+    except (TypeError, ValueError):
+        action_horizon_k = 3
+    action_horizon_steps: int | str
+    if action_horizon == "full":
+        action_horizon_steps = "full"
+    elif action_horizon == "k":
+        action_horizon_steps = action_horizon_k
+    else:
+        action_horizon_steps = 1
+    raw_candidate_count = bridge_session.get("candidate_count", "auto")
+    candidate_count: int | str
+    if isinstance(raw_candidate_count, str):
+        candidate_count_token = raw_candidate_count.strip().lower()
+        if candidate_count_token in {"auto", "n"}:
+            candidate_count = "auto"
+        else:
+            try:
+                candidate_count = max(1, int(candidate_count_token))
+            except ValueError:
+                candidate_count = "auto"
+    else:
+        try:
+            candidate_count = max(1, int(raw_candidate_count))
+        except (TypeError, ValueError):
+            candidate_count = "auto"
     candidate_bound_cap = max(
         1,
         int(bridge_session.get("candidate_bound_cap") or _DEFAULT_CANDIDATE_BOUND_CAP),
     )
-    candidate_bound = max(
-        1,
-        int(bridge_session.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
-    )
+    if candidate_count == "auto":
+        candidate_bound = max(
+            1,
+            int(bridge_session.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
+        )
+        candidate_bound = min(candidate_bound, candidate_bound_cap)
+    else:
+        candidate_bound = max(1, int(candidate_count))
+        candidate_bound_cap = max(candidate_bound, candidate_bound_cap)
     # Build symbolic resource/part state for validation tracking
     llm_input = dict(prepared_bridge_request.get("llm_input") or {})
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
@@ -261,6 +301,11 @@ def build_multi_turn_session_seed(
         "max_observe_batch": max_observe_batch,
         "outline_mode": outline_mode,
         "feedback_render_style": feedback_render_style,
+        "recovery_selection_mode": recovery_selection_mode,
+        "action_horizon": action_horizon,
+        "action_horizon_steps": action_horizon_steps,
+        "action_horizon_k": action_horizon_k,
+        "candidate_count": candidate_count,
         "candidate_bound": candidate_bound,
         "candidate_bound_cap": candidate_bound_cap,
         "status": "pending",
@@ -4179,6 +4224,13 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         phase,
         outline_mode=outline_mode,
         candidate_bound=candidate_bound,
+        candidate_count=session_state.get("candidate_count", "auto"),
+        recovery_selection_mode=str(session_state.get("recovery_selection_mode") or "pure_llm")
+        .strip()
+        .lower(),
+        action_horizon=str(session_state.get("action_horizon") or "1").strip().lower(),
+        action_horizon_steps=session_state.get("action_horizon_steps"),
+        action_horizon_k=max(1, int(session_state.get("action_horizon_k") or 3)),
     )
 
 
@@ -4303,8 +4355,24 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
             "candidate_index": int(row.get("candidate_index") or 0),
             "valid": bool(row.get("valid")),
         }
+        for key in (
+            "action_horizon",
+            "event_count",
+            "selection_score",
+            "remaining_blocked_issues",
+            "resource_switch_count",
+        ):
+            if row.get(key) not in (None, "", [], {}):
+                summary[key] = deepcopy(row.get(key))
         if row.get("pruned_match") is not None:
             summary["pruned_match"] = bool(row.get("pruned_match"))
+        committed_events = [
+            _compact_artifact_task(item)
+            for item in (row.get("committed_events") or [])
+            if isinstance(item, dict)
+        ]
+        if committed_events:
+            summary["events"] = committed_events
         compact_task = _compact_artifact_task(task)
         if compact_task:
             summary["task"] = compact_task
@@ -4349,7 +4417,7 @@ def _compact_artifact_transition_validation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     compact: dict[str, Any] = {}
-    for key in ("status", "selected_candidate_index"):
+    for key in ("status", "selected_candidate_index", "selected_by"):
         if value.get(key) not in (None, "", [], {}):
             compact[key] = deepcopy(value.get(key))
     findings = value.get("findings")
@@ -4429,6 +4497,13 @@ def _artifact_response_payload(
         return payload
 
     artifact_payload: dict[str, Any] = {}
+    for key in (
+        "recovery_selection_mode",
+        "action_horizon",
+        "candidate_count",
+    ):
+        if turn_entry.get(key) not in (None, "", [], {}):
+            artifact_payload[key] = deepcopy(turn_entry.get(key))
     thought = str(parsed_response.get("thought") or "").strip()
     if thought:
         artifact_payload["thought"] = thought
@@ -4439,18 +4514,53 @@ def _artifact_response_payload(
         for row in (turn_entry.get("candidate_events") or [])
         if isinstance(row, dict)
     ]
+    candidate_traces = []
+    for trace in turn_entry.get("candidate_traces") or []:
+        if not isinstance(trace, dict):
+            continue
+        candidate_traces.append(
+            {
+                "events": [
+                    _compact_artifact_task(row)
+                    for row in (trace.get("events") or [])
+                    if isinstance(row, dict)
+                ],
+                **(
+                    {"rationale": str(trace.get("rationale") or "").strip()}
+                    if str(trace.get("rationale") or "").strip()
+                    else {}
+                ),
+            }
+        )
+    if candidate_traces:
+        artifact_payload["candidate_traces"] = candidate_traces
     if isinstance(turn_entry.get("candidate_evaluations"), list):
         artifact_payload["candidate_evaluation_summary"] = _compact_artifact_candidate_evaluations(
             turn_entry.get("candidate_evaluations") or []
+        )
+    if "llm_selected_candidate_index" in turn_entry:
+        artifact_payload["llm_selected_candidate_index"] = int(
+            turn_entry.get("llm_selected_candidate_index") or 0
         )
     if "selected_candidate_index" in turn_entry:
         artifact_payload["selected_candidate_index"] = int(
             turn_entry.get("selected_candidate_index") or 0
         )
+    if str(turn_entry.get("selected_by") or "").strip():
+        artifact_payload["selected_by"] = str(turn_entry.get("selected_by") or "").strip()
+    if turn_entry.get("selection_score") not in (None, "", [], {}):
+        artifact_payload["selection_score"] = int(turn_entry.get("selection_score") or 0)
     if isinstance(turn_entry.get("selected_transition"), dict):
         artifact_payload["selected_transition"] = _compact_artifact_task(
             turn_entry.get("selected_transition")
         )
+    selected_transition_sequence = [
+        _compact_artifact_task(row)
+        for row in (turn_entry.get("selected_transition_sequence") or [])
+        if isinstance(row, dict)
+    ]
+    if selected_transition_sequence:
+        artifact_payload["selected_transition_sequence"] = selected_transition_sequence
     if isinstance(turn_entry.get("selected_candidate_task"), dict):
         artifact_payload["selected_candidate_task"] = _compact_artifact_task(
             turn_entry.get("selected_candidate_task")
@@ -4476,6 +4586,10 @@ def _artifact_response_payload(
             "status": "passed",
             "selected_candidate_index": selected_candidate_index,
         }
+        if str(turn_entry.get("selected_by") or "").strip():
+            artifact_payload["transition_validation"]["selected_by"] = str(
+                turn_entry.get("selected_by") or ""
+            ).strip()
         if not (turn_entry.get("candidate_rejection_feedback") or []):
             artifact_payload.pop("candidate_rejection_feedback", None)
     return artifact_payload
@@ -6048,6 +6162,8 @@ async def execute_multi_turn_bridge(
             and current_phase == "outline"
             and decision == "outline_ready"
         ):
+            session_state["status"] = "ready_for_primitive_generation"
+            _sync_bridge_debug_state()
             break
         if (
             stop_after_phase == "primitive"
@@ -6059,6 +6175,7 @@ async def execute_multi_turn_bridge(
         if session_state.get("status") in (
             "completed",
             "paused_after_outline_turn",
+            "ready_for_primitive_generation",
             "paused_after_primitive_turn",
             "paused_after_primitive_generation",
             "paused_after_primitive_blocked",
@@ -6075,6 +6192,7 @@ async def execute_multi_turn_bridge(
     if session_state.get("status") not in (
         "completed",
         "paused_after_outline_turn",
+        "ready_for_primitive_generation",
         "paused_after_primitive_turn",
         "paused_after_primitive_generation",
         "paused_after_primitive_blocked",

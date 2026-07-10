@@ -45,8 +45,8 @@ ur5e:
   moveit:
     launch: "ur5e_rg2_hardware_moveit.launch.py"
     group_name: "ur_manipulator"
-    default_velocity_scaling: 0.50
-    default_acceleration_scaling: 0.50
+    default_velocity_scaling: 0.425
+    default_acceleration_scaling: 0.425
     arm_joint_limits:
       max_velocity: 2.90
       max_acceleration: 4.80
@@ -57,12 +57,12 @@ ur5e:
     rtde_allowed_goal_duration_margin: 20.0
     rtde_trajectory_controller: "cais_ur5e_rtde_trajectory_controller"
   rtde:
-    max_joint_vel_rad_s: 1.324
-    max_joint_accel_rad_s2: 1.486
-    max_joint_jerk_rad_s3: 3.025
+    max_joint_vel_rad_s: 1.125
+    max_joint_accel_rad_s2: 1.263
+    max_joint_jerk_rad_s3: 2.571
     shoulder_pan_extra_scale: 2.0
-    movej_speed_rad_s: 1.486
-    movej_accel_rad_s2: 1.81
+    movej_speed_rad_s: 1.263
+    movej_accel_rad_s2: 1.539
   joint_state_topics:
     - "/joint_states"
   trajectory_topics: []
