@@ -36,7 +36,7 @@ _pkg_dir = os.path.join(os.path.dirname(__file__))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
-
+###
 # Headless agent runner.
 def _run_headless() -> None:
     """Run the SPADE agents without the web UI (legacy CLI mode)."""
