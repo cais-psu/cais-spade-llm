@@ -180,9 +180,6 @@ def _outline_candidates_response_schema(
     else:
         candidate_min_items = int(normalized_candidate_count)
         candidate_max_items = int(normalized_candidate_count)
-    normalized_selection_mode = str(recovery_selection_mode or "pure_llm").strip().lower()
-    if normalized_selection_mode not in {"pure_llm", "neurosymbolic"}:
-        normalized_selection_mode = "pure_llm"
     normalized_horizon = str(action_horizon or "1").strip().lower()
     if normalized_horizon not in {"1", "k", "full"}:
         normalized_horizon = "1"
@@ -191,8 +188,7 @@ def _outline_candidates_response_schema(
     else:
         normalized_horizon_k = max(1, int(action_horizon_k or 3))
     required = ["thought"]
-    if normalized_selection_mode == "pure_llm":
-        required.append("selected_candidate_index")
+    required.append("selected_candidate_index")
     if normalized_horizon == "1":
         candidate_property_name = "candidate_events"
         required.append(candidate_property_name)
@@ -2853,7 +2849,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     recovery_selection_mode = (
         str(session_state.get("recovery_selection_mode") or "pure_llm").strip().lower()
     )
-    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+    if recovery_selection_mode != "pure_llm":
         recovery_selection_mode = "pure_llm"
     action_horizon = str(session_state.get("action_horizon") or "1").strip().lower()
     if action_horizon not in {"1", "k", "full"}:
@@ -2935,8 +2931,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         )
         selection_owner_text = (
             "You must choose the best candidate by setting `selected_candidate_index`."
-            if recovery_selection_mode == "pure_llm"
-            else "Do not choose the winner; Product Agent validation and cost-based selection will choose after you propose candidates."
         )
         horizon_text = {
             "1": "Each candidate contains exactly one next recovery event.",
@@ -3122,12 +3116,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     if is_candidate_mode:
         selected_candidate_line = (
             "- Return `selected_candidate_index` pointing at your chosen candidate."
-            if recovery_selection_mode == "pure_llm"
-            else "- Do not return `selected_candidate_index`; Product Agent validation and cost-based selection will choose the candidate."
         )
-        selected_candidate_example = (
-            '  "selected_candidate_index": 0,\n' if recovery_selection_mode == "pure_llm" else ""
-        )
+        selected_candidate_example = '  "selected_candidate_index": 0,\n'
         if action_horizon == "1":
             response_contract_lines = [
                 "- Return one JSON object with top-level fields `thought` and `candidate_events`.",

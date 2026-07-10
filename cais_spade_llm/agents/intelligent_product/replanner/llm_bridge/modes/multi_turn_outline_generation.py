@@ -342,7 +342,7 @@ async def _handle_outline_incremental_validated(
 
 def _recovery_selection_mode(session_state: dict[str, Any]) -> str:
     mode = str(session_state.get("recovery_selection_mode") or "pure_llm").strip().lower()
-    return mode if mode in {"pure_llm", "neurosymbolic"} else "pure_llm"
+    return mode if mode == "pure_llm" else "pure_llm"
 
 
 def _action_horizon(session_state: dict[str, Any]) -> str:
@@ -458,21 +458,6 @@ def _resource_switch_count(events: list[dict[str, Any]]) -> int:
     )
 
 
-def _selection_score(
-    *,
-    progress_score: int,
-    remaining_blocked_issues: int,
-    event_count: int,
-    resource_switch_count: int,
-) -> int:
-    return (
-        int(progress_score) * 100
-        - int(remaining_blocked_issues) * 50
-        - int(event_count) * 10
-        - int(resource_switch_count) * 2
-    )
-
-
 def _validate_candidate_sequence(
     *,
     candidate: dict[str, Any],
@@ -538,8 +523,6 @@ def _validate_candidate_sequence(
     validated_events: list[dict[str, Any]] = []
     committed_events: list[dict[str, Any]] = []
     grounded_actions: list[dict[str, Any]] = []
-    progress_score = 0
-    progress_details: list[dict[str, Any]] = []
 
     for event_index, surface_event in enumerate(surface_events):
         working_task = deepcopy(surface_event)
@@ -587,14 +570,6 @@ def _validate_candidate_sequence(
         if grounded_action:
             grounded_actions.append(deepcopy(grounded_action))
 
-        event_progress_score, event_progress_detail = _shared._candidate_progress_score(
-            task=dict(validated_task or {}),
-            session_state=working_session_state,
-            prepared_bridge_request=prepared_bridge_request,
-        )
-        progress_score += int(event_progress_score or 0)
-        progress_details.append(deepcopy(event_progress_detail or {}))
-
         committed_event = _shared._commit_selected_candidate_task(
             task=dict(validated_task or {}),
             sequence_index=sequence_index + event_index,
@@ -635,41 +610,14 @@ def _validate_candidate_sequence(
     evaluation["validated_events"] = deepcopy(validated_events)
     evaluation["committed_events"] = deepcopy(committed_events)
     evaluation["grounded_actions"] = deepcopy(grounded_actions)
-    evaluation["progress_score"] = progress_score
-    evaluation["progress_details"] = deepcopy(progress_details)
     evaluation["remaining_blocked_issues"] = remaining_blocked_issues
     evaluation["resource_switch_count"] = resource_switches
-    evaluation["selection_score"] = _selection_score(
-        progress_score=progress_score,
-        remaining_blocked_issues=remaining_blocked_issues,
-        event_count=len(committed_events),
-        resource_switch_count=resource_switches,
-    )
     if validated_events:
         evaluation["task"] = deepcopy(validated_events[0])
         evaluation["validated_task"] = deepcopy(validated_events[0])
     if grounded_actions:
         evaluation["grounded_action"] = deepcopy(grounded_actions[0])
     return evaluation
-
-
-def _select_neurosymbolic_candidate(
-    candidate_evaluations: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    valid_candidates = [
-        row for row in candidate_evaluations if isinstance(row, dict) and bool(row.get("valid"))
-    ]
-    if not valid_candidates:
-        return None
-    return max(
-        valid_candidates,
-        key=lambda row: (
-            int(row.get("selection_score") or 0),
-            -int(row.get("remaining_blocked_issues") or 0),
-            -int(row.get("event_count") or 0),
-            -int(row.get("candidate_index") or 0),
-        ),
-    )
 
 
 async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
@@ -752,7 +700,7 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
     llm_selected_candidate_index = _llm_selected_candidate_index(parsed_response)
     if llm_selected_candidate_index is not None:
         turn_entry["llm_selected_candidate_index"] = llm_selected_candidate_index
-    if recovery_selection_mode == "pure_llm" and llm_selected_candidate_index is None:
+    if llm_selected_candidate_index is None:
         finding = _shared._candidate_schema_finding(
             task={},
             reason=(
@@ -770,10 +718,8 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
         session_state["transition_validation"] = deepcopy(turn_entry["transition_validation"])
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
-    if (
-        recovery_selection_mode == "pure_llm"
-        and llm_selected_candidate_index is not None
-        and not (0 <= llm_selected_candidate_index < len(candidate_sequences))
+    if llm_selected_candidate_index is not None and not (
+        0 <= llm_selected_candidate_index < len(candidate_sequences)
     ):
         finding = _shared._candidate_schema_finding(
             task={},
@@ -814,24 +760,17 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
         candidate_evaluations=candidate_evaluations,
     )
 
-    if recovery_selection_mode == "pure_llm":
-        selected_candidate_index = int(llm_selected_candidate_index or 0)
-        selected_by = "pure_llm"
-        selected = next(
-            (
-                row
-                for row in candidate_evaluations
-                if isinstance(row, dict)
-                and int(row.get("candidate_index", -1)) == selected_candidate_index
-            ),
-            None,
-        )
-    else:
-        selected = _select_neurosymbolic_candidate(candidate_evaluations)
-        selected_candidate_index = (
-            int(selected.get("candidate_index") or 0) if isinstance(selected, dict) else -1
-        )
-        selected_by = "neurosymbolic"
+    selected_candidate_index = int(llm_selected_candidate_index or 0)
+    selected_by = "pure_llm"
+    selected = next(
+        (
+            row
+            for row in candidate_evaluations
+            if isinstance(row, dict)
+            and int(row.get("candidate_index", -1)) == selected_candidate_index
+        ),
+        None,
+    )
 
     feedback_rows = _shared._candidate_feedback_rows(candidate_evaluations)
     selected_valid = bool(selected and selected.get("valid"))
@@ -907,7 +846,6 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
 
     turn_entry["selected_candidate_index"] = selected_candidate_index
     turn_entry["selected_by"] = selected_by
-    turn_entry["selection_score"] = int(selected.get("selection_score") or 0)
     turn_entry["selected_transition"] = deepcopy(selected_transition)
     turn_entry["selected_transition_sequence"] = deepcopy(selected_committed_events)
     turn_entry["selected_candidate_task"] = deepcopy(selected_candidate_task)
@@ -953,12 +891,11 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: PLR0915
 
     _logger.info(
         "[MultiTurn] outline incremental_candidates_validated: accepted %s-selected candidate %d (%s) "
-        "(events=%d, score=%d, prefix now %d events, complete=%s)",
+        "(events=%d, prefix now %d events, complete=%s)",
         selected_by,
         selected_candidate_index + 1,
         str(selected_transition.get("outline_id") or "").strip(),
         len(selected_committed_events),
-        int(selected.get("selection_score") or 0),
         len(accepted_prefix),
         outline_complete,
     )

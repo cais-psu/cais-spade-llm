@@ -161,7 +161,8 @@ ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
 3. **40s** — Single MoveIt `move_group` + RViz launches (both robots in one instance)
 
 **One RViz window** will open with both robots visible. Use the **Planning Group**
-dropdown in the MotionPlanning panel to switch between robots:
+dropdown in the MotionPlanning panel for paired or individual control:
+- `dual_robots` — xArm6 + UR5e arms together
 - `xarm6_xarm6` — xArm6 arm (6-DOF)
 - `xarm6_xarm_gripper` — xArm6 gripper
 - `ur5e_ur_manipulator` — UR5e arm (6-DOF)

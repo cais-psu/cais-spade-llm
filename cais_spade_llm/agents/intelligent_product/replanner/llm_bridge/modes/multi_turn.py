@@ -213,7 +213,7 @@ def build_multi_turn_session_seed(
     recovery_selection_mode = (
         str(bridge_session.get("recovery_selection_mode") or "pure_llm").strip().lower()
     )
-    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+    if recovery_selection_mode != "pure_llm":
         recovery_selection_mode = "pure_llm"
     action_horizon = str(bridge_session.get("action_horizon") or "1").strip().lower()
     if action_horizon not in {"1", "k", "full"}:
@@ -4358,7 +4358,6 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
         for key in (
             "action_horizon",
             "event_count",
-            "selection_score",
             "remaining_blocked_issues",
             "resource_switch_count",
         ):
@@ -4548,8 +4547,6 @@ def _artifact_response_payload(
         )
     if str(turn_entry.get("selected_by") or "").strip():
         artifact_payload["selected_by"] = str(turn_entry.get("selected_by") or "").strip()
-    if turn_entry.get("selection_score") not in (None, "", [], {}):
-        artifact_payload["selection_score"] = int(turn_entry.get("selection_score") or 0)
     if isinstance(turn_entry.get("selected_transition"), dict):
         artifact_payload["selected_transition"] = _compact_artifact_task(
             turn_entry.get("selected_transition")

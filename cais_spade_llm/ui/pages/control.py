@@ -17,7 +17,10 @@ log = logging.getLogger(__name__)
 
 # Gazebo launch variants with friendly labels.
 _GAZEBO_VARIANTS = {
-    "gazebo_dual": ("Dual Robots (xArm6 + UR5e)", "Full dual-robot Gazebo + MoveIt + RViz"),
+    "gazebo_dual": (
+        "Dual Robots (xArm6 + UR5e)",
+        "No-hardware Gazebo + MoveIt/RViz; RViz controls xArm6 and UR5e planning groups",
+    ),
     "gazebo_xarm6": ("xArm6 Only", "Single xArm6 Gazebo + MoveIt + RViz"),
     "gazebo_ur5e": ("UR5e Only", "Single UR5e + RG2 Gazebo + MoveIt + RViz"),
 }
@@ -318,7 +321,9 @@ def _launch_section(bridge: SystemBridge) -> None:
 
             with launch_container:
                 # Gazebo variants.
-                ui.label("Gazebo Simulation").classes("text-sm font-semibold text-slate-600")
+                ui.label("Gazebo Simulation (No Hardware)").classes(
+                    "text-sm font-semibold text-slate-600"
+                )
                 for name, (label, desc) in _GAZEBO_VARIANTS.items():
                     blocked_reason = None
                     if any_hardware_running and statuses.get(name, "stopped") != "running":

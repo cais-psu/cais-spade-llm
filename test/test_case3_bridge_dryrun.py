@@ -219,7 +219,7 @@ def _normalize_recovery_outline_experiment_settings(raw_settings: Any) -> dict[s
     raw = dict(raw_settings or {}) if isinstance(raw_settings, dict) else {}
     enabled = bool(raw.get("enabled", True))
     recovery_selection_mode = str(raw.get("recovery_selection_mode") or "pure_llm").strip().lower()
-    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+    if recovery_selection_mode != "pure_llm":
         recovery_selection_mode = "pure_llm"
 
     raw_action_horizon = raw.get("action_horizon", 1)
@@ -2353,22 +2353,6 @@ async def _run_mocked_candidate_handler(
         multi_turn_outline_generation,
     )
 
-    def _mock_progress_score(
-        *,
-        task: dict[str, Any],
-        session_state: dict[str, Any],
-        prepared_bridge_request: dict[str, Any],
-    ) -> tuple[int, dict[str, int]]:
-        del session_state, prepared_bridge_request
-        scores = {
-            "low_score": 1,
-            "better_score": 5,
-            "step_a": 2,
-            "step_b": 2,
-        }
-        score = scores.get(str(task.get("event_name") or ""), 1)
-        return score, {"mock_score": score}
-
     def _mock_remaining_counts(
         *,
         session_state: dict[str, Any],
@@ -2390,11 +2374,6 @@ async def _run_mocked_candidate_handler(
             multi_turn_mode,
             "_validate_single_outline_task",
             side_effect=lambda **_kwargs: ([], {}),
-        ),
-        patch.object(
-            multi_turn_mode,
-            "_candidate_progress_score",
-            side_effect=_mock_progress_score,
         ),
         patch.object(
             multi_turn_mode,
@@ -2448,7 +2427,7 @@ def test_case3_experiment_settings_are_loaded_from_file() -> None:
     assert settings["candidate_count"] == "auto"
 
 
-def test_case3_neurosymbolic_selects_best_valid_one_step_candidate() -> None:
+def test_case3_configured_neurosymbolic_falls_back_to_pure_llm_selection() -> None:
     session_state = _candidate_session(
         recovery_selection_mode="neurosymbolic",
         action_horizon="1",
@@ -2468,9 +2447,10 @@ def test_case3_neurosymbolic_selects_best_valid_one_step_candidate() -> None:
     )
 
     assert decision == "need_next_task"
-    assert turn_entry["selected_by"] == "neurosymbolic"
-    assert turn_entry["selected_candidate_index"] == 1
-    assert session_state["accepted_outline_prefix"][0]["event_name"] == "better_score"
+    assert turn_entry["recovery_selection_mode"] == "pure_llm"
+    assert turn_entry["selected_by"] == "pure_llm"
+    assert turn_entry["selected_candidate_index"] == 0
+    assert session_state["accepted_outline_prefix"][0]["event_name"] == "low_score"
 
 
 def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
@@ -2483,7 +2463,7 @@ def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
             session_state=session_state,
             parsed_response={
                 "thought": "select my preferred candidate",
-                "selected_candidate_index": 0,
+                "selected_candidate_index": 1,
                 "candidate_events": [
                     _candidate_event("low_score"),
                     _candidate_event("better_score"),
@@ -2493,13 +2473,61 @@ def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
     )
 
     assert turn_entry["selected_by"] == "pure_llm"
-    assert turn_entry["selected_candidate_index"] == 0
-    assert session_state["accepted_outline_prefix"][0]["event_name"] == "low_score"
+    assert turn_entry["selected_candidate_index"] == 1
+    assert [row["valid"] for row in turn_entry["candidate_evaluations"]] == [True, True]
+    assert session_state["accepted_outline_prefix"][0]["event_name"] == "better_score"
 
 
-def test_case3_neurosymbolic_k_horizon_commits_selected_sequence() -> None:
+def test_case3_missing_selected_candidate_index_is_rejected() -> None:
     session_state = _candidate_session(
-        recovery_selection_mode="neurosymbolic",
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+    )
+    decision, turn_entry = asyncio.run(
+        _run_mocked_candidate_handler(
+            session_state=session_state,
+            parsed_response={
+                "thought": "forgot to select",
+                "candidate_events": [
+                    _candidate_event("low_score"),
+                    _candidate_event("better_score"),
+                ],
+            },
+        )
+    )
+
+    assert decision == "need_revision"
+    assert turn_entry["transition_validation"]["status"] == "rejected"
+    assert "selected_candidate_index" in turn_entry["validation_findings"][0]["reason"]
+
+
+def test_case3_out_of_range_selected_candidate_index_is_rejected() -> None:
+    session_state = _candidate_session(
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+    )
+    decision, turn_entry = asyncio.run(
+        _run_mocked_candidate_handler(
+            session_state=session_state,
+            parsed_response={
+                "thought": "bad selection",
+                "selected_candidate_index": 2,
+                "candidate_events": [
+                    _candidate_event("low_score"),
+                    _candidate_event("better_score"),
+                ],
+            },
+        )
+    )
+
+    assert decision == "need_revision"
+    assert turn_entry["transition_validation"]["status"] == "rejected"
+    assert "selected_candidate_index" in turn_entry["validation_findings"][0]["reason"]
+
+
+def test_case3_pure_llm_k_horizon_commits_selected_sequence() -> None:
+    session_state = _candidate_session(
+        recovery_selection_mode="pure_llm",
         action_horizon="k",
     )
     _decision, turn_entry = asyncio.run(
@@ -2507,6 +2535,7 @@ def test_case3_neurosymbolic_k_horizon_commits_selected_sequence() -> None:
             session_state=session_state,
             parsed_response={
                 "thought": "propose short traces",
+                "selected_candidate_index": 1,
                 "candidate_traces": [
                     {"events": [_candidate_event("low_score")]},
                     {
@@ -2520,7 +2549,7 @@ def test_case3_neurosymbolic_k_horizon_commits_selected_sequence() -> None:
         )
     )
 
-    assert turn_entry["selected_by"] == "neurosymbolic"
+    assert turn_entry["selected_by"] == "pure_llm"
     assert turn_entry["selected_candidate_index"] == 1
     assert len(turn_entry["selected_transition_sequence"]) == 2
     assert [row["event_name"] for row in session_state["accepted_outline_prefix"]] == [
@@ -2529,9 +2558,9 @@ def test_case3_neurosymbolic_k_horizon_commits_selected_sequence() -> None:
     ]
 
 
-def test_case3_neurosymbolic_full_horizon_requires_complete_trace() -> None:
+def test_case3_pure_llm_full_horizon_requires_complete_trace() -> None:
     session_state = _candidate_session(
-        recovery_selection_mode="neurosymbolic",
+        recovery_selection_mode="pure_llm",
         action_horizon="full",
     )
     decision, turn_entry = asyncio.run(
@@ -2539,6 +2568,7 @@ def test_case3_neurosymbolic_full_horizon_requires_complete_trace() -> None:
             session_state=session_state,
             parsed_response={
                 "thought": "propose full traces",
+                "selected_candidate_index": 1,
                 "candidate_traces": [
                     {"events": [_candidate_event("better_score")]},
                     {
@@ -2559,7 +2589,7 @@ def test_case3_neurosymbolic_full_horizon_requires_complete_trace() -> None:
 
 def test_case3_candidate_count_integer_rejects_wrong_count() -> None:
     session_state = _candidate_session(
-        recovery_selection_mode="neurosymbolic",
+        recovery_selection_mode="pure_llm",
         action_horizon="1",
         candidate_count=1,
     )

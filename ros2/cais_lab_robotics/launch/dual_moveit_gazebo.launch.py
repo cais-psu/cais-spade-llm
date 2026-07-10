@@ -2,8 +2,9 @@
 """
 All-in-one: Gazebo Classic + MoveIt2 for BOTH xArm6 and UR5e in ONE move_group.
 
-A single MoveIt move_group manages both robots. In RViz, toggle between
-planning groups to control each robot:
+A single MoveIt move_group manages both robots. In RViz, use the `dual_robots`
+planning group for paired xArm6 + UR5e motion, or toggle to individual groups:
+  - dual_robots           → xArm6 + UR5e arms together
   - xarm6_xarm6           → xArm6 arm (6-DOF)
   - xarm6_xarm_gripper    → xArm6 gripper
   - ur5e_ur_manipulator   → UR5e arm (6-DOF)
@@ -221,6 +222,11 @@ def _build_combined_srdf(xarm_prefix, ur5e_prefix):
     for elem in list(ur5e_srdf):
         merged.append(elem)
 
+    # ── Inject paired dual-arm planning group ──────────────────────────────────
+    dual_group = ET.SubElement(merged, 'group', {'name': 'dual_robots'})
+    ET.SubElement(dual_group, 'group', {'name': f'{xarm_prefix}xarm6'})
+    ET.SubElement(dual_group, 'group', {'name': f'{ur5e_prefix}ur_manipulator'})
+
     # ── Inject RG2 planning group ───────────────────────────────────────────
     onrobot_prefix = f'{ur5e_prefix}rg2_'
     rg2_group = ET.SubElement(merged, 'group', {'name': f'{ur5e_prefix}rg2_gripper'})
@@ -348,6 +354,14 @@ def _build_moveit_params(xarm_prefix, ur5e_prefix, urdf, srdf):
     if 'ur_manipulator' in ur5e_ompl:
         ompl['move_group'][f'{ur5e_prefix}ur_manipulator'] = \
             ur5e_ompl['ur_manipulator']
+    ompl['move_group']['dual_robots'] = {
+        'planner_configs': ['RRTConnectkConfigDefault'],
+        'projection_evaluator': (
+            f'joints({xarm_prefix}joint1,{xarm_prefix}joint2,'
+            f'{ur5e_prefix}shoulder_pan_joint,{ur5e_prefix}shoulder_lift_joint)'
+        ),
+        'longest_valid_segment_fraction': 0.005,
+    }
     if 'xarm_gripper' in xarm_gripper_ompl:
         ompl['move_group'][f'{ur5e_prefix}rg2_gripper'] = xarm_gripper_ompl['xarm_gripper']
 
@@ -495,7 +509,7 @@ def launch_setup(context, *args, **kwargs):
 
     if launch_rviz:
         # 4. Single RViz — toggle Planning Group dropdown to switch robots:
-        #    xarm6_xarm6, xarm6_xarm_gripper, ur5e_ur_manipulator
+        #    dual_robots, xarm6_xarm6, xarm6_xarm_gripper, ur5e_ur_manipulator
         rviz_config = PathJoinSubstitution([
             FindPackageShare('xarm_gazebo'), 'rviz', 'dual_moveit.rviz',
         ])

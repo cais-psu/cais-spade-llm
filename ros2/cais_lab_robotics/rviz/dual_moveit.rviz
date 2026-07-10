@@ -36,7 +36,7 @@ Visualization Manager:
       Scene Robot:
         Robot Alpha: 0.5
       Planning Request:
-        Planning Group: xarm6_xarm6
+        Planning Group: dual_robots
         Interactive Marker Size: 0.2
         Query Start State: false
         Query Goal State: true

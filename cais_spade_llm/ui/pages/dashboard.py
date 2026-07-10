@@ -242,7 +242,7 @@ def render(bridge: SystemBridge) -> None:
                         width_class="w-48",
                     )
                     fast_forward_switch = ui.switch(
-                        "Fast Forward Simulation",
+                        "Fast Forward Simulation (headless, no RViz)",
                         value=bool(getattr(bridge, "fast_forward_simulation_enabled", False)),
                     ).classes("mb-1")
                 runtime_bridge_settings = bridge.get_runtime_bridge_settings()
@@ -717,7 +717,10 @@ def render(bridge: SystemBridge) -> None:
 
                         gazebo_launch_state["busy"] = True
                         _update_controls()
-                        _set_action_banner("info", "Launching Gazebo + MoveIt...")
+                        _set_action_banner(
+                            "info",
+                            "Launching no-hardware dual Gazebo + MoveIt/RViz...",
+                        )
                         try:
                             fast_forward = (
                                 bool(fast_forward_switch.value)
@@ -734,7 +737,10 @@ def render(bridge: SystemBridge) -> None:
                             else:
                                 _set_action_banner(
                                     "success",
-                                    "Gazebo + MoveIt launched. Waiting for ROS services...",
+                                    (
+                                        "No-hardware dual Gazebo + MoveIt/RViz launched. "
+                                        "Waiting for ROS services..."
+                                    ),
                                     auto_hide_s=6.0,
                                 )
                         finally:
@@ -3307,12 +3313,16 @@ def _check_prerequisites(
                 with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
                     ui.icon("info").classes("text-lg")
                     with ui.column().classes("gap-1"):
-                        ui.label("Gazebo + MoveIt are ready.").classes("text-sm font-semibold")
+                        ui.label("No-hardware dual Gazebo + MoveIt/RViz are ready.").classes(
+                            "text-sm font-semibold"
+                        )
                         ui.label(sim_reason).classes("text-xs")
             elif gazebo_running and sim_ready:
                 with ui.row().classes("items-center gap-2 text-green-600"):
                     ui.icon("check_circle").classes("text-sm")
-                    ui.label("Gazebo + MoveIt are ready — safe to start.").classes("text-sm")
+                    ui.label(
+                        "No-hardware dual Gazebo + MoveIt/RViz are ready - safe to start."
+                    ).classes("text-sm")
             elif gazebo_running:
                 with ui.row().classes("items-center gap-2 text-amber-600 bg-amber-50 p-3 rounded"):
                     ui.icon("warning").classes("text-lg")
@@ -3326,9 +3336,11 @@ def _check_prerequisites(
                     ui.icon("warning").classes("text-lg")
                     with ui.column().classes("gap-2"):
                         ui.label("Gazebo is not running.").classes("text-sm font-semibold")
-                        ui.label("Launch Gazebo + MoveIt first.").classes("text-sm")
+                        ui.label("Launch no-hardware dual Gazebo + MoveIt/RViz first.").classes(
+                            "text-sm"
+                        )
                         launch_btn = ui.button(
-                            "Start Gazebo + MoveIt",
+                            "Start Dual Gazebo + RViz",
                             on_click=launch_simulation,
                             icon="play_arrow",
                         ).props("dense color=amber")
