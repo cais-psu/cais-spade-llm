@@ -48,52 +48,6 @@ def _modeled_gap_unmet_conditions_by_id(llm_input: dict[str, Any]) -> dict[str, 
     return conditions_by_id
 
 
-def _task_dependency_ids(task: dict[str, Any]) -> list[str]:
-    return [str(item).strip() for item in (task.get("predecessors") or []) if str(item).strip()]
-
-
-def _task_closes_condition_ids(task: dict[str, Any]) -> list[str]:
-    return _dedupe_tokens(
-        [
-            str(item).strip()
-            for item in (task.get("closes_condition_ids") or [])
-            if str(item).strip()
-        ]
-    )
-
-
-def _task_enables_task_ids(task: dict[str, Any]) -> list[str]:
-    return _dedupe_tokens(
-        [str(item).strip() for item in (task.get("enables_task_ids") or []) if str(item).strip()]
-    )
-
-
-def _task_part_names(task: dict[str, Any]) -> list[str]:
-    tokens: list[str] = []
-    for candidate in (
-        task.get("part_name"),
-        dict(task.get("expected_start_state") or {}).get("part_name"),
-        dict(task.get("expected_end_state") or {}).get("part_name"),
-        dict(task.get("expected_start_state") or {}).get("held_part"),
-        dict(task.get("expected_end_state") or {}).get("held_part"),
-    ):
-        token = str(candidate or "").strip()
-        if token and token not in tokens:
-            tokens.append(token)
-    return tokens
-
-
-def _task_type_for_cca(
-    task: dict[str, Any],
-    *,
-    task_types_by_id: dict[str, str],
-) -> str:
-    task_id = str(task.get("outline_id") or "").strip()
-    if task_id and str(task_types_by_id.get(task_id) or "").strip():
-        return str(task_types_by_id.get(task_id) or "").strip()
-    return str(task.get("task_kind") or "").strip()
-
-
 def _fault_event_fallback_parts(llm_input: dict[str, Any]) -> list[str]:
     fault_event = dict(llm_input.get("fault_event") or {})
     return [
@@ -129,13 +83,35 @@ def _continuation_condition_cleared(
     fallback_parts: list[str],
 ) -> bool:
     kind = str(condition.get("kind") or "").strip()
-    if kind == "focused_resource_terminal_state":
+    entity_kind = str(condition.get("entity_kind") or "").strip().lower()
+    entity = str(condition.get("entity") or "").strip()
+    field = str(condition.get("field") or "").strip()
+    expected = condition.get("expected")
+    if kind in {"focused_resource_terminal_state", "resource_terminal_state"}:
         resource_jid = str(condition.get("entity") or "").strip()
         expected_state = str(condition.get("expected") or "").strip()
-        current_state = str(
-            dict(resources_by_jid.get(resource_jid) or {}).get("current_state") or ""
-        ).strip()
+        if entity_kind == "part":
+            row = dict(parts_by_name.get(entity) or {})
+        else:
+            row = dict(resources_by_jid.get(resource_jid) or {})
+        if field:
+            return row.get(field) == expected
+        current_state = str(row.get("current_state") or "").strip()
         return bool(expected_state and current_state == expected_state)
+    if kind == "safety_destination_occupancy" and entity_kind == "resource":
+        row = dict(resources_by_jid.get(entity) or {})
+        expected_not = (
+            str(dict(expected).get("not") or "").strip()
+            if isinstance(expected, dict)
+            else ""
+        )
+        current_location = str(
+            row.get("current_location")
+            or row.get("resource_location")
+            or dict(row.get("occupancy") or {}).get("location")
+            or ""
+        ).strip()
+        return bool(expected_not and current_location != expected_not)
     if kind != "safety_blocked_suffix_task":
         return False
     blocker_parts = _extract_blocker_part_names(
@@ -156,174 +132,6 @@ def _continuation_condition_cleared(
             continue
         return False
     return True
-
-
-def _continuation_prerequisite_task_ids(
-    task: dict[str, Any],
-    *,
-    outline_tasks: list[dict[str, Any]],
-    task_types_by_id: dict[str, str],
-    llm_input: dict[str, Any],
-    parts_by_name: dict[str, dict[str, Any]],
-) -> list[str]:
-    if (
-        _task_type_for_cca(
-            task,
-            task_types_by_id=task_types_by_id,
-        )
-        != "continuation_resume"
-    ):
-        return []
-    referenced_parts = _task_part_names(task)
-    pending_nominal_task_ids: list[str] = []
-    for part_name in referenced_parts:
-        pending_nominal_task_ids.extend(
-            str(item).strip()
-            for item in (
-                dict(parts_by_name.get(part_name) or {}).get("pending_nominal_task_ids") or []
-            )
-            if str(item).strip()
-        )
-    unmet_conditions = [
-        dict(row)
-        for row in (_modeled_gap_unmet_conditions_by_id(llm_input).values())
-        if isinstance(row, dict)
-    ]
-    fallback_parts = _fault_event_fallback_parts(llm_input)
-    prerequisite_ids: list[str] = []
-    for condition in unmet_conditions:
-        kind = str(condition.get("kind") or "").strip()
-        if kind == "focused_resource_terminal_state":
-            resource_jid = str(condition.get("entity") or "").strip()
-            expected_state = str(condition.get("expected") or "").strip()
-            for index, raw_task in enumerate(outline_tasks):
-                if not isinstance(raw_task, dict):
-                    continue
-                outline_id = str(raw_task.get("outline_id") or "").strip() or f"task_{index}"
-                if task_types_by_id.get(outline_id) != "resource_only":
-                    continue
-                if str(raw_task.get("resource_jid") or "").strip() != resource_jid:
-                    continue
-                end_state = dict(raw_task.get("expected_end_state") or {})
-                end_token = str(
-                    end_state.get("current_state") or end_state.get("state") or ""
-                ).strip()
-                if end_token == expected_state:
-                    prerequisite_ids.append(outline_id)
-        elif kind == "safety_blocked_suffix_task":
-            source_task_id = str(condition.get("source_task_id") or "").strip()
-            if (
-                pending_nominal_task_ids
-                and source_task_id
-                and source_task_id not in pending_nominal_task_ids
-            ):
-                continue
-            blocker_parts = _extract_blocker_part_names(
-                blocking_reason=str(condition.get("blocking_reason") or "").strip(),
-                parts_by_name=parts_by_name,
-                fallback_parts=fallback_parts,
-            )
-            for blocker_part in blocker_parts:
-                goal_location = str(
-                    dict(parts_by_name.get(blocker_part) or {}).get("goal_location") or ""
-                ).strip()
-                for index, raw_task in enumerate(outline_tasks):
-                    if not isinstance(raw_task, dict):
-                        continue
-                    outline_id = str(raw_task.get("outline_id") or "").strip() or f"task_{index}"
-                    if task_types_by_id.get(outline_id) == "continuation_resume":
-                        continue
-                    if str(raw_task.get("part_name") or "").strip() != blocker_part:
-                        continue
-                    end_state = dict(raw_task.get("expected_end_state") or {})
-                    end_current_state = (
-                        str(end_state.get("current_state") or end_state.get("state") or "")
-                        .strip()
-                        .lower()
-                    )
-                    end_location = _part_location(end_state)
-                    if end_current_state in {"placed", "assembled"} or (
-                        goal_location and end_location == goal_location
-                    ):
-                        prerequisite_ids.append(outline_id)
-    return _dedupe_tokens(prerequisite_ids)
-
-
-def _dependency_reaches(
-    *,
-    task_id: str,
-    target_id: str,
-    dependency_map: dict[str, list[str]],
-) -> bool:
-    if task_id == target_id:
-        return True
-    seen: set[str] = set()
-    frontier = list(dependency_map.get(task_id) or [])
-    while frontier:
-        current = frontier.pop(0)
-        if current in seen:
-            continue
-        seen.add(current)
-        if current == target_id:
-            return True
-        frontier.extend(dependency_map.get(current) or [])
-    return False
-
-
-def _sequence_finding(
-    *,
-    task: dict[str, Any],
-    constraint_code: str,
-    reason: str,
-    part_name: str | None = None,
-    resource_jid: str | None = None,
-    evidence: dict[str, Any] | None = None,
-    claimed_condition_ids: list[str] | None = None,
-    claimed_task_ids: list[str] | None = None,
-) -> dict[str, Any]:
-    finding = {
-        "task_id": str(task.get("outline_id") or "").strip(),
-        "resource_jid": str(resource_jid or task.get("resource_jid") or "").strip() or None,
-        "part_name": str(part_name or task.get("part_name") or "").strip() or None,
-        "pose_source": "task_contract",
-        "pose": None,
-        "workspace_bounds": None,
-        "failed_axes": [constraint_code],
-        "constraint_owner": "cca",
-        "constraint_family": "sequence",
-        "constraint_code": constraint_code,
-        "reason": reason,
-        "evidence": deepcopy(evidence or {}),
-    }
-    if claimed_condition_ids:
-        finding["claimed_condition_ids"] = _dedupe_tokens(claimed_condition_ids)
-    if claimed_task_ids:
-        finding["claimed_task_ids"] = _dedupe_tokens(claimed_task_ids)
-    return finding
-
-
-def _projected_enabled_task_ids(
-    *,
-    pending_tasks_by_id: dict[str, dict[str, Any]],
-    projected_cleared_condition_ids: list[str],
-) -> list[str]:
-    enabled_task_ids: list[str] = []
-    cleared_set = {
-        str(condition_id).strip()
-        for condition_id in projected_cleared_condition_ids
-        if str(condition_id).strip()
-    }
-    for task_id, pending_task in pending_tasks_by_id.items():
-        blocked_by_condition_ids = [
-            str(item).strip()
-            for item in (dict(pending_task).get("blocked_by_condition_ids") or [])
-            if str(item).strip()
-        ]
-        if not blocked_by_condition_ids:
-            continue
-        if all(condition_id in cleared_set for condition_id in blocked_by_condition_ids):
-            enabled_task_ids.append(task_id)
-    return _dedupe_tokens(enabled_task_ids)
 
 
 def _effective_task_part_name(task: dict[str, Any], signature: dict[str, Any]) -> str:
@@ -765,6 +573,7 @@ def _safe_next_task_ids_after_projection(
     projected_resources: dict[str, dict[str, Any]],
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    safety_dfa_states: dict[str, str],
 ) -> tuple[list[str], list[str]]:
     rule_lookup = _recovery_rule_lookup(rules)
     safe_next_task_ids: list[str] = []
@@ -808,6 +617,11 @@ def _safe_next_task_ids_after_projection(
             state_aps=list(projection.get("current_state_aps") or []),
             llm_input=llm_input,
         )
+        projected_rule_state = str(
+            safety_dfa_states.get(blocking_rule_id) or ""
+        ).strip()
+        if projected_rule_state and blocking_rule_id in monitor.current_states:
+            monitor.current_states[blocking_rule_id] = projected_rule_state
         allowed, _ = monitor.online_safety_validation(
             list(projection.get("candidate_aps") or []),
             predicted_state_aps=list(projection.get("predicted_state_aps") or []),
@@ -827,6 +641,7 @@ def validate_outline_macro_recovery_safety(
     projected_resources: dict[str, dict[str, Any]],
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
+    safety_dfa_states_before: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     rules = _recovery_loaded_rules(llm_input)
     projection = project_outline_macro_recovery_aps(
@@ -838,13 +653,20 @@ def validate_outline_macro_recovery_safety(
         projected_parts=projected_parts,
         llm_input=llm_input,
     )
-    claimed_condition_ids = [
-        str(item).strip() for item in (task.get("closes_condition_ids") or []) if str(item).strip()
-    ]
     conditions_by_id = _modeled_gap_unmet_conditions_by_id(llm_input)
+    active_safety_condition_ids = [
+        condition_id
+        for condition_id, condition in conditions_by_id.items()
+        if str(condition.get("blocking_rule_id") or "").strip()
+        or str(condition.get("kind") or "").strip().startswith("safety_")
+    ]
     pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
 
     if not rules:
+        if safety_dfa_states_before:
+            raise ValueError(
+                "projected safety DFA states reference rules that are not active"
+            )
         return {
             "is_safe": True,
             "safety_ctx": {
@@ -859,6 +681,8 @@ def validate_outline_macro_recovery_safety(
             "findings": [],
             "handled_condition_ids": [],
             "cleared_condition_ids": [],
+            "safety_dfa_states_before": {},
+            "safety_dfa_states_after": {},
         }
 
     monitor = _build_recovery_safety_monitor(
@@ -866,15 +690,51 @@ def validate_outline_macro_recovery_safety(
         state_aps=list(projection.get("current_state_aps") or []),
         llm_input=llm_input,
     )
+    if safety_dfa_states_before is not None:
+        supplied_rule_ids = set(safety_dfa_states_before)
+        active_rule_ids = set(monitor.current_states)
+        if supplied_rule_ids != active_rule_ids:
+            raise ValueError(
+                "projected safety DFA rule identifiers do not match the active rules"
+            )
+        for rule_id, state in safety_dfa_states_before.items():
+            state_token = str(state or "").strip()
+            dfa = dict(monitor.dfas.get(rule_id) or {})
+            transitions = dict(dfa.get("transitions") or {})
+            known_states = set(transitions)
+            known_states.update(
+                str(destination)
+                for rows in transitions.values()
+                for _, destination in rows
+            )
+            if not state_token or state_token not in known_states:
+                raise ValueError(
+                    f"projected safety DFA state is invalid for rule '{rule_id}'"
+                )
+            monitor.current_states[rule_id] = state_token
+    dfa_states_before = {
+        rule_id: str(monitor.current_states[rule_id])
+        for rule_id in sorted(monitor.current_states)
+    }
     allowed, info = monitor.online_safety_validation(
         list(projection.get("candidate_aps") or []),
         predicted_state_aps=list(projection.get("predicted_state_aps") or []),
     )
+    candidate_dfa_states_after = deepcopy(dfa_states_before)
+    if allowed:
+        candidate_dfa_states_after.update(
+            {
+                rule_id: str(state)
+                for rule_id, state in sorted(
+                    dict(info.get("next_states") or {}).items()
+                )
+            }
+        )
     rule_lookup = _recovery_rule_lookup(rules)
     violated_rule_id = str(info.get("violated_rule") or "").strip()
     violated_rule = dict(rule_lookup.get(violated_rule_id) or {})
     related_condition_ids = _claimed_safety_condition_ids_for_rule(
-        claimed_condition_ids=claimed_condition_ids,
+        claimed_condition_ids=active_safety_condition_ids,
         conditions_by_id=conditions_by_id,
         rule_id=violated_rule_id,
     )
@@ -885,10 +745,28 @@ def validate_outline_macro_recovery_safety(
             rules=rules,
             conditions_by_id=conditions_by_id,
             pending_tasks_by_id=pending_tasks_by_id,
-            claimed_condition_ids=claimed_condition_ids,
+            claimed_condition_ids=active_safety_condition_ids,
             projected_resources=projected_resources,
             projected_parts=projected_parts,
             llm_input=llm_input,
+            safety_dfa_states=candidate_dfa_states_after,
+        )
+        cleared_condition_ids = _dedupe_tokens(
+            cleared_condition_ids
+            + [
+                condition_id
+                for condition_id, condition in conditions_by_id.items()
+                if (
+                    str(condition.get("blocking_rule_id") or "").strip()
+                    or str(condition.get("kind") or "").strip().startswith("safety_")
+                )
+                and _continuation_condition_cleared(
+                    condition,
+                    resources_by_jid=projected_resources,
+                    parts_by_name=projected_parts,
+                    fallback_parts=_fault_event_fallback_parts(llm_input),
+                )
+            ]
         )
 
     safety_ctx = {
@@ -943,314 +821,19 @@ def validate_outline_macro_recovery_safety(
         )
 
     handled_condition_ids = _dedupe_tokens(related_condition_ids + cleared_condition_ids)
+    dfa_states_after = candidate_dfa_states_after
     return {
         "is_safe": bool(allowed),
         "safety_ctx": safety_ctx,
         "findings": findings,
         "handled_condition_ids": handled_condition_ids,
         "cleared_condition_ids": cleared_condition_ids,
-    }
-
-
-def validate_outline_macro_cca_constraints(
-    *,
-    task: dict[str, Any],
-    grounded_action: dict[str, Any] | None = None,
-    event_instance: dict[str, Any] | Any | None = None,
-    projection: dict[str, Any] | Any | None = None,
-    signature: dict[str, Any],
-    pre_resources: dict[str, dict[str, Any]],
-    pre_parts: dict[str, dict[str, Any]],
-    projected_resources: dict[str, dict[str, Any]],
-    projected_parts: dict[str, dict[str, Any]],
-    llm_input: dict[str, Any],
-    outline_tasks: list[dict[str, Any]],
-    task_types_by_id: dict[str, str],
-    task_index_by_id: dict[str, int],
-    dependency_map: dict[str, list[str]],
-    previously_cleared_condition_ids: list[str] | None = None,
-) -> dict[str, Any]:
-    del grounded_action, event_instance, projection
-    findings: list[dict[str, Any]] = []
-    condition_lookup = _modeled_gap_unmet_conditions_by_id(llm_input)
-    pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
-    fallback_parts = _fault_event_fallback_parts(llm_input)
-    task_type = _task_type_for_cca(
-        task,
-        task_types_by_id=task_types_by_id,
-    )
-    invalid_dependency_ids = [
-        dependency_id
-        for dependency_id in _task_dependency_ids(task)
-        if dependency_id not in task_index_by_id
-    ]
-    if invalid_dependency_ids:
-        finding = _sequence_finding(
-            task=task,
-            constraint_code="invalid_dependency_reference",
-            reason=(
-                "predecessors may reference only outline_id values from outline rows in "
-                f"this same response ({', '.join(invalid_dependency_ids)})"
-            ),
-            part_name=task.get("part_name"),
-            evidence={"dependency_ids": deepcopy(invalid_dependency_ids)},
-        )
-        finding["dependency_ids"] = deepcopy(invalid_dependency_ids)
-        findings.append(finding)
-
-    if task_type == "continuation_resume":
-        prerequisite_ids = _continuation_prerequisite_task_ids(
-            task,
-            outline_tasks=outline_tasks,
-            task_types_by_id=task_types_by_id,
-            llm_input=llm_input,
-            parts_by_name=pre_parts,
-        )
-        task_id = str(task.get("outline_id") or "").strip()
-        missing_dependency_ids = [
-            prerequisite_id
-            for prerequisite_id in prerequisite_ids
-            if not _dependency_reaches(
-                task_id=task_id,
-                target_id=prerequisite_id,
-                dependency_map=dependency_map,
-            )
-        ]
-        if missing_dependency_ids:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="dependency_unsatisfied",
-                    reason=(
-                        f"continuation task is missing prerequisite dependencies on "
-                        f"{', '.join(missing_dependency_ids)}"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"required_dependency_ids": deepcopy(missing_dependency_ids)},
-                )
-            )
-        continuation_index = int(task_index_by_id.get(task_id) or 0)
-        late_prerequisite_ids = [
-            prerequisite_id
-            for prerequisite_id in prerequisite_ids
-            if int(task_index_by_id.get(prerequisite_id) or -1) >= continuation_index
-        ]
-        if late_prerequisite_ids:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="order_violation",
-                    reason=(
-                        f"continuation task appears before prerequisite tasks "
-                        f"{', '.join(late_prerequisite_ids)}"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"required_dependency_ids": deepcopy(late_prerequisite_ids)},
-                )
-            )
-        blocking_condition_ids = [
-            condition_id
-            for condition_id, condition in condition_lookup.items()
-            if not _continuation_condition_cleared(
-                condition,
-                resources_by_jid=pre_resources,
-                parts_by_name=pre_parts,
-                fallback_parts=fallback_parts,
-            )
-        ]
-        if blocking_condition_ids:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="blocker_open",
-                    reason=(
-                        "continuation blockers are still uncleared in symbolic state "
-                        f"({', '.join(blocking_condition_ids)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"condition_ids": deepcopy(blocking_condition_ids)},
-                )
-            )
-
-    projected_cleared_condition_ids = [
-        condition_id
-        for condition_id, condition in condition_lookup.items()
-        if _continuation_condition_cleared(
-            condition,
-            resources_by_jid=projected_resources,
-            parts_by_name=projected_parts,
-            fallback_parts=fallback_parts,
-        )
-    ]
-    claimed_condition_ids = _task_closes_condition_ids(task)
-    if claimed_condition_ids:
-        not_currently_unmet = [
-            condition_id
-            for condition_id in claimed_condition_ids
-            if condition_id not in condition_lookup
-        ]
-        if not_currently_unmet:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="claimed_condition_not_currently_unmet",
-                    reason=(
-                        "closes_condition_ids references continuation condition ids "
-                        "that are not currently unmet "
-                        f"({', '.join(not_currently_unmet)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"claimed_condition_ids": deepcopy(not_currently_unmet)},
-                    claimed_condition_ids=not_currently_unmet,
-                )
-            )
-        not_cleared = [
-            condition_id
-            for condition_id in claimed_condition_ids
-            if condition_id in condition_lookup
-            and condition_id not in projected_cleared_condition_ids
-        ]
-        if not_cleared:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="claimed_condition_not_cleared",
-                    reason=(
-                        "closes_condition_ids claims continuation conditions that remain "
-                        f"unmet after projection ({', '.join(not_cleared)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"claimed_condition_ids": deepcopy(not_cleared)},
-                    claimed_condition_ids=not_cleared,
-                )
-            )
-    claimed_task_ids = _task_enables_task_ids(task)
-    if claimed_task_ids:
-        not_pending = [
-            task_id for task_id in claimed_task_ids if task_id not in pending_tasks_by_id
-        ]
-        if not_pending:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="claimed_task_not_pending",
-                    reason=(
-                        "enables_task_ids references task ids that are not pending "
-                        f"nominal tasks ({', '.join(not_pending)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"claimed_task_ids": deepcopy(not_pending)},
-                    claimed_task_ids=not_pending,
-                )
-            )
-        not_currently_blocked = [
-            task_id
-            for task_id in claimed_task_ids
-            if task_id in pending_tasks_by_id
-            and not [
-                str(item).strip()
-                for item in (
-                    dict(pending_tasks_by_id.get(task_id) or {}).get("blocked_by_condition_ids")
-                    or []
-                )
-                if str(item).strip()
-            ]
-        ]
-        if not_currently_blocked:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="claimed_task_not_currently_blocked",
-                    reason=(
-                        "enables_task_ids references nominal tasks that are not currently "
-                        f"blocked in recovery gap state ({', '.join(not_currently_blocked)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"claimed_task_ids": deepcopy(not_currently_blocked)},
-                    claimed_task_ids=not_currently_blocked,
-                )
-            )
-        projected_enabled_task_ids = _projected_enabled_task_ids(
-            pending_tasks_by_id=pending_tasks_by_id,
-            projected_cleared_condition_ids=projected_cleared_condition_ids,
-        )
-        not_enabled = [
-            task_id
-            for task_id in claimed_task_ids
-            if task_id in pending_tasks_by_id and task_id not in projected_enabled_task_ids
-        ]
-        if not_enabled:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="claimed_task_not_enabled",
-                    reason=(
-                        "enables_task_ids claims blocked nominal tasks that remain blocked "
-                        f"after projection ({', '.join(not_enabled)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"claimed_task_ids": deepcopy(not_enabled)},
-                    claimed_task_ids=not_enabled,
-                )
-            )
-    if previously_cleared_condition_ids:
-        reopened_condition_ids = [
-            condition_id
-            for condition_id in previously_cleared_condition_ids
-            if condition_id not in projected_cleared_condition_ids
-        ]
-        task_id = str(task.get("outline_id") or "").strip()
-        current_index = int(task_index_by_id.get(task_id) or 0)
-        has_future_continuation = any(
-            isinstance(candidate_task, dict)
-            and int(task_index_by_id.get(str(candidate_task.get("outline_id") or "").strip()) or -1)
-            > current_index
-            and str(
-                task_types_by_id.get(str(candidate_task.get("outline_id") or "").strip()) or ""
-            ).strip()
-            == "continuation_resume"
-            for candidate_task in (outline_tasks or [])
-        )
-        if reopened_condition_ids and has_future_continuation:
-            findings.append(
-                _sequence_finding(
-                    task=task,
-                    constraint_code="condition_reopened",
-                    reason=(
-                        "projected state transition reopens previously cleared continuation "
-                        f"conditions ({', '.join(reopened_condition_ids)})"
-                    ),
-                    part_name=task.get("part_name"),
-                    evidence={"condition_ids": deepcopy(reopened_condition_ids)},
-                )
-            )
-
-    safety_result = validate_outline_macro_recovery_safety(
-        task=task,
-        signature=signature,
-        pre_resources=pre_resources,
-        pre_parts=pre_parts,
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=llm_input,
-    )
-    findings.extend(list(safety_result.get("findings") or []))
-    return {
-        "is_valid": not findings,
-        "findings": findings,
-        "cleared_condition_ids": _dedupe_tokens(
-            list(projected_cleared_condition_ids)
-            + list(safety_result.get("cleared_condition_ids") or [])
-        ),
-        "monitor_state": {
-            "projected_cleared_condition_ids": deepcopy(projected_cleared_condition_ids),
-            "safety_ctx": deepcopy(safety_result.get("safety_ctx") or {}),
-        },
+        "safety_dfa_states_before": dfa_states_before,
+        "safety_dfa_states_after": dfa_states_after,
     }
 
 
 __all__ = [
     "project_outline_macro_recovery_aps",
     "validate_outline_macro_recovery_safety",
-    "validate_outline_macro_cca_constraints",
 ]

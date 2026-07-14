@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,7 @@ class LlmAgent(Agent):
             agent_role=self.agent_role,
             overrides=instructions,
         )
+        self._last_structured_request: dict[str, Any] = {}
 
     @staticmethod
     def _build_agent_instructions(
@@ -410,21 +412,34 @@ class LlmAgent(Agent):
             The parsed structured response from the LLM.
         """
 
+        initial_messages: list[dict[str, Any]] = []
+        if self.instructions:
+            initial_messages.append({"role": "system", "content": self.instructions})
+        initial_messages.append({"role": "user", "content": prompt})
+        structured_response_format = {
+            "type": "json_schema",
+            "json_schema": deepcopy(response_format),
+        }
+        self._last_structured_request = {
+            "model": self.model,
+            "messages": deepcopy(initial_messages),
+            "reasoning_effort": self.reasoning_effort,
+            "response_format": deepcopy(structured_response_format),
+            "response_source": "live",
+            "request_sent": True,
+        }
+        if tools:
+            self._last_structured_request["tools"] = deepcopy(tools)
+
         def _call() -> dict[str, Any]:
-            msgs: list[dict[str, Any]] = []
-            if self.instructions:
-                msgs.append({"role": "system", "content": self.instructions})
-            msgs.append({"role": "user", "content": prompt})
+            msgs = deepcopy(initial_messages)
 
             for _ in range(max_tool_rounds + 1):
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": msgs,
                     "reasoning_effort": self.reasoning_effort,
-                    "response_format": {
-                        "type": "json_schema",
-                        "json_schema": response_format,
-                    },
+                    "response_format": deepcopy(structured_response_format),
                 }
                 if tools:
                     kwargs["tools"] = tools

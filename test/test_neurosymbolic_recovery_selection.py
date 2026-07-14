@@ -1,0 +1,1551 @@
+"""Focused tests for one-step neurosymbolic recovery selection."""
+
+from __future__ import annotations
+
+import asyncio
+from copy import deepcopy
+from typing import Any
+
+import pytest
+
+from cais_spade_llm.agents.central_controller.outline_macro_safety import (
+    validate_outline_macro_recovery_safety,
+)
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+    multi_turn,
+    multi_turn_outline_generation,
+    multi_turn_prompts,
+)
+from cais_spade_llm.agents.resource_agent.printing_agent import PrintingAgent
+from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    recovery_validation_fingerprint,
+)
+from cais_spade_llm.resources.resource_primitives import build_recovery_des_model
+
+
+def _condition(
+    condition_id: str,
+    *,
+    part_name: str,
+    expected: str,
+) -> dict[str, Any]:
+    return {
+        "condition_id": condition_id,
+        "kind": "recovery_part_goal",
+        "entity_kind": "part",
+        "entity": part_name,
+        "field": "state",
+        "expected": expected,
+    }
+
+
+def _prepared(*conditions: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "llm_input": {
+            "modeled_continuation_gap": {
+                "unmet_continuation_conditions": [deepcopy(row) for row in conditions],
+                "continuation_requirements": [deepcopy(row) for row in conditions],
+            }
+        },
+        "tools_catalog": [],
+        "recovery_resources": {},
+    }
+
+
+def _des_model(
+    resource_jid: str,
+    *,
+    current_valuation: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "model_type": "extended_finite_automaton",
+        "resource_jid": resource_jid,
+        "state_variables": {
+            field_name: {
+                "scope": "resource",
+                "domain": [deepcopy(value)],
+            }
+            for field_name, value in current_valuation.items()
+        },
+        "current_valuation": deepcopy(current_valuation),
+        "events": deepcopy(events),
+    }
+
+
+def _attach_model(
+    prepared: dict[str, Any],
+    session_state: dict[str, Any],
+    resource_jid: str,
+    model: dict[str, Any],
+) -> None:
+    prepared.setdefault("recovery_resources", {})[resource_jid] = {
+        "recovery_des_model": deepcopy(model)
+    }
+    session_state.setdefault("recovery_des_models", {})[resource_jid] = deepcopy(model)
+
+
+def _session(*, parts: dict[str, str], candidate_bound: int = 5) -> dict[str, Any]:
+    return {
+        "recovery_selection_mode": "neurosymbolic",
+        "outline_mode": "incremental_candidates_validated",
+        "action_horizon": "1",
+        "action_horizon_steps": 1,
+        "action_horizon_k": 1,
+        "candidate_count": "auto",
+        "candidate_bound": candidate_bound,
+        "candidate_proposal_budget": candidate_bound,
+        "accepted_outline_prefix": [],
+        "candidate_rejection_feedback": [],
+        "candidate_prune_history": {},
+        "outline_validation_findings": [],
+        "pruned_actions": [],
+        "symbolic_resources": {
+            "resource@localhost": {
+                "resource_jid": "resource@localhost",
+                "resource_state": "idle",
+                "current_state": "idle",
+                "held_part": None,
+            }
+        },
+        "symbolic_parts": {
+            part_name: {
+                "part_name": part_name,
+                "part_state": state,
+                "current_state": state,
+                "part_location": "station",
+                "current_location": "station",
+                "part_holder_resource_jid": None,
+                "current_holder_resource_jid": None,
+            }
+            for part_name, state in parts.items()
+        },
+        "projected_safety_dfa_states": {},
+        "projected_safety_condition_identifiers": [],
+    }
+
+
+def _event(
+    event_name: str,
+    *,
+    part_name: str,
+    start_state: str,
+    end_state: str,
+) -> dict[str, Any]:
+    return {
+        "outline_id": f"outline_{event_name}",
+        "event_name": event_name,
+        "resource_jid": "resource@localhost",
+        "part_name": part_name,
+        "expected_start_state": {
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": start_state,
+            "part_location": "station",
+        },
+        "expected_end_state": {
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": end_state,
+            "part_location": "station",
+        },
+        "rationale": "candidate rationale",
+    }
+
+
+def _evaluation(
+    candidate_index: int,
+    *,
+    session_state: dict[str, Any],
+    part_name: str,
+    end_state: str,
+    valid: bool = True,
+) -> dict[str, Any]:
+    projected_parts = deepcopy(session_state["symbolic_parts"])
+    projected_parts[part_name]["part_state"] = end_state
+    projected_parts[part_name]["current_state"] = end_state
+    return {
+        "candidate_index": candidate_index,
+        "valid": valid,
+        "validation_findings": [],
+        "validation_stages": [
+            {"validator_role": "PA", "status": "passed"},
+            {"validator_role": "RA", "status": "passed"},
+            {"validator_role": "CCA", "status": "passed"},
+        ],
+        "projected_symbolic_resources": deepcopy(
+            session_state["symbolic_resources"]
+        ),
+        "projected_symbolic_parts": projected_parts,
+        "remaining_safety_condition_identifiers": [],
+        "safety_dfa_states_before": {},
+        "safety_dfa_states_after": {},
+    }
+
+
+def test_mode_specific_candidate_response_schemas() -> None:
+    pure_schema = multi_turn_prompts._outline_candidates_response_schema(
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+        candidate_bound=5,
+    )["schema"]
+    neuro_schema = multi_turn_prompts._outline_candidates_response_schema(
+        recovery_selection_mode="neurosymbolic",
+        action_horizon="1",
+        candidate_bound=5,
+    )["schema"]
+
+    assert pure_schema["properties"]["candidate_events"]["minItems"] == 3
+    assert pure_schema["properties"]["candidate_events"]["maxItems"] == 3
+    assert "selected_candidate_index" in pure_schema["required"]
+    assert neuro_schema["properties"]["candidate_events"]["minItems"] == 1
+    assert neuro_schema["properties"]["candidate_events"]["maxItems"] == 5
+    assert "selected_candidate_index" not in neuro_schema["properties"]
+    assert "selected_candidate_index" not in neuro_schema["required"]
+
+
+def test_robot_and_printer_use_the_ra_owned_des_interface() -> None:
+    assert RobotAgent.recovery_des_model is not ResourceAgent.recovery_des_model
+    assert PrintingAgent.recovery_des_model is not ResourceAgent.recovery_des_model
+
+    class _Printer:
+        jid = "printer@localhost"
+        agent_name = "printer@localhost"
+        static_capabilities: dict[str, Any] = {}
+        _RESOURCE_PROFILE = PrintingAgent._RESOURCE_PROFILE
+        _RECOVERY_PRIMITIVES = PrintingAgent._RECOVERY_PRIMITIVES
+        _current_state = "printing"
+        _current_location = "printer_cell"
+        _active_job = "JOB_1"
+        _job_state = "printing"
+        _material_state = "loaded"
+        _bed_state = "ready"
+        _snapshot_state = PrintingAgent._snapshot_state
+        pause_job = PrintingAgent.pause_job
+        resume_job = PrintingAgent.resume_job
+        cancel_job = PrintingAgent.cancel_job
+
+    printer = _Printer()
+    descriptor = PrintingAgent.recovery_des_model(
+        printer,
+        snapshot=printer._snapshot_state(),
+    )
+
+    assert descriptor["model_type"] == "extended_finite_automaton"
+    assert set(descriptor["local_event_alphabet"]) == {
+        "pause_job",
+        "resume_job",
+        "cancel_job",
+    }
+    assert set(descriptor["state_variables"]) == {"resource_state"}
+    assert descriptor["current_valuation"] == {"resource_state": "printing"}
+    assert printer._snapshot_state()["job_state"] == "printing"
+    assert printer._snapshot_state()["active_job"] == "JOB_1"
+    for event in descriptor["events"]:
+        assert set(event["guards"]) == {"resource_state"}
+        assert set(event["updates"]) == {"resource_state"}
+    assert descriptor["descriptor_fingerprint"]
+
+    async def _exercise_runtime_job_state() -> None:
+        await printer.pause_job()
+        assert printer._current_state == "paused"
+        assert printer._job_state == "paused"
+        assert printer._active_job == "JOB_1"
+        await printer.resume_job()
+        assert printer._current_state == "printing"
+        assert printer._job_state == "printing"
+        await printer.cancel_job()
+        assert printer._current_state == "idle"
+        assert printer._job_state == "idle"
+        assert printer._active_job is None
+
+    asyncio.run(_exercise_runtime_job_state())
+
+    class _Robot:
+        jid = "robot@localhost"
+        agent_name = "robot@localhost"
+        static_capabilities = {
+            "resource_type": "robot",
+            "reachability": ["input_station", "output_station"],
+        }
+        named_positions = {"home": [0.0]}
+        controller_config: dict[str, Any] = {}
+
+        def resolve_registered_function_names(self, **kwargs: Any) -> list[str]:
+            return RobotAgent.resolve_registered_function_names(**kwargs)
+
+    robot = _Robot()
+    robot_descriptor = RobotAgent.recovery_des_model(
+        robot,
+        snapshot={
+            "resource_jid": robot.jid,
+            "current_state": "idle",
+            "current_location": "home",
+            "held_part": None,
+            "gripper_state": "open",
+            "current_pose": {"x": 0.0, "y": 0.0, "z": 1.0},
+            "reachable_locations": ["input_station", "output_station"],
+            "named_poses": ["home"],
+        },
+    )
+    assert set(robot_descriptor["local_event_alphabet"]) == {
+        "pick_approach",
+        "pick_grasp",
+        "place_approach",
+        "move_home",
+        "place_insert",
+    }
+    assert "current_pose" not in robot_descriptor["state_variables"]
+    for primitive_name in (
+        "detect_parts",
+        "compute_pick_targets",
+        "get_current_pose",
+        "move_relative",
+    ):
+        assert primitive_name not in robot_descriptor["local_event_alphabet"]
+
+
+def test_base_resource_uses_only_an_explicit_private_des_descriptor() -> None:
+    class _ConfiguredResource:
+        jid = "configured@localhost"
+        agent_name = "configured@localhost"
+        static_capabilities = {
+            "recovery_des_model": {
+                "state_variables": {
+                    "job_state": {
+                        "scope": "resource",
+                        "domain": ["paused", "running"],
+                    }
+                },
+                "events": [
+                    {
+                        "event_name": "continue_job",
+                        "controllable": True,
+                        "observable": True,
+                        "guards": {"job_state": {"equals": "paused"}},
+                        "updates": {"job_state": {"set": "running"}},
+                    }
+                ],
+                "marked_state_conditions": [],
+            }
+        }
+
+    configured = _ConfiguredResource()
+    descriptor = build_recovery_des_model(
+        configured,
+        snapshot={"job_state": "paused"},
+    )
+    assert descriptor["local_event_alphabet"] == ["continue_job"]
+    assert descriptor["current_valuation"] == {"job_state": "paused"}
+
+    configured.static_capabilities = {}
+    assert build_recovery_des_model(
+        configured,
+        snapshot={"job_state": "paused"},
+    ) == {}
+
+
+def test_printer_transition_enables_ra_declared_continuation_event() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    session_state["symbolic_resources"] = {
+        "printer@localhost": {
+            "resource_jid": "printer@localhost",
+            "resource_state": "printing",
+            "current_state": "printing",
+            "job_state": "printing",
+        }
+    }
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    model = _des_model(
+        "printer@localhost",
+        current_valuation={"current_state": "printing", "job_state": "printing"},
+        events=[
+            {
+                "event_name": "pause_job",
+                "controllable": True,
+                "observable": False,
+                "guards": {"current_state": {"equals": "printing"}},
+                "updates": {
+                    "current_state": {"set": "paused"},
+                    "job_state": {"set": "paused"},
+                },
+            },
+            {
+                "event_name": "resume_job",
+                "controllable": True,
+                "observable": False,
+                "guards": {"current_state": {"equals": "paused"}},
+                "updates": {
+                    "current_state": {"set": "printing"},
+                    "job_state": {"set": "printing"},
+                },
+            },
+        ],
+    )
+    _attach_model(prepared, session_state, "printer@localhost", model)
+    event = {
+        "outline_id": "printer_transition",
+        "event_name": "authored_printer_symbol",
+        "resource_jid": "printer@localhost",
+        "expected_start_state": {
+            "resource_state": "printing",
+            "current_state": "printing",
+            "job_state": "printing",
+        },
+        "expected_end_state": {
+            "resource_state": "paused",
+            "current_state": "paused",
+            "job_state": "paused",
+        },
+        "rationale": "apply exact printer variables",
+    }
+    projected = deepcopy(session_state)
+    multi_turn._apply_task_effects_to_symbolic_state(event, projected)
+    evaluation = {
+        "candidate_index": 0,
+        "valid": True,
+        "projected_symbolic_resources": deepcopy(projected["symbolic_resources"]),
+        "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
+        "remaining_safety_condition_identifiers": [],
+        "safety_dfa_states_before": {},
+        "safety_dfa_states_after": {},
+    }
+
+    selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[{"candidate_index": 0, "surface_events": [event]}],
+        candidate_evaluations=[evaluation],
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert selected == [evaluation["candidate_id"]]
+    assert any(
+        '"event_name":"resume_job"' in event_id
+        for event_id in evaluation["selection_evidence"][
+            "newly_enabled_recovery_event_ids"
+        ]
+    )
+
+
+def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject() -> None:
+    state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["printing", "paused"]},
+        "job_state": {"scope": "resource", "domain": ["printing", "paused"]},
+        "part_quality": {"scope": "part", "domain": ["unknown", "accepted"]},
+    }
+    schema = multi_turn_prompts._outline_candidates_response_schema(
+        recovery_selection_mode="neurosymbolic",
+        declared_state_variables=state_variables,
+    )["schema"]
+    properties = schema["$defs"]["outline_state"]["properties"]
+    assert "job_state" in properties
+    assert "spindle_speed" not in properties
+    assert properties["resource_state"]["minLength"] == 1
+    assert (
+        schema["$defs"]["outline_event"]["properties"]["event_name"]["minLength"]
+        == 1
+    )
+
+    prepared = {
+        "llm_input": {
+            "observed_runtime_state": {
+                "resources": [
+                    {
+                        "resource_jid": "printer@localhost",
+                        "resource_state": "printing",
+                        "current_state": "printing",
+                        "job_state": "printing",
+                    }
+                ]
+            },
+            "part_facts": [],
+        },
+        "recovery_resources": {
+            "printer@localhost": {
+                "recovery_des_model": {"state_variables": state_variables}
+            }
+        },
+    }
+    session_state = {
+        "recovery_des_models": {
+            "printer@localhost": {"state_variables": deepcopy(state_variables)}
+        },
+        "symbolic_resources": {
+            "printer@localhost": {
+                "resource_jid": "printer@localhost",
+                "resource_state": "printing",
+                "current_state": "printing",
+                "job_state": "printing",
+            }
+        },
+        "symbolic_parts": {},
+    }
+    valid_task = {
+        "outline_id": "printer_pause",
+        "event_name": "authored_event",
+        "resource_jid": "printer@localhost",
+        "expected_start_state": {
+            "resource_state": "printing",
+            "job_state": "printing",
+        },
+        "expected_end_state": {
+            "resource_state": "paused",
+            "job_state": "paused",
+        },
+        "rationale": "exact declared variables",
+    }
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=valid_task,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings == []
+
+    outside_domain = deepcopy(valid_task)
+    outside_domain["expected_end_state"]["job_state"] = "maintenance"
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=outside_domain,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "state_value_outside_ra_domain"
+    assert findings[0]["validation_category"] == "transition_feasibility"
+
+    invalid_task = deepcopy(valid_task)
+    invalid_task["expected_end_state"]["spindle_speed"] = 1
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=invalid_task,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+
+    robot_state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["idle", "ready"]},
+        "gripper_state": {"scope": "resource", "domain": ["open", "closed"]},
+    }
+    prepared["llm_input"]["observed_runtime_state"]["resources"].append(
+        {
+            "resource_jid": "robot@localhost",
+            "resource_state": "idle",
+            "current_state": "idle",
+            "gripper_state": "open",
+        }
+    )
+    prepared["recovery_resources"]["robot@localhost"] = {
+        "recovery_des_model": {"state_variables": deepcopy(robot_state_variables)}
+    }
+    session_state["recovery_des_models"]["robot@localhost"] = {
+        "state_variables": deepcopy(robot_state_variables)
+    }
+    session_state["symbolic_resources"]["robot@localhost"] = {
+        "resource_jid": "robot@localhost",
+        "resource_state": "idle",
+        "current_state": "idle",
+        "gripper_state": "open",
+    }
+    wrong_resource_field = {
+        "outline_id": "robot_job_state",
+        "event_name": "authored_event",
+        "resource_jid": "robot@localhost",
+        "expected_start_state": {
+            "resource_state": "idle",
+            "job_state": "printing",
+        },
+        "expected_end_state": {
+            "resource_state": "ready",
+            "job_state": "paused",
+        },
+        "rationale": "job_state belongs to another RA descriptor",
+    }
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=wrong_resource_field,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+
+    invalid_gripper_value = {
+        "outline_id": "robot_invalid_gripper_value",
+        "event_name": "authored_event",
+        "resource_jid": "robot@localhost",
+        "expected_start_state": {
+            "resource_state": "idle",
+            "gripper_state": "open",
+        },
+        "expected_end_state": {
+            "resource_state": "ready",
+            "gripper_state": "ajar",
+        },
+        "rationale": "gripper_state must use the RobotAgent domain",
+    }
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=invalid_gripper_value,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "state_value_outside_ra_domain"
+
+    missing_part_binding = deepcopy(valid_task)
+    missing_part_binding["expected_start_state"]["part_quality"] = "unknown"
+    missing_part_binding["expected_end_state"]["part_quality"] = "accepted"
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=missing_part_binding,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+
+
+def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    session_state = _session(parts={"P": "faulted"})
+    state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["idle"]},
+        "held_part": {"scope": "resource", "domain": [None]},
+        "part_state": {"scope": "part", "domain": ["faulted"]},
+        "part_location": {"scope": "part", "domain": ["station"]},
+    }
+    descriptor = {"state_variables": state_variables}
+    prepared["recovery_resources"]["resource@localhost"] = {
+        "recovery_des_model": deepcopy(descriptor)
+    }
+    session_state["recovery_des_models"] = {
+        "resource@localhost": deepcopy(descriptor)
+    }
+    task = {
+        "outline_id": "restore_goal_state",
+        "event_name": "authored_exact_symbol",
+        "resource_jid": "resource@localhost",
+        "part_name": "P",
+        "expected_start_state": {
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": "faulted",
+            "part_location": "station",
+        },
+        "expected_end_state": {
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": "restored",
+            "part_location": "station",
+        },
+        "rationale": "Satisfy the exact supplied part-state goal.",
+    }
+
+    findings, grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=task,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert findings == []
+    assert grounded is not None
+    assert grounded["expected_end_state"]["part_state"] == "restored"
+
+    empty_state_label = deepcopy(task)
+    empty_state_label["expected_end_state"]["part_state"] = ""
+    findings, _grounded = multi_turn.validate_recovery_outline_task(
+        planner=object(),
+        task=empty_state_label,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert findings[0]["constraint_code"] == "candidate_schema_violation"
+
+
+def test_missing_tampered_and_stale_ra_des_descriptors_fail_closed() -> None:
+    descriptor = {
+        "model_type": "extended_finite_automaton",
+        "resource_jid": "resource@localhost",
+        "state_variables": {},
+        "events": [],
+    }
+    fingerprint = recovery_validation_fingerprint(descriptor)
+    reply = {
+        "recovery_des_model": {
+            **deepcopy(descriptor),
+            "descriptor_fingerprint": fingerprint,
+        },
+        "recovery_des_model_fingerprint": fingerprint,
+    }
+    verified, verified_fingerprint = (
+        multi_turn_outline_generation._verified_recovery_des_model(ra_reply=reply)
+    )
+    assert verified["resource_jid"] == "resource@localhost"
+    assert verified_fingerprint == fingerprint
+
+    with pytest.raises(RuntimeError, match="unavailable or invalid"):
+        multi_turn_outline_generation._verified_recovery_des_model(ra_reply={})
+    tampered = deepcopy(reply)
+    tampered["recovery_des_model"]["resource_jid"] = "changed@localhost"
+    with pytest.raises(RuntimeError, match="unavailable or invalid"):
+        multi_turn_outline_generation._verified_recovery_des_model(
+            ra_reply=tampered
+        )
+    with pytest.raises(RuntimeError, match="fingerprint changed"):
+        multi_turn_outline_generation._verified_recovery_des_model(
+            ra_reply=reply,
+            expected_fingerprint="stale-fingerprint",
+        )
+
+
+def test_neurosymbolic_prompt_assigns_only_candidate_generation_to_llm() -> None:
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input={
+                "observed_runtime_state": {"resources": []},
+                "part_facts": [],
+                "modeled_continuation_gap": {},
+                "loaded_safety_rules": [],
+            },
+            session_state=_session(parts={}),
+            recovery_resources={},
+        )
+    )
+
+    assert "do not return `selected_candidate_index`" in prompt
+    assert "do not pad the list" in prompt
+    assert "You must choose the best candidate" not in prompt
+
+
+def test_unique_condition_clearing_candidate_is_selected_independent_of_names_and_order() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    clearing = _event(
+        "arbitrary_symbol_alpha",
+        part_name="P",
+        start_state="faulted",
+        end_state="restored",
+    )
+    no_progress = _event(
+        "arbitrary_symbol_beta",
+        part_name="P",
+        start_state="faulted",
+        end_state="other_state",
+    )
+
+    def select(rows: list[dict[str, Any]]) -> list[str]:
+        evaluations = [
+            _evaluation(
+                index,
+                session_state=session_state,
+                part_name="P",
+                end_state=str(row["expected_end_state"]["part_state"]),
+            )
+            for index, row in enumerate(rows)
+        ]
+        return multi_turn_outline_generation._apply_neurosymbolic_comparison(
+            candidate_sequences=[
+                {"candidate_index": index, "surface_events": [deepcopy(row)]}
+                for index, row in enumerate(rows)
+            ],
+            candidate_evaluations=evaluations,
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+        )
+
+    forward = select([clearing, no_progress])
+    reverse = select([no_progress, clearing])
+    renamed = deepcopy(clearing)
+    renamed["event_name"] = "unrelated_authored_token"
+
+    assert len(forward) == 1
+    assert reverse == forward
+    assert select([renamed, no_progress]) == forward
+
+
+def test_ra_declared_guard_enabling_candidate_progresses() -> None:
+    session_state = _session(parts={"P": "faulted", "AUX": "held"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    session_state["symbolic_resources"]["resource@localhost"]["held_part"] = "AUX"
+    model = _des_model(
+        "resource@localhost",
+        current_valuation={"current_state": "idle", "held_part": "AUX"},
+        events=[
+            {
+                "event_name": "release_entity",
+                "controllable": True,
+                "observable": False,
+                "guards": {"held_part": {"not_equals": None}},
+                "updates": {"held_part": {"set": None}},
+            },
+            {
+                "event_name": "acquire_entity",
+                "controllable": True,
+                "observable": False,
+                "guards": {"held_part": {"equals": None}},
+                "updates": {"held_part": {"set_from_param": "part_name"}},
+            },
+        ],
+    )
+    _attach_model(prepared, session_state, "resource@localhost", model)
+    event = {
+        "outline_id": "release",
+        "event_name": "no_action_verb_required",
+        "resource_jid": "resource@localhost",
+        "expected_start_state": {"resource_state": "idle", "held_part": "AUX"},
+        "expected_end_state": {"resource_state": "idle", "held_part": None},
+        "rationale": "exact declared effect",
+    }
+    projected = deepcopy(session_state)
+    multi_turn._apply_task_effects_to_symbolic_state(event, projected)
+    evaluation = {
+        "candidate_index": 0,
+        "valid": True,
+        "projected_symbolic_resources": deepcopy(projected["symbolic_resources"]),
+        "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
+        "remaining_safety_condition_identifiers": [],
+        "safety_dfa_states_before": {},
+        "safety_dfa_states_after": {},
+    }
+
+    selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[{"candidate_index": 0, "surface_events": [event]}],
+        candidate_evaluations=[evaluation],
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert selected == [evaluation["candidate_id"]]
+    assert evaluation["selection_evidence"]["cleared_recovery_obligation_ids"] == []
+    assert evaluation["selection_evidence"]["newly_enabled_recovery_event_ids"]
+
+    renamed_event = deepcopy(event)
+    renamed_event["event_name"] = "another_exact_authored_name"
+    renamed_event["expected_end_state"]["resource_state"] = (
+        "another_exact_intermediate_state"
+    )
+    renamed_projected = deepcopy(session_state)
+    multi_turn._apply_task_effects_to_symbolic_state(
+        renamed_event,
+        renamed_projected,
+    )
+    renamed_evaluation = {
+        "candidate_index": 0,
+        "valid": True,
+        "projected_symbolic_resources": deepcopy(
+            renamed_projected["symbolic_resources"]
+        ),
+        "projected_symbolic_parts": deepcopy(renamed_projected["symbolic_parts"]),
+        "remaining_safety_condition_identifiers": [],
+        "safety_dfa_states_before": {},
+        "safety_dfa_states_after": {},
+    }
+
+    renamed_selected = (
+        multi_turn_outline_generation._apply_neurosymbolic_comparison(
+            candidate_sequences=[
+                {"candidate_index": 0, "surface_events": [renamed_event]}
+            ],
+            candidate_evaluations=[renamed_evaluation],
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+        )
+    )
+
+    assert renamed_selected == [renamed_evaluation["candidate_id"]]
+    assert (
+        renamed_evaluation["selection_evidence"][
+            "newly_enabled_recovery_event_ids"
+        ]
+        == evaluation["selection_evidence"]["newly_enabled_recovery_event_ids"]
+    )
+
+
+def test_incomparable_nondominated_candidates_remain_ambiguous() -> None:
+    session_state = _session(parts={"P": "faulted", "Q": "faulted"})
+    prepared = _prepared(
+        _condition("goal_P", part_name="P", expected="restored"),
+        _condition("goal_Q", part_name="Q", expected="restored"),
+    )
+    events = [
+        _event("restore_P", part_name="P", start_state="faulted", end_state="restored"),
+        _event("restore_Q", part_name="Q", start_state="faulted", end_state="restored"),
+    ]
+    evaluations = [
+        _evaluation(
+            index,
+            session_state=session_state,
+            part_name=part_name,
+            end_state="restored",
+        )
+        for index, part_name in enumerate(("P", "Q"))
+    ]
+
+    nondominated = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[
+            {"candidate_index": index, "surface_events": [event]}
+            for index, event in enumerate(events)
+        ],
+        candidate_evaluations=evaluations,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert len(nondominated) == 2
+    assert {row["selection_status"] for row in evaluations} == {"nondominated"}
+    assert session_state["accepted_outline_prefix"] == []
+
+
+def test_equivalent_exact_successors_require_revision() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    first = _event(
+        "first_name",
+        part_name="P",
+        start_state="faulted",
+        end_state="restored",
+    )
+    second = deepcopy(first)
+    second["outline_id"] = "other_outline"
+    second["event_name"] = "second_name"
+    second["rationale"] = "other rationale"
+    evaluations = [
+        _evaluation(
+            index,
+            session_state=session_state,
+            part_name="P",
+            end_state="restored",
+        )
+        for index in range(2)
+    ]
+
+    nondominated = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[
+            {"candidate_index": 0, "surface_events": [first]},
+            {"candidate_index": 1, "surface_events": [second]},
+        ],
+        candidate_evaluations=evaluations,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert len(nondominated) == 2
+    assert evaluations[1]["selection_status"] == "equivalent_nondominated"
+    assert evaluations[0]["candidate_id"] == evaluations[1]["candidate_id"]
+
+
+def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() -> None:
+    occupancy_condition = {
+        "condition_id": "occupancy_clear",
+        "kind": "safety_destination_occupancy",
+        "entity_kind": "resource",
+        "entity": "blocker@localhost",
+        "field": "current_location",
+        "expected": {"not": "station"},
+    }
+    goal_condition = _condition("affected_part_goal", part_name="P", expected="restored")
+    prepared = _prepared(occupancy_condition, goal_condition)
+    session_state = _session(parts={"P": "faulted", "AUX": "in_gripper"})
+    session_state["symbolic_resources"] = {
+        "blocker@localhost": {
+            "resource_jid": "blocker@localhost",
+            "resource_state": "occupied",
+            "current_state": "occupied",
+            "resource_location": "station",
+            "current_location": "station",
+            "held_part": None,
+        },
+        "handler@localhost": {
+            "resource_jid": "handler@localhost",
+            "resource_state": "loaded",
+            "current_state": "loaded",
+            "held_part": "AUX",
+        },
+    }
+    session_state["symbolic_parts"]["AUX"].update(
+        {
+            "part_holder_resource_jid": "handler@localhost",
+            "current_holder_resource_jid": "handler@localhost",
+            "part_location": "handler@localhost_gripper",
+            "current_location": "handler@localhost_gripper",
+        }
+    )
+    handler_model = _des_model(
+        "handler@localhost",
+        current_valuation={"current_state": "loaded", "held_part": "AUX"},
+        events=[
+            {
+                "event_name": "release_entity",
+                "controllable": True,
+                "observable": False,
+                "guards": {"held_part": {"not_equals": None}},
+                "updates": {"held_part": {"set": None}},
+            },
+            {
+                "event_name": "acquire_entity",
+                "controllable": True,
+                "observable": False,
+                "guards": {"held_part": {"equals": None}},
+                "updates": {"held_part": {"set_from_param": "part_name"}},
+            },
+        ],
+    )
+    _attach_model(prepared, session_state, "handler@localhost", handler_model)
+    events = [
+        {
+            "outline_id": "clear_occupancy",
+            "event_name": "authored_a",
+            "resource_jid": "blocker@localhost",
+            "expected_start_state": {
+                "resource_state": "occupied",
+                "resource_location": "station",
+                "held_part": None,
+            },
+            "expected_end_state": {
+                "resource_state": "clear",
+                "resource_location": "buffer",
+                "held_part": None,
+            },
+            "rationale": "clear exact occupancy condition",
+        },
+        {
+            "outline_id": "free_guard",
+            "event_name": "authored_b",
+            "resource_jid": "handler@localhost",
+            "part_name": "AUX",
+            "expected_start_state": {
+                "resource_state": "loaded",
+                "held_part": "AUX",
+                "part_state": "in_gripper",
+                "part_location": "handler@localhost_gripper",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "staged",
+                "part_location": "buffer",
+            },
+            "rationale": "enable an exact capability guard",
+        },
+        {
+            "outline_id": "restore_affected_part",
+            "event_name": "authored_c",
+            "resource_jid": "handler@localhost",
+            "part_name": "P",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "faulted",
+                "part_location": "station",
+            },
+            "expected_end_state": {
+                "resource_state": "completed",
+                "held_part": None,
+                "part_state": "restored",
+                "part_location": "station",
+            },
+            "rationale": "clear exact affected part goal",
+        },
+    ]
+
+    evidence_rows: list[dict[str, Any]] = []
+    for event in events:
+        projected = deepcopy(session_state)
+        multi_turn._apply_task_effects_to_symbolic_state(event, projected)
+        evaluation = {
+            "candidate_index": 0,
+            "valid": True,
+            "projected_symbolic_resources": deepcopy(
+                projected["symbolic_resources"]
+            ),
+            "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
+            "remaining_safety_condition_identifiers": [],
+            "safety_dfa_states_before": {},
+            "safety_dfa_states_after": {},
+        }
+        selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+            candidate_sequences=[
+                {"candidate_index": 0, "surface_events": [deepcopy(event)]}
+            ],
+            candidate_evaluations=[evaluation],
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+        )
+        assert selected == [evaluation["candidate_id"]]
+        evidence_rows.append(deepcopy(evaluation["selection_evidence"]))
+        multi_turn._apply_task_effects_to_symbolic_state(event, session_state)
+
+    assert evidence_rows[0]["cleared_recovery_obligation_ids"] == ["occupancy_clear"]
+    assert evidence_rows[1]["cleared_recovery_obligation_ids"] == []
+    assert evidence_rows[1]["newly_enabled_recovery_event_ids"]
+    assert evidence_rows[2]["cleared_recovery_obligation_ids"] == ["affected_part_goal"]
+    assert not multi_turn_outline_generation._unresolved_condition_ids(
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+
+def test_empty_and_budget_overflow_generation_fail_before_agent_validation() -> None:
+    session_state = _session(parts={}, candidate_bound=2)
+
+    empty_decision, _ = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={"thought": "none", "candidate_events": []},
+            prepared_recovery_request={},
+            planner=object(),
+        )
+    )
+    overflow_decision, _ = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={
+                "thought": "too many",
+                "candidate_events": [
+                    _event(
+                        f"event_{index}",
+                        part_name="P",
+                        start_state="faulted",
+                        end_state="restored",
+                    )
+                    for index in range(3)
+                ],
+            },
+            prepared_recovery_request={},
+            planner=object(),
+        )
+    )
+    selected_index_decision, selected_index_turn = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={
+                "thought": "invalid ownership",
+                "selected_candidate_index": 0,
+                "candidate_events": [
+                    _event(
+                        "event",
+                        part_name="P",
+                        start_state="faulted",
+                        end_state="restored",
+                    )
+                ],
+            },
+            prepared_recovery_request={},
+            planner=object(),
+        )
+    )
+
+    assert empty_decision == "need_revision"
+    assert overflow_decision == "need_revision"
+    assert selected_index_decision == "need_revision"
+    assert (
+        selected_index_turn["validation_findings"][0]["constraint_code"]
+        == "candidate_schema_violation"
+    )
+
+
+def test_neurosymbolic_handler_commits_unique_successor_without_selected_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    event = _event(
+        "authored_transition",
+        part_name="P",
+        start_state="faulted",
+        end_state="restored",
+    )
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        candidate = dict(kwargs["candidate"])
+        candidate_index = int(candidate.get("candidate_index") or 0)
+        evaluation = _evaluation(
+            candidate_index,
+            session_state=session_state,
+            part_name="P",
+            end_state="restored",
+        )
+        evaluation.update(
+            {
+                "task": deepcopy(event),
+                "validated_task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "validated_events": [deepcopy(event)],
+                "committed_events": [
+                    multi_turn._commit_selected_candidate_task(
+                        task=event,
+                        sequence_index=int(kwargs["sequence_index"]),
+                    )
+                ],
+                "grounded_actions": [],
+                "pa_state_fingerprint": (
+                    multi_turn_outline_generation._pa_state_fingerprint(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared,
+                    )
+                ),
+                "safety_rule_fingerprint": "rules",
+                "live_safety_dfa_state_fingerprint": "live",
+            }
+        )
+        return evaluation
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validate_candidate,
+    )
+
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={"thought": "propose", "candidate_events": [event]},
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+    turn_entry["decision"] = decision
+    artifact = multi_turn._artifact_response_payload(
+        phase="outline",
+        session_state=session_state,
+        parsed_response={"thought": "propose", "candidate_events": [event]},
+        turn_entry=turn_entry,
+    )
+
+    assert decision == "outline_ready"
+    assert turn_entry["selected_by"] == "neurosymbolic"
+    assert turn_entry["selection_status"] == "selected"
+    assert "selected_candidate_index" not in turn_entry
+    assert "selected_candidate_index" not in artifact
+    assert artifact["selected_by"] == "neurosymbolic"
+    assert artifact["selection_status"] == "selected"
+    assert artifact["selection_evidence"]["cleared_recovery_obligation_ids"] == ["goal_P"]
+    assert len(artifact["nondominated_candidate_ids"]) == 1
+    assert artifact["candidate_evaluation_summary"][0]["projected_successor"]
+    assert len(session_state["accepted_outline_prefix"]) == 1
+    assert session_state["symbolic_parts"]["P"]["current_state"] == "restored"
+    roles = {
+        stage["validator_role"]
+        for stage in turn_entry["candidate_evaluations"][0]["validation_stages"]
+    }
+    assert roles == {"PA", "RA", "CCA"}
+
+
+def test_neurosymbolic_handler_appends_nothing_when_selection_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"P": "faulted", "Q": "faulted"})
+    prepared = _prepared(
+        _condition("goal_P", part_name="P", expected="restored"),
+        _condition("goal_Q", part_name="Q", expected="restored"),
+    )
+    events = [
+        _event("restore_P", part_name="P", start_state="faulted", end_state="restored"),
+        _event("restore_Q", part_name="Q", start_state="faulted", end_state="restored"),
+    ]
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        candidate = dict(kwargs["candidate"])
+        candidate_index = int(candidate.get("candidate_index") or 0)
+        event = dict(candidate["surface_events"][0])
+        part_name = str(event["part_name"])
+        evaluation = _evaluation(
+            candidate_index,
+            session_state=session_state,
+            part_name=part_name,
+            end_state="restored",
+        )
+        evaluation.update(
+            {
+                "task": deepcopy(event),
+                "validated_task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "committed_events": [
+                    multi_turn._commit_selected_candidate_task(
+                        task=event,
+                        sequence_index=int(kwargs["sequence_index"]),
+                    )
+                ],
+                "grounded_actions": [],
+                "pa_state_fingerprint": (
+                    multi_turn_outline_generation._pa_state_fingerprint(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared,
+                    )
+                ),
+            }
+        )
+        return evaluation
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validate_candidate,
+    )
+
+    decisions: list[str] = []
+    for revision in range(3):
+        decision, turn_entry = asyncio.run(
+            multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={"thought": "propose", "candidate_events": events},
+                prepared_recovery_request=prepared,
+                planner=object(),
+            )
+        )
+        decisions.append(decision)
+        assert len(turn_entry["nondominated_candidate_ids"]) == 2
+        assert session_state["accepted_outline_prefix"] == []
+        if revision == 0:
+            prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+                multi_turn_prompts.build_multi_turn_phase_prompt_input(
+                    phase="outline",
+                    llm_input=deepcopy(prepared.get("llm_input") or {}),
+                    session_state=session_state,
+                    recovery_resources=deepcopy(
+                        prepared.get("recovery_resources") or {}
+                    ),
+                )
+            )
+            assert "selection_ambiguous" in prompt
+            assert "open_recovery_obligation_ids_after" in prompt
+            assert "at most one representative" in prompt
+
+    assert decisions == [
+        "selection_ambiguous",
+        "selection_ambiguous",
+        "selection_unresolved",
+    ]
+    assert turn_entry["selection_status"] == "selection_unresolved"
+    assert session_state["status"] == "selection_unresolved"
+    assert len(session_state["candidate_rejection_feedback"]) == 1
+
+
+def test_invalid_ambiguity_representative_keeps_constraint_and_counts_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"P": "faulted", "Q": "faulted"})
+    prepared = _prepared(
+        _condition("goal_P", part_name="P", expected="restored"),
+        _condition("goal_Q", part_name="Q", expected="restored"),
+    )
+    events = [
+        _event("restore_P", part_name="P", start_state="faulted", end_state="restored"),
+        _event("restore_Q", part_name="Q", start_state="faulted", end_state="restored"),
+    ]
+    reject_representative = False
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        candidate = dict(kwargs["candidate"])
+        candidate_index = int(candidate.get("candidate_index") or 0)
+        event = dict(candidate["surface_events"][0])
+        if reject_representative:
+            finding = multi_turn.annotate_validation_finding(
+                {
+                    "validation_category": "syntax_and_grounding_validation",
+                    "constraint_owner": "binding",
+                    "constraint_family": "binding",
+                    "constraint_code": "candidate_schema_violation",
+                    "reason": "representative requires correction",
+                    "task_id": str(event.get("outline_id") or ""),
+                    "resource_jid": str(event.get("resource_jid") or ""),
+                    "part_name": str(event.get("part_name") or ""),
+                }
+            )
+            return {
+                "candidate_index": candidate_index,
+                "valid": False,
+                "task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "validation_findings": [finding],
+                "validation_stages": [],
+                "pa_state_fingerprint": (
+                    multi_turn_outline_generation._pa_state_fingerprint(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared,
+                    )
+                ),
+            }
+
+        part_name = str(event["part_name"])
+        evaluation = _evaluation(
+            candidate_index,
+            session_state=session_state,
+            part_name=part_name,
+            end_state="restored",
+        )
+        evaluation.update(
+            {
+                "task": deepcopy(event),
+                "validated_task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "committed_events": [
+                    multi_turn._commit_selected_candidate_task(
+                        task=event,
+                        sequence_index=int(kwargs["sequence_index"]),
+                    )
+                ],
+                "grounded_actions": [],
+                "pa_state_fingerprint": (
+                    multi_turn_outline_generation._pa_state_fingerprint(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared,
+                    )
+                ),
+            }
+        )
+        return evaluation
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validate_candidate,
+    )
+
+    decision, _turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={"thought": "compare", "candidate_events": events},
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+    assert decision == "selection_ambiguous"
+    assert session_state["selection_revision_count"] == 1
+
+    reject_representative = True
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={"thought": "revise", "candidate_events": [events[0]]},
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+    assert decision == "need_revision"
+    assert session_state["selection_revision_count"] == 2
+    feedback_codes = {
+        str(finding.get("constraint_code") or "")
+        for row in turn_entry["candidate_rejection_feedback"]
+        for finding in (
+            [row]
+            if str(row.get("constraint_code") or "")
+            else list(row.get("validation_findings") or [])
+        )
+    }
+    assert feedback_codes == {"candidate_schema_violation", "selection_ambiguous"}
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input=deepcopy(prepared.get("llm_input") or {}),
+            session_state=session_state,
+            recovery_resources=deepcopy(prepared.get("recovery_resources") or {}),
+        )
+    )
+    assert "representative requires correction" in prompt
+    assert "at most one representative" in prompt
+
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={"thought": "revise", "candidate_events": [events[0]]},
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+    assert decision == "selection_unresolved"
+    assert turn_entry["selection_status"] == "selection_unresolved"
+    assert session_state["selection_revision_count"] == 3
+    assert session_state["accepted_outline_prefix"] == []
+
+
+def test_cca_projects_dfa_state_without_mutating_a_live_monitor() -> None:
+    rule = {
+        "id": "SAFE_TEST",
+        "ap_scope": "recovery",
+        "dfa_dot": (
+            'digraph { init -> 1; 1 -> 2 [label="ap001"]; '
+            '1 -> 1 [label="!ap001"]; 2 -> 2 [label="!ap001"]; }'
+        ),
+        "recovery_aps": [
+            {
+                "label": "ap001",
+                "full": "ap_event/assembly/any/any/authored_event/destination=station",
+                "selector": {
+                    "mode": "resource_move_to_destination",
+                    "resource": "any",
+                    "part": "any",
+                    "destination": "station",
+                },
+            }
+        ],
+    }
+    validation_input = {
+        "task": {
+            "outline_id": "candidate",
+            "event_name": "uninterpreted_name",
+            "resource_jid": "resource@localhost",
+            "expected_start_state": {"resource_state": "idle"},
+            "expected_end_state": {
+                "resource_state": "new_state",
+                "resource_location": "station",
+            },
+        },
+        "signature": {"task_kind": "resource_only"},
+        "pre_resources": {
+            "resource@localhost": {
+                "current_state": "idle",
+                "current_location": "elsewhere",
+            }
+        },
+        "pre_parts": {},
+        "projected_resources": {
+            "resource@localhost": {
+                "current_state": "new_state",
+                "current_location": "station",
+            }
+        },
+        "projected_parts": {},
+        "llm_input": {"loaded_safety_rules": [rule]},
+    }
+
+    first = validate_outline_macro_recovery_safety(**validation_input)
+    second = validate_outline_macro_recovery_safety(
+        **validation_input,
+        safety_dfa_states_before=deepcopy(first["safety_dfa_states_after"]),
+    )
+
+    assert first["safety_dfa_states_before"] == {"SAFE_TEST": "1"}
+    assert first["safety_dfa_states_after"] == {"SAFE_TEST": "2"}
+    assert second["safety_dfa_states_before"] == {"SAFE_TEST": "2"}
+    assert second["safety_dfa_states_after"] == {"SAFE_TEST": "2"}
+    with pytest.raises(ValueError, match="invalid"):
+        validate_outline_macro_recovery_safety(
+            **validation_input,
+            safety_dfa_states_before={"SAFE_TEST": "stale_state"},
+        )
+
+
+def test_session_seed_preserves_pure_llm_and_enables_neurosymbolic_budget() -> None:
+    pure = multi_turn.build_multi_turn_session_seed(
+        {"recovery_session": {"recovery_selection_mode": "pure_llm"}}
+    )
+    neuro = multi_turn.build_multi_turn_session_seed(
+        {
+            "recovery_session": {
+                "recovery_selection_mode": "neurosymbolic",
+                "action_horizon": "full",
+                "candidate_count": 3,
+                "candidate_proposal_budget": 7,
+            }
+        }
+    )
+
+    assert pure["candidate_count"] == 3
+    assert pure["recovery_selection_mode"] == "pure_llm"
+    assert neuro["recovery_selection_mode"] == "neurosymbolic"
+    assert neuro["action_horizon"] == "1"
+    assert neuro["candidate_count"] == "adaptive"
+    assert neuro["candidate_bound"] == 7

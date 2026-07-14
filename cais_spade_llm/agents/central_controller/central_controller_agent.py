@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from collections.abc import Iterable
 from copy import deepcopy
@@ -19,6 +20,9 @@ from cais_spade_llm.agents.central_controller.online_fsa_monitor import OnlineFs
 # Import the updated monitor
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 from cais_spade_llm.agents.central_controller.online_safety_supervisor import OnlineSafetySupervisor
+from cais_spade_llm.agents.central_controller.outline_macro_safety import (
+    validate_outline_macro_recovery_safety,
+)
 from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
@@ -26,6 +30,11 @@ from cais_spade_llm.agents.central_controller.recovery_safety_generation import 
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    RECOVERY_OUTLINE_SAFETY_VALIDATE,
+    RECOVERY_OUTLINE_SAFETY_VALIDATED,
+    recovery_validation_fingerprint,
+)
 
 
 class CentralControllerAgent(LlmAgent):
@@ -161,6 +170,15 @@ class CentralControllerAgent(LlmAgent):
         t_recovery = Template()
         t_recovery.set_metadata("type", "recovery_safety_generate")
         self.add_behaviour(self._RecoverySafetyGeneration(), t_recovery)
+
+        t_recovery_outline_safety = Template()
+        t_recovery_outline_safety.set_metadata(
+            "type", RECOVERY_OUTLINE_SAFETY_VALIDATE
+        )
+        self.add_behaviour(
+            self._RecoveryOutlineSafetyValidation(),
+            t_recovery_outline_safety,
+        )
 
     def _collect_system_coordination_state(self) -> dict[str, Any]:
         """
@@ -2093,6 +2111,215 @@ class CentralControllerAgent(LlmAgent):
                 self,
                 msg,
                 transport_label="cca_decision",
+            )
+
+    class _RecoveryOutlineSafetyValidation(CyclicBehaviour):
+        """Validate projected recovery candidates with the live CCA rules."""
+
+        async def run(self) -> None:
+            agent: CentralControllerAgent = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+            started_at = time.perf_counter()
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning(
+                    "[CCA] Malformed recovery_outline_safety_validate body."
+                )
+                return
+            if not isinstance(payload, dict):
+                agent.logger.warning(
+                    "[CCA] Non-object recovery_outline_safety_validate body."
+                )
+                return
+
+            monitor_ready = await agent._wait_for_safety_monitor_ready(timeout_s=9.0)
+            validation_unavailable_reason = (
+                "CCA safety monitor is unavailable"
+                if agent.safety_file is not None and not monitor_ready
+                else ""
+            )
+            current_rules = [
+                deepcopy(rule)
+                for rule in agent.safety_rules
+                if isinstance(rule, dict)
+            ]
+            rule_ids = [
+                str(rule.get("id") or "").strip()
+                for rule in current_rules
+                if str(rule.get("id") or "").strip()
+            ]
+            safety_rule_fingerprint = recovery_validation_fingerprint(current_rules)
+            live_safety_dfa_states = {
+                str(rule_id): str(state)
+                for rule_id, state in sorted(
+                    dict(
+                        getattr(agent.safety_monitor, "current_states", {})
+                        if agent.safety_monitor is not None
+                        else {}
+                    ).items()
+                )
+            }
+            live_safety_dfa_state_fingerprint = recovery_validation_fingerprint(
+                live_safety_dfa_states
+            )
+            running_aps = sorted(
+                str(item)
+                for item in (
+                    getattr(agent.safety_monitor, "running_aps", set())
+                    if agent.safety_monitor is not None
+                    else set()
+                )
+                if str(item).strip()
+            )
+            candidates = payload.get("candidates")
+            if not isinstance(candidates, list):
+                candidates = []
+            results: list[dict[str, Any]] = []
+            for row in candidates:
+                candidate = row if isinstance(row, dict) else {}
+                candidate_index = int(candidate.get("candidate_index") or 0)
+                validation_input = candidate.get("safety_input")
+                validation_input = (
+                    deepcopy(validation_input)
+                    if isinstance(validation_input, dict)
+                    else {}
+                )
+                llm_input = validation_input.get("llm_input")
+                llm_input = deepcopy(llm_input) if isinstance(llm_input, dict) else {}
+                llm_input["loaded_safety_rules"] = deepcopy(current_rules)
+                recovery_safety_context = llm_input.get("recovery_safety_context")
+                recovery_safety_context = (
+                    deepcopy(recovery_safety_context)
+                    if isinstance(recovery_safety_context, dict)
+                    else {}
+                )
+                recovery_safety_context["running_aps"] = deepcopy(running_aps)
+                llm_input["recovery_safety_context"] = recovery_safety_context
+                try:
+                    if validation_unavailable_reason:
+                        raise RuntimeError(validation_unavailable_reason)
+                    expected_rule_fingerprint = str(
+                        candidate.get("safety_rule_fingerprint") or ""
+                    ).strip()
+                    if (
+                        expected_rule_fingerprint
+                        and expected_rule_fingerprint != safety_rule_fingerprint
+                    ):
+                        raise RuntimeError("CCA safety-rule fingerprint changed")
+                    expected_live_state_fingerprint = str(
+                        candidate.get("live_safety_dfa_state_fingerprint") or ""
+                    ).strip()
+                    if (
+                        expected_live_state_fingerprint
+                        and expected_live_state_fingerprint
+                        != live_safety_dfa_state_fingerprint
+                    ):
+                        raise RuntimeError("CCA live safety DFA state changed")
+                    projected_dfa_states = candidate.get("safety_dfa_states_before")
+                    if not isinstance(projected_dfa_states, dict):
+                        projected_dfa_states = deepcopy(live_safety_dfa_states)
+                    result = validate_outline_macro_recovery_safety(
+                        task=deepcopy(validation_input.get("task") or {}),
+                        signature=deepcopy(validation_input.get("signature") or {}),
+                        pre_resources=deepcopy(
+                            validation_input.get("pre_resources") or {}
+                        ),
+                        pre_parts=deepcopy(validation_input.get("pre_parts") or {}),
+                        projected_resources=deepcopy(
+                            validation_input.get("projected_resources") or {}
+                        ),
+                        projected_parts=deepcopy(
+                            validation_input.get("projected_parts") or {}
+                        ),
+                        llm_input=llm_input,
+                        safety_dfa_states_before=deepcopy(projected_dfa_states),
+                    )
+                except Exception as exc:
+                    agent.logger.exception(
+                        "[CCA] Recovery outline safety validation failed for candidate=%d.",
+                        candidate_index,
+                    )
+                    result = {
+                        "is_safe": False,
+                        "findings": [
+                            {
+                                "validation_category": "safety",
+                                "constraint_owner": "cca",
+                                "constraint_family": "safety",
+                                "constraint_code": "safety_validation_unavailable",
+                                "reason": str(exc),
+                            }
+                        ],
+                        "cleared_condition_ids": [],
+                        "safety_ctx": {"rule_ids": rule_ids},
+                    }
+                findings = [
+                    deepcopy(item)
+                    for item in (result.get("findings") or [])
+                    if isinstance(item, dict)
+                ]
+                for finding in findings:
+                    finding.setdefault("validation_category", "safety")
+                cleared_condition_ids = [
+                    str(item).strip()
+                    for item in (result.get("cleared_condition_ids") or [])
+                    if str(item).strip()
+                ]
+                active_condition_ids = [
+                    str(item).strip()
+                    for item in (candidate.get("active_safety_condition_ids") or [])
+                    if str(item).strip()
+                ]
+                remaining_condition_ids = [
+                    condition_id
+                    for condition_id in active_condition_ids
+                    if condition_id not in set(cleared_condition_ids)
+                ]
+                results.append(
+                    {
+                        "candidate_index": candidate_index,
+                        "is_safe": bool(result.get("is_safe") is True),
+                        "findings": findings,
+                        "active_rule_identifiers": deepcopy(rule_ids),
+                        "cleared_safety_condition_identifiers": cleared_condition_ids,
+                        "remaining_safety_condition_identifiers": remaining_condition_ids,
+                        "safety_context": deepcopy(result.get("safety_ctx") or {}),
+                        "safety_dfa_states_before": deepcopy(
+                            result.get("safety_dfa_states_before") or {}
+                        ),
+                        "safety_dfa_states_after": deepcopy(
+                            result.get("safety_dfa_states_after") or {}
+                        ),
+                    }
+                )
+
+            response = {
+                "request_id": str(payload.get("request_id") or ""),
+                "recovery_session_id": str(
+                    payload.get("recovery_session_id") or ""
+                ),
+                "turn_index": int(payload.get("turn_index") or 0),
+                "state_fingerprint": str(payload.get("state_fingerprint") or ""),
+                "validator_jid": str(agent.jid),
+                "results": results,
+                "active_rule_identifiers": deepcopy(rule_ids),
+                "safety_rule_fingerprint": safety_rule_fingerprint,
+                "live_safety_dfa_states": deepcopy(live_safety_dfa_states),
+                "live_safety_dfa_state_fingerprint": live_safety_dfa_state_fingerprint,
+                "latency_ms": (time.perf_counter() - started_at) * 1000.0,
+                "mocked": False,
+            }
+            reply = Message(to=str(payload.get("product_jid") or msg.sender or ""))
+            reply.set_metadata("type", RECOVERY_OUTLINE_SAFETY_VALIDATED)
+            reply.body = json.dumps(response, default=str)
+            await send_agent_message(
+                self,
+                reply,
+                trace_category=RECOVERY_OUTLINE_SAFETY_VALIDATED,
+                transport_label=RECOVERY_OUTLINE_SAFETY_VALIDATED,
             )
 
     class _RecoverySafetyGeneration(CyclicBehaviour):

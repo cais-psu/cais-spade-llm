@@ -163,6 +163,82 @@ def _extract_prompt_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_structured_llm_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the structured request recorded for the current LLM turn."""
+    latest_turn = _latest_multi_turn_turn(payload)
+    llm_request = latest_turn.get("llm_request")
+    if isinstance(llm_request, dict) and llm_request:
+        return deepcopy(llm_request)
+    return {}
+
+
+def _render_structured_llm_request(
+    payload: dict[str, Any],
+    *,
+    fallback_prompt_text: str,
+) -> str:
+    """Render one complete structured request as a readable debug artifact."""
+    llm_request = _extract_structured_llm_request(payload)
+    messages = [
+        deepcopy(row)
+        for row in (llm_request.get("messages") or [])
+        if isinstance(row, dict)
+    ]
+    if not messages and str(fallback_prompt_text or "").strip():
+        messages = [{"role": "user", "content": fallback_prompt_text}]
+
+    lines = [
+        "Structured LLM Request",
+        f"Model: {str(llm_request.get('model') or '').strip() or '(unknown)'}",
+        (
+            "Reasoning effort: "
+            f"{str(llm_request.get('reasoning_effort') or '').strip() or '(unknown)'}"
+        ),
+        (
+            "Response source: "
+            f"{str(llm_request.get('response_source') or '').strip() or '(unknown)'}"
+        ),
+        f"Request sent: {str(bool(llm_request.get('request_sent'))).lower()}",
+        "",
+        "Messages",
+    ]
+    for index, message in enumerate(messages, start=1):
+        role = str(message.get("role") or "").strip() or "unknown"
+        lines.extend(
+            [
+                f"[{index}] role={role}",
+                str(message.get("content") or ""),
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "Response Format",
+            json.dumps(
+                llm_request.get("response_format") or {},
+                indent=2,
+                default=str,
+                ensure_ascii=True,
+            ),
+        ]
+    )
+    if llm_request.get("tools"):
+        lines.extend(
+            [
+                "",
+                "Tools",
+                json.dumps(
+                    llm_request.get("tools"),
+                    indent=2,
+                    default=str,
+                    ensure_ascii=True,
+                ),
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
 def _extract_report_text(payload: dict[str, Any]) -> str:
     latest_turn = _latest_multi_turn_turn(payload)
     if str(latest_turn.get("report_text") or "").strip():
@@ -266,7 +342,7 @@ def _extract_llm_raw_response(payload: dict[str, Any]) -> str:
 
 
 def _extract_outline_transition_trace(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the accepted outline stack for a multi-turn debug artifact."""
+    """Return the accepted outline trace for the combined result artifact."""
     latest_turn = _latest_multi_turn_turn(payload)
     raw_response = latest_turn.get("raw_response")
     if not isinstance(raw_response, dict):
@@ -360,71 +436,70 @@ def _extract_remaining_blocked_issue_count(payload: dict[str, Any]) -> int | Non
     return 0 if decision == "outline_ready" else None
 
 
-def _write_multi_turn_outline_stack_artifact(
+def _outline_result_payload(
     *,
     payload: dict[str, Any],
-    target_dir: Path,
-    artifact_name: str,
-) -> dict[str, str]:
-    transition_trace = _extract_outline_transition_trace(payload)
-    artifact_path = target_dir / artifact_name
-    artifact_path.write_text(
-        json.dumps(
-            _json_safe_resume_value(transition_trace),
-            indent=2,
-            ensure_ascii=True,
-        ),
-        encoding="utf-8",
-    )
-    return {"outline_stack_artifact_path": str(artifact_path)}
-
-
-def _write_multi_turn_turn_index_artifact(
-    *,
-    payload: dict[str, Any],
-    target_dir: Path,
-    artifact_name: str,
     artifact_paths: dict[str, str],
-) -> dict[str, str]:
+) -> dict[str, Any]:
+    """Return one auditable outline result containing model and validator data."""
     latest_turn = _latest_multi_turn_turn(payload)
     multi_turn_ctx = _multi_turn_artifact_context(payload)
-    transition_trace = _extract_outline_transition_trace(payload)
-    index_payload: dict[str, Any] = {
-        "turn_index": int(multi_turn_ctx.get("turn_index") or 0),
-        "phase": str(multi_turn_ctx.get("phase") or "").strip(),
-        "decision": str(latest_turn.get("decision") or "").strip(),
-        "selected_candidate_index": _extract_selected_candidate_index(payload),
-        "selected_transition_outline_id": _extract_selected_transition_outline_id(payload),
-        "accepted_trace_length": len(transition_trace),
-        "remaining_blocked_issue_count": _extract_remaining_blocked_issue_count(payload),
-        "artifact_paths": {
-            key: str(artifact_paths.get(key) or "").strip()
-            for key in (
-                "prompt_artifact_path",
-                "llm_response_artifact_path",
-                "response_artifact_path",
-                "outline_stack_artifact_path",
-            )
-            if str(artifact_paths.get(key) or "").strip()
-        },
-        "artifact_roles": {
-            "prompt_artifact_path": "exact LLM input",
-            "llm_response_artifact_path": "raw model output only",
-            "response_artifact_path": "validator and session enriched output",
-            "outline_stack_artifact_path": "accepted transition_trace only",
-        },
-    }
-    artifact_path = target_dir / artifact_name
-    artifact_path.write_text(
-        json.dumps(
-            _json_safe_resume_value(index_payload),
-            indent=2,
-            ensure_ascii=True,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    enriched_response = latest_turn.get("raw_response")
+    if not isinstance(enriched_response, dict):
+        enriched_response = {}
+    result_payload = _compact_multi_turn_response_artifact(enriched_response)
+    llm_response = latest_turn.get("llm_raw_response")
+    if llm_response in (None, "", [], {}):
+        llm_response = payload.get("multi_turn_llm_raw_response")
+    result_payload.update(
+        {
+            "turn_index": int(multi_turn_ctx.get("turn_index") or 0),
+            "phase": "outline",
+            "llm_response": deepcopy(llm_response if llm_response is not None else {}),
+            "decision": str(latest_turn.get("decision") or "").strip(),
+            "next_phase": str(latest_turn.get("next_phase") or "").strip(),
+            "accepted_trace_length": len(_extract_outline_transition_trace(payload)),
+            "remaining_blocked_issue_count": _extract_remaining_blocked_issue_count(
+                payload
+            ),
+            "artifact_paths": deepcopy(artifact_paths),
+        }
     )
-    return {"turn_index_artifact_path": str(artifact_path)}
+    result_payload.setdefault(
+        "selected_candidate_index",
+        _extract_selected_candidate_index(payload),
+    )
+    selected_transition_outline_id = _extract_selected_transition_outline_id(payload)
+    if selected_transition_outline_id:
+        result_payload["selected_transition_outline_id"] = selected_transition_outline_id
+    result_payload.setdefault(
+        "transition_trace",
+        _extract_outline_transition_trace(payload),
+    )
+    return result_payload
+
+
+def _outline_artifact_paths(
+    *,
+    request_artifact_path: Path,
+    result_artifact_path: Path,
+    stack_artifact_path: Path,
+) -> dict[str, str]:
+    """Return canonical outline paths together with compatibility aliases."""
+    request_path = str(request_artifact_path)
+    result_path = str(result_artifact_path)
+    return {
+        "request_artifact_path": request_path,
+        "outline_result_artifact_path": result_path,
+        "outline_stack_artifact_path": str(stack_artifact_path),
+        "prompt_artifact_path": request_path,
+        "response_artifact_path": result_path,
+    }
+
+
+def _outline_stack_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return only the complete accepted transition trace."""
+    return _extract_outline_transition_trace(payload)
 
 
 def _extract_phase_result(payload: dict[str, Any]) -> str:
@@ -516,6 +591,13 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
                     if str(item.get("constraint_code") or "").strip()
                 }
             )
+        validation_stages = [
+            deepcopy(item)
+            for item in (row.get("validation_stages") or [])
+            if isinstance(item, dict)
+        ]
+        if validation_stages:
+            summary["validation_stages"] = validation_stages
         compact_rows.append(compact_row)
     return compact_rows
 
@@ -586,6 +668,13 @@ def _compact_runtime_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
         ]
         if findings:
             summary["validation_findings"] = findings
+        validation_stages = [
+            deepcopy(item)
+            for item in (row.get("validation_stages") or [])
+            if isinstance(item, dict)
+        ]
+        if validation_stages:
+            summary["validation_stages"] = validation_stages
         progress_detail = row.get("progress_detail")
         if isinstance(progress_detail, dict) and progress_detail:
             summary["progress_detail"] = deepcopy(progress_detail)
@@ -684,6 +773,9 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "resource_jid",
         "primitive_local_turn_index",
         "final_output_stage",
+        "request_artifact_path",
+        "grounding_result_artifact_path",
+        "outline_result_artifact_path",
         "prompt_artifact_path",
         "llm_response_artifact_path",
         "response_artifact_path",
@@ -1066,34 +1158,63 @@ def write_recovery_artifacts(
         )
         target_dir.mkdir(parents=True, exist_ok=True)
         suppress_phase_prompt_response = multi_turn_ctx["phase"] == "primitive_generation"
-        prompt_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_prompt_{timestamp}.txt"
-        )
-        response_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_response_{timestamp}.txt"
-        )
-        llm_response_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_llm_response_{timestamp}.txt"
-        )
-        latest_prompt_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_prompt_latest.txt"
-        )
-        latest_response_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_response_latest.txt"
-        )
-        outline_stack_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_stack_{timestamp}.json"
-        )
-        turn_index_artifact_name = (
-            f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
-            f"{multi_turn_ctx['phase']}_index_{timestamp}.json"
-        )
+        if multi_turn_ctx["phase"] == "grounding":
+            prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"grounding_request_{timestamp}.txt"
+            )
+            response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"grounding_result_{timestamp}.json"
+            )
+            llm_response_artifact_name = ""
+            latest_prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                "grounding_request_latest.txt"
+            )
+            latest_response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                "grounding_result_latest.json"
+            )
+        elif multi_turn_ctx["phase"] == "outline":
+            prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"outline_request_{timestamp}.txt"
+            )
+            response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"outline_result_{timestamp}.json"
+            )
+            llm_response_artifact_name = ""
+            latest_prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                "outline_request_latest.txt"
+            )
+            latest_response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                "outline_result_latest.json"
+            )
+        else:
+            prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"{multi_turn_ctx['phase']}_prompt_{timestamp}.txt"
+            )
+            response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"{multi_turn_ctx['phase']}_response_{timestamp}.txt"
+            )
+            llm_response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"{multi_turn_ctx['phase']}_llm_response_{timestamp}.txt"
+            )
+            latest_prompt_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"{multi_turn_ctx['phase']}_prompt_latest.txt"
+            )
+            latest_response_artifact_name = (
+                f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+                f"{multi_turn_ctx['phase']}_response_latest.txt"
+            )
         session_transcript_artifact_name = (
             f"multi_turn_session_{multi_turn_ctx['session_id']}_{timestamp}.txt"
         )
@@ -1114,17 +1235,36 @@ def write_recovery_artifacts(
         llm_response_artifact_name = ""
         latest_prompt_artifact_name = f"{reasoning_mode}_prompt_latest.txt"
         latest_response_artifact_name = f"{reasoning_mode}_response_latest.txt"
-        outline_stack_artifact_name = ""
-        turn_index_artifact_name = ""
         session_transcript_artifact_name = f"{reasoning_mode}_session_{timestamp}.txt"
         latest_session_transcript_artifact_name = f"{reasoning_mode}_session_latest.txt"
         resume_checkpoint_artifact_name = ""
         latest_resume_checkpoint_artifact_name = ""
 
+    outline_stack_artifact_name = (
+        f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+        f"outline_stack_{timestamp}.json"
+        if reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+        else ""
+    )
+
     prompt_text = _extract_prompt_text(normalized_payload)
     report_text = _extract_report_text(normalized_payload)
     is_report_artifact = not str(prompt_text or "").strip() and bool(str(report_text or "").strip())
+    is_grounding_artifact = bool(
+        reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "grounding"
+    )
+    is_outline_artifact = bool(
+        reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+    )
     primary_text = report_text if is_report_artifact else prompt_text
+    if (is_grounding_artifact or is_outline_artifact) and not is_report_artifact:
+        primary_text = _render_structured_llm_request(
+            normalized_payload,
+            fallback_prompt_text=prompt_text,
+        )
     primary_artifact_name = (
         prompt_artifact_name.replace("_prompt_", "_report_")
         if is_report_artifact
@@ -1217,6 +1357,8 @@ def write_recovery_artifacts(
             artifact_paths["report_artifact_path"] = str(primary_artifact_path)
         else:
             artifact_paths["prompt_artifact_path"] = str(primary_artifact_path)
+            if is_grounding_artifact or is_outline_artifact:
+                artifact_paths["request_artifact_path"] = str(primary_artifact_path)
 
     result_text = _extract_phase_result(normalized_payload) if is_report_artifact else ""
     raw_response = "" if is_report_artifact else _extract_raw_response(normalized_payload)
@@ -1231,6 +1373,25 @@ def write_recovery_artifacts(
         if is_report_artifact
         else latest_response_artifact_name
     )
+    if is_outline_artifact and not is_report_artifact:
+        request_artifact_path = target_dir / primary_artifact_name
+        outline_result_artifact_path = target_dir / secondary_artifact_name
+        outline_stack_artifact_path = target_dir / outline_stack_artifact_name
+        outline_paths = _outline_artifact_paths(
+            request_artifact_path=request_artifact_path,
+            result_artifact_path=outline_result_artifact_path,
+            stack_artifact_path=outline_stack_artifact_path,
+        )
+        secondary_text = json.dumps(
+            _json_safe_resume_value(
+                _outline_result_payload(
+                    payload=normalized_payload,
+                    artifact_paths=outline_paths,
+                )
+            ),
+            indent=2,
+            ensure_ascii=True,
+        )
     if write_phase_prompt_response and not suppress_phase_prompt_response and secondary_text:
         secondary_artifact_path = target_dir / secondary_artifact_name
         secondary_artifact_path.write_text(
@@ -1241,6 +1402,36 @@ def write_recovery_artifacts(
             artifact_paths["result_artifact_path"] = str(secondary_artifact_path)
         else:
             artifact_paths["response_artifact_path"] = str(secondary_artifact_path)
+            if is_grounding_artifact:
+                artifact_paths["grounding_result_artifact_path"] = str(
+                    secondary_artifact_path
+                )
+            elif is_outline_artifact:
+                artifact_paths.update(
+                    _outline_artifact_paths(
+                        request_artifact_path=target_dir / primary_artifact_name,
+                        result_artifact_path=secondary_artifact_path,
+                        stack_artifact_path=target_dir / outline_stack_artifact_name,
+                    )
+                )
+    if (
+        write_phase_prompt_response
+        and not suppress_phase_prompt_response
+        and is_outline_artifact
+        and outline_stack_artifact_name
+    ):
+        outline_stack_artifact_path = target_dir / outline_stack_artifact_name
+        outline_stack_artifact_path.write_text(
+            json.dumps(
+                _json_safe_resume_value(_outline_stack_payload(normalized_payload)),
+                indent=2,
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        artifact_paths["outline_stack_artifact_path"] = str(
+            outline_stack_artifact_path
+        )
     llm_raw_response = (
         _extract_llm_raw_response(normalized_payload) if reasoning_mode == "multi_turn" else ""
     )
@@ -1253,35 +1444,6 @@ def write_recovery_artifacts(
         llm_response_artifact_path = target_dir / llm_response_artifact_name
         llm_response_artifact_path.write_text(llm_raw_response, encoding="utf-8")
         artifact_paths["llm_response_artifact_path"] = str(llm_response_artifact_path)
-    if (
-        write_phase_prompt_response
-        and not suppress_phase_prompt_response
-        and reasoning_mode == "multi_turn"
-        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
-        and outline_stack_artifact_name
-    ):
-        artifact_paths.update(
-            _write_multi_turn_outline_stack_artifact(
-                payload=normalized_payload,
-                target_dir=target_dir,
-                artifact_name=outline_stack_artifact_name,
-            )
-        )
-    if (
-        write_phase_prompt_response
-        and not suppress_phase_prompt_response
-        and reasoning_mode == "multi_turn"
-        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
-        and turn_index_artifact_name
-    ):
-        artifact_paths.update(
-            _write_multi_turn_turn_index_artifact(
-                payload=normalized_payload,
-                target_dir=target_dir,
-                artifact_name=turn_index_artifact_name,
-                artifact_paths=artifact_paths,
-            )
-        )
     session_transcript = _extract_session_transcript(normalized_payload)
     if write_session_transcript and session_transcript:
         session_transcript_artifact_path = target_dir / session_transcript_artifact_name
@@ -1305,6 +1467,10 @@ def write_recovery_artifacts(
                 artifact_paths["latest_report_artifact_path"] = str(latest_primary_artifact_path)
             else:
                 artifact_paths["latest_prompt_artifact_path"] = str(latest_primary_artifact_path)
+                if is_grounding_artifact:
+                    artifact_paths["latest_request_artifact_path"] = str(
+                        latest_primary_artifact_path
+                    )
         if write_phase_prompt_response and not suppress_phase_prompt_response and secondary_text:
             latest_secondary_artifact_path = target_dir / latest_secondary_artifact_name
             latest_secondary_artifact_path.write_text(
@@ -1317,6 +1483,10 @@ def write_recovery_artifacts(
                 artifact_paths["latest_response_artifact_path"] = str(
                     latest_secondary_artifact_path
                 )
+                if is_grounding_artifact:
+                    artifact_paths["latest_grounding_result_artifact_path"] = str(
+                        latest_secondary_artifact_path
+                    )
         if write_session_transcript and session_transcript:
             latest_session_transcript_artifact_path = (
                 target_dir / latest_session_transcript_artifact_name

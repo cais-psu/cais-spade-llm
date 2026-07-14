@@ -1,6 +1,7 @@
 {
   "enabled": true,
-  "recovery_selection_mode": "pure_llm",
+  "recovery_selection_mode": "neurosymbolic",
   "action_horizon": 1,
-  "candidate_count": "auto"
+  "candidate_count": "adaptive",
+  "candidate_proposal_budget": 5
 }

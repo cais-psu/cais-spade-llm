@@ -5,15 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.central_controller.outline_macro_safety import (
-    validate_outline_macro_cca_constraints,
-)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
     _apply_outline_task_effects,
     _build_outline_task_type_lookup,
     _infer_outline_macro_signature,
-    _outline_task_predecessors,
-    _task_findings_block_projected_state,
 )
 
 SYNTAX_AND_GROUNDING_VALIDATION = "syntax_and_grounding_validation"
@@ -66,9 +61,11 @@ _TRANSITION_FEASIBILITY_CODES = {
     "invalid_dependency_reference",
     "missing_release_destination",
     "no_state_change",
+    "label_only_state_change",
     "order_violation",
     "part_relocation_without_carrier",
     "source_reference_unavailable",
+    "state_value_outside_ra_domain",
     "supervisor_blocked",
     "unsatisfied_guard_predicate",
 }
@@ -86,6 +83,7 @@ _PHYSICAL_FEASIBILITY_CODES = {
     "resource_unavailable",
     "resource_validation_error",
     "resource_validation_unavailable",
+    "wrong_resource_validator",
     "unsupported_resource_target",
     "workspace_unreachable",
 }
@@ -157,6 +155,70 @@ def _exact_mapping_value(mapping: dict[str, Any], field_name: str) -> Any:
     if field_name not in mapping:
         return _EXACT_STATE_UNAVAILABLE
     return deepcopy(mapping.get(field_name))
+
+
+def _exact_domain_contains(domain: list[Any], value: Any) -> bool:
+    """Return whether one exact value belongs to an RA-declared finite domain."""
+    return any(type(item) is type(value) and item == value for item in domain)
+
+
+def _label_state_satisfied_condition_ids(
+    *,
+    task: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> list[str]:
+    """Return exact supplied conditions satisfied by end-state label values."""
+    resource_jid = _task_resource_jid(task)
+    part_name = _task_part_name(task)
+    end_state = dict(task.get("expected_end_state") or {})
+    modeled_gap = dict(
+        dict(prepared_recovery_request.get("llm_input") or {}).get(
+            "modeled_continuation_gap"
+        )
+        or {}
+    )
+    raw_conditions: list[dict[str, Any]] = []
+    for field_name in (
+        "unsatisfied_conditions",
+        "unsatisfied_goal_conditions",
+        "unmet_continuation_conditions",
+    ):
+        raw_conditions.extend(
+            deepcopy(row)
+            for row in (modeled_gap.get(field_name) or [])
+            if isinstance(row, dict)
+        )
+
+    satisfied: list[str] = []
+    for condition in raw_conditions:
+        entity_kind = str(condition.get("entity_kind") or "").strip().lower()
+        entity = str(condition.get("entity") or "").strip()
+        field_name = str(condition.get("field") or "").strip()
+        state_field = ""
+        if (
+            entity_kind == "resource"
+            and entity == resource_jid
+            and field_name in {"state", "current_state", "resource_state"}
+        ):
+            state_field = "resource_state"
+        elif (
+            entity_kind == "part"
+            and entity == part_name
+            and field_name in {"state", "current_state", "part_state"}
+        ):
+            state_field = "part_state"
+        if not state_field or state_field not in end_state:
+            continue
+        if end_state.get(state_field) != condition.get("expected"):
+            continue
+        condition_id = str(
+            condition.get("condition_id") or condition.get("id") or ""
+        ).strip()
+        if not condition_id:
+            condition_id = f"{entity_kind}:{entity}:{field_name}"
+        if condition_id not in satisfied:
+            satisfied.append(condition_id)
+    return satisfied
 
 
 def _dedupe_tokens(values: list[str]) -> list[str]:
@@ -1107,7 +1169,7 @@ def _binding_finding(
     }
 
 
-def _outline_contract_finding(
+def _outline_contract_finding(  # noqa: C901, PLR0912
     *,
     task: dict[str, Any],
     outline_contract: dict[str, Any] | None,
@@ -1120,6 +1182,16 @@ def _outline_contract_finding(
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
     action_target = _task_action_target(task)
+    state_field_scopes = {
+        str(field_name): str(scope or "resource")
+        for field_name, scope in dict(contract.get("state_field_scopes") or {}).items()
+        if str(field_name)
+    }
+    state_field_domains = {
+        str(field_name): deepcopy(domain)
+        for field_name, domain in dict(contract.get("state_field_domains") or {}).items()
+        if str(field_name) and isinstance(domain, list)
+    }
 
     if bool(contract.get("disallow_unknown_state_fields")):
         allowed_state_fields = {
@@ -1150,12 +1222,92 @@ def _outline_contract_finding(
                     evidence={"state_fields": deepcopy(invalid_fields)},
                 )
 
+    part_scoped_without_part = sorted(
+        {
+            str(field_name)
+            for state in (start_state, end_state)
+            for field_name in state
+            if state_field_scopes.get(str(field_name)) == "part" and not part_name
+        }
+    )
+    if part_scoped_without_part:
+        return _binding_finding(
+            task=task,
+            constraint_code="disallowed_outline_state_field",
+            resource_jid=resource_jid or None,
+            part_name=None,
+            reason=(
+                "part-scoped outline state field(s) require part_name: "
+                + ", ".join(part_scoped_without_part)
+            ),
+            evidence={
+                "state_fields": deepcopy(part_scoped_without_part),
+                "declared_scope": "part",
+            },
+        )
+
+    for state_key, state in (
+        ("expected_start_state", start_state),
+        ("expected_end_state", end_state),
+    ):
+        for state_label_field in ("resource_state", "part_state"):
+            if state_label_field not in state:
+                continue
+            state_label = state.get(state_label_field)
+            if isinstance(state_label, str) and state_label.strip():
+                continue
+            return _binding_finding(
+                task=task,
+                constraint_code="candidate_schema_violation",
+                resource_jid=resource_jid or None,
+                part_name=part_name or None,
+                reason=(
+                    f"{state_key}.{state_label_field} must be a nonempty exact string"
+                ),
+                evidence={
+                    "field": f"{state_key}.{state_label_field}",
+                    "value": deepcopy(state_label),
+                },
+            )
+        for field_name, value in sorted(state.items()):
+            if field_name in {
+                "resource_state",
+                "part_state",
+                "resource_location",
+                "part_location",
+                "held_part",
+            }:
+                continue
+            domain = state_field_domains.get(field_name)
+            if domain is None or _exact_domain_contains(domain, value):
+                continue
+            return _binding_finding(
+                task=task,
+                constraint_code="state_value_outside_ra_domain",
+                resource_jid=resource_jid or None,
+                part_name=part_name or None,
+                reason=(
+                    f"{state_key}.{field_name} must use an exact value from the "
+                    "responsible ResourceAgent domain"
+                ),
+                evidence={
+                    "field": f"{state_key}.{field_name}",
+                    "value": deepcopy(value),
+                    "domain": deepcopy(domain),
+                },
+            )
+
     if bool(contract.get("require_expected_start_match")):
         mismatches: list[dict[str, Any]] = []
-        for field_name, actual in (
-            ("resource_state", _exact_mapping_value(resource_row, "resource_state")),
-            ("held_part", _exact_mapping_value(resource_row, "held_part")),
-        ):
+        for field_name in sorted(start_state):
+            scope = state_field_scopes.get(
+                field_name,
+                "part" if field_name in {"part_state", "part_location"} else "resource",
+            )
+            if scope == "part" and not part_name:
+                continue
+            source_row = part_row if scope == "part" else resource_row
+            actual = _exact_mapping_value(source_row, field_name)
             if field_name not in start_state:
                 continue
             expected = deepcopy(start_state.get(field_name))
@@ -1168,26 +1320,6 @@ def _outline_contract_finding(
                         "available": actual is not _EXACT_STATE_UNAVAILABLE,
                     }
                 )
-
-        if part_name:
-            for field_name, actual in (
-                ("part_state", _exact_mapping_value(part_row, "part_state")),
-                ("part_location", _exact_mapping_value(part_row, "part_location")),
-            ):
-                if field_name not in start_state:
-                    continue
-                expected = deepcopy(start_state.get(field_name))
-                if actual is _EXACT_STATE_UNAVAILABLE or actual != expected:
-                    mismatches.append(
-                        {
-                            "field": field_name,
-                            "expected": expected,
-                            "actual": None
-                            if actual is _EXACT_STATE_UNAVAILABLE
-                            else deepcopy(actual),
-                            "available": actual is not _EXACT_STATE_UNAVAILABLE,
-                        }
-                    )
 
         if mismatches:
             field_names = ", ".join(
@@ -1213,18 +1345,17 @@ def _outline_contract_finding(
 
     if bool(contract.get("require_meaningful_delta")):
         has_delta = False
-        for field_name, before in (
-            ("resource_state", _exact_mapping_value(resource_row, "resource_state")),
-            ("resource_location", _exact_mapping_value(resource_row, "resource_location")),
-            ("held_part", _exact_mapping_value(resource_row, "held_part")),
-            ("part_state", _exact_mapping_value(part_row, "part_state")),
-            ("part_location", _exact_mapping_value(part_row, "part_location")),
-        ):
-            if field_name not in end_state:
-                continue
+        delta_fields: list[str] = []
+        for field_name in sorted(end_state):
+            scope = state_field_scopes.get(
+                field_name,
+                "part" if field_name in {"part_state", "part_location"} else "resource",
+            )
+            source_row = part_row if scope == "part" else resource_row
+            before = _exact_mapping_value(source_row, field_name)
             if before is _EXACT_STATE_UNAVAILABLE or before != end_state.get(field_name):
                 has_delta = True
-                break
+                delta_fields.append(field_name)
         if not has_delta:
             return _binding_finding(
                 task=task,
@@ -1233,6 +1364,31 @@ def _outline_contract_finding(
                 part_name=part_name or None,
                 reason="Task does not change the projected symbolic state.",
                 evidence={"field": "expected_end_state", "deltas": []},
+            )
+        physical_delta_fields = [
+            field_name
+            for field_name in delta_fields
+            if field_name not in {"resource_state", "current_state", "part_state"}
+        ]
+        label_condition_ids = [
+            str(item).strip()
+            for item in (contract.get("label_state_satisfied_condition_ids") or [])
+            if str(item).strip()
+        ]
+        if not physical_delta_fields and not label_condition_ids:
+            return _binding_finding(
+                task=task,
+                constraint_code="label_only_state_change",
+                resource_jid=resource_jid or None,
+                part_name=part_name or None,
+                reason=(
+                    "A new event_name or state label must also change another "
+                    "RA-declared state variable or an active recovery blocker fact."
+                ),
+                evidence={
+                    "expected_start_state": deepcopy(start_state),
+                    "expected_end_state": deepcopy(end_state),
+                },
             )
 
     if bool(contract.get("require_release_destination_for_release")) and resource_jid and part_name:
@@ -1612,7 +1768,7 @@ def compile_grounded_recovery_outline_task(
     }
 
 
-def projected_outline_validation_context(
+def projected_outline_validation_context(  # noqa: C901, PLR0912
     *,
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
@@ -1641,6 +1797,11 @@ def projected_outline_validation_context(
         recovery_snapshot = dict(entry.get("recovery_snapshot") or {})
         static_capabilities = dict(entry.get("static_capabilities") or {})
         resource_row = resources_by_jid.setdefault(token, {"resource_jid": token})
+        recovery_des_model = dict(entry.get("recovery_des_model") or {})
+        current_valuation = dict(recovery_des_model.get("current_valuation") or {})
+        for field_name, value in current_valuation.items():
+            if field_name not in resource_row:
+                resource_row[field_name] = deepcopy(value)
         for key in (
             "named_poses",
             "available_named_poses",
@@ -1658,6 +1819,20 @@ def projected_outline_validation_context(
                 resource_row[key] = deepcopy(static_capabilities.get(key))
             elif recovery_snapshot.get(key) not in (None, "", [], {}):
                 resource_row[key] = deepcopy(recovery_snapshot.get(key))
+    for resource_jid, resource_row in resources_by_jid.items():
+        resource_row.setdefault("resource_jid", resource_jid)
+        if "resource_state" not in resource_row and "current_state" in resource_row:
+            resource_row["resource_state"] = deepcopy(resource_row.get("current_state"))
+        if "current_state" not in resource_row and "resource_state" in resource_row:
+            resource_row["current_state"] = deepcopy(resource_row.get("resource_state"))
+        if "resource_location" not in resource_row and "current_location" in resource_row:
+            resource_row["resource_location"] = deepcopy(
+                resource_row.get("current_location")
+            )
+        if "current_location" not in resource_row and "resource_location" in resource_row:
+            resource_row["current_location"] = deepcopy(
+                resource_row.get("resource_location")
+            )
 
     parts_by_name: dict[str, dict[str, Any]] = {}
     for row in llm_input.get("part_facts") or []:
@@ -1706,17 +1881,49 @@ def validate_recovery_outline_task(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Validate an outline task through the centralized recovery validation pipeline."""
+    """Run only ProductAgent-owned syntax, grounding, and transition validation."""
+    del planner
     prepared_recovery_request = deepcopy(prepared_recovery_request)
     resources_by_jid, parts_by_name = projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
+    resource_jid = _task_resource_jid(task)
+    recovery_entry = dict(
+        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
+            resource_jid
+        )
+        or {}
+    )
+    recovery_des_model = dict(
+        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
+        or recovery_entry.get("recovery_des_model")
+        or {}
+    )
+    state_variables = dict(recovery_des_model.get("state_variables") or {})
+    outline_contract = deepcopy(_OUTLINE_VALIDATION_CONTRACT)
+    if state_variables:
+        outline_contract["allowed_state_fields"] = sorted(state_variables)
+        outline_contract["state_field_scopes"] = {
+            str(field_name): str(dict(declaration or {}).get("scope") or "resource")
+            for field_name, declaration in state_variables.items()
+        }
+        outline_contract["state_field_domains"] = {
+            str(field_name): deepcopy(dict(declaration or {}).get("domain"))
+            for field_name, declaration in state_variables.items()
+            if isinstance(dict(declaration or {}).get("domain"), list)
+        }
+    outline_contract["label_state_satisfied_condition_ids"] = (
+        _label_state_satisfied_condition_ids(
+            task=task,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+    )
     grounding_result = compile_grounded_recovery_outline_task(
         task,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
-        outline_contract=deepcopy(_OUTLINE_VALIDATION_CONTRACT),
+        outline_contract=outline_contract,
         location_validation_mode="strict",
     )
     finding = grounding_result.get("finding")
@@ -1726,99 +1933,7 @@ def validate_recovery_outline_task(
     grounded_action = dict(grounding_result.get("grounded_action") or {})
     if not grounded_action:
         return [], None
-
-    findings: list[dict[str, Any]] = []
-    findings.extend(
-        _validate_outline_task_resource_feasibility(
-            planner=planner,
-            task=task,
-            grounded_action=grounded_action,
-            resources_by_jid=resources_by_jid,
-            parts_by_name=parts_by_name,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-    )
-    if not findings:
-        findings.extend(
-            _validate_outline_task_cca(
-                task=task,
-                grounded_action=grounded_action,
-                resources_by_jid=resources_by_jid,
-                parts_by_name=parts_by_name,
-                llm_input=dict(prepared_recovery_request.get("llm_input") or {}),
-                prior_findings=findings,
-            )
-        )
-    return [annotate_validation_finding(row) for row in findings], grounded_action
-
-def _resource_agent_map(planner: Any) -> dict[str, Any]:
-    return {
-        str(getattr(agent, "jid", "")).strip(): agent
-        for agent in (getattr(planner, "resource_agents", None) or [])
-        if str(getattr(agent, "jid", "")).strip()
-    }
-
-def _resource_constraint_finding(
-    *,
-    task: dict[str, Any],
-    constraint_code: str,
-    reason: str,
-    resource_jid: str = "",
-    part_name: str = "",
-    evidence: dict[str, Any] | None = None,
-    guard: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    evidence = dict(evidence or {})
-    durable = str(constraint_code or "").strip().lower() in {
-        "resource_validation_unavailable",
-        "workspace_unreachable",
-    }
-    return {
-        "task_id": str(task.get("outline_id") or "").strip(),
-        "resource_jid": resource_jid or None,
-        "part_name": part_name or None,
-        "pose_source": "resource_feasibility",
-        "pose": deepcopy(evidence.get("checked_pose")),
-        "workspace_bounds": deepcopy(evidence.get("workspace_bounds")),
-        "failed_axes": [constraint_code],
-        "constraint_owner": "resource",
-        "constraint_family": "resource_feasibility",
-        "constraint_code": constraint_code,
-        "validation_category": PHYSICAL_FEASIBILITY,
-        "reason": reason,
-        "guard": deepcopy(guard),
-        "evidence": deepcopy(evidence),
-        "durable": durable,
-        "retriable": True,
-    }
-
-
-def _resource_recovery_snapshot_for_feasibility(
-    *,
-    resource_jid: str,
-    resource_row: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> dict[str, Any]:
-    recovery_entry = dict(
-        dict(prepared_recovery_request.get("recovery_resources") or {}).get(resource_jid) or {}
-    )
-    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
-    static_capabilities = dict(recovery_entry.get("static_capabilities") or {})
-    for key, value in static_capabilities.items():
-        if recovery_snapshot.get(key) in (None, "", [], {}):
-            recovery_snapshot[key] = deepcopy(value)
-    recovery_snapshot.update(deepcopy(resource_row or {}))
-    recovery_snapshot.setdefault("resource_jid", resource_jid)
-    if recovery_snapshot.get("current_state") in (None, "") and recovery_snapshot.get(
-        "resource_state"
-    ) not in (None, ""):
-        recovery_snapshot["current_state"] = deepcopy(recovery_snapshot.get("resource_state"))
-    if recovery_snapshot.get("resource_state") in (None, "") and recovery_snapshot.get(
-        "current_state"
-    ) not in (None, ""):
-        recovery_snapshot["resource_state"] = deepcopy(recovery_snapshot.get("current_state"))
-    return recovery_snapshot
-
+    return [], grounded_action
 
 def _part_context_for_resource_feasibility(
     *,
@@ -1868,15 +1983,18 @@ def _part_context_for_resource_feasibility(
     return part_context
 
 
-def _validate_outline_task_resource_feasibility(
+def build_recovery_physical_validation_input(
     *,
-    planner: Any,
     task: dict[str, Any],
     grounded_action: dict[str, Any],
-    resources_by_jid: dict[str, dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
+    session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """Build the exact grounded input sent to the responsible ResourceAgent."""
+    resources_by_jid, parts_by_name = projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
     resource_jid = str(
         grounded_action.get("resource_jid")
         or _task_resource_jid(task)
@@ -1887,104 +2005,41 @@ def _validate_outline_task_resource_feasibility(
         or _task_part_name(task)
         or ""
     ).strip()
-    if not resource_jid:
-        return []
-
-    resource_agent = _resource_agent_map(planner).get(resource_jid)
-    physical_feasibility_check = getattr(
-        resource_agent,
-        "check_recovery_physical_feasibility",
-        None,
-    )
-    if not callable(physical_feasibility_check):
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_validation_unavailable",
-                reason=(
-                    f"resource '{resource_jid}' does not expose "
-                    "check_recovery_physical_feasibility"
-                ),
-                resource_jid=resource_jid,
-                part_name=part_name,
-                evidence={"available_resource_jids": sorted(_resource_agent_map(planner))},
-            )
-        ]
-
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
-    recovery_snapshot = _resource_recovery_snapshot_for_feasibility(
-        resource_jid=resource_jid,
-        resource_row=resource_row,
-        prepared_recovery_request=prepared_recovery_request,
-    )
     part_context = _part_context_for_resource_feasibility(
         part_name=part_name,
         part_row=part_row,
         resource_row=resource_row,
         grounded_action=grounded_action,
     )
-
-    try:
-        result = physical_feasibility_check(
-            part_context=deepcopy(part_context),
-            recovery_snapshot=deepcopy(recovery_snapshot),
-            grounded_action=deepcopy(grounded_action),
-            operation_kind=str(grounded_action.get("operation_kind") or "").strip(),
-            part_name=part_name or None,
-        )
-    except Exception as exc:
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_validation_error",
-                reason=f"resource physical feasibility check for '{resource_jid}' failed: {exc}",
-                resource_jid=resource_jid,
-                part_name=part_name,
-                evidence={"exception_type": type(exc).__name__},
-            )
-        ]
-
-    if not isinstance(result, dict):
-        return [
-            _resource_constraint_finding(
-                task=task,
-                constraint_code="resource_validation_error",
-                reason=(
-                    "resource physical feasibility check for "
-                    f"'{resource_jid}' returned non-object result"
-                ),
-                resource_jid=resource_jid,
-                part_name=part_name,
-                evidence={"result_type": type(result).__name__},
-            )
-        ]
-    if bool(result.get("allowed", True)):
-        return []
-
-    evidence = dict(result.get("evidence") or {})
-    return [
-        _resource_constraint_finding(
-            task=task,
-            constraint_code=str(result.get("constraint_code") or "resource_blocked").strip(),
-            reason=str(result.get("reason") or "resource rejected the outline task").strip(),
-            resource_jid=resource_jid,
-            part_name=part_name,
-            evidence=evidence,
-            guard=dict(result.get("guard") or {}),
-        )
-    ]
+    use_projected_recovery_snapshot = any(
+        isinstance(row, dict) and _task_resource_jid(row) == resource_jid
+        for row in (session_state.get("accepted_outline_prefix") or [])
+    )
+    return {
+        "resource_jid": resource_jid,
+        "part_name": part_name or None,
+        "operation_kind": str(grounded_action.get("operation_kind") or "").strip(),
+        "part_context": deepcopy(part_context),
+        "grounded_action": deepcopy(grounded_action),
+        "projected_recovery_snapshot": deepcopy(resource_row),
+        "use_projected_recovery_snapshot": use_projected_recovery_snapshot,
+    }
 
 
-def _validate_outline_task_cca(
+def build_recovery_safety_validation_input(
     *,
     task: dict[str, Any],
-    resources_by_jid: dict[str, dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
-    llm_input: dict[str, Any],
-    prior_findings: list[dict[str, Any]],
-    grounded_action: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> dict[str, Any]:
+    """Project one PA-valid transition for authoritative CCA validation."""
+    resources_by_jid, parts_by_name = projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    llm_input = deepcopy(dict(prepared_recovery_request.get("llm_input") or {}))
     validation_trace = [deepcopy(task)]
     task_id = str(task.get("outline_id") or "").strip() or "task_0"
     task_types_by_id = _build_outline_task_type_lookup(
@@ -2001,33 +2056,41 @@ def _validate_outline_task_cca(
 
     projected_resources = deepcopy(resources_by_jid)
     projected_parts = deepcopy(parts_by_name)
-    if not _task_findings_block_projected_state(list(prior_findings or [])):
-        task_type = str(task_types_by_id.get(task_id) or "").strip()
-        _apply_outline_task_effects(
-            task,
-            resources_by_jid=projected_resources,
-            parts_by_name=projected_parts,
-            task_type=task_type,
+    task_type = str(task_types_by_id.get(task_id) or "").strip()
+    resource_jid = _task_resource_jid(task)
+    recovery_entry = dict(
+        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
+            resource_jid
         )
-
-    cca_result = validate_outline_macro_cca_constraints(
-        task=deepcopy(task),
-        grounded_action=deepcopy(grounded_action or {}),
-        event_instance=None,
-        projection=None,
-        signature=deepcopy(signature),
-        pre_resources=deepcopy(resources_by_jid),
-        pre_parts=deepcopy(parts_by_name),
-        projected_resources=projected_resources,
-        projected_parts=projected_parts,
-        llm_input=deepcopy(llm_input),
-        outline_tasks=validation_trace,
-        task_types_by_id=deepcopy(task_types_by_id),
-        task_index_by_id={task_id: 0},
-        dependency_map={task_id: _outline_task_predecessors(task)},
-        previously_cleared_condition_ids=None,
+        or {}
     )
-    return [deepcopy(row) for row in (cca_result.get("findings") or []) if isinstance(row, dict)]
+    recovery_des_model = dict(
+        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
+        or recovery_entry.get("recovery_des_model")
+        or {}
+    )
+    state_field_scopes = {
+        str(field_name): str(dict(declaration or {}).get("scope") or "resource")
+        for field_name, declaration in dict(
+            recovery_des_model.get("state_variables") or {}
+        ).items()
+    }
+    _apply_outline_task_effects(
+        task,
+        resources_by_jid=projected_resources,
+        parts_by_name=projected_parts,
+        task_type=task_type,
+        state_field_scopes=state_field_scopes,
+    )
+    return {
+        "task": deepcopy(task),
+        "signature": deepcopy(signature),
+        "pre_resources": deepcopy(resources_by_jid),
+        "pre_parts": deepcopy(parts_by_name),
+        "projected_resources": projected_resources,
+        "projected_parts": projected_parts,
+        "llm_input": llm_input,
+    }
 
 __all__ = [
     "PHYSICAL_FEASIBILITY",
@@ -2035,6 +2098,8 @@ __all__ = [
     "SYNTAX_AND_GROUNDING_VALIDATION",
     "TRANSITION_FEASIBILITY",
     "annotate_validation_finding",
+    "build_recovery_physical_validation_input",
+    "build_recovery_safety_validation_input",
     "compile_grounded_recovery_outline_task",
     "projected_outline_validation_context",
     "validate_recovery_outline_task",

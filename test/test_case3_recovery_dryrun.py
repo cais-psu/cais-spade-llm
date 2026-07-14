@@ -26,6 +26,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -49,6 +50,12 @@ _bootstrap_repo_site_packages(ROOT)
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
 )  # noqa: E402
+from cais_spade_llm.agents.central_controller import (  # noqa: E402
+    outline_macro_safety as outline_macro_safety_module,
+)
+from cais_spade_llm.agents.central_controller.outline_macro_safety import (  # noqa: E402
+    validate_outline_macro_recovery_safety,
+)
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner  # noqa: E402
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (  # noqa: E402
     build_failure_event,
@@ -60,10 +67,21 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes impo
     multi_turn_outline_state,
     multi_turn_prompts,
 )
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (  # noqa: E402
+    recovery_validation_service,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (  # noqa: E402
     write_recovery_artifacts,
 )
-from cais_spade_llm.resources.resource_primitives import get_resource_recovery_snapshot  # noqa: E402
+from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent  # noqa: E402
+from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent  # noqa: E402
+from cais_spade_llm.agents.shared_information import llm_agent as llm_agent_module  # noqa: E402
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (  # noqa: E402
+    recovery_validation_fingerprint,
+)
+from cais_spade_llm.resources.resource_primitives import (  # noqa: E402
+    get_resource_recovery_snapshot,
+)
 
 
 DEBUG_ROOT = ROOT / "cais_spade_llm" / "monitor" / "debug"
@@ -230,7 +248,7 @@ def _normalize_recovery_outline_experiment_settings(raw_settings: Any) -> dict[s
     raw = dict(raw_settings or {}) if isinstance(raw_settings, dict) else {}
     enabled = bool(raw.get("enabled", True))
     recovery_selection_mode = str(raw.get("recovery_selection_mode") or "pure_llm").strip().lower()
-    if recovery_selection_mode != "pure_llm":
+    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
         recovery_selection_mode = "pure_llm"
 
     raw_action_horizon = raw.get("action_horizon", 1)
@@ -254,7 +272,7 @@ def _normalize_recovery_outline_experiment_settings(raw_settings: Any) -> dict[s
     candidate_count: int | str
     if isinstance(raw_candidate_count, str):
         candidate_token = raw_candidate_count.strip().lower()
-        if candidate_token in {"auto", "n"}:
+        if candidate_token in {"adaptive", "auto", "n"}:
             candidate_count = "auto"
         else:
             try:
@@ -267,11 +285,20 @@ def _normalize_recovery_outline_experiment_settings(raw_settings: Any) -> dict[s
         except (TypeError, ValueError):
             candidate_count = "auto"
 
+    candidate_proposal_budget = max(
+        1,
+        int(raw.get("candidate_proposal_budget") or 5),
+    )
+    if recovery_selection_mode == "neurosymbolic":
+        action_horizon = 1
+        candidate_count = "auto"
+
     return {
         "enabled": enabled,
         "recovery_selection_mode": recovery_selection_mode,
         "action_horizon": action_horizon,
         "candidate_count": candidate_count,
+        "candidate_proposal_budget": candidate_proposal_budget,
     }
 
 
@@ -346,6 +373,7 @@ class FakeProductAgent:
         scripted_responses: list[dict[str, Any]] | None = None,
     ) -> None:
         self.jid = "assembly_board-v1@localhost"
+        self.cca_jid = "central_controller@localhost"
         self.agent_name = "assembly_board-v1"
         self.instructions = "Case 3 runtime recovery dry-run product agent."
         self.logger = logging.getLogger("case3_recovery_dryrun")
@@ -365,6 +393,204 @@ class FakeProductAgent:
         self._turn_index = 0
         self._uses_scripted_responses = scripted_responses is not None
         self._scripted_responses = [deepcopy(row) for row in scripted_responses or []]
+        self._last_structured_request: dict[str, Any] = {}
+        self._mock_recovery_validation_resources: dict[str, Any] = {}
+
+    async def request_recovery_outline_physical_validation(
+        self,
+        *,
+        resource_jid: str,
+        payload: dict[str, Any],
+        timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Invoke the explicitly mocked owning RA transport for dry-run tests."""
+        del timeout_s
+        resource = self._mock_recovery_validation_resources.get(resource_jid)
+        if resource is None:
+            raise RuntimeError(f"mocked RA '{resource_jid}' is unavailable")
+        snapshot = resource.get_recovery_snapshot()
+        recovery_des_model = resource.recovery_des_model(snapshot=snapshot)
+        results: list[dict[str, Any]] = []
+        for row in payload.get("candidates") or []:
+            candidate = dict(row or {})
+            task = dict(candidate.get("task") or {})
+            physical_input = dict(candidate.get("physical_input") or {})
+            validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
+                live_snapshot=snapshot,
+                physical_input=physical_input,
+                recovery_des_model=recovery_des_model,
+            )
+            result = resource.check_recovery_physical_feasibility(
+                part_context=deepcopy(physical_input.get("part_context") or {}),
+                recovery_snapshot=validation_snapshot,
+                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
+                operation_kind=str(physical_input.get("operation_kind") or ""),
+                part_name=physical_input.get("part_name"),
+            )
+            findings = []
+            if not bool(result.get("allowed")):
+                findings.append(
+                    {
+                        "validation_category": "physical_feasibility",
+                        "constraint_owner": "resource",
+                        "constraint_family": "resource_feasibility",
+                        "constraint_code": str(
+                            result.get("constraint_code") or "resource_blocked"
+                        ),
+                        "reason": str(result.get("reason") or "mocked RA rejected"),
+                        "resource_jid": str(task.get("resource_jid") or resource_jid),
+                        "part_name": task.get("part_name"),
+                        "evidence": deepcopy(result.get("evidence") or {}),
+                    }
+                )
+            results.append(
+                {
+                    "candidate_index": int(candidate.get("candidate_index") or 0),
+                    "allowed": bool(result.get("allowed")),
+                    "findings": findings,
+                    "resource_result": deepcopy(result),
+                }
+            )
+        return {
+            "request_id": str(payload.get("request_id") or "mocked-ra-request"),
+            "recovery_session_id": str(payload.get("recovery_session_id") or ""),
+            "turn_index": int(payload.get("turn_index") or 0),
+            "state_fingerprint": str(payload.get("state_fingerprint") or ""),
+            "validator_jid": resource_jid,
+            "snapshot": deepcopy(snapshot),
+            "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
+            "recovery_des_model": deepcopy(recovery_des_model),
+            "recovery_des_model_fingerprint": str(
+                recovery_des_model.get("descriptor_fingerprint") or ""
+            ),
+            "results": results,
+            "latency_ms": 0.0,
+            "mocked": True,
+        }
+
+    async def request_recovery_outline_safety_validation(
+        self,
+        *,
+        payload: dict[str, Any],
+        timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Invoke the explicitly mocked CCA owner for dry-run tests."""
+        del timeout_s
+        results: list[dict[str, Any]] = []
+        all_rules: list[dict[str, Any]] = []
+        live_safety_dfa_states: dict[str, str] = {}
+        for row in payload.get("candidates") or []:
+            candidate = dict(row or {})
+            safety_input = deepcopy(dict(candidate.get("safety_input") or {}))
+            llm_input = deepcopy(dict(safety_input.get("llm_input") or {}))
+            rules = [
+                deepcopy(rule)
+                for rule in (llm_input.get("loaded_safety_rules") or [])
+                if isinstance(rule, dict)
+            ]
+            all_rules.extend(rules)
+            live_monitor = outline_macro_safety_module._build_recovery_safety_monitor(
+                rules=rules,
+                state_aps=[],
+                llm_input=llm_input,
+            )
+            live_safety_dfa_states = {
+                str(rule_id): str(state)
+                for rule_id, state in sorted(live_monitor.current_states.items())
+            }
+            safety_rule_fingerprint = recovery_validation_fingerprint(rules)
+            live_safety_dfa_state_fingerprint = recovery_validation_fingerprint(
+                live_safety_dfa_states
+            )
+            expected_rule_fingerprint = str(
+                candidate.get("safety_rule_fingerprint") or ""
+            ).strip()
+            if (
+                expected_rule_fingerprint
+                and expected_rule_fingerprint != safety_rule_fingerprint
+            ):
+                raise RuntimeError("CCA safety-rule fingerprint changed")
+            expected_live_state_fingerprint = str(
+                candidate.get("live_safety_dfa_state_fingerprint") or ""
+            ).strip()
+            if (
+                expected_live_state_fingerprint
+                and expected_live_state_fingerprint
+                != live_safety_dfa_state_fingerprint
+            ):
+                raise RuntimeError("CCA live safety DFA state changed")
+            projected_dfa_states = candidate.get("safety_dfa_states_before")
+            if not isinstance(projected_dfa_states, dict):
+                projected_dfa_states = live_safety_dfa_states
+            result = validate_outline_macro_recovery_safety(
+                task=deepcopy(safety_input.get("task") or {}),
+                signature=deepcopy(safety_input.get("signature") or {}),
+                pre_resources=deepcopy(safety_input.get("pre_resources") or {}),
+                pre_parts=deepcopy(safety_input.get("pre_parts") or {}),
+                projected_resources=deepcopy(
+                    safety_input.get("projected_resources") or {}
+                ),
+                projected_parts=deepcopy(safety_input.get("projected_parts") or {}),
+                llm_input=llm_input,
+                safety_dfa_states_before=deepcopy(projected_dfa_states),
+            )
+            cleared = [
+                str(item).strip()
+                for item in (result.get("cleared_condition_ids") or [])
+                if str(item).strip()
+            ]
+            active = [
+                str(item).strip()
+                for item in (candidate.get("active_safety_condition_ids") or [])
+                if str(item).strip()
+            ]
+            results.append(
+                {
+                    "candidate_index": int(candidate.get("candidate_index") or 0),
+                    "is_safe": bool(result.get("is_safe")),
+                    "findings": deepcopy(result.get("findings") or []),
+                    "active_rule_identifiers": [
+                        str(rule.get("id") or "").strip()
+                        for rule in rules
+                        if str(rule.get("id") or "").strip()
+                    ],
+                    "cleared_safety_condition_identifiers": cleared,
+                    "remaining_safety_condition_identifiers": [
+                        condition_id
+                        for condition_id in active
+                        if condition_id not in set(cleared)
+                    ],
+                    "safety_context": deepcopy(result.get("safety_ctx") or {}),
+                    "safety_dfa_states_before": deepcopy(
+                        result.get("safety_dfa_states_before") or {}
+                    ),
+                    "safety_dfa_states_after": deepcopy(
+                        result.get("safety_dfa_states_after") or {}
+                    ),
+                }
+            )
+        return {
+            "request_id": str(payload.get("request_id") or "mocked-cca-request"),
+            "recovery_session_id": str(payload.get("recovery_session_id") or ""),
+            "turn_index": int(payload.get("turn_index") or 0),
+            "state_fingerprint": str(payload.get("state_fingerprint") or ""),
+            "validator_jid": self.cca_jid,
+            "results": results,
+            "active_rule_identifiers": sorted(
+                {
+                    str(rule.get("id") or "").strip()
+                    for rule in all_rules
+                    if str(rule.get("id") or "").strip()
+                }
+            ),
+            "safety_rule_fingerprint": recovery_validation_fingerprint(all_rules),
+            "live_safety_dfa_states": deepcopy(live_safety_dfa_states),
+            "live_safety_dfa_state_fingerprint": recovery_validation_fingerprint(
+                live_safety_dfa_states
+            ),
+            "latency_ms": 0.0,
+            "mocked": True,
+        }
 
     def _geometry_for_part(self, part_name: str) -> dict[str, Any]:
         board = dict(self.product_geometry.get("assembly_board") or {})
@@ -389,6 +615,22 @@ class FakeProductAgent:
         tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
+        response_source = (
+            "mocked_scripted_fixture" if self._uses_scripted_responses else "live"
+        )
+        self._last_structured_request = {
+            "model": self.llm_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "reasoning_effort": self.llm_reasoning_effort,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": deepcopy(response_format),
+            },
+            "response_source": response_source,
+            "request_sent": not self._uses_scripted_responses,
+        }
+        if tools:
+            self._last_structured_request["tools"] = deepcopy(tools)
         if self._scripted_responses:
             parsed = deepcopy(self._scripted_responses.pop(0))
             self._record_turn(prompt, parsed)
@@ -490,6 +732,8 @@ class FakeRecoveryRobot:
         "detach_part",
         "get_current_pose",
     )
+    recovery_des_model = RobotAgent.recovery_des_model
+    resolve_registered_function_names = RobotAgent.resolve_registered_function_names
 
     def __init__(
         self,
@@ -501,6 +745,8 @@ class FakeRecoveryRobot:
         gripper_state: str,
         pose_ref: str | None,
         position: dict[str, float],
+        current_location: str | None = None,
+        occupancy: dict[str, Any] | None = None,
         observations: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         env_block = dict(config.get(execution_env) or {})
@@ -510,11 +756,14 @@ class FakeRecoveryRobot:
         self.static_capabilities = deepcopy(env_block.get("static_capabilities") or {})
         self.static_capabilities.setdefault("resource_type", "robot")
         self.named_positions = deepcopy(env_block.get("named_positions") or {})
+        self.controller_config = deepcopy(env_block.get("controller") or {})
         self._current_state = str(current_state)
         self._held_part = held_part
         self._gripper_state = str(gripper_state)
         self._recovery_pose_ref = pose_ref
         self._position = deepcopy(position)
+        self._current_location = current_location
+        self._occupancy = deepcopy(occupancy or {})
         self._observations = deepcopy(observations or {})
         self._shared_observations: dict[str, dict[str, Any]] = {}
         self.logger = logging.getLogger(f"FakeRecoveryRobot.{self.agent_name}")
@@ -929,7 +1178,13 @@ class FakeRecoveryRobot:
         return [deepcopy(item) for item in catalog.values()]
 
     def get_recovery_snapshot(self) -> dict[str, Any]:
-        return get_resource_recovery_snapshot(self)
+        snapshot = get_resource_recovery_snapshot(self)
+        if self._current_location not in (None, ""):
+            snapshot["current_location"] = self._current_location
+            snapshot["resource_location"] = self._current_location
+        if self._occupancy:
+            snapshot["occupancy"] = deepcopy(self._occupancy)
+        return snapshot
 
     def _snapshot_state(self) -> dict[str, Any]:
         return {
@@ -938,6 +1193,8 @@ class FakeRecoveryRobot:
             "current_state": self._current_state,
             "current_pose": deepcopy(self._position),
             "current_pose_ref": self._recovery_pose_ref,
+            "current_location": self._current_location,
+            "occupancy": deepcopy(self._occupancy),
             "held_part": self._held_part,
             "gripper_state": self._gripper_state,
         }
@@ -945,72 +1202,10 @@ class FakeRecoveryRobot:
     async def _ensure_controller_prewarmed(self) -> None:
         return None
 
-    def _is_pose_in_workspace(self, pose: dict[str, Any]) -> tuple[bool, str]:
-        bounds = self.static_capabilities.get("workspace_bounds")
-        if not isinstance(bounds, dict):
-            return True, "no workspace_bounds configured"
-        violations: list[str] = []
-        for axis in ("x", "y", "z"):
-            if pose.get(axis) is None:
-                continue
-            value = float(pose[axis])
-            low = bounds.get(f"{axis}_min_m")
-            high = bounds.get(f"{axis}_max_m")
-            if low is not None and value < float(low):
-                violations.append(f"{axis}={value:.4f} < {axis}_min_m={float(low):.4f}")
-            if high is not None and value > float(high):
-                violations.append(f"{axis}={value:.4f} > {axis}_max_m={float(high):.4f}")
-        if violations:
-            return False, f"pose outside workspace: {', '.join(violations)}"
-        return True, "pose within workspace bounds"
-
-    def check_recovery_physical_feasibility(
-        self,
-        *,
-        part_context: dict[str, Any],
-        recovery_snapshot: dict[str, Any],
-        grounded_action: dict[str, Any] | None = None,
-        part_name: str | None = None,
-        **_compat_kwargs: Any,
-    ) -> dict[str, Any]:
-        target_info = dict(
-            (grounded_action or {}).get("target") or part_context.get("target") or {}
-        )
-        target_pose = (
-            target_info.get("slot_pose")
-            or target_info.get("pose")
-            or part_context.get("observed_pose")
-            or part_context.get("pose")
-        )
-        evidence = {
-            "part_context": deepcopy(part_context),
-            "recovery_snapshot": deepcopy(recovery_snapshot),
-            "resource_jid": self.jid,
-            "grounded_action": deepcopy(grounded_action or {}),
-        }
-        if not isinstance(target_pose, dict):
-            return {
-                "allowed": True,
-                "reason": "grounded preconditions are satisfied and no pose check is required",
-                "evidence": evidence,
-            }
-        inside, reason = self._is_pose_in_workspace(target_pose)
-        return {
-            "allowed": inside,
-            "constraint_code": "workspace_unreachable" if not inside else None,
-            "guard": (
-                {
-                    "kind": "observed_pose_unreachable",
-                    "resource_jid": self.jid,
-                    "part_name": str(part_name or "").strip() or None,
-                    "pose": deepcopy(target_pose),
-                }
-                if not inside
-                else None
-            ),
-            "reason": reason,
-            "evidence": {**evidence, "checked_pose": deepcopy(target_pose)},
-        }
+    _is_pose_in_workspace = RobotAgent._is_pose_in_workspace
+    check_recovery_physical_feasibility = (
+        RobotAgent.check_recovery_physical_feasibility
+    )
 
     async def execute_recovery_observation(
         self,
@@ -1305,6 +1500,13 @@ def _configure_live_recovery_session(
         recovery_session["recovery_selection_mode"] = settings["recovery_selection_mode"]
         recovery_session.update(_recovery_action_horizon_fields(settings["action_horizon"]))
         recovery_session.update(_recovery_candidate_count_fields(settings["candidate_count"]))
+        recovery_session["candidate_proposal_budget"] = int(
+            settings["candidate_proposal_budget"]
+        )
+        if settings["recovery_selection_mode"] == "neurosymbolic":
+            recovery_session["candidate_bound"] = int(
+                settings["candidate_proposal_budget"]
+            )
     prepared_recovery_request["recovery_session"] = recovery_session
     prepared_recovery_request["recovery_outline_experiment_settings"] = deepcopy(settings)
     return settings
@@ -1366,6 +1568,12 @@ async def _prepare_recovery_dryrun_harness(
                 else None
             ),
             position=deepcopy(dict(raw_snapshot.get("current_pose") or {})),
+            current_location=(
+                str(raw_snapshot.get("current_location") or "").strip()
+                if raw_snapshot.get("current_location") not in (None, "")
+                else None
+            ),
+            occupancy=deepcopy(dict(raw_snapshot.get("occupancy") or {})),
             observations=deepcopy(dict(raw_snapshot.get("observations") or {})),
         )
         if robot.jid != resource_jid:
@@ -1377,6 +1585,9 @@ async def _prepare_recovery_dryrun_harness(
         raise ValueError("runtime context resource_snapshots is empty")
 
     planner = ProcessPlannerPrepareTrace(product_agent, robots)
+    product_agent._mock_recovery_validation_resources = {
+        robot.jid: robot for robot in robots
+    }
     planner.nodes = deepcopy(plan_payload.get("nodes") or [])
     _apply_runtime_status_snapshot(
         planner.nodes,
@@ -2123,11 +2334,33 @@ def _print_turns(turns: list[dict[str, Any]]) -> None:
                 decision=turn.get("decision") or turn.get("final_output_stage") or "-",
             )
         )
+        phase = str(turn.get("phase") or "").strip().lower()
+        request_path = str(turn.get("request_artifact_path") or "").strip()
+        grounding_result_path = str(
+            turn.get("grounding_result_artifact_path") or ""
+        ).strip()
+        outline_result_path = str(
+            turn.get("outline_result_artifact_path") or ""
+        ).strip()
         prompt_path = str(turn.get("prompt_artifact_path") or "").strip()
         llm_response_path = str(turn.get("llm_response_artifact_path") or "").strip()
         response_path = str(turn.get("response_artifact_path") or "").strip()
         stack_path = str(turn.get("outline_stack_artifact_path") or "").strip()
         index_path = str(turn.get("turn_index_artifact_path") or "").strip()
+        if phase == "grounding":
+            if request_path or prompt_path:
+                _emit(f"    request: {request_path or prompt_path}")
+            if grounding_result_path or response_path:
+                _emit(f"    grounding result: {grounding_result_path or response_path}")
+            continue
+        if phase == "outline":
+            if request_path or prompt_path:
+                _emit(f"    outline request: {request_path or prompt_path}")
+            if outline_result_path or response_path:
+                _emit(f"    outline result: {outline_result_path or response_path}")
+            if stack_path:
+                _emit(f"    outline stack: {stack_path}")
+            continue
         if prompt_path:
             _emit(f"    prompt: {prompt_path}")
         if llm_response_path:
@@ -2276,110 +2509,160 @@ def _fixture_outline_responses() -> list[dict[str, Any]]:
         model_response = {
             key: deepcopy(payload[key]) for key in response_keys if key in payload
         }
+        if (
+            "candidate_events" in model_response
+            and _load_recovery_outline_experiment_settings()[
+                "recovery_selection_mode"
+            ]
+            == "neurosymbolic"
+        ):
+            selected_index = int(model_response.pop("selected_candidate_index", 0) or 0)
+            candidate_events = list(model_response.get("candidate_events") or [])
+            model_response["candidate_events"] = [
+                deepcopy(candidate_events[selected_index])
+            ]
         responses.append(_without_description_fields(model_response))
     return responses
 
 
+def _with_three_mocked_candidate_events(response: dict[str, Any]) -> dict[str, Any]:
+    """Expand a test-only response to the three-candidate runtime contract."""
+    expanded = deepcopy(response)
+    candidate_events = [
+        deepcopy(row)
+        for row in (expanded.get("candidate_events") or [])
+        if isinstance(row, dict)
+    ]
+    selected_index = int(expanded.get("selected_candidate_index") or 0)
+    selected_event = deepcopy(candidate_events[selected_index])
+    while len(candidate_events) < 3:
+        alternative_number = len(candidate_events) + 1
+        alternative = deepcopy(selected_event)
+        alternative["outline_id"] = (
+            f"{str(selected_event.get('outline_id') or '').strip()}_alternative_"
+            f"{alternative_number}"
+        )
+        alternative["event_name"] = (
+            f"{str(selected_event.get('event_name') or '').strip()}_alternative_"
+            f"{alternative_number}"
+        )
+        alternative["rationale"] = (
+            f"Mocked alternative {alternative_number} with the same declared physical effect."
+        )
+        candidate_events.append(alternative)
+    expanded["candidate_events"] = candidate_events
+    return expanded
+
+
 def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
     responses = _fixture_outline_responses()[:2]
-    responses.extend(
-        [
-            {
-                "thought": "Use explicit occupancy and a grounded named pose.",
-                "selected_candidate_index": 0,
-                "candidate_events": [
-                    {
-                        "outline_id": "novel_clear_xarm6",
-                        "event_name": "evt_q7",
-                        "resource_jid": "xarm6@localhost",
-                        "expected_start_state": {
-                            "resource_state": "failed",
-                            "resource_location": "assembly_board-v1",
-                        },
-                        "expected_end_state": {
-                            "resource_state": "xarm6_clear_state",
-                            "resource_location": "home",
-                        },
-                        "rationale": "Leave the explicitly occupied protected destination.",
-                    }
-                ],
-            },
-            {
-                "thought": "Free the reachable manipulator without entering the destination.",
-                "selected_candidate_index": 0,
-                "candidate_events": [
-                    {
-                        "outline_id": "novel_stage_mcp",
-                        "event_name": "evt_z9",
-                        "resource_jid": "ur5e@localhost",
-                        "part_name": "MCP",
-                        "expected_start_state": {
-                            "resource_state": "picked",
-                            "held_part": "MCP",
-                            "part_state": "in_gripper",
-                            "part_location": "ur5e@localhost_gripper",
-                        },
-                        "expected_end_state": {
-                            "resource_state": "mcp_buffer_clear",
-                            "held_part": None,
-                            "part_state": "mcp_waiting_recovery",
-                            "part_location": "prusa-mk4-2",
-                        },
-                        "rationale": "Release MCP at a supplied reachable location.",
-                    }
-                ],
-            },
-            {
-                "thought": "Acquire the affected part from the grounded observation.",
-                "selected_candidate_index": 0,
-                "candidate_events": [
-                    {
-                        "outline_id": "novel_acquire_lg",
-                        "event_name": "evt_n4",
-                        "resource_jid": "ur5e@localhost",
-                        "part_name": "LG",
-                        "expected_start_state": {
-                            "resource_state": "mcp_buffer_clear",
-                            "held_part": None,
-                            "part_state": "misplaced",
-                        },
-                        "expected_end_state": {
-                            "resource_state": "lg_secured",
-                            "held_part": "LG",
-                            "part_state": "lg_under_recovery_control",
-                        },
-                        "rationale": "Acquire LG using its observed pose.",
-                    }
-                ],
-            },
-            {
-                "thought": "Restore the held affected part to its supplied goal location.",
-                "selected_candidate_index": 0,
-                "candidate_events": [
-                    {
-                        "outline_id": "novel_restore_lg",
-                        "event_name": "evt_v2",
-                        "resource_jid": "ur5e@localhost",
-                        "part_name": "LG",
-                        "expected_start_state": {
-                            "resource_state": "lg_secured",
-                            "held_part": "LG",
-                            "part_state": "lg_under_recovery_control",
-                            "part_location": "ur5e@localhost_gripper",
-                        },
-                        "expected_end_state": {
-                            "resource_state": "lg_recovery_complete",
-                            "resource_location": "assembly_board-v1",
-                            "held_part": None,
-                            "part_state": "lg_restored_state",
-                            "part_location": "assembly_board-v1",
-                        },
-                        "rationale": "Release LG at assembly_board-v1 after occupancy clears.",
-                    }
-                ],
-            },
-        ]
-    )
+    novel_responses = [
+        {
+            "thought": "Use explicit occupancy and a grounded named pose.",
+            "selected_candidate_index": 0,
+            "candidate_events": [
+                {
+                    "outline_id": "novel_clear_xarm6",
+                    "event_name": "evt_q7",
+                    "resource_jid": "xarm6@localhost",
+                    "expected_start_state": {
+                        "resource_state": "failed",
+                        "resource_location": "assembly_board-v1",
+                    },
+                    "expected_end_state": {
+                        "resource_state": "xarm6_clear_state",
+                        "resource_location": "home",
+                    },
+                    "rationale": "Leave the explicitly occupied protected destination.",
+                }
+            ],
+        },
+        {
+            "thought": "Free the reachable manipulator without entering the destination.",
+            "selected_candidate_index": 0,
+            "candidate_events": [
+                {
+                    "outline_id": "novel_stage_mcp",
+                    "event_name": "evt_z9",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "MCP",
+                    "expected_start_state": {
+                        "resource_state": "picked",
+                        "held_part": "MCP",
+                        "part_state": "in_gripper",
+                        "part_location": "ur5e@localhost_gripper",
+                    },
+                    "expected_end_state": {
+                        "resource_state": "mcp_buffer_clear",
+                        "held_part": None,
+                        "part_state": "mcp_waiting_recovery",
+                        "part_location": "prusa-mk4-2",
+                    },
+                    "rationale": "Release MCP at a supplied reachable location.",
+                }
+            ],
+        },
+        {
+            "thought": "Acquire the affected part from the grounded observation.",
+            "selected_candidate_index": 0,
+            "candidate_events": [
+                {
+                    "outline_id": "novel_acquire_lg",
+                    "event_name": "evt_n4",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "expected_start_state": {
+                        "resource_state": "mcp_buffer_clear",
+                        "held_part": None,
+                        "part_state": "misplaced",
+                    },
+                    "expected_end_state": {
+                        "resource_state": "lg_secured",
+                        "held_part": "LG",
+                        "part_state": "lg_under_recovery_control",
+                    },
+                    "rationale": "Acquire LG using its observed pose.",
+                }
+            ],
+        },
+        {
+            "thought": "Restore the held affected part to its supplied goal location.",
+            "selected_candidate_index": 0,
+            "candidate_events": [
+                {
+                    "outline_id": "novel_restore_lg",
+                    "event_name": "evt_v2",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "expected_start_state": {
+                        "resource_state": "lg_secured",
+                        "held_part": "LG",
+                        "part_state": "lg_under_recovery_control",
+                        "part_location": "ur5e@localhost_gripper",
+                    },
+                    "expected_end_state": {
+                        "resource_state": "lg_recovery_complete",
+                        "resource_location": "assembly_board-v1",
+                        "held_part": None,
+                        "part_state": "lg_restored_state",
+                        "part_location": "assembly_board-v1",
+                    },
+                    "rationale": "Release LG at assembly_board-v1 after occupancy clears.",
+                }
+            ],
+        },
+    ]
+    if (
+        _load_recovery_outline_experiment_settings()["recovery_selection_mode"]
+        == "neurosymbolic"
+    ):
+        for response in novel_responses:
+            response.pop("selected_candidate_index", None)
+        responses.extend(deepcopy(novel_responses))
+    else:
+        responses.extend(
+            _with_three_mocked_candidate_events(response) for response in novel_responses
+        )
     return responses
 
 
@@ -2527,7 +2810,6 @@ def _candidate_session(
         "candidate_rejection_feedback": [],
         "candidate_prune_history": {},
         "recovery_selection_mode": recovery_selection_mode,
-        "outline_stagnation_count": 0,
         "outline_validation_findings": [],
         "pruned_actions": [],
         "symbolic_resources": {},
@@ -2542,6 +2824,7 @@ async def _run_mocked_candidate_handler(
     *,
     session_state: dict[str, Any],
     parsed_response: dict[str, Any],
+    invalid_candidate_indexes: set[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_generation,
@@ -2556,30 +2839,68 @@ async def _run_mocked_candidate_handler(
         accepted_count = len(session_state.get("accepted_outline_prefix") or [])
         return (0, 0) if accepted_count >= 2 else (1, 0)
 
+    async def _mock_validate_candidate_sequence(
+        *,
+        candidate: dict[str, Any],
+        sequence_index: int,
+        session_state: dict[str, Any],
+        prepared_recovery_request: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        events = [
+            deepcopy(row)
+            for row in (candidate.get("surface_events") or [])
+            if isinstance(row, dict)
+        ]
+        committed = [
+            multi_turn_mode._commit_selected_candidate_task(
+                task=event,
+                sequence_index=sequence_index + index,
+            )
+            for index, event in enumerate(events)
+        ]
+        candidate_index = int(candidate.get("candidate_index") or 0)
+        invalid = candidate_index in set(invalid_candidate_indexes or set())
+        findings = (
+            [
+                multi_turn_mode._candidate_schema_finding(
+                    task=events[0] if events else {},
+                    reason="selected candidate test rejection",
+                    evidence={"candidate_index": candidate_index},
+                )
+            ]
+            if invalid
+            else []
+        )
+        return {
+            "candidate_index": candidate_index,
+            "valid": not invalid,
+            "task": deepcopy(events[0] if events else {}),
+            "surface_events": events,
+            "validated_events": deepcopy(events),
+            "committed_events": committed,
+            "grounded_actions": [],
+            "validation_findings": findings,
+            "validation_stages": [],
+            "remaining_blocked_issues": 0,
+            "resource_switch_count": 0,
+            "pa_state_fingerprint": multi_turn_outline_generation._pa_state_fingerprint(
+                session_state=session_state,
+                prepared_recovery_request=prepared_recovery_request,
+            ),
+        }
+
     with (
         patch.object(multi_turn_mode, "_active_pruned_actions", return_value=[]),
         patch.object(
-            multi_turn_mode,
-            "_derive_candidate_outline_task",
-            side_effect=lambda candidate_task, **_kwargs: (deepcopy(candidate_task), []),
-        ),
-        patch.object(multi_turn_mode, "_matching_active_pruned_action", return_value=None),
-        patch.object(
-            multi_turn_mode,
-            "_validate_single_outline_task",
-            side_effect=lambda **_kwargs: ([], {}),
+            multi_turn_outline_generation,
+            "_validate_candidate_sequence",
+            side_effect=_mock_validate_candidate_sequence,
         ),
         patch.object(
             multi_turn_mode,
             "_remaining_blocked_issue_counts",
             side_effect=_mock_remaining_counts,
-        ),
-        patch.object(
-            multi_turn_outline_generation,
-            "_semantic_state_signature",
-            side_effect=lambda *, session_state, **_kwargs: (
-                f"accepted:{len(session_state.get('accepted_outline_prefix') or [])}"
-            ),
         ),
         patch.object(multi_turn_mode, "_apply_task_effects_to_symbolic_state", return_value=None),
         patch.object(multi_turn_mode, "_promote_durable_candidate_rejections", return_value=None),
@@ -2622,21 +2943,196 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert prepared_recovery_request["P_id"] == expected_p_id
     assert result["llm_response_source"] == "mocked_scripted_fixture"
     assert (tmp_path / "recovery_outline").is_dir()
-    assert list((tmp_path / "recovery_outline").glob("multi_turn_turn*_prompt_*.txt"))
-    llm_response_paths = sorted(
-        (tmp_path / "recovery_outline").glob("multi_turn_turn*_outline_llm_response_*.txt")
+    grounding_request_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_grounding_request_*.txt"
+        )
     )
-    enriched_response_paths = sorted(
-        (tmp_path / "recovery_outline").glob("multi_turn_turn*_outline_response_*.txt")
+    grounding_result_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_grounding_result_*.json"
+        )
     )
-    assert llm_response_paths
-    assert enriched_response_paths
-    llm_response = json.loads(llm_response_paths[0].read_text(encoding="utf-8"))
-    enriched_response = json.loads(enriched_response_paths[0].read_text(encoding="utf-8"))
-    assert set(llm_response) == {"thought", "selected_candidate_index", "candidate_events"}
+    assert len(grounding_request_paths) == 2
+    assert len(grounding_result_paths) == 2
+    assert not list(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_grounding_llm_response_*.txt"
+        )
+    )
+    assert not list(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_grounding_response_*.txt"
+        )
+    )
+
+    expected_lg_observation = deepcopy(
+        next(
+            row
+            for row in (runtime_context.get("resource_snapshots") or [])
+            if isinstance(row, dict)
+            and str(row.get("resource_jid") or "").strip() == "xarm6@localhost"
+        )["observations"]["LG"]
+    )
+    first_grounding_result = json.loads(
+        grounding_result_paths[0].read_text(encoding="utf-8")
+    )
+    second_grounding_result = json.loads(
+        grounding_result_paths[1].read_text(encoding="utf-8")
+    )
+    assert first_grounding_result["effective_decision"] == "observe"
+    assert first_grounding_result["next_phase"] == "grounding"
+    assert first_grounding_result["llm_response"]["decision"] == "observe"
+    assert first_grounding_result["observation_results"][0]["observation_key"] == (
+        "observed_pose_LG"
+    )
+    assert first_grounding_result["observation_results"][0]["output"] == (
+        expected_lg_observation
+    )
+    assert first_grounding_result["observation_store_after_turn"]["observed_pose_LG"] == (
+        expected_lg_observation
+    )
+    assert second_grounding_result["effective_decision"] == "grounded"
+    assert second_grounding_result["next_phase"] == "outline"
+    assert second_grounding_result["observation_results"] == []
+    assert second_grounding_result["observation_store_after_turn"]["observed_pose_LG"] == (
+        expected_lg_observation
+    )
+
+    first_request_text = grounding_request_paths[0].read_text(encoding="utf-8")
+    request_message_text = first_request_text.split("Response Format", maxsplit=1)[0]
+    assert "role=system" not in first_request_text
+    assert "role=user" in first_request_text
+    assert '"name": "multi_turn_grounding_response"' in first_request_text
+    assert "multi_turn_grounding_response" not in request_message_text
+
+    grounding_turns = [
+        turn
+        for turn in result["turns"]
+        if isinstance(turn, dict)
+        and str(turn.get("phase") or "").strip().lower() == "grounding"
+    ]
+    assert len(grounding_turns) == 2
+    for turn in grounding_turns:
+        assert turn["request_artifact_path"] == turn["prompt_artifact_path"]
+        assert turn["grounding_result_artifact_path"] == turn["response_artifact_path"]
+        assert "llm_response_artifact_path" not in turn
+
+    outline_request_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_request_*.txt"
+        )
+    )
+    outline_result_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_result_*.json"
+        )
+    )
+    outline_stack_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_stack_*.json"
+        )
+    )
+    outline_turns = [
+        turn
+        for turn in result["turns"]
+        if isinstance(turn, dict)
+        and str(turn.get("phase") or "").strip().lower() == "outline"
+    ]
+    assert len(outline_request_paths) == len(outline_turns)
+    assert len(outline_result_paths) == len(outline_turns)
+    assert len(outline_stack_paths) == len(outline_turns)
+    assert not list(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_llm_response_*.txt"
+        )
+    )
+    assert not list(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_response_*.txt"
+        )
+    )
+    assert not list(
+        (tmp_path / "recovery_outline").glob("multi_turn_turn*_outline_index_*.json")
+    )
+
+    first_outline_request = outline_request_paths[0].read_text(encoding="utf-8")
+    outline_message_text = first_outline_request.split(
+        "Response Format", maxsplit=1
+    )[0]
+    assert len(outline_message_text) < 6_000
+    assert len(first_outline_request) < 12_000
+    for private_model_token in (
+        "RA-Owned Recovery DES Models",
+        "local_event_alphabet",
+        "descriptor_fingerprint",
+        '"guards"',
+        '"updates"',
+        "detect_parts",
+        "compute_pick_targets",
+        "get_current_pose",
+        "move_relative",
+    ):
+        assert private_model_token not in outline_message_text
+    expected_pose = dict(expected_lg_observation.get("pose") or {})
+    assert '"observed_pose": {' in first_outline_request
+    for axis in ("x", "y", "z"):
+        assert f'"{axis}": {expected_pose[axis]}' in first_outline_request
+
+    first_outline_result = json.loads(
+        outline_result_paths[0].read_text(encoding="utf-8")
+    )
+    llm_response = first_outline_result["llm_response"]
+    assert set(llm_response) == {"thought", "candidate_events"}
+    assert len(llm_response["candidate_events"]) == 1
     assert "candidate_evaluation_summary" not in llm_response
-    assert "candidate_evaluation_summary" in enriched_response
-    assert "selected_transition" in enriched_response
+    assert len(first_outline_result["candidate_evaluation_summary"]) == 1
+    private_models = first_outline_result["private_recovery_des_models"]
+    assert set(private_models) == {"ur5e@localhost", "xarm6@localhost"}
+    for descriptor in private_models.values():
+        assert descriptor["descriptor_fingerprint"]
+        assert "events" in descriptor
+    for evaluation in first_outline_result["candidate_evaluation_summary"]:
+        stages = list(evaluation.get("validation_stages") or [])
+        assert [stage["validator_role"] for stage in stages] == [
+            "PA",
+            "PA",
+            "RA",
+            "CCA",
+        ]
+        assert stages[0]["validation_category"] == "syntax_and_grounding_validation"
+        assert stages[1]["validation_category"] == "transition_feasibility"
+        assert stages[2]["validation_category"] == "physical_feasibility"
+        assert stages[3]["validation_category"] == "safety"
+        assert stages[0]["mocked"] is False
+        assert stages[1]["mocked"] is False
+        assert stages[2]["mocked"] is True
+        assert stages[3]["mocked"] is True
+    assert "selected_transition" in first_outline_result
+    assert "transition_trace" in first_outline_result
+    for result_path in outline_result_paths:
+        outline_result = json.loads(result_path.read_text(encoding="utf-8"))
+        result_artifact_paths = outline_result["artifact_paths"]
+        assert result_artifact_paths["outline_result_artifact_path"] == str(result_path)
+        assert result_artifact_paths["response_artifact_path"] == str(result_path)
+        assert result_artifact_paths["request_artifact_path"] == (
+            result_artifact_paths["prompt_artifact_path"]
+        )
+        assert Path(result_artifact_paths["outline_stack_artifact_path"]).exists()
+    for stack_path in outline_stack_paths:
+        stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
+        assert isinstance(stack_payload, list)
+        assert stack_payload
+    latest_outline_turn = outline_turns[-1]
+    assert latest_outline_turn["request_artifact_path"] == (
+        latest_outline_turn["prompt_artifact_path"]
+    )
+    assert latest_outline_turn["outline_result_artifact_path"] == (
+        latest_outline_turn["response_artifact_path"]
+    )
+    assert "llm_response_artifact_path" not in latest_outline_turn
+    assert Path(latest_outline_turn["outline_stack_artifact_path"]).exists()
+    assert "turn_index_artifact_path" not in latest_outline_turn
 
 
 def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
@@ -2654,9 +3150,7 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     assert trace[1]["expected_end_state"]["part_state"] == "mcp_waiting_recovery"
     assert trace[2]["expected_end_state"]["resource_state"] == "lg_secured"
     assert trace[3]["expected_end_state"]["part_state"] == "lg_restored_state"
-    semantic_history = list(session_state.get("semantic_state_history") or [])
-    assert len(semantic_history) == 5
-    assert len(set(semantic_history)) == len(semantic_history)
+    assert "semantic_state_history" not in session_state
     assert session_state["status"] == "ready_for_primitive_generation"
     assert result["llm_response_source"] == "mocked_scripted_fixture"
 
@@ -2685,6 +3179,21 @@ def test_case3_runtime_context_has_no_expected_recovery_answers() -> None:
         "place_lg_to_assembly_board_v1",
     ):
         assert forbidden_token not in serialized_context
+
+
+def test_case3_dryrun_uses_production_ra_and_cca_validator_functions() -> None:
+    assert (
+        FakeRecoveryRobot.check_recovery_physical_feasibility
+        is RobotAgent.check_recovery_physical_feasibility
+    )
+    assert (
+        FakeRecoveryRobot._is_pose_in_workspace
+        is RobotAgent._is_pose_in_workspace
+    )
+    assert (
+        validate_outline_macro_recovery_safety
+        is outline_macro_safety_module.validate_outline_macro_recovery_safety
+    )
 
 
 def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_location() -> None:
@@ -2953,14 +3462,17 @@ def test_candidate_prompt_has_no_numeric_selected_index_example() -> None:
     assert "integer `selected_candidate_index`" in prompt
     assert "Outline Candidate Contract" not in prompt
     assert "Recovery Candidate Rules" in prompt
+    assert "`candidate_events` must contain exactly three candidates" in prompt
     assert (
         "Resource-only actions may include `resource_state`, `resource_location`, and `held_part`"
         in prompt
     )
     assert "`part_state` and `part_location` require `part_name`" in prompt
-    assert "advertised named-pose token" in prompt
     assert "selected_candidate_index" in schema["required"]
     assert schema["properties"]["selected_candidate_index"]["type"] == "integer"
+    assert schema["properties"]["selected_candidate_index"]["maximum"] == 2
+    assert schema["properties"]["candidate_events"]["minItems"] == 3
+    assert schema["properties"]["candidate_events"]["maxItems"] == 3
 
 
 def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anchoring() -> None:
@@ -2983,17 +3495,63 @@ def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anch
     assert "Accepted Transition Prefix" not in prompt
     assert accepted_event_name not in prompt
     assert "You may author a new `event_name`" in prompt
-    assert "new `resource_state` or `part_state` tokens" in prompt
-    assert "changing only a label is invalid" in prompt
+    assert "optional new `resource_state` or `part_state` values" in prompt
+    assert "A new state name has no meaning by itself" in prompt
+    assert "must accompany a concrete state effect" in prompt
     assert '"resource_location": "station"' in prompt
-    assert "Use only listed resource, part, predicate, location, and named-pose tokens" in prompt
+    assert "Use only supplied resources, parts, locations, named poses, predicates" in prompt
     assert "Outline Candidate Contract" not in prompt
 
 
-def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn_outline_generation,
+def test_production_cca_rejects_safe1_out_of_order_mcp_placement() -> None:
+    _fixture, _product_agent, _planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    session_state["symbolic_resources"]["xarm6@localhost"].update(
+        {
+            "current_state": "idle",
+            "resource_state": "idle",
+            "current_location": "home",
+            "resource_location": "home",
+            "occupancy": {"location": "home"},
+        }
+    )
+    task = {
+        "outline_id": "mcp_early",
+        "event_name": "evt_mcp_early",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "MCP",
+        "expected_start_state": {
+            "resource_state": "picked",
+            "held_part": "MCP",
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost_gripper",
+        },
+        "expected_end_state": {
+            "resource_state": "idle",
+            "resource_location": "assembly_board-v1",
+            "held_part": None,
+            "part_state": "assembled",
+            "part_location": "assembly_board-v1",
+        },
+    }
+    safety_input = recovery_validation_service.build_recovery_safety_validation_input(
+        task=task,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    safety_result = validate_outline_macro_recovery_safety(**safety_input)
+
+    assert safety_result["is_safe"] is False
+    assert any(
+        str(finding.get("rule_id") or "") == "SAFE_1"
+        and str(finding.get("constraint_code") or "") == "safety_rule_violation"
+        for finding in (safety_result.get("findings") or [])
+    )
+
+
+def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() -> None:
     from cais_spade_llm.resources.robot import robot_primitives, robot_profile
 
     _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
@@ -3096,10 +3654,18 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         },
         "rationale": "Restore the held part to its supplied goal location.",
     }
-    _validated_restore, blocked_findings = _validate(restore_lg)
+    validated_restore, blocked_findings = _validate(restore_lg)
+    assert blocked_findings == []
+    safety_input = recovery_validation_service.build_recovery_safety_validation_input(
+        task=validated_restore,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    safety_result = validate_outline_macro_recovery_safety(**safety_input)
     assert any(
         str(finding.get("constraint_code") or "") == "safety_rule_violation"
-        for finding in blocked_findings
+        and str(finding.get("rule_id") or "") == "SAFE_2"
+        for finding in (safety_result.get("findings") or [])
     )
 
     clear_xarm6 = {
@@ -3126,6 +3692,12 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
 
     validated_restore, findings = _validate(restore_lg)
     assert findings == []
+    safety_input = recovery_validation_service.build_recovery_safety_validation_input(
+        task=validated_restore,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert validate_outline_macro_recovery_safety(**safety_input)["is_safe"] is True
     multi_turn_mode._apply_task_effects_to_symbolic_state(validated_restore, session_state)
     remaining_findings, remaining_conditions = multi_turn_mode._remaining_blocked_issue_counts(
         session_state=session_state,
@@ -3138,119 +3710,314 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
     )
     assert session_state["symbolic_parts"]["LG"]["current_state"] == "lg_restored_state"
 
-    semantic_signature = multi_turn_outline_generation._semantic_state_signature(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    assert "xarm6_clear_state" not in semantic_signature
-    assert "lg_restored_state" not in semantic_signature
+    assert "semantic_state_history" not in session_state
 
 
-def test_semantic_guard_rejects_label_only_changes_and_physical_cycles() -> None:
+def test_ra_declared_gripper_state_survives_ambiguity_revision() -> None:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_generation,
     )
 
-    prepared_recovery_request: dict[str, Any] = {}
-    base_session = {
-        "accepted_outline_prefix": [],
-        "semantic_state_history": [],
-        "symbolic_resources": {
-            "xarm6@localhost": {
-                "resource_jid": "xarm6@localhost",
-                "current_state": "failed",
-                "resource_state": "failed",
-                "current_location": "home",
-                "held_part": None,
-                "gripper_state": "open",
-            }
+    _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+    )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    session_state["recovery_selection_mode"] = "neurosymbolic"
+    session_state["candidate_count"] = "auto"
+
+    clear_xarm6 = {
+        "outline_id": "clear_xarm6_with_declared_gripper_state",
+        "event_name": "clear_board_home",
+        "resource_jid": "xarm6@localhost",
+        "expected_start_state": {
+            "resource_state": "failed",
+            "resource_location": "assembly_board-v1",
+            "held_part": None,
+            "gripper_state": "open",
         },
-        "symbolic_parts": {},
+        "expected_end_state": {
+            "resource_state": "home",
+            "resource_location": "home",
+            "held_part": None,
+            "gripper_state": "open",
+        },
+        "rationale": "Clear the explicitly occupied destination.",
     }
+    decision, clear_turn = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "clear occupancy",
+                "candidate_events": [clear_xarm6],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    assert decision == "need_next_task"
+    assert [
+        stage["status"]
+        for stage in clear_turn["candidate_evaluations"][0]["validation_stages"]
+    ] == ["passed", "passed", "passed", "passed"]
+
+    def _stage_candidate(location: str) -> dict[str, Any]:
+        return {
+            "outline_id": f"stage_mcp_{location}",
+            "event_name": f"stage_mcp_at_{location}",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "resource_location": None,
+                "held_part": "MCP",
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost_gripper",
+                "gripper_state": "closed",
+            },
+            "expected_end_state": {
+                "resource_state": "placed",
+                "resource_location": location,
+                "held_part": None,
+                "part_state": "placed",
+                "part_location": location,
+                "gripper_state": "open",
+            },
+            "rationale": "Release MCP at one exact reachable staging location.",
+        }
+
+    stage_prusa_mk3 = _stage_candidate("prusa-mk3")
+    stage_prusa_mk4_1 = _stage_candidate("prusa-mk4-1")
+    decision, _ambiguous_turn = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "compare staging successors",
+                "candidate_events": [stage_prusa_mk3, stage_prusa_mk4_1],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    assert decision == "selection_ambiguous"
+    assert len(session_state["accepted_outline_prefix"]) == 1
+    assert session_state["active_selection_ambiguity_feedback"][
+        "constraint_code"
+    ] == "selection_ambiguous"
+
+    decision, selected_turn = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "one representative",
+                "candidate_events": [stage_prusa_mk3],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    assert decision == "need_next_task"
+    assert selected_turn["selected_transition"]["event_name"] == (
+        "stage_mcp_at_prusa-mk3"
+    )
+    assert session_state["symbolic_resources"]["ur5e@localhost"][
+        "gripper_state"
+    ] == "open"
+    assert session_state["selection_revision_count"] == 0
+    assert session_state["active_selection_ambiguity_feedback"] == {}
+
+    projection_seed = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    safety_input = recovery_validation_service.build_recovery_safety_validation_input(
+        task=stage_prusa_mk3,
+        session_state=projection_seed,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert safety_input["projected_resources"]["ur5e@localhost"][
+        "gripper_state"
+    ] == "open"
+
+
+def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_outline_generation,
+    )
+
+    _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+    )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    session_state["recovery_selection_mode"] = "neurosymbolic"
+    session_state["candidate_count"] = "auto"
+    clear_xarm6 = {
+        "outline_id": "RECOVERY_SEQ1",
+        "event_name": "clear_board_home",
+        "resource_jid": "xarm6@localhost",
+        "expected_start_state": {
+            "resource_state": "failed",
+            "resource_location": "assembly_board-v1",
+            "held_part": None,
+        },
+        "expected_end_state": {
+            "resource_state": "home",
+            "resource_location": "home",
+            "held_part": None,
+        },
+        "rationale": "Clear the occupied board.",
+    }
+    session_state["accepted_outline_prefix"] = [deepcopy(clear_xarm6)]
+    multi_turn_mode._apply_task_effects_to_symbolic_state(clear_xarm6, session_state)
+    session_state["symbolic_parts"]["LG"]["observed_pose"] = {
+        "x": 0.0,
+        "y": 0.2,
+        "z": 1.035,
+    }
+
+    acquire_lg_with_xarm6 = {
+        "outline_id": "xarm6_acquire_lg",
+        "event_name": "acquire_lg",
+        "resource_jid": "xarm6@localhost",
+        "part_name": "LG",
+        "expected_start_state": {
+            "resource_state": "home",
+            "resource_location": "home",
+            "held_part": None,
+            "part_state": "misplaced",
+            "part_location": None,
+        },
+        "expected_end_state": {
+            "resource_state": "picked",
+            "resource_location": None,
+            "held_part": "LG",
+            "part_state": "in_gripper",
+            "part_location": "xarm6@localhost_gripper",
+        },
+        "rationale": "Attempt the observed LG pose.",
+    }
+    ur5e_home_with_mcp = {
+        "outline_id": "ur5e_home_with_mcp",
+        "event_name": "move_home_with_mcp",
+        "resource_jid": "ur5e@localhost",
+        "part_name": "MCP",
+        "expected_start_state": {
+            "resource_state": "picked",
+            "resource_location": None,
+            "held_part": "MCP",
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost_gripper",
+        },
+        "expected_end_state": {
+            "resource_state": "home",
+            "resource_location": "home",
+            "held_part": "MCP",
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost_gripper",
+        },
+        "rationale": "Retain MCP while moving to home.",
+    }
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "validate physical and symbolic alternatives",
+                "candidate_events": [acquire_lg_with_xarm6, ur5e_home_with_mcp],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    evaluations = turn_entry["candidate_evaluations"]
+    assert evaluations[0]["validation_findings"][0]["constraint_code"] == (
+        "workspace_unreachable"
+    )
+    assert evaluations[1]["valid"] is True
+    assert evaluations[1]["selection_status"] == "excluded_no_progress"
+    assert decision == "need_revision"
+
+
+def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() -> None:
+    _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+    )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
 
     label_only = {
-        "candidate_index": 0,
-        "surface_events": [
-            {
-                "outline_id": "label_only",
-                "event_name": "evt_l1",
-                "resource_jid": "xarm6@localhost",
-                "expected_start_state": {"resource_state": "failed"},
-                "expected_end_state": {"resource_state": "new_label_only"},
-                "rationale": "Only relabel the state.",
-            }
-        ],
+        "outline_id": "label_only",
+        "event_name": "evt_l1",
+        "resource_jid": "xarm6@localhost",
+        "expected_start_state": {
+            "resource_state": "failed",
+            "resource_location": "assembly_board-v1",
+        },
+        "expected_end_state": {
+            "resource_state": "new_label_only",
+            "resource_location": "assembly_board-v1",
+        },
+        "rationale": "Only relabel the state.",
     }
-    with patch.object(
-        multi_turn_mode,
-        "_validate_single_outline_task",
-        return_value=([], {}),
-    ):
-        evaluation = multi_turn_outline_generation._validate_candidate_sequence(
-            candidate=label_only,
-            sequence_index=1,
-            action_horizon="1",
-            action_horizon_k=1,
-            session_state=deepcopy(base_session),
-            prepared_recovery_request=prepared_recovery_request,
-            planner=object(),
-        )
-    assert evaluation["valid"] is False
-    assert evaluation["validation_findings"][0]["constraint_code"] == (
-        "no_semantic_state_change"
+    validated, schema_findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=label_only,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
     )
+    assert schema_findings == []
+    findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
+        planner=planner,
+        task=validated,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings[0]["constraint_code"] == "label_only_state_change"
 
-    prior_session = deepcopy(base_session)
-    prior_session["symbolic_resources"]["xarm6@localhost"]["current_location"] = (
-        "assembly_board-v1"
-    )
-    prior_signature = multi_turn_outline_generation._semantic_state_signature(
-        session_state=prior_session,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    current_signature = multi_turn_outline_generation._semantic_state_signature(
-        session_state=base_session,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    cycle_session = deepcopy(base_session)
-    cycle_session["semantic_state_history"] = [prior_signature, current_signature]
-    cycle_candidate = {
-        "candidate_index": 0,
-        "surface_events": [
-            {
-                "outline_id": "cycle",
-                "event_name": "evt_c8",
-                "resource_jid": "xarm6@localhost",
-                "expected_start_state": {
-                    "resource_state": "failed",
-                    "resource_location": "home",
-                },
-                "expected_end_state": {
-                    "resource_state": "another_new_label",
-                    "resource_location": "assembly_board-v1",
-                },
-                "rationale": "Return to a previously visited physical state.",
-            }
-        ],
+    clear = {
+        **label_only,
+        "outline_id": "clear",
+        "event_name": "evt_clear",
+        "expected_end_state": {
+            "resource_state": "clear_state",
+            "resource_location": "home",
+        },
     }
-    with patch.object(
-        multi_turn_mode,
-        "_validate_single_outline_task",
-        return_value=([], {}),
-    ):
-        evaluation = multi_turn_outline_generation._validate_candidate_sequence(
-            candidate=cycle_candidate,
-            sequence_index=1,
-            action_horizon="1",
-            action_horizon_k=1,
-            session_state=cycle_session,
-            prepared_recovery_request=prepared_recovery_request,
-            planner=object(),
-        )
-    assert evaluation["valid"] is False
-    assert evaluation["validation_findings"][0]["constraint_code"] == (
-        "semantic_cycle_detected"
+    validated_clear, schema_findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=clear,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
     )
+    assert schema_findings == []
+    findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
+        planner=planner,
+        task=validated_clear,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings == []
+    multi_turn_mode._apply_task_effects_to_symbolic_state(validated_clear, session_state)
+
+    return_to_prior = {
+        **label_only,
+        "outline_id": "return_to_prior",
+        "event_name": "evt_return",
+        "expected_start_state": {
+            "resource_state": "clear_state",
+            "resource_location": "home",
+        },
+        "expected_end_state": {
+            "resource_state": "returned_state",
+            "resource_location": "assembly_board-v1",
+        },
+    }
+    validated_return, schema_findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=return_to_prior,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert schema_findings == []
+    findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
+        planner=planner,
+        task=validated_return,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings == []
+    assert "semantic_state_history" not in session_state
 
 
 def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> None:
@@ -3450,6 +4217,67 @@ def test_grounding_schema_contains_only_structural_decision_fields() -> None:
     assert request_schema["required"] == ["fact_type", "entity"]
 
 
+def test_production_structured_request_records_actual_system_message() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create(**kwargs: Any) -> Any:
+        calls.append(deepcopy(kwargs))
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "thought": "enough context",
+                                "decision": "grounded",
+                                "observe_requests": [],
+                            }
+                        ),
+                        tool_calls=None,
+                    )
+                )
+            ]
+        )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+
+    async def _direct_to_thread(
+        func: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> Any:
+        return func(*args, **kwargs)
+
+    agent = object.__new__(llm_agent_module.LlmAgent)
+    agent.model = "test-model"
+    agent.reasoning_effort = "medium"
+    agent.instructions = "generic product system instructions"
+    response_format = multi_turn_prompts.multi_turn_phase_response_schema("grounding")
+
+    with (
+        patch.object(llm_agent_module, "_client", fake_client),
+        patch.object(llm_agent_module.asyncio, "to_thread", new=_direct_to_thread),
+    ):
+        parsed = asyncio.run(
+            llm_agent_module.LlmAgent.ask_llm_structured(
+                agent,
+                "grounding user prompt",
+                response_format=response_format,
+            )
+        )
+
+    assert parsed["decision"] == "grounded"
+    assert calls
+    recorded_request = agent._last_structured_request
+    assert recorded_request["model"] == "test-model"
+    assert recorded_request["messages"] == [
+        {"role": "system", "content": "generic product system instructions"},
+        {"role": "user", "content": "grounding user prompt"},
+    ]
+    assert calls[0]["messages"] == recorded_request["messages"]
+    assert calls[0]["response_format"] == recorded_request["response_format"]
+
+
 def test_candidate_validation_feedback_is_rendered_once() -> None:
     prompt = _render_non_case3_candidate_prompt(
         candidate_rejection_feedback=[
@@ -3475,16 +4303,49 @@ def test_candidate_validation_feedback_is_rendered_once() -> None:
     assert "Disabled And Blocked Candidate Events" not in prompt
 
 
-def test_raw_llm_and_enriched_response_artifacts_are_distinct(tmp_path: Path) -> None:
+def test_incomplete_release_feedback_preserves_the_exact_current_finding() -> None:
+    reason = "Task releases 'LCP' without specifying a concrete grounded destination."
+    prompt = _render_non_case3_candidate_prompt(
+        candidate_rejection_feedback=[
+            {
+                "candidate_index": 0,
+                "task": {
+                    "outline_id": "candidate_release",
+                    "event_name": "authored_release",
+                    "resource_jid": "xarm6@localhost",
+                    "part_name": "LCP",
+                },
+                "validation_findings": [
+                    {
+                        "validation_category": "transition_feasibility",
+                        "constraint_code": "missing_release_destination",
+                        "reason": reason,
+                        "resource_jid": "xarm6@localhost",
+                        "part_name": "LCP",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert prompt.count("missing_release_destination") == 1
+    assert prompt.count(reason) == 1
+    assert "no_progressing_candidate" not in prompt
+
+
+def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path) -> None:
     transition_trace = [_candidate_event("better_score", outline_id="RECOVERY_SEQ1")]
     candidate_evaluations = [
         {
-            "candidate_index": 1,
+            "candidate_index": candidate_index,
             "valid": True,
             "remaining_blocked_issues": 0,
-            "validated_task": _candidate_event("better_score"),
+            "validated_task": _candidate_event(event_name),
             "validation_findings": [],
         }
+        for candidate_index, event_name in enumerate(
+            ("low_score", "better_score", "third_choice")
+        )
     ]
     llm_raw_response = {
         "thought": "select the second candidate",
@@ -3492,6 +4353,7 @@ def test_raw_llm_and_enriched_response_artifacts_are_distinct(tmp_path: Path) ->
         "candidate_events": [
             _candidate_event("low_score"),
             _candidate_event("better_score"),
+            _candidate_event("third_choice"),
         ],
     }
     enriched_response = {
@@ -3506,6 +4368,13 @@ def test_raw_llm_and_enriched_response_artifacts_are_distinct(tmp_path: Path) ->
         "phase": "outline",
         "decision": "need_next_task",
         "prompt_text": "candidate prompt",
+        "llm_request": {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "candidate prompt"}],
+            "response_format": {"type": "json_schema", "json_schema": {}},
+            "response_source": "mocked_scripted_fixture",
+            "request_sent": False,
+        },
         "llm_raw_response": deepcopy(llm_raw_response),
         "raw_response": deepcopy(enriched_response),
         "candidate_evaluations": deepcopy(candidate_evaluations),
@@ -3530,38 +4399,93 @@ def test_raw_llm_and_enriched_response_artifacts_are_distinct(tmp_path: Path) ->
         debug_dir=tmp_path,
     )
 
-    llm_artifact = Path(artifact_paths["llm_response_artifact_path"])
-    enriched_artifact = Path(artifact_paths["response_artifact_path"])
+    request_artifact = Path(artifact_paths["request_artifact_path"])
+    result_artifact = Path(artifact_paths["outline_result_artifact_path"])
     stack_artifact = Path(artifact_paths["outline_stack_artifact_path"])
-    index_artifact = Path(artifact_paths["turn_index_artifact_path"])
-    assert "_llm_response_" in llm_artifact.name
-    assert "_response_" in enriched_artifact.name
-    assert "_stack_" in stack_artifact.name
-    assert "_index_" in index_artifact.name
-    assert llm_artifact != enriched_artifact
-    assert json.loads(llm_artifact.read_text(encoding="utf-8")) == llm_raw_response
-    enriched_payload = json.loads(enriched_artifact.read_text(encoding="utf-8"))
-    assert "candidate_evaluation_summary" in enriched_payload
-    assert "selected_transition" in enriched_payload
-    assert "transition_trace" in enriched_payload
-    assert "candidate_evaluation_summary" not in json.loads(
-        llm_artifact.read_text(encoding="utf-8")
+    assert request_artifact.name.startswith("multi_turn_turn03_outline_request_")
+    assert result_artifact.name.startswith("multi_turn_turn03_outline_result_")
+    assert stack_artifact.name.startswith("multi_turn_turn03_outline_stack_")
+    assert artifact_paths["prompt_artifact_path"] == str(request_artifact)
+    assert artifact_paths["response_artifact_path"] == str(result_artifact)
+    assert "llm_response_artifact_path" not in artifact_paths
+    assert "turn_index_artifact_path" not in artifact_paths
+    assert {path.name for path in (tmp_path / "recovery_outline").iterdir()} == {
+        request_artifact.name,
+        result_artifact.name,
+        stack_artifact.name,
+    }
+
+    request_text = request_artifact.read_text(encoding="utf-8")
+    assert "Model: test-model" in request_text
+    assert "role=user" in request_text
+    assert "candidate prompt" in request_text
+
+    result_payload = json.loads(result_artifact.read_text(encoding="utf-8"))
+    assert result_payload["llm_response"] == llm_raw_response
+    assert len(result_payload["candidate_evaluation_summary"]) == 3
+    assert result_payload["selected_transition"] == transition_trace[0]
+    assert result_payload["transition_trace"] == transition_trace
+    assert result_payload["turn_index"] == 3
+    assert result_payload["phase"] == "outline"
+    assert result_payload["decision"] == "need_next_task"
+    assert result_payload["selected_candidate_index"] == 1
+    assert result_payload["selected_transition_outline_id"] == "RECOVERY_SEQ1"
+    assert result_payload["accepted_trace_length"] == 1
+    assert result_payload["remaining_blocked_issue_count"] == 0
+    assert result_payload["artifact_paths"] == {
+        "request_artifact_path": str(request_artifact),
+        "outline_result_artifact_path": str(result_artifact),
+        "outline_stack_artifact_path": str(stack_artifact),
+        "prompt_artifact_path": str(request_artifact),
+        "response_artifact_path": str(result_artifact),
+    }
+    stack_payload = json.loads(stack_artifact.read_text(encoding="utf-8"))
+    assert stack_payload == transition_trace
+
+
+def test_rejected_outline_stack_preserves_only_the_accepted_trace(
+    tmp_path: Path,
+) -> None:
+    transition_trace = [_candidate_event("accepted_before", outline_id="RECOVERY_SEQ1")]
+    turn = {
+        "turn_index": 4,
+        "phase": "outline",
+        "decision": "need_revision",
+        "prompt_text": "candidate prompt",
+        "llm_raw_response": {
+            "thought": "invalid selected candidate",
+            "selected_candidate_index": 0,
+            "candidate_events": [_candidate_event("rejected_candidate")],
+        },
+        "raw_response": {
+            "decision": "need_revision",
+            "selected_candidate_index": 0,
+            "transition_trace": deepcopy(transition_trace),
+            "transition_validation": {"status": "rejected"},
+        },
+    }
+    artifact_paths = write_recovery_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "multi_turn_current_turn": deepcopy(turn),
+            "recovery_debug": {
+                "multi_turn_session": {
+                    "session_id": "rejected_stack_test",
+                    "turn_index": 4,
+                    "turns": [deepcopy(turn)],
+                }
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
     )
-    assert json.loads(stack_artifact.read_text(encoding="utf-8")) == transition_trace
-    index_payload = json.loads(index_artifact.read_text(encoding="utf-8"))
-    assert index_payload["turn_index"] == 3
-    assert index_payload["phase"] == "outline"
-    assert index_payload["decision"] == "need_next_task"
-    assert index_payload["selected_candidate_index"] == 1
-    assert index_payload["selected_transition_outline_id"] == "RECOVERY_SEQ1"
-    assert index_payload["accepted_trace_length"] == 1
-    assert index_payload["remaining_blocked_issue_count"] == 0
-    assert index_payload["artifact_paths"]["prompt_artifact_path"] == str(
-        Path(artifact_paths["prompt_artifact_path"])
+
+    stack_payload = json.loads(
+        Path(artifact_paths["outline_stack_artifact_path"]).read_text(
+            encoding="utf-8"
+        )
     )
-    assert index_payload["artifact_paths"]["llm_response_artifact_path"] == str(llm_artifact)
-    assert index_payload["artifact_paths"]["response_artifact_path"] == str(enriched_artifact)
-    assert index_payload["artifact_paths"]["outline_stack_artifact_path"] == str(stack_artifact)
+    assert stack_payload == transition_trace
 
 
 def test_case3_actual_outline_validation_is_structural() -> None:
@@ -3580,35 +4504,31 @@ def test_case3_actual_outline_validation_is_structural() -> None:
 def test_case3_experiment_settings_are_loaded_from_file() -> None:
     settings = _load_recovery_outline_experiment_settings()
 
-    assert settings["recovery_selection_mode"] == "pure_llm"
+    assert settings["recovery_selection_mode"] == "neurosymbolic"
     assert settings["action_horizon"] == 1
     assert settings["candidate_count"] == "auto"
+    assert settings["candidate_proposal_budget"] == 5
 
 
-def test_case3_configured_neurosymbolic_falls_back_to_pure_llm_selection() -> None:
+def test_case3_configured_neurosymbolic_uses_adaptive_symbolic_selection() -> None:
     session_state = _candidate_session(
         recovery_selection_mode="neurosymbolic",
         action_horizon="1",
     )
-    decision, turn_entry = asyncio.run(
-        _run_mocked_candidate_handler(
-            session_state=session_state,
-            parsed_response={
-                "thought": "propose alternatives",
-                "selected_candidate_index": 0,
-                "candidate_events": [
-                    _candidate_event("low_score"),
-                    _candidate_event("better_score"),
-                ],
-            },
-        )
+    schema = multi_turn_mode._get_response_schema(
+        "outline",
+        {
+            **session_state,
+            "outline_mode": "incremental_candidates_validated",
+            "candidate_bound": 5,
+        },
     )
 
-    assert decision == "need_next_task"
-    assert turn_entry["recovery_selection_mode"] == "pure_llm"
-    assert turn_entry["selected_by"] == "pure_llm"
-    assert turn_entry["selected_candidate_index"] == 0
-    assert session_state["accepted_outline_prefix"][0]["event_name"] == "low_score"
+    assert session_state["recovery_selection_mode"] == "neurosymbolic"
+    assert "selected_candidate_index" not in schema["schema"]["properties"]
+    candidate_schema = schema["schema"]["properties"]["candidate_events"]
+    assert candidate_schema["minItems"] == 1
+    assert candidate_schema["maxItems"] == 5
 
 
 def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
@@ -3625,6 +4545,7 @@ def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
                 "candidate_events": [
                     _candidate_event("low_score"),
                     _candidate_event("better_score"),
+                    _candidate_event("third_choice"),
                 ],
             },
         )
@@ -3632,8 +4553,44 @@ def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
 
     assert turn_entry["selected_by"] == "pure_llm"
     assert turn_entry["selected_candidate_index"] == 1
-    assert [row["valid"] for row in turn_entry["candidate_evaluations"]] == [True, True]
+    assert [row["valid"] for row in turn_entry["candidate_evaluations"]] == [
+        True,
+        True,
+        True,
+    ]
     assert session_state["accepted_outline_prefix"][0]["event_name"] == "better_score"
+
+
+def test_case3_invalid_llm_selected_candidate_is_not_substituted() -> None:
+    session_state = _candidate_session(
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+    )
+    decision, turn_entry = asyncio.run(
+        _run_mocked_candidate_handler(
+            session_state=session_state,
+            invalid_candidate_indexes={0},
+            parsed_response={
+                "thought": "select the first candidate",
+                "selected_candidate_index": 0,
+                "candidate_events": [
+                    _candidate_event("invalid_selected"),
+                    _candidate_event("valid_alternative"),
+                    _candidate_event("valid_third"),
+                ],
+            },
+        )
+    )
+
+    assert decision == "need_revision"
+    assert session_state["accepted_outline_prefix"] == []
+    assert turn_entry["transition_validation"]["selected_candidate_index"] == 0
+    assert turn_entry["candidate_evaluations"][0]["valid"] is False
+    assert turn_entry["candidate_evaluations"][1]["valid"] is True
+    assert [
+        row["candidate_index"]
+        for row in turn_entry["candidate_rejection_feedback"]
+    ] == [0]
 
 
 def test_case3_missing_selected_candidate_index_is_rejected() -> None:
@@ -3649,6 +4606,7 @@ def test_case3_missing_selected_candidate_index_is_rejected() -> None:
                 "candidate_events": [
                     _candidate_event("low_score"),
                     _candidate_event("better_score"),
+                    _candidate_event("third_choice"),
                 ],
             },
         )
@@ -3669,10 +4627,11 @@ def test_case3_out_of_range_selected_candidate_index_is_rejected() -> None:
             session_state=session_state,
             parsed_response={
                 "thought": "bad selection",
-                "selected_candidate_index": 2,
+                "selected_candidate_index": 3,
                 "candidate_events": [
                     _candidate_event("low_score"),
                     _candidate_event("better_score"),
+                    _candidate_event("third_choice"),
                 ],
             },
         )
@@ -3745,17 +4704,17 @@ def test_case3_pure_llm_full_horizon_requires_complete_trace() -> None:
     assert len(session_state["accepted_outline_prefix"]) == 2
 
 
-def test_case3_candidate_count_integer_rejects_wrong_count() -> None:
+def test_case3_one_step_candidate_count_rejects_fewer_than_three() -> None:
     session_state = _candidate_session(
         recovery_selection_mode="pure_llm",
         action_horizon="1",
-        candidate_count=1,
+        candidate_count="auto",
     )
     decision, turn_entry = asyncio.run(
         _run_mocked_candidate_handler(
             session_state=session_state,
             parsed_response={
-                "thought": "too many alternatives",
+                "thought": "too few alternatives",
                 "candidate_events": [
                     _candidate_event("low_score"),
                     _candidate_event("better_score"),
@@ -3765,7 +4724,33 @@ def test_case3_candidate_count_integer_rejects_wrong_count() -> None:
     )
 
     assert decision == "need_revision"
-    assert "exactly 1 candidate" in turn_entry["error"]
+    assert "exactly 3 candidates" in turn_entry["error"]
+
+
+def test_case3_one_step_candidate_count_rejects_more_than_three() -> None:
+    session_state = _candidate_session(
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+        candidate_count="auto",
+    )
+    decision, turn_entry = asyncio.run(
+        _run_mocked_candidate_handler(
+            session_state=session_state,
+            parsed_response={
+                "thought": "too many alternatives",
+                "selected_candidate_index": 0,
+                "candidate_events": [
+                    _candidate_event("first_choice"),
+                    _candidate_event("second_choice"),
+                    _candidate_event("third_choice"),
+                    _candidate_event("fourth_choice"),
+                ],
+            },
+        )
+    )
+
+    assert decision == "need_revision"
+    assert "exactly 3 candidates" in turn_entry["error"]
 
 
 if __name__ == "__main__":

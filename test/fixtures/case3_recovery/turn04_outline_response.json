@@ -41,6 +41,27 @@
         "part_location": "prusa-mk3"
       },
       "description": "Also enabled because ur5e holds MCP and prusa-mk3 is reachable. This likewise frees ur5e to fetch LG first, satisfying the LG-before-MCP recovery guard while keeping MCP at a grounded reachable buffer location."
+    },
+    {
+      "outline_id": "stage_mcp_at_home",
+      "event_name": "retain_mcp_at_home",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "MCP",
+      "rationale": "Keep MCP under ur5e control at the grounded home location as an alternative staging transition.",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "expected_end_state": {
+        "resource_state": "picked",
+        "resource_location": "home",
+        "held_part": "MCP",
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost_gripper"
+      },
+      "description": "Keep MCP under ur5e control at the grounded home location as an alternative staging transition."
     }
   ],
   "candidate_evaluation_summary": [

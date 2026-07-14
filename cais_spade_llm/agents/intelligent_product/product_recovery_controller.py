@@ -2156,8 +2156,6 @@ class ProductRecoveryController:
         updated["des_event_sequence"] = []
         updated["transition_trace"] = []
         updated["outline_lookahead"] = []
-        updated["outline_stagnation_count"] = 0
-        updated["outline_progress_signature"] = ""
         updated["pruned_actions"] = []
         updated["outline_validation_findings"] = []
         updated["transition_validation"] = {}

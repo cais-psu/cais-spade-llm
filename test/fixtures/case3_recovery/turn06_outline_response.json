@@ -20,6 +20,44 @@
         "part_location": "assembly_board-v1"
       },
       "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
+    },
+    {
+      "outline_id": "restore_lg_alternative_a",
+      "event_name": "release_lg_at_assembly_board_v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "rationale": "Release LG at the same supplied goal location as an alternative authored transition.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "restored",
+        "part_location": "assembly_board-v1"
+      },
+      "description": "Release LG at the same supplied goal location as an alternative authored transition."
+    },
+    {
+      "outline_id": "restore_lg_alternative_b",
+      "event_name": "settle_lg_at_assembly_board_v1",
+      "resource_jid": "ur5e@localhost",
+      "part_name": "LG",
+      "rationale": "Settle LG at assembly_board-v1 using the same declared physical effect as another candidate.",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "LG",
+        "part_state": "misplaced"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "restored",
+        "part_location": "assembly_board-v1"
+      },
+      "description": "Settle LG at assembly_board-v1 using the same declared physical effect as another candidate."
     }
   ],
   "candidate_evaluation_summary": [

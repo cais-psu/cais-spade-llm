@@ -1660,6 +1660,148 @@ def robot_task_names() -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def robot_recovery_des_descriptor(
+    *,
+    resource_jid: str,
+    snapshot: dict[str, Any],
+    task_names: tuple[str, ...] | list[str] | None = None,
+    reachable_locations: list[Any] | tuple[Any, ...] | None = None,
+    named_poses: list[Any] | tuple[Any, ...] | None = None,
+    marked_state_conditions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the robot's private task-level recovery DES descriptor."""
+    registry = robot_task_registry()
+    selected_names = tuple(task_names or robot_task_names())
+    selected_tasks = [registry[name] for name in selected_names if name in registry]
+    if not selected_tasks:
+        return {}
+
+    current_state = snapshot.get("current_state")
+    current_location = snapshot.get("current_location")
+    held_part = snapshot.get("held_part")
+    gripper_state = snapshot.get("gripper_state")
+    resource_states: list[Any] = [current_state]
+    part_states: list[Any] = [None]
+    part_locations: list[Any] = [None, f"{resource_jid}_gripper"]
+    locations: list[Any] = [current_location]
+    locations.extend(reachable_locations or [])
+    locations.extend(named_poses or [])
+    events: list[dict[str, Any]] = []
+
+    for task in selected_tasks:
+        program = task.program
+        resource_states.extend((program.entry_state, program.success_state))
+        guards: dict[str, dict[str, Any]] = {}
+        # Recovery transitions may introduce exact new state labels. Re-entry
+        # therefore uses the task's physical entry guards; nominal lifecycle
+        # labels remain in the model domain and updates but do not reinterpret
+        # a novel label as semantic evidence.
+        if program.part_in_state:
+            part_states.append(program.part_in_state)
+        for guard in program.entry_guards:
+            if guard.predicate == "held_part_empty":
+                guards["held_part"] = {"equals": None}
+            elif guard.predicate == "held_part_exists":
+                guards["held_part"] = {"exists": True}
+
+        updates: dict[str, dict[str, Any]] = {
+            "resource_state": {"set": program.success_state}
+        }
+        for effect in program.effects:
+            if effect.target == "current_state" and effect.action == "set":
+                updates["resource_state"] = {"set": deepcopy(effect.value)}
+            elif effect.target == "held_part":
+                updates["held_part"] = (
+                    {"set": None}
+                    if effect.action == "clear"
+                    else {"set_from_param": "part_name"}
+                )
+            elif effect.target == "gripper_state" and effect.action == "set":
+                updates["gripper_state"] = {"set": deepcopy(effect.value)}
+
+        location_param = str(
+            dict(program.context_mapping or {}).get("location_param") or ""
+        ).strip()
+        if task.name == "move_home":
+            updates["resource_location"] = {"set": "home"}
+        elif location_param:
+            updates["resource_location"] = {"set_from_param": location_param}
+
+        completed_part_transition = dict(
+            dict(program.part_transition or {}).get("completed") or {}
+        )
+        if completed_part_transition:
+            part_state = completed_part_transition.get("state")
+            if part_state not in (None, ""):
+                updates["part_state"] = {"set": deepcopy(part_state)}
+                part_states.append(deepcopy(part_state))
+            location_template = str(
+                completed_part_transition.get("location_template") or ""
+            ).strip()
+            location_param = str(
+                completed_part_transition.get("location_param") or ""
+            ).strip()
+            if location_template:
+                resolved_location = location_template.replace(
+                    "{resource_jid}", resource_jid
+                )
+                updates["part_location"] = {"set": resolved_location}
+                part_locations.append(resolved_location)
+            elif location_param:
+                updates["part_location"] = {"set_from_param": location_param}
+
+        events.append(
+            {
+                "event_name": task.name,
+                "controllable": True,
+                "observable": True,
+                "guards": guards,
+                "updates": updates,
+            }
+        )
+
+    def _domain(values: list[Any]) -> list[Any]:
+        result: list[Any] = []
+        for value in values:
+            if value not in result:
+                result.append(deepcopy(value))
+        return result
+
+    return {
+        "state_variables": {
+            "resource_state": {
+                "scope": "resource",
+                "domain": _domain(resource_states),
+            },
+            "resource_location": {
+                "scope": "resource",
+                "domain": _domain(locations),
+            },
+            "held_part": {
+                "scope": "resource",
+                "domain": _domain([held_part, None]),
+            },
+            "gripper_state": {
+                "scope": "resource",
+                "domain": _domain([gripper_state, "open", "closed"]),
+            },
+            "part_state": {"scope": "part", "domain": _domain(part_states)},
+            "part_location": {
+                "scope": "part",
+                "domain": _domain(part_locations + locations),
+            },
+        },
+        "current_valuation": {
+            "resource_state": current_state,
+            "resource_location": current_location,
+            "held_part": held_part,
+            "gripper_state": gripper_state,
+        },
+        "events": events,
+        "marked_state_conditions": deepcopy(marked_state_conditions or []),
+    }
+
+
 def robot_task_capability_context(
     *,
     static_capabilities: dict[str, Any] | None = None,

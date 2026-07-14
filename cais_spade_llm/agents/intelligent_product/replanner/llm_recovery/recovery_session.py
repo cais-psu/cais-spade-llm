@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+    build_multi_turn_session_seed,
+    execute_multi_turn_recovery,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_resource_adapter import (
     adapt_recovery_resource_snapshot,
     recovery_resource_capabilities,
     resolve_recovery_resource_type,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-    build_multi_turn_session_seed,
-    execute_multi_turn_recovery,
 )
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
@@ -49,6 +49,52 @@ class RecoverySessionMixin:
         return self._normalize_recovery_reasoning_mode(
             precomputed_policy.get("recovery_reasoning_mode", "multi_turn")
         )
+
+    def _recovery_outline_experiment_settings(self) -> dict[str, Any]:
+        """Load the configured recovery candidate-selection mode."""
+        settings_path = (
+            Path(__file__).resolve().parents[4]
+            / "initialization"
+            / "recovery_outline_experiment_settings.json"
+        )
+        raw: dict[str, Any] = {}
+        if settings_path.exists():
+            try:
+                loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                self.logger.warning(
+                    "[Recovery] Could not load recovery outline experiment settings: %s",
+                    exc,
+                )
+            else:
+                if isinstance(loaded, dict):
+                    raw = loaded
+
+        mode = str(raw.get("recovery_selection_mode") or "pure_llm").strip().lower()
+        if mode not in {"pure_llm", "neurosymbolic"}:
+            mode = "pure_llm"
+        try:
+            proposal_budget = max(
+                1,
+                int(raw.get("candidate_proposal_budget") or 5),
+            )
+        except (TypeError, ValueError):
+            proposal_budget = 5
+        if mode == "neurosymbolic":
+            candidate_count: int | str = "adaptive"
+        else:
+            candidate_count = 3
+        return {
+            "enabled": bool(raw.get("enabled", True)),
+            "outline_mode": "incremental_candidates_validated",
+            "recovery_selection_mode": mode,
+            "action_horizon": "1",
+            "action_horizon_steps": 1,
+            "action_horizon_k": 1,
+            "candidate_count": candidate_count,
+            "candidate_proposal_budget": proposal_budget,
+            "candidate_bound": proposal_budget if mode == "neurosymbolic" else 3,
+        }
 
     def _recovery_artifact_path(self, artifact_key: str) -> Path | None:
         product_agent = getattr(self, "product_agent", None)
@@ -1030,6 +1076,7 @@ class RecoverySessionMixin:
 
         from cais_spade_llm.resources.resource_primitives import (
             build_execution_primitive_catalog,
+            build_recovery_des_model,
             build_synthesis_primitive_catalog,
         )
         from cais_spade_llm.resources.robot.robot_primitives import (
@@ -1114,12 +1161,28 @@ class RecoverySessionMixin:
                     resource_type,
                     primitive_catalog=execution_primitive_catalog,
                 )
+                recovery_des_model_method = getattr(resource, "recovery_des_model", None)
+                if callable(recovery_des_model_method):
+                    recovery_des_model = await asyncio.to_thread(
+                        recovery_des_model_method,
+                        snapshot=recovery_snapshot,
+                    )
+                else:
+                    recovery_des_model = build_recovery_des_model(
+                        resource,
+                        snapshot=recovery_snapshot,
+                    )
                 recovery_resources[resource_jid] = {
                     "resource_jid": resource_jid,
                     "resource_type": resource_type,
                     "recovery_adapter": adapter_capabilities,
                     "primitive_catalog": primitive_catalog,
                     "execution_primitive_catalog": execution_primitive_catalog,
+                    "recovery_des_model": deepcopy(recovery_des_model),
+                    "recovery_des_model_fingerprint": str(
+                        dict(recovery_des_model or {}).get("descriptor_fingerprint")
+                        or ""
+                    ),
                     "recovery_snapshot": recovery_snapshot or {},
                     "resource_core": deepcopy(recovery_snapshot.get("resource_core") or {}),
                     "resource_facets": deepcopy(recovery_snapshot.get("resource_facets") or {}),
@@ -2949,6 +3012,21 @@ class RecoverySessionMixin:
         )
         session_id = f"prepare_{uuid4().hex[:8]}"
         reasoning_mode = self._resolve_recovery_reasoning_mode()
+        outline_settings = self._recovery_outline_experiment_settings()
+        recovery_session = {
+            "phase": "prepare_trace",
+            "llm_enabled": False,
+            "reasoning_mode": reasoning_mode,
+            "session_id": session_id,
+        }
+        if outline_settings.get("enabled", True):
+            recovery_session.update(
+                {
+                    key: deepcopy(value)
+                    for key, value in outline_settings.items()
+                    if key != "enabled"
+                }
+            )
 
         prepared_recovery_request = {
             "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -2983,12 +3061,7 @@ class RecoverySessionMixin:
                     "reason": "Safety monitor state q is not wired yet",
                 },
             },
-            "recovery_session": {
-                "phase": "prepare_trace",
-                "llm_enabled": False,
-                "reasoning_mode": reasoning_mode,
-                "session_id": session_id,
-            },
+            "recovery_session": recovery_session,
         }
         requirement_inventory = self._recovery_requirement_inventory()
         prepared_recovery_request["requirement_nodes"] = deepcopy(

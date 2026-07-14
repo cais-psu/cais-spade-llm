@@ -9,6 +9,9 @@ import logging
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
+    infer_outline_predecessors,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
     compact_multi_turn_runtime_session,
     write_recovery_artifacts,
@@ -21,9 +24,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_p
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     annotate_validation_finding,
     validate_recovery_outline_task,
-)
-from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
-    infer_outline_predecessors,
 )
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
@@ -44,23 +44,9 @@ _DEFAULT_MAX_OBSERVATIONS = 3
 _DEFAULT_MAX_OBSERVE_BATCH = 3
 _DEFAULT_CANDIDATE_BOUND = 5
 _DEFAULT_CANDIDATE_BOUND_CAP = 8
+_ONE_STEP_CANDIDATE_COUNT = 3
 _CANDIDATE_PRUNE_REPEAT_THRESHOLD = 2
 _LLM_WAIT_LOG_INTERVAL_S = 10.0
-_MULTI_TURN_OUTLINE_CONTRACT = {
-    "allowed_state_fields": [
-        "resource_state",
-        "resource_location",
-        "held_part",
-        "part_state",
-        "part_location",
-    ],
-    "disallow_unknown_state_fields": True,
-    "require_expected_start_match": True,
-    "require_meaningful_delta": True,
-    "require_release_destination_for_release": True,
-    "require_carrier_for_part_relocation": True,
-}
-
 _PHASE_SEQUENCE = ("grounding", "outline", "primitive_generation", "finalize")
 
 _DURABLE_PRUNED_CONSTRAINT_CODES = {
@@ -95,6 +81,8 @@ _TRANSITIONS: dict[str, dict[str, str]] = {
         "outline_ready": "primitive_generation",
         "need_revision": "outline",
         "need_next_task": "outline",
+        "selection_ambiguous": "outline",
+        "selection_unresolved": "outline",
     },
     "primitive_generation": {
         "need_context": "primitive_generation",
@@ -175,7 +163,7 @@ def transition_multi_turn_phase(current_phase: str, decision: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_multi_turn_session_seed(
+def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
     prepared_recovery_request: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the initial session state for a multi-turn recovery run."""
@@ -201,7 +189,7 @@ def build_multi_turn_session_seed(
     recovery_selection_mode = (
         str(recovery_session.get("recovery_selection_mode") or "pure_llm").strip().lower()
     )
-    if recovery_selection_mode != "pure_llm":
+    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
         recovery_selection_mode = "pure_llm"
     action_horizon = str(recovery_session.get("action_horizon") or "1").strip().lower()
     if action_horizon not in {"1", "k", "full"}:
@@ -221,7 +209,7 @@ def build_multi_turn_session_seed(
     candidate_count: int | str
     if isinstance(raw_candidate_count, str):
         candidate_count_token = raw_candidate_count.strip().lower()
-        if candidate_count_token in {"auto", "n"}:
+        if candidate_count_token in {"adaptive", "auto", "n"}:
             candidate_count = "auto"
         else:
             try:
@@ -233,15 +221,23 @@ def build_multi_turn_session_seed(
             candidate_count = max(1, int(raw_candidate_count))
         except (TypeError, ValueError):
             candidate_count = "auto"
+    if recovery_selection_mode == "neurosymbolic":
+        action_horizon = "1"
+        action_horizon_steps = 1
+        candidate_count = "adaptive"
+    elif action_horizon == "1":
+        candidate_count = _ONE_STEP_CANDIDATE_COUNT
     candidate_bound_cap = max(
         1,
         int(recovery_session.get("candidate_bound_cap") or _DEFAULT_CANDIDATE_BOUND_CAP),
     )
-    if candidate_count == "auto":
-        candidate_bound = max(
-            1,
-            int(recovery_session.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
-        )
+    if candidate_count in {"adaptive", "auto"}:
+        configured_budget = recovery_session.get("candidate_proposal_budget")
+        if configured_budget in (None, ""):
+            configured_budget = recovery_session.get("candidate_bound")
+        candidate_bound = max(1, int(configured_budget or _DEFAULT_CANDIDATE_BOUND))
+        if recovery_selection_mode == "neurosymbolic":
+            candidate_bound_cap = max(candidate_bound_cap, candidate_bound)
         candidate_bound = min(candidate_bound, candidate_bound_cap)
     else:
         candidate_bound = max(1, int(candidate_count))
@@ -294,6 +290,7 @@ def build_multi_turn_session_seed(
         "action_horizon_steps": action_horizon_steps,
         "action_horizon_k": action_horizon_k,
         "candidate_count": candidate_count,
+        "candidate_proposal_budget": candidate_bound,
         "candidate_bound": candidate_bound,
         "candidate_bound_cap": candidate_bound_cap,
         "status": "pending",
@@ -310,15 +307,29 @@ def build_multi_turn_session_seed(
         "des_event_sequence": [],
         "transition_trace": [],
         "outline_lookahead": [],
-        "outline_stagnation_count": 0,
-        "outline_progress_signature": "",
-        "semantic_state_history": [],
         "pruned_actions": [],
         "outline_validation_findings": [],
         "transition_validation": {},
         "unresolved_target_predicates": [],
         "candidate_rejection_feedback": [],
+        "selection_revision_count": 0,
+        "selection_revision_fingerprint": "",
+        "selection_revision_limit": 3,
+        "selection_revision_safety_rule_fingerprints": [],
+        "selection_revision_live_dfa_fingerprints": [],
+        "active_selection_ambiguity_feedback": {},
+        "active_selection_ambiguity_fingerprint": "",
         "candidate_prune_history": {},
+        "projected_safety_dfa_states": {},
+        "recovery_des_models": {
+            str(resource_jid): deepcopy(
+                dict(resource_entry or {}).get("recovery_des_model") or {}
+            )
+            for resource_jid, resource_entry in dict(
+                prepared_recovery_request.get("recovery_resources") or {}
+            ).items()
+            if str(resource_jid)
+        },
         # Primitive-generation state
         "primitive_generation_cursor": 0,
         "accepted_primitive_program": [],
@@ -1468,6 +1479,8 @@ def _extract_safety_blocker_part_names(
 
 
 def _condition_expected_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict) and set(expected) == {"not"}:
+        return not _condition_expected_matches(actual, expected.get("not"))
     if isinstance(expected, (dict, list)):
         return actual == expected
     if expected in (None, ""):
@@ -1475,7 +1488,7 @@ def _condition_expected_matches(actual: Any, expected: Any) -> bool:
     return str(actual or "").strip() == str(expected or "").strip()
 
 
-def _continuation_condition_satisfied(
+def _continuation_condition_satisfied(  # noqa: C901, PLR0912
     condition: dict[str, Any],
     *,
     session_state: dict[str, Any],
@@ -1491,6 +1504,56 @@ def _continuation_condition_satisfied(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
+
+    if entity_kind == "resource" and entity:
+        row = dict(resources_by_jid.get(entity) or {})
+        resource_field_aliases = {
+            "state": ("current_state", "resource_state"),
+            "current_state": ("current_state", "resource_state"),
+            "resource_state": ("resource_state", "current_state"),
+            "location": ("current_location", "resource_location"),
+            "current_location": ("current_location", "resource_location"),
+            "resource_location": ("resource_location", "current_location"),
+            "held_part": ("held_part",),
+            "gripper_state": ("gripper_state",),
+        }
+        aliases = resource_field_aliases.get(field)
+        if row and aliases:
+            actual = next(
+                (row.get(alias) for alias in aliases if alias in row),
+                None,
+            )
+            return _condition_expected_matches(actual, expected)
+
+    if entity_kind == "part" and entity:
+        row = dict(parts_by_name.get(entity) or {})
+        part_field_aliases = {
+            "state": ("current_state", "part_state"),
+            "current_state": ("current_state", "part_state"),
+            "part_state": ("part_state", "current_state"),
+            "location": ("current_location", "part_location"),
+            "current_location": ("current_location", "part_location"),
+            "part_location": ("part_location", "current_location"),
+            "holder": (
+                "current_holder_resource_jid",
+                "part_holder_resource_jid",
+            ),
+            "current_holder_resource_jid": (
+                "current_holder_resource_jid",
+                "part_holder_resource_jid",
+            ),
+            "part_holder_resource_jid": (
+                "part_holder_resource_jid",
+                "current_holder_resource_jid",
+            ),
+        }
+        aliases = part_field_aliases.get(field)
+        if row and aliases:
+            actual = next(
+                (row.get(alias) for alias in aliases if alias in row),
+                None,
+            )
+            return _condition_expected_matches(actual, expected)
 
     if kind == "resource_terminal_state" and entity_kind == "resource" and entity:
         row = dict(resources_by_jid.get(entity) or {})
@@ -1667,246 +1730,6 @@ def _active_candidate_recovery_blockers(
         )
         blockers[_candidate_recovery_blocker_key(blocker)] = blocker
     return list(blockers.values())
-
-
-def _no_blocker_reduction_finding(
-    *,
-    task: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "task_id": str(task.get("outline_id") or "").strip(),
-        "resource_jid": _task_resource_jid(task) or None,
-        "part_name": _task_part_name(task) or None,
-        "constraint_owner": "selector",
-        "constraint_family": "candidate_selection",
-        "constraint_code": "no_blocker_reduction",
-        "reason": "Task does not directly reduce the current recovery blockers.",
-        "evidence": {"field": "recovery_blockers"},
-    }
-
-
-def _count_resolved_continuation_conditions(
-    *,
-    candidate_session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> tuple[int, int]:
-    active_conditions = _active_continuation_conditions(prepared_recovery_request)
-    if not active_conditions:
-        return 0, 0
-    unresolved_after = [
-        row
-        for row in active_conditions
-        if not _continuation_condition_satisfied(
-            row,
-            session_state=candidate_session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-    ]
-    return len(active_conditions) - len(unresolved_after), len(unresolved_after)
-
-
-def _candidate_session_after_task(
-    *,
-    session_state: dict[str, Any],
-    task: dict[str, Any],
-) -> dict[str, Any]:
-    candidate_session_state = deepcopy(session_state)
-    _apply_task_effects_to_symbolic_state(task, candidate_session_state)
-    return candidate_session_state
-
-
-def _part_release_frees_resource_for_blocker(
-    *,
-    task: dict[str, Any],
-    session_state: dict[str, Any],
-    candidate_session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    current_blockers: list[dict[str, Any]],
-) -> bool:
-    if not _task_ends_with_part_clear_of_resource(task):
-        return False
-
-    resource_jid = _task_resource_jid(task)
-
-    # Only block if THIS resource has a terminal state blocker — not if some
-    # other resource does.  Allows cross-assignment recovery.
-    if any(
-        _normalized_blocker_kind(blocker) == "resource_terminal_state"
-        and str(blocker.get("entity") or "").strip() == resource_jid
-        for blocker in current_blockers
-        if isinstance(blocker, dict)
-    ):
-        return False
-    released_part = _task_part_name(task)
-    if not resource_jid or not released_part:
-        return False
-
-    resources_by_jid, parts_by_name = _projected_outline_validation_context(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    candidate_resources_by_jid, _ = _projected_outline_validation_context(
-        session_state=candidate_session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    current_resource = dict(resources_by_jid.get(resource_jid) or {})
-    candidate_resource = dict(candidate_resources_by_jid.get(resource_jid) or {})
-
-    if str(current_resource.get("held_part") or "").strip() != released_part:
-        return False
-    if str(candidate_resource.get("held_part") or "").strip():
-        return False
-
-    blocker_parts = _current_safety_blocker_parts(
-        current_blockers=current_blockers,
-        parts_by_name=parts_by_name,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-
-    if not blocker_parts:
-        return False
-    if released_part in blocker_parts:
-        return False
-    return True
-
-
-def _current_safety_blocker_parts(
-    *,
-    current_blockers: list[dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
-    prepared_recovery_request: dict[str, Any],
-) -> set[str]:
-    blocker_parts: set[str] = set()
-    for blocker in current_blockers:
-        if not isinstance(blocker, dict):
-            continue
-        if _normalized_blocker_kind(blocker) != "safety_blocked_suffix_task":
-            continue
-        blocker_parts.update(
-            _extract_safety_blocker_part_names(
-                blocking_reason=str(blocker.get("blocking_reason") or "").strip(),
-                parts_by_name=parts_by_name,
-                fallback_parts=_fault_event_fallback_parts(prepared_recovery_request),
-            )
-        )
-    return blocker_parts
-
-
-def _part_acquisition_counts_as_blocker_progress(
-    *,
-    task: dict[str, Any],
-    session_state: dict[str, Any],
-    candidate_session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    current_blockers: list[dict[str, Any]],
-) -> bool:
-    if not _task_ends_with_part_held_by_resource(task):
-        return False
-
-    resource_jid = _task_resource_jid(task)
-
-    # Only block if the resource performing this action has a terminal state
-    # blocker — not if some OTHER resource does.  This allows cross-assignment
-    # (e.g. ur5e acquiring LG when xarm6 is in failed state).
-    if any(
-        _normalized_blocker_kind(blocker) == "resource_terminal_state"
-        and str(blocker.get("entity") or "").strip() == resource_jid
-        for blocker in current_blockers
-        if isinstance(blocker, dict)
-    ):
-        return False
-    acquired_part = _task_part_name(task)
-    if not resource_jid or not acquired_part:
-        return False
-
-    _, parts_by_name = _projected_outline_validation_context(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    blocker_parts = _current_safety_blocker_parts(
-        current_blockers=current_blockers,
-        parts_by_name=parts_by_name,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    if acquired_part not in blocker_parts:
-        return False
-
-    candidate_resources_by_jid, candidate_parts_by_name = _projected_outline_validation_context(
-        session_state=candidate_session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    candidate_resource = dict(candidate_resources_by_jid.get(resource_jid) or {})
-    candidate_part = dict(candidate_parts_by_name.get(acquired_part) or {})
-    if str(candidate_resource.get("held_part") or "").strip() != acquired_part:
-        return False
-    if str(candidate_part.get("current_holder_resource_jid") or "").strip() != resource_jid:
-        return False
-    return True
-
-
-def _preparatory_transit_toward_blocker(
-    *,
-    task: dict[str, Any],
-    session_state: dict[str, Any],
-    candidate_session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    current_blockers: list[dict[str, Any]],
-) -> bool:
-    """Credit preparatory moves where a resource holds a blocker part and
-    the task represents a meaningful physical transit step (e.g. moving toward
-    the goal location or to an intermediate staging position).
-
-    This prevents rejection of valid intermediate actions like "transit LG to
-    approach position" when the resource already carries the blocker part.
-    """
-    resource_jid = _task_resource_jid(task)
-    part_name = _task_part_name(task)
-    if not resource_jid or not part_name:
-        return False
-
-    # The resource must currently hold the part.
-    resources_by_jid, parts_by_name = _projected_outline_validation_context(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    resource_row = dict(resources_by_jid.get(resource_jid) or {})
-    if str(resource_row.get("held_part") or "").strip() != part_name:
-        return False
-
-    # The held part must be relevant to a current blocker.
-    blocker_parts = _current_safety_blocker_parts(
-        current_blockers=current_blockers,
-        parts_by_name=parts_by_name,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    if part_name not in blocker_parts:
-        return False
-
-    # The task must have a target_ref or change resource location — i.e. it's
-    # actually commanding a physical move, not a no-op.
-    target_ref = _task_target_ref(task)
-    action_target = dict(task.get("action_target") or {})
-    target_location = str(action_target.get("target_location") or "").strip()
-    end_state = dict(task.get("expected_end_state") or {})
-    end_part_location = str(end_state.get("part_location") or "").strip()
-
-    if target_ref or target_location or end_part_location:
-        return True
-
-    # Even without explicit target, if the symbolic state changes (e.g.
-    # resource location moves) we credit it.
-    candidate_resources_by_jid, _ = _projected_outline_validation_context(
-        session_state=candidate_session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    candidate_resource = dict(candidate_resources_by_jid.get(resource_jid) or {})
-    if (
-        str(candidate_resource.get("current_location") or "").strip()
-        != str(resource_row.get("current_location") or "").strip()
-    ):
-        return True
-
-    return False
 
 
 def _candidate_pruned_task_match_key(task: dict[str, Any]) -> str:
@@ -2252,83 +2075,6 @@ def _compute_enabled_candidate_bound(
     return min(candidate_bound, candidate_bound_cap)
 
 
-def _candidate_progress_score(
-    *,
-    task: dict[str, Any],
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> tuple[int, dict[str, int]]:
-    current_blockers = _active_candidate_recovery_blockers(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    candidate_session_state = _candidate_session_after_task(
-        session_state=session_state,
-        task=task,
-    )
-    remaining_blockers = _active_candidate_recovery_blockers(
-        session_state=candidate_session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    current_keys = {
-        _candidate_recovery_blocker_key(row) for row in current_blockers if isinstance(row, dict)
-    }
-    remaining_keys = {
-        _candidate_recovery_blocker_key(row) for row in remaining_blockers if isinstance(row, dict)
-    }
-    resolved_blockers = len(current_keys - remaining_keys)
-    blocker_part_acquired = 0
-    if resolved_blockers == 0 and _part_acquisition_counts_as_blocker_progress(
-        task=task,
-        session_state=session_state,
-        candidate_session_state=candidate_session_state,
-        prepared_recovery_request=prepared_recovery_request,
-        current_blockers=current_blockers,
-    ):
-        blocker_part_acquired = 1
-    resource_freed_for_blocker = 0
-    if (
-        resolved_blockers == 0
-        and blocker_part_acquired == 0
-        and _part_release_frees_resource_for_blocker(
-            task=task,
-            session_state=session_state,
-            candidate_session_state=candidate_session_state,
-            prepared_recovery_request=prepared_recovery_request,
-            current_blockers=current_blockers,
-        )
-    ):
-        resource_freed_for_blocker = 1
-    preparatory_transit = 0
-    if (
-        resolved_blockers == 0
-        and blocker_part_acquired == 0
-        and resource_freed_for_blocker == 0
-        and _preparatory_transit_toward_blocker(
-            task=task,
-            session_state=session_state,
-            candidate_session_state=candidate_session_state,
-            prepared_recovery_request=prepared_recovery_request,
-            current_blockers=current_blockers,
-        )
-    ):
-        preparatory_transit = 1
-    remaining_blocked_issues = len(remaining_keys)
-    secondary_progress = blocker_part_acquired + resource_freed_for_blocker + preparatory_transit
-    return (
-        resolved_blockers + secondary_progress,
-        {
-            "resolved_direct_blockers": resolved_blockers,
-            "blocker_part_acquired": blocker_part_acquired,
-            "freed_resource_for_blocker": resource_freed_for_blocker,
-            "preparatory_transit": preparatory_transit,
-            "resolved_continuation_conditions": resolved_blockers,
-            "remaining_continuation_conditions": remaining_blocked_issues,
-            "remaining_blocked_issues": remaining_blocked_issues,
-        },
-    )
-
-
 def _candidate_feedback_rows(
     candidate_evaluations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2366,33 +2112,6 @@ def _normalized_candidate_feedback_row(row: dict[str, Any]) -> dict[str, Any] | 
     return feedback_row
 
 
-def _candidate_feedback_row_signature(row: dict[str, Any]) -> str:
-    normalized = _normalized_candidate_feedback_row(row) or {}
-    payload = {
-        "task": deepcopy(dict(normalized.get("task") or {})),
-        "validation_findings": deepcopy(normalized.get("validation_findings") or []),
-    }
-    return json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
-
-
-def _merge_candidate_rejection_feedback(
-    existing_rows: list[dict[str, Any]],
-    new_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    merged_rows: list[dict[str, Any]] = []
-    seen_signatures: set[str] = set()
-    for row in list(existing_rows or []) + list(new_rows or []):
-        normalized = _normalized_candidate_feedback_row(dict(row or {}))
-        if not normalized:
-            continue
-        signature = _candidate_feedback_row_signature(normalized)
-        if signature in seen_signatures:
-            continue
-        seen_signatures.add(signature)
-        merged_rows.append(normalized)
-    return merged_rows
-
-
 def _finding_event_status_for_logging(finding: dict[str, Any]) -> str:
     constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     constraint_family = str(finding.get("constraint_family") or "").strip().lower()
@@ -2413,8 +2132,11 @@ def _remaining_blocked_issue_counts(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[int, int]:
-    remaining_blockers = len(
-        _active_candidate_recovery_blockers(
+    remaining_blockers = sum(
+        1
+        for condition in _active_continuation_conditions(prepared_recovery_request)
+        if not _continuation_condition_satisfied(
+            condition,
             session_state=session_state,
             prepared_recovery_request=prepared_recovery_request,
         )
@@ -2495,25 +2217,6 @@ def _candidate_target_ref_from_surface_task(task: dict[str, Any]) -> str:
     return str(
         action_target.get("target_location") or action_target.get("named_pose") or ""
     ).strip()
-
-
-def _task_ends_with_part_held_by_resource(task: dict[str, Any]) -> bool:
-    resource_jid = _task_resource_jid(task)
-    part_name = _task_part_name(task)
-    end_state = dict(task.get("expected_end_state") or {})
-    held_part = str(end_state.get("held_part") or "").strip()
-    return bool(part_name and resource_jid and held_part == part_name)
-
-
-def _task_ends_with_part_clear_of_resource(task: dict[str, Any]) -> bool:
-    part_name = _task_part_name(task)
-    if not part_name:
-        return False
-    end_state = dict(task.get("expected_end_state") or {})
-    held_part = end_state.get("held_part")
-    return bool(
-        ("part_location" in end_state or _task_target_ref(task)) and (held_part in (None, ""))
-    )
 
 
 def _candidate_effect_match_key(task: dict[str, Any]) -> dict[str, Any]:
@@ -2752,41 +2455,6 @@ def _derive_candidate_outline_task(
     start_state: dict[str, Any] = deepcopy(raw_start_state)
     end_state: dict[str, Any] = deepcopy(raw_end_state)
 
-    unexpected_start_fields = sorted(
-        key
-        for key in start_state
-        if str(key or "").strip()
-        and key not in _MULTI_TURN_OUTLINE_CONTRACT["allowed_state_fields"]
-    )
-    if unexpected_start_fields:
-        return None, [
-            _candidate_schema_finding(
-                task=candidate_task,
-                reason=(
-                    "expected_start_state includes unknown predicate key(s): "
-                    + ", ".join(unexpected_start_fields)
-                ),
-                evidence={"field": "expected_start_state", "unexpected": unexpected_start_fields},
-            )
-        ]
-    unexpected_end_fields = sorted(
-        key
-        for key in end_state
-        if str(key or "").strip()
-        and key not in _MULTI_TURN_OUTLINE_CONTRACT["allowed_state_fields"]
-    )
-    if unexpected_end_fields:
-        return None, [
-            _candidate_schema_finding(
-                task=candidate_task,
-                reason=(
-                    "expected_end_state includes unknown predicate key(s): "
-                    + ", ".join(unexpected_end_fields)
-                ),
-                evidence={"field": "expected_end_state", "unexpected": unexpected_end_fields},
-            )
-        ]
-
     completeness_findings = _candidate_state_completeness_findings(
         candidate_task=candidate_task,
         part_name=part_name,
@@ -2839,7 +2507,7 @@ def _commit_selected_candidate_task(
     return committed_task
 
 
-def _apply_task_effects_to_symbolic_state(
+def _apply_task_effects_to_symbolic_state(  # noqa: C901
     task: dict[str, Any],
     session_state: dict[str, Any],
 ) -> None:
@@ -2859,21 +2527,51 @@ def _apply_task_effects_to_symbolic_state(
 
     if resource_jid:
         res = symbolic_resources.setdefault(resource_jid, {"resource_jid": resource_jid})
+        recovery_des_model = dict(
+            dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
+            or {}
+        )
+        state_variables = dict(recovery_des_model.get("state_variables") or {})
+        for field_name, value in end_state.items():
+            declaration = dict(state_variables.get(field_name) or {})
+            if declaration and str(declaration.get("scope") or "resource") == "resource":
+                res[field_name] = deepcopy(value)
         if "resource_state" in end_state:
             res["resource_state"] = deepcopy(end_state.get("resource_state"))
             res["current_state"] = deepcopy(end_state.get("resource_state"))
         if "held_part" in end_state:
             res["held_part"] = deepcopy(end_state.get("held_part"))
-            res["gripper_state"] = "closed" if end_state.get("held_part") else "open"
+            if "gripper_state" not in end_state:
+                res["gripper_state"] = (
+                    "closed" if end_state.get("held_part") else "open"
+                )
         if "resource_location" in end_state:
             res["resource_location"] = deepcopy(end_state.get("resource_location"))
             res["current_location"] = deepcopy(end_state.get("resource_location"))
             occupancy = dict(res.get("occupancy") or {})
             occupancy["location"] = deepcopy(end_state.get("resource_location"))
             res["occupancy"] = occupancy
+        if "current_state" in end_state:
+            res["current_state"] = deepcopy(end_state.get("current_state"))
+            res["resource_state"] = deepcopy(end_state.get("current_state"))
+        if "current_location" in end_state:
+            res["current_location"] = deepcopy(end_state.get("current_location"))
+            res["resource_location"] = deepcopy(end_state.get("current_location"))
 
     if part_name:
         part = symbolic_parts.setdefault(part_name, {"part_name": part_name})
+        recovery_des_model = dict(
+            dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
+            or {}
+        )
+        for field_name, declaration in dict(
+            recovery_des_model.get("state_variables") or {}
+        ).items():
+            if (
+                str(dict(declaration or {}).get("scope") or "resource") == "part"
+                and field_name in end_state
+            ):
+                part[field_name] = deepcopy(end_state.get(field_name))
         if "part_state" in end_state:
             part["part_state"] = deepcopy(end_state.get("part_state"))
             part["current_state"] = deepcopy(end_state.get("part_state"))
@@ -3703,6 +3401,15 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             1,
             int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
         )
+    declared_state_variables: dict[str, dict[str, Any]] = {}
+    for descriptor in dict(session_state.get("recovery_des_models") or {}).values():
+        for field_name, declaration in dict(
+            dict(descriptor or {}).get("state_variables") or {}
+        ).items():
+            declared_state_variables.setdefault(
+                str(field_name),
+                deepcopy(dict(declaration or {})),
+            )
     return multi_turn_phase_response_schema(
         phase,
         outline_mode=outline_mode,
@@ -3714,6 +3421,7 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         action_horizon=str(session_state.get("action_horizon") or "1").strip().lower(),
         action_horizon_steps=session_state.get("action_horizon_steps"),
         action_horizon_k=max(1, int(session_state.get("action_horizon_k") or 3)),
+        declared_state_variables=declared_state_variables,
     )
 
 
@@ -3825,7 +3533,9 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
     return compact_rows
 
 
-def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
+def _compact_artifact_candidate_evaluations(  # noqa: C901
+    rows: Any,
+) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -3844,6 +3554,11 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
             "event_count",
             "remaining_blocked_issues",
             "resource_switch_count",
+            "candidate_id",
+            "duplicate_of_candidate_id",
+            "equivalent_successor_class_id",
+            "selection_status",
+            "progressing",
         ):
             if row.get(key) not in (None, "", [], {}):
                 summary[key] = deepcopy(row.get(key))
@@ -3875,9 +3590,44 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
                     if str(item.get("constraint_code") or "").strip()
                 }
             )
+        validation_stages = [
+            deepcopy(item)
+            for item in (row.get("validation_stages") or [])
+            if isinstance(item, dict)
+        ]
+        if validation_stages:
+            summary["validation_stages"] = validation_stages
+        if isinstance(row.get("recovery_des_model_fingerprints"), dict):
+            summary["recovery_des_model_fingerprints"] = deepcopy(
+                row.get("recovery_des_model_fingerprints") or {}
+            )
         progress_detail = row.get("progress_detail")
         if isinstance(progress_detail, dict) and progress_detail:
             summary["progress_detail"] = deepcopy(progress_detail)
+        selection_evidence = row.get("selection_evidence")
+        if isinstance(selection_evidence, dict):
+            summary["selection_evidence"] = deepcopy(selection_evidence)
+        dominated_by_candidate_ids = row.get("dominated_by_candidate_ids")
+        if isinstance(dominated_by_candidate_ids, list):
+            summary["dominated_by_candidate_ids"] = deepcopy(
+                dominated_by_candidate_ids
+            )
+        if isinstance(row.get("projected_symbolic_resources"), dict) or isinstance(
+            row.get("projected_symbolic_parts"), dict
+        ):
+            summary["projected_successor"] = {
+                "resources": deepcopy(row.get("projected_symbolic_resources") or {}),
+                "parts": deepcopy(row.get("projected_symbolic_parts") or {}),
+                "safety_dfa_states": deepcopy(
+                    row.get("safety_dfa_states_after") or {}
+                ),
+                "open_recovery_obligation_ids": deepcopy(
+                    dict(row.get("selection_evidence") or {}).get(
+                        "open_recovery_obligation_ids_after"
+                    )
+                    or []
+                ),
+            }
         summaries.append(summary)
     return summaries
 
@@ -3900,7 +3650,12 @@ def _compact_artifact_transition_validation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     compact: dict[str, Any] = {}
-    for key in ("status", "selected_candidate_index", "selected_by"):
+    for key in (
+        "status",
+        "selected_candidate_index",
+        "selected_by",
+        "selection_status",
+    ):
         if value.get(key) not in (None, "", [], {}):
             compact[key] = deepcopy(value.get(key))
     findings = value.get("findings")
@@ -3951,7 +3706,45 @@ def _artifact_response_payload(
     payload = deepcopy(parsed_response if isinstance(parsed_response, dict) else {})
     if str(turn_entry.get("decision") or "").strip():
         payload.setdefault("decision", str(turn_entry.get("decision") or "").strip())
-    if str(phase or "").strip().lower() != "outline":
+    normalized_phase = str(phase or "").strip().lower()
+    if normalized_phase == "grounding":
+        effective_decision = str(turn_entry.get("decision") or "").strip()
+        grounding_payload: dict[str, Any] = {
+            "turn_index": int(turn_entry.get("turn_index") or 0),
+            "phase": "grounding",
+            "llm_response": deepcopy(parsed_response),
+            "decision": effective_decision,
+            "effective_decision": effective_decision,
+            "observe_requests": deepcopy(turn_entry.get("observe_requests") or []),
+            "observation_results": deepcopy(turn_entry.get("observation_results") or []),
+            "observation_store_after_turn": deepcopy(
+                session_state.get("observation_store") or {}
+            ),
+            "next_phase": str(turn_entry.get("next_phase") or "").strip(),
+        }
+        llm_request = dict(turn_entry.get("llm_request") or {})
+        response_source = str(llm_request.get("response_source") or "").strip()
+        if response_source:
+            grounding_payload["response_source"] = response_source
+        for key in (
+            "error",
+            "grounding_override_reason",
+            "invalid_observe_requests",
+            "already_fulfilled_observe_requests",
+        ):
+            value = turn_entry.get(key)
+            if value not in (None, "", [], {}):
+                grounding_payload[key] = deepcopy(value)
+        grounding_feedback = [
+            deepcopy(row)
+            for row in (session_state.get("phase_feedback") or [])
+            if isinstance(row, dict)
+            and str(row.get("phase") or "").strip().lower() == "grounding"
+        ]
+        if grounding_feedback:
+            grounding_payload["grounding_feedback"] = grounding_feedback
+        return grounding_payload
+    if normalized_phase != "outline":
         return payload
 
     accepted_prefix = [
@@ -4031,6 +3824,18 @@ def _artifact_response_payload(
         )
     if str(turn_entry.get("selected_by") or "").strip():
         artifact_payload["selected_by"] = str(turn_entry.get("selected_by") or "").strip()
+    if str(turn_entry.get("selection_status") or "").strip():
+        artifact_payload["selection_status"] = str(
+            turn_entry.get("selection_status") or ""
+        ).strip()
+    if isinstance(turn_entry.get("selection_evidence"), dict):
+        artifact_payload["selection_evidence"] = deepcopy(
+            turn_entry.get("selection_evidence") or {}
+        )
+    if isinstance(turn_entry.get("nondominated_candidate_ids"), list):
+        artifact_payload["nondominated_candidate_ids"] = deepcopy(
+            turn_entry.get("nondominated_candidate_ids") or []
+        )
     if isinstance(turn_entry.get("selected_transition"), dict):
         artifact_payload["selected_transition"] = _compact_artifact_task(
             turn_entry.get("selected_transition")
@@ -4056,6 +3861,22 @@ def _artifact_response_payload(
         artifact_payload["transition_validation"] = _compact_artifact_transition_validation(
             turn_entry.get("transition_validation") or {}
         )
+    if str(turn_entry.get("recovery_selection_mode") or "").strip() == "neurosymbolic":
+        artifact_payload.setdefault("selected_by", "neurosymbolic")
+        artifact_payload.setdefault(
+            "selection_status",
+            str(turn_entry.get("decision") or "need_revision").strip(),
+        )
+        artifact_payload.setdefault("selected_transition", {})
+        artifact_payload.setdefault("selection_evidence", {})
+        artifact_payload.setdefault("nondominated_candidate_ids", [])
+        artifact_payload.pop("selected_candidate_index", None)
+        artifact_payload.pop("llm_selected_candidate_index", None)
+        private_models = dict(session_state.get("recovery_des_models") or {})
+        if private_models:
+            artifact_payload["private_recovery_des_models"] = deepcopy(
+                private_models
+            )
     selected_candidate_index = artifact_payload.get("selected_candidate_index")
     if isinstance(selected_candidate_index, int) and _selected_candidate_evaluation_is_valid(
         rows=turn_entry.get("candidate_evaluations") or [],
@@ -4990,6 +4811,9 @@ def _write_per_turn_artifact(
         stamped_paths = {
             key: str(artifact_paths.get(key) or "").strip()
             for key in (
+                "request_artifact_path",
+                "grounding_result_artifact_path",
+                "outline_result_artifact_path",
                 "prompt_artifact_path",
                 "llm_response_artifact_path",
                 "response_artifact_path",
@@ -5512,6 +5336,7 @@ async def execute_multi_turn_recovery(
         prompt_input: dict[str, Any] = {}
         prompt_text = ""
         parsed_response: dict[str, Any] = {}
+        llm_request: dict[str, Any] = {}
 
         if current_phase == "primitive_generation":
             session_state["status"] = "running_primitive_generation"
@@ -5567,6 +5392,9 @@ async def execute_multi_turn_recovery(
                         elapsed_s=elapsed_s,
                     )
             parsed_response = deepcopy(raw_response if isinstance(raw_response, dict) else {})
+            llm_request = deepcopy(
+                dict(getattr(product_agent, "_last_structured_request", {}) or {})
+            )
             await _emit_progress(
                 session_state=session_state,
                 current_phase=current_phase,
@@ -5593,8 +5421,12 @@ async def execute_multi_turn_recovery(
         if prompt_input:
             turn_entry["prompt_input"] = deepcopy(prompt_input)
         turn_entry["prompt_text"] = prompt_text
+        if llm_request:
+            turn_entry["llm_request"] = deepcopy(llm_request)
         turn_entry["llm_raw_response"] = deepcopy(parsed_response)
         turn_entry["decision"] = decision
+        next_phase = transition_multi_turn_phase(current_phase, decision)
+        turn_entry["next_phase"] = next_phase
         turn_entry["raw_response"] = _artifact_response_payload(
             phase=current_phase,
             session_state=session_state,
@@ -5605,7 +5437,6 @@ async def execute_multi_turn_recovery(
         compact_multi_turn_runtime_session(session_state)
 
         # 5. Transition
-        next_phase = transition_multi_turn_phase(current_phase, decision)
         session_state["current_phase"] = next_phase
         await _emit_progress(
             session_state=session_state,
@@ -5666,6 +5497,7 @@ async def execute_multi_turn_recovery(
             "paused_after_primitive_stuck",
             "des_cycle_detected",
             "des_deadlock",
+            "selection_unresolved",
         ):
             break
 
@@ -5683,6 +5515,7 @@ async def execute_multi_turn_recovery(
         "paused_after_primitive_stuck",
         "des_cycle_detected",
         "des_deadlock",
+        "selection_unresolved",
         "error",
     ):
         session_state["status"] = "des_turn_limit"

@@ -914,6 +914,7 @@ def _apply_outline_task_effects(
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
     task_type: str,
+    state_field_scopes: dict[str, str] | None = None,
 ) -> None:
     resource_jid = str(task.get("resource_jid") or "").strip()
     if not resource_jid or resource_jid not in resources_by_jid:
@@ -921,18 +922,30 @@ def _apply_outline_task_effects(
 
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
     end_state = dict(task.get("expected_end_state") or {})
+    declared_scopes = {
+        str(field_name): str(scope or "resource")
+        for field_name, scope in dict(state_field_scopes or {}).items()
+        if str(field_name)
+    }
     task_part_name = str(
         _outline_task_part_binding(task, parts_by_name=parts_by_name).get("effective_part_name")
         or task.get("part_name")
         or ""
     ).strip()
 
+    for field_name, value in end_state.items():
+        if declared_scopes.get(str(field_name)) == "resource":
+            resource_row[str(field_name)] = deepcopy(value)
     if "resource_state" in end_state:
         candidate_state = deepcopy(end_state.get("resource_state"))
         resource_row["resource_state"] = candidate_state
         resource_row["current_state"] = candidate_state
     if "held_part" in end_state:
         resource_row["held_part"] = deepcopy(end_state.get("held_part"))
+        if "gripper_state" not in end_state:
+            resource_row["gripper_state"] = (
+                "closed" if end_state.get("held_part") else "open"
+            )
     if "resource_location" in end_state:
         resource_row["resource_location"] = deepcopy(end_state.get("resource_location"))
         resource_row["current_location"] = deepcopy(end_state.get("resource_location"))
@@ -948,6 +961,9 @@ def _apply_outline_task_effects(
     part_row = dict(parts_by_name.get(task_part_name) or {})
     if not part_row:
         return
+    for field_name, value in end_state.items():
+        if declared_scopes.get(str(field_name)) == "part":
+            part_row[str(field_name)] = deepcopy(value)
     if "part_state" in end_state:
         candidate_state = deepcopy(end_state.get("part_state"))
         part_row["part_state"] = candidate_state

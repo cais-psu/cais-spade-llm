@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+import time
 import uuid
 from collections.abc import Iterable
 from concurrent.futures import Future as ConcurrentFuture
@@ -27,6 +28,13 @@ from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.shared_information.local_dispatch import (
     send_agent_message,
     send_agent_message_sync,
+)
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    RECOVERY_OUTLINE_PHYSICAL_VALIDATE,
+    RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+    RECOVERY_OUTLINE_SAFETY_VALIDATE,
+    RECOVERY_OUTLINE_SAFETY_VALIDATED,
+    recovery_validation_reply_matches,
 )
 from cais_spade_llm.product.order import validate_product_order
 from cais_spade_llm.product.profile import ProductProfile
@@ -208,6 +216,10 @@ class ProductAgent(LlmAgent):
             "alert": None,
         }
         self._kickoff_result_event = asyncio.Event()
+        self._recovery_outline_validation_waiters: dict[str, dict[str, Any]] = {}
+        self._recovery_outline_validation_batches: dict[
+            tuple[str, str, str, int, str], dict[str, Any]
+        ] = {}
         precomputed_policy = (
             self.precomputed_bundle.get("replan_policy", {})
             if isinstance(self.precomputed_bundle.get("replan_policy"), dict)
@@ -579,6 +591,226 @@ class ProductAgent(LlmAgent):
         canonical = json.dumps(task_nodes, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _bare_jid(value: Any) -> str:
+        """Return a SPADE JID without its optional resource suffix."""
+        return str(value or "").strip().split("/", 1)[0]
+
+    async def _request_recovery_outline_validation(
+        self,
+        *,
+        target_jid: str,
+        request_type: str,
+        response_type: str,
+        payload: dict[str, Any],
+        timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Send one correlated validation request to its authoritative agent."""
+        request_payload = deepcopy(payload)
+        request_id = str(request_payload.get("request_id") or uuid.uuid4().hex).strip()
+        request_payload["request_id"] = request_id
+        request_payload["product_jid"] = str(self.jid)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._recovery_outline_validation_waiters[request_id] = {
+            "future": future,
+            "expected_sender": self._bare_jid(target_jid),
+            "response_type": response_type,
+            "recovery_session_id": str(
+                request_payload.get("recovery_session_id") or ""
+            ).strip(),
+            "turn_index": int(request_payload.get("turn_index") or 0),
+            "state_fingerprint": str(
+                request_payload.get("state_fingerprint") or ""
+            ).strip(),
+            "started_at": time.perf_counter(),
+        }
+        msg = Message(to=str(target_jid))
+        msg.set_metadata("type", request_type)
+        msg.body = json.dumps(request_payload, default=str)
+        try:
+            send_agent_message_sync(
+                self,
+                msg,
+                trace_category=request_type,
+                transport_label=request_type,
+            )
+            result = await asyncio.wait_for(future, timeout=max(0.1, float(timeout_s)))
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"{request_type} timed out after {float(timeout_s):.1f}s"
+            ) from exc
+        finally:
+            self._recovery_outline_validation_waiters.pop(request_id, None)
+        if not recovery_validation_reply_matches(
+            result,
+            request_id=request_id,
+            recovery_session_id=str(request_payload.get("recovery_session_id") or ""),
+            turn_index=int(request_payload.get("turn_index") or 0),
+            state_fingerprint=str(request_payload.get("state_fingerprint") or ""),
+        ):
+            raise RuntimeError(f"{response_type} reply did not match the active request")
+        return result
+
+    async def request_recovery_outline_physical_validation(
+        self,
+        *,
+        resource_jid: str,
+        payload: dict[str, Any],
+        timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Ask the responsible RA to validate physical feasibility."""
+        return await self._request_recovery_outline_validation_batched(
+            target_jid=resource_jid,
+            request_type=RECOVERY_OUTLINE_PHYSICAL_VALIDATE,
+            response_type=RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+            payload=payload,
+            timeout_s=timeout_s,
+        )
+
+    async def request_recovery_outline_safety_validation(
+        self,
+        *,
+        payload: dict[str, Any],
+        timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Ask the live CCA to validate candidate safety."""
+        return await self._request_recovery_outline_validation_batched(
+            target_jid=str(self.cca_jid),
+            request_type=RECOVERY_OUTLINE_SAFETY_VALIDATE,
+            response_type=RECOVERY_OUTLINE_SAFETY_VALIDATED,
+            payload=payload,
+            timeout_s=timeout_s,
+        )
+
+    async def _request_recovery_outline_validation_batched(
+        self,
+        *,
+        target_jid: str,
+        request_type: str,
+        response_type: str,
+        payload: dict[str, Any],
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        """Coalesce same-turn candidate requests into one owner-agent message."""
+        session_id = str(payload.get("recovery_session_id") or "").strip()
+        turn_index = int(payload.get("turn_index") or 0)
+        state_fingerprint = str(payload.get("state_fingerprint") or "").strip()
+        key = (
+            request_type,
+            self._bare_jid(target_jid),
+            session_id,
+            turn_index,
+            state_fingerprint,
+        )
+        loop = asyncio.get_running_loop()
+        caller_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        batch = self._recovery_outline_validation_batches.get(key)
+        if batch is None:
+            batch = {
+                "payloads": [],
+                "futures": [],
+                "target_jid": target_jid,
+                "request_type": request_type,
+                "response_type": response_type,
+                "timeout_s": timeout_s,
+            }
+            self._recovery_outline_validation_batches[key] = batch
+            batch["flush_task"] = loop.create_task(
+                self._flush_recovery_outline_validation_batch(key)
+            )
+        batch["payloads"].append(deepcopy(payload))
+        batch["futures"].append(caller_future)
+        return await caller_future
+
+    async def _flush_recovery_outline_validation_batch(
+        self,
+        key: tuple[str, str, str, int, str],
+    ) -> None:
+        """Send one grouped RA or CCA request and fan its reply back to callers."""
+        await asyncio.sleep(0.001)
+        batch = self._recovery_outline_validation_batches.pop(key, None)
+        if not isinstance(batch, dict):
+            return
+        payloads = [
+            deepcopy(row)
+            for row in (batch.get("payloads") or [])
+            if isinstance(row, dict)
+        ]
+        futures = [
+            future
+            for future in (batch.get("futures") or [])
+            if isinstance(future, asyncio.Future)
+        ]
+        if not payloads:
+            error = RuntimeError("recovery validation batch contained no payloads")
+            for future in futures:
+                if not future.done():
+                    future.set_exception(error)
+            return
+        merged_payload = deepcopy(payloads[0])
+        merged_payload["candidates"] = [
+            deepcopy(candidate)
+            for payload in payloads
+            for candidate in (payload.get("candidates") or [])
+            if isinstance(candidate, dict)
+        ]
+        merged_payload["candidate_tasks"] = [
+            deepcopy(candidate.get("task") or {})
+            for candidate in merged_payload["candidates"]
+        ]
+        merged_payload["grounded_actions"] = [
+            deepcopy(payload.get("grounded_action") or {}) for payload in payloads
+        ]
+        try:
+            result = await self._request_recovery_outline_validation(
+                target_jid=str(batch.get("target_jid") or ""),
+                request_type=str(batch.get("request_type") or ""),
+                response_type=str(batch.get("response_type") or ""),
+                payload=merged_payload,
+                timeout_s=float(batch.get("timeout_s") or 10.0),
+            )
+        except Exception as exc:  # noqa: BLE001 - every unavailable validator fails closed
+            for future in futures:
+                if not future.done():
+                    future.set_exception(exc)
+            return
+        for future in futures:
+            if not future.done():
+                future.set_result(deepcopy(result))
+
+    def _resolve_recovery_outline_validation_reply(
+        self,
+        *,
+        response_type: str,
+        sender: Any,
+        payload: dict[str, Any],
+    ) -> None:
+        """Resolve a pending validation future after strict sender correlation."""
+        request_id = str(payload.get("request_id") or "").strip()
+        waiter = self._recovery_outline_validation_waiters.get(request_id)
+        if not isinstance(waiter, dict):
+            self.logger.info(
+                "[Product] Ignoring stale %s request_id=%s.",
+                response_type,
+                request_id or "<missing>",
+            )
+            return
+        future = waiter.get("future")
+        if not isinstance(future, asyncio.Future) or future.done():
+            return
+        actual_sender = self._bare_jid(sender)
+        expected_sender = str(waiter.get("expected_sender") or "").strip()
+        if actual_sender != expected_sender or response_type != waiter.get("response_type"):
+            future.set_exception(
+                RuntimeError(
+                    f"{response_type} reply sender '{actual_sender}' did not match "
+                    f"'{expected_sender}'"
+                )
+            )
+            return
+        future.set_result(deepcopy(payload))
+
     # --------------------------------------------------------------------- #
     # SPADE lifecycle
     # --------------------------------------------------------------------- #
@@ -611,6 +843,24 @@ class ProductAgent(LlmAgent):
         t_recovery_safety = Template()
         t_recovery_safety.set_metadata("type", "recovery_safety_generated")
         self.add_behaviour(self._RecoverySafetyGeneratedInbox(), t_recovery_safety)
+
+        t_recovery_physical_validated = Template()
+        t_recovery_physical_validated.set_metadata(
+            "type", RECOVERY_OUTLINE_PHYSICAL_VALIDATED
+        )
+        self.add_behaviour(
+            self._RecoveryOutlinePhysicalValidatedInbox(),
+            t_recovery_physical_validated,
+        )
+
+        t_recovery_safety_validated = Template()
+        t_recovery_safety_validated.set_metadata(
+            "type", RECOVERY_OUTLINE_SAFETY_VALIDATED
+        )
+        self.add_behaviour(
+            self._RecoveryOutlineSafetyValidatedInbox(),
+            t_recovery_safety_validated,
+        )
 
         # Plan executor (runs cycles, dispatches DAG tasks)
         # self.add_behaviour(self._PlanExecutor())
@@ -1763,6 +2013,58 @@ class ProductAgent(LlmAgent):
                 return
 
             await agent._handle_recovery_safety_generated_result(payload)
+
+    class _RecoveryOutlinePhysicalValidatedInbox(CyclicBehaviour):
+        """Resolve correlated physical-validation replies from ResourceAgents."""
+
+        async def run(self):
+            agent: ProductAgent = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning(
+                    "[Product] Malformed recovery_outline_physical_validated body."
+                )
+                return
+            if not isinstance(payload, dict):
+                agent.logger.warning(
+                    "[Product] Non-object recovery_outline_physical_validated body."
+                )
+                return
+            agent._resolve_recovery_outline_validation_reply(
+                response_type=RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+                sender=msg.sender,
+                payload=payload,
+            )
+
+    class _RecoveryOutlineSafetyValidatedInbox(CyclicBehaviour):
+        """Resolve correlated safety-validation replies from the CCA."""
+
+        async def run(self):
+            agent: ProductAgent = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.5)
+            if not msg:
+                return
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning(
+                    "[Product] Malformed recovery_outline_safety_validated body."
+                )
+                return
+            if not isinstance(payload, dict):
+                agent.logger.warning(
+                    "[Product] Non-object recovery_outline_safety_validated body."
+                )
+                return
+            agent._resolve_recovery_outline_validation_reply(
+                response_type=RECOVERY_OUTLINE_SAFETY_VALIDATED,
+                sender=msg.sender,
+                payload=payload,
+            )
 
     class _PlanExecutor(CyclicBehaviour):
         """

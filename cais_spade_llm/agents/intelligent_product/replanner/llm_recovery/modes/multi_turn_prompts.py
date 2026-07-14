@@ -12,6 +12,7 @@ from cais_spade_llm.resources.resource_primitives import (
 from cais_spade_llm.resources.resource_profile import get_resource_profile
 
 _DEFAULT_CANDIDATE_BOUND = 5
+_ONE_STEP_CANDIDATE_COUNT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,15 @@ def _outline_task_view(task: dict[str, Any]) -> dict[str, Any]:
 
 _OUTLINE_STATE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "additionalProperties": True,
+    "additionalProperties": False,
+    "properties": {
+        "resource_state": {"type": "string", "minLength": 1},
+        "resource_location": {"type": ["string", "null"]},
+        "held_part": {"type": ["string", "null"]},
+        "part_state": {"type": "string", "minLength": 1},
+        "part_location": {"type": ["string", "null"]},
+    },
+    "required": ["resource_state"],
 }
 
 
@@ -110,7 +119,7 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "outline_id": {"type": "string"},
-        "event_name": {"type": "string"},
+        "event_name": {"type": "string", "minLength": 1},
         "resource_jid": {"type": "string"},
         "part_name": {"type": "string"},
         "expected_start_state": deepcopy(_OUTLINE_STATE_SCHEMA),
@@ -125,7 +134,129 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "expected_end_state",
         "rationale",
     ],
+    "allOf": [
+        {
+            "if": {"required": ["part_name"]},
+            "then": {
+                "properties": {
+                    "expected_start_state": {
+                        **deepcopy(_OUTLINE_STATE_SCHEMA),
+                        "required": ["resource_state", "held_part", "part_state"],
+                    },
+                    "expected_end_state": {
+                        **deepcopy(_OUTLINE_STATE_SCHEMA),
+                        "required": ["resource_state", "held_part", "part_state"],
+                    },
+                }
+            },
+        }
+    ],
 }
+
+
+def _json_schema_types_for_domain(domain: list[Any]) -> list[str]:
+    types: set[str] = set()
+    for value in domain:
+        if value is None:
+            types.add("null")
+        elif isinstance(value, bool):
+            types.add("boolean")
+        elif isinstance(value, int):
+            types.add("integer")
+        elif isinstance(value, float):
+            types.add("number")
+        elif isinstance(value, dict):
+            types.add("object")
+        elif isinstance(value, list):
+            types.add("array")
+        else:
+            types.add("string")
+    return sorted(types) or ["string", "number", "boolean", "object", "array", "null"]
+
+
+def _outline_symbolic_event_schema(
+    declared_state_variables: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not declared_state_variables:
+        return deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
+    state_schema = deepcopy(_OUTLINE_STATE_SCHEMA)
+    for field_name, declaration in sorted(declared_state_variables.items()):
+        token = str(field_name or "").strip()
+        if not token:
+            continue
+        domain = list(dict(declaration or {}).get("domain") or [])
+        field_schema: dict[str, Any] = {
+            "type": _json_schema_types_for_domain(domain)
+        }
+        if token in {"resource_state", "part_state"}:
+            field_schema["minLength"] = 1
+        state_schema["properties"][token] = field_schema
+    event_schema = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
+    event_schema["properties"]["expected_start_state"] = deepcopy(state_schema)
+    event_schema["properties"]["expected_end_state"] = deepcopy(state_schema)
+    event_schema["allOf"][0]["then"]["properties"]["expected_start_state"] = {
+        **deepcopy(state_schema),
+        "required": ["resource_state", "held_part", "part_state"],
+    }
+    event_schema["allOf"][0]["then"]["properties"]["expected_end_state"] = {
+        **deepcopy(state_schema),
+        "required": ["resource_state", "held_part", "part_state"],
+    }
+    return event_schema
+
+
+def _outline_candidate_schema_definitions(
+    declared_state_variables: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Return shared candidate schemas without repeating state declarations."""
+    expanded_event = _outline_symbolic_event_schema(declared_state_variables)
+    state_schema = deepcopy(
+        expanded_event["properties"]["expected_start_state"]
+    )
+    event_schema = deepcopy(expanded_event)
+    event_schema["properties"]["expected_start_state"] = {
+        "$ref": "#/$defs/outline_state"
+    }
+    event_schema["properties"]["expected_end_state"] = {
+        "$ref": "#/$defs/outline_state"
+    }
+    event_schema["allOf"] = [
+        {
+            "if": {"required": ["part_name"]},
+            "then": {
+                "properties": {
+                    "expected_start_state": {
+                        "allOf": [
+                            {"$ref": "#/$defs/outline_state"},
+                            {
+                                "required": [
+                                    "resource_state",
+                                    "held_part",
+                                    "part_state",
+                                ]
+                            },
+                        ]
+                    },
+                    "expected_end_state": {
+                        "allOf": [
+                            {"$ref": "#/$defs/outline_state"},
+                            {
+                                "required": [
+                                    "resource_state",
+                                    "held_part",
+                                    "part_state",
+                                ]
+                            },
+                        ]
+                    },
+                }
+            },
+        }
+    ]
+    return {
+        "outline_state": state_schema,
+        "outline_event": event_schema,
+    }
 
 
 def _outline_incremental_response_schema() -> dict[str, Any]:
@@ -155,12 +286,13 @@ def _outline_candidates_response_schema(
     action_horizon: str = "1",
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
     normalized_candidate_count: int | str
     if isinstance(candidate_count, str):
         candidate_count_token = candidate_count.strip().lower()
-        if candidate_count_token in {"auto", "n"}:
+        if candidate_count_token in {"adaptive", "auto", "n"}:
             normalized_candidate_count = "auto"
         else:
             try:
@@ -172,21 +304,38 @@ def _outline_candidates_response_schema(
             normalized_candidate_count = max(1, int(candidate_count))
         except (TypeError, ValueError):
             normalized_candidate_count = "auto"
-    if normalized_candidate_count == "auto":
+    normalized_horizon = str(action_horizon or "1").strip().lower()
+    if normalized_horizon not in {"1", "k", "full"}:
+        normalized_horizon = "1"
+    normalized_selection_mode = str(
+        recovery_selection_mode or "pure_llm"
+    ).strip().lower()
+    if normalized_selection_mode not in {"pure_llm", "neurosymbolic"}:
+        normalized_selection_mode = "pure_llm"
+    if normalized_selection_mode == "neurosymbolic":
+        normalized_horizon = "1"
+        candidate_min_items = 1
+        candidate_max_items = normalized_bound
+    elif normalized_horizon == "1":
+        candidate_min_items = _ONE_STEP_CANDIDATE_COUNT
+        candidate_max_items = _ONE_STEP_CANDIDATE_COUNT
+    elif normalized_candidate_count == "auto":
         candidate_min_items = 1
         candidate_max_items = normalized_bound
     else:
         candidate_min_items = int(normalized_candidate_count)
         candidate_max_items = int(normalized_candidate_count)
-    normalized_horizon = str(action_horizon or "1").strip().lower()
-    if normalized_horizon not in {"1", "k", "full"}:
-        normalized_horizon = "1"
     if normalized_horizon == "k" and action_horizon_steps not in (None, "", "full"):
         normalized_horizon_k = max(1, int(action_horizon_steps or action_horizon_k or 3))
     else:
         normalized_horizon_k = max(1, int(action_horizon_k or 3))
+    schema_definitions = _outline_candidate_schema_definitions(
+        declared_state_variables
+    )
+    candidate_item_schema = {"$ref": "#/$defs/outline_event"}
     required = ["thought"]
-    required.append("selected_candidate_index")
+    if normalized_selection_mode == "pure_llm":
+        required.append("selected_candidate_index")
     if normalized_horizon == "1":
         candidate_property_name = "candidate_events"
         required.append(candidate_property_name)
@@ -194,7 +343,7 @@ def _outline_candidates_response_schema(
             "type": "array",
             "minItems": candidate_min_items,
             "maxItems": candidate_max_items,
-            "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+            "items": deepcopy(candidate_item_schema),
         }
     else:
         candidate_property_name = "candidate_traces"
@@ -202,7 +351,7 @@ def _outline_candidates_response_schema(
         event_array_schema: dict[str, Any] = {
             "type": "array",
             "minItems": 1,
-            "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+            "items": deepcopy(candidate_item_schema),
         }
         if normalized_horizon == "k":
             event_array_schema["maxItems"] = normalized_horizon_k
@@ -220,20 +369,24 @@ def _outline_candidates_response_schema(
                 "required": ["events"],
             },
         }
+    response_properties: dict[str, Any] = {
+        "thought": {"type": "string"},
+        candidate_property_name: candidate_property,
+    }
+    if normalized_selection_mode == "pure_llm":
+        response_properties["selected_candidate_index"] = {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": max(0, candidate_max_items - 1),
+        }
     return {
         "name": "multi_turn_outline_candidates_response",
         "strict": False,
         "schema": {
             "type": "object",
-            "properties": {
-                "thought": {"type": "string"},
-                "selected_candidate_index": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": max(0, candidate_max_items - 1),
-                },
-                candidate_property_name: candidate_property,
-            },
+            "additionalProperties": False,
+            "$defs": schema_definitions,
+            "properties": response_properties,
             "required": required,
         },
     }
@@ -351,7 +504,7 @@ def _finalize_response_schema() -> dict[str, Any]:
     }
 
 
-def multi_turn_phase_response_schema(
+def multi_turn_phase_response_schema(  # noqa: PLR0913
     phase: str,
     *,
     outline_mode: str = "incremental",
@@ -361,6 +514,7 @@ def multi_turn_phase_response_schema(
     action_horizon: str = "1",
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
     normalized = phase.strip().lower()
@@ -375,6 +529,7 @@ def multi_turn_phase_response_schema(
                 action_horizon=action_horizon,
                 action_horizon_steps=action_horizon_steps,
                 action_horizon_k=action_horizon_k,
+                declared_state_variables=declared_state_variables,
             )
         return _outline_incremental_response_schema()
     if normalized == "grounding":
@@ -403,7 +558,6 @@ def build_multi_turn_phase_prompt_input(
     current_recovery_blockers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the structured prompt input payload for a given phase."""
-    outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     return {
         "phase": phase,
         "llm_input": deepcopy(llm_input),
@@ -973,14 +1127,15 @@ def _render_des_event_diagnostic(
     resources_by_jid: dict[str, dict[str, Any]] | None = None,
     parts_by_name: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    diagnostic = _des_diagnostic_fields(finding)
+    constraint_code = str(
+        finding.get("constraint_code") or "validation_rejected"
+    ).strip()
+    reason = str(finding.get("reason") or "Candidate was rejected.").strip()
     line = (
         f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
-        f" | event_status={diagnostic['event_status']}"
-        f" | diagnosis={diagnostic['diagnosis']}"
-        f" | guard_or_condition={diagnostic['guard_or_condition']}"
+        f" | constraint_code={constraint_code}"
+        f" | reason={reason}"
         f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
-        f" | re_enablement={diagnostic['re_enablement']}"
     )
     if _finding_durable(finding):
         line += " | persistence=diagnosis persists until the relevant projected state facts change"
@@ -1236,7 +1391,47 @@ def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str
     return history
 
 
-def _candidate_rejection_learning_summary(
+def _compact_selection_feedback_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep only comparison evidence that can change the next LLM proposal."""
+    evidence = dict(row.get("evidence") or {})
+    compact: dict[str, Any] = {}
+    for field_name in (
+        "nondominated_candidate_ids",
+        "selection_revision_count",
+        "selection_revision_limit",
+    ):
+        if field_name in evidence:
+            compact[field_name] = deepcopy(evidence.get(field_name))
+    comparison = []
+    for candidate in evidence.get("candidate_comparison") or []:
+        if not isinstance(candidate, dict):
+            continue
+        selection_evidence = dict(candidate.get("selection_evidence") or {})
+        comparison.append(
+            {
+                "candidate_id": str(candidate.get("candidate_id") or ""),
+                "selection_status": str(
+                    candidate.get("selection_status") or ""
+                ),
+                "cleared_recovery_obligation_ids": deepcopy(
+                    selection_evidence.get("cleared_recovery_obligation_ids") or []
+                ),
+                "open_recovery_obligation_ids_after": deepcopy(
+                    selection_evidence.get("open_recovery_obligation_ids_after")
+                    or []
+                ),
+                "newly_enabled_recovery_event_ids": deepcopy(
+                    selection_evidence.get("newly_enabled_recovery_event_ids")
+                    or []
+                ),
+            }
+        )
+    if comparison:
+        compact["candidate_comparison"] = comparison
+    return compact
+
+
+def _candidate_rejection_learning_summary(  # noqa: C901
     *,
     history: list[dict[str, Any]],
     feedback_rows: list[dict[str, Any]],
@@ -1284,6 +1479,21 @@ def _candidate_rejection_learning_summary(
 
         for row in feedback_rows:
             if not isinstance(row, dict):
+                continue
+            if str(row.get("constraint_code") or "").strip():
+                constraint_code = str(row.get("constraint_code") or "").strip()
+                if constraint_code in {
+                    "no_progressing_candidate",
+                    "selection_ambiguous",
+                    "selection_unresolved",
+                }:
+                    line_by_key[("", "", "", constraint_code, "", "")] = (
+                        f"- model_based_selection [{constraint_code}]: "
+                        f"{str(row.get('reason') or '').strip()} | evidence="
+                        f"{_compact_json(_compact_selection_feedback_evidence(row))}"
+                    )
+                    continue
+                _add_des_rows(task={}, findings=[row])
                 continue
             _add_des_rows(
                 task=dict(row.get("task") or {}),
@@ -1365,6 +1575,22 @@ def _candidate_rejection_learning_summary(
 
     for row in feedback_rows:
         if not isinstance(row, dict):
+            continue
+        if str(row.get("constraint_code") or "").strip():
+            constraint_code = str(row.get("constraint_code") or "").strip()
+            if constraint_code in {
+                "no_progressing_candidate",
+                "selection_ambiguous",
+                "selection_unresolved",
+            }:
+                key = ("", "", "", constraint_code, str(row.get("reason") or ""))
+                line_by_key[key] = (
+                    f"- candidate [{constraint_code}]: "
+                    f"{str(row.get('reason') or '').strip()} | evidence="
+                    f"{_compact_json(_compact_selection_feedback_evidence(row))}"
+                )
+                continue
+            _add_evaluation(task={}, findings=[row])
             continue
         _add_evaluation(
             task=dict(row.get("task") or {}),
@@ -2223,6 +2449,9 @@ def _history_derived_pruned_actions_summary(
     for row in candidate_rejection_feedback or []:
         if not isinstance(row, dict):
             continue
+        if str(row.get("constraint_code") or "").strip():
+            _add_row(task={}, findings=[row])
+            continue
         _add_row(
             task=dict(row.get("task") or {}),
             findings=[
@@ -2398,8 +2627,6 @@ def _prompt_outline_resource_view(resource: dict[str, Any]) -> dict[str, Any]:
         view["resource_location"] = deepcopy(resource.get("current_location"))
     if "current_pose" in resource:
         view["current_pose"] = deepcopy(resource.get("current_pose"))
-    if "workspace_bounds" in resource:
-        view["workspace_bounds"] = deepcopy(resource.get("workspace_bounds"))
     return view
 
 
@@ -2814,9 +3041,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         for row in (session_state.get("primitive_escalation_diagnostics") or [])
         if isinstance(row, dict)
     ]
-    candidate_rejection_history = _candidate_rejection_history(session_state)
     is_single_pass = outline_mode == "single_pass"
     is_candidate_mode = outline_mode == "incremental_candidates_validated"
+    recovery_selection_mode = str(
+        session_state.get("recovery_selection_mode") or "pure_llm"
+    ).strip().lower()
+    if recovery_selection_mode not in {"pure_llm", "neurosymbolic"}:
+        recovery_selection_mode = "pure_llm"
+    candidate_rejection_history = (
+        [] if is_candidate_mode else _candidate_rejection_history(session_state)
+    )
     action_horizon = str(session_state.get("action_horizon") or "1").strip().lower()
     if action_horizon not in {"1", "k", "full"}:
         action_horizon = "1"
@@ -2871,16 +3105,37 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Author the expected symbolic start and end states directly."
         )
     elif is_candidate_mode:
-        selection_owner_text = (
-            "You must choose the best candidate by setting `selected_candidate_index`."
-        )
-        horizon_text = {
-            "1": "Each candidate contains exactly one next recovery event.",
-            "k": (
-                f"Each candidate contains a sequence of up to {action_horizon_steps} next recovery events."
-            ),
-            "full": "Each candidate contains a complete recovery outline trace.",
-        }[action_horizon]
+        if recovery_selection_mode == "neurosymbolic":
+            candidate_budget = max(
+                1,
+                int(
+                    session_state.get("candidate_proposal_budget")
+                    or session_state.get("candidate_bound")
+                    or _DEFAULT_CANDIDATE_BOUND
+                ),
+            )
+            selection_owner_text = (
+                "Do not select or rank the candidates; validated projected DES product "
+                "states are compared after generation."
+            )
+            horizon_text = (
+                "Propose every materially distinct supported next recovery event you can "
+                f"ground, from one up to {candidate_budget}; do not pad the list."
+            )
+        else:
+            selection_owner_text = (
+                "You must choose the best candidate by setting `selected_candidate_index`."
+            )
+            horizon_text = {
+                "1": (
+                    "Propose exactly three candidates; each contains exactly one next "
+                    "recovery event."
+                ),
+                "k": (
+                    f"Each candidate contains a sequence of up to {action_horizon_steps} next recovery events."
+                ),
+                "full": "Each candidate contains a complete recovery outline trace.",
+            }[action_horizon]
         role_text = (
             "You are the active replanner for a recovery session.\n"
             "Current phase: Recovery Event Candidate Proposal.\n"
@@ -2890,12 +3145,22 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             f"{selection_owner_text}\n"
             "Return authored symbolic rows only; Product validates the stated transition."
         )
-        if candidate_rejection_feedback or candidate_rejection_history:
+        if candidate_rejection_feedback:
             role_text += (
                 "\nUse listed diagnostics as projected-state evidence and avoid "
                 "repeating candidate events that remain disabled or blocked_by_supervisor "
                 "under unchanged facts."
             )
+            if any(
+                str(row.get("constraint_code") or "").strip()
+                == "selection_ambiguous"
+                for row in candidate_rejection_feedback
+                if isinstance(row, dict)
+            ):
+                role_text += (
+                    "\nReturn at most one representative for each exact equivalent "
+                    "successor class listed in the comparison evidence."
+                )
     else:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
@@ -3022,14 +3287,38 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         candidate_property_name = (
             "`candidate_events`" if action_horizon == "1" else "`candidate_traces`"
         )
+        if recovery_selection_mode == "neurosymbolic":
+            candidate_budget = max(
+                1,
+                int(
+                    session_state.get("candidate_proposal_budget")
+                    or session_state.get("candidate_bound")
+                    or _DEFAULT_CANDIDATE_BOUND
+                ),
+            )
+            response_rule = (
+                f"- Return one JSON object with `thought` and {candidate_property_name}; "
+                "do not return `selected_candidate_index`."
+            )
+            count_rules = [
+                f"- `candidate_events` must contain one to {candidate_budget} materially distinct candidates without padding."
+            ]
+        else:
+            response_rule = (
+                f"- Return one JSON object with `thought`, {candidate_property_name}, and "
+                "an integer `selected_candidate_index` pointing at your chosen candidate."
+            )
+            count_rules = (
+                ["- `candidate_events` must contain exactly three candidates."]
+                if action_horizon == "1"
+                else []
+            )
         sections.extend(
             [
                 "",
                 "Recovery Candidate Rules",
-                (
-                    f"- Return one JSON object with `thought`, {candidate_property_name}, and "
-                    "an integer `selected_candidate_index` pointing at your chosen candidate."
-                ),
+                response_rule,
+                *count_rules,
                 (
                     "- Each candidate is one physical action by one listed resource with "
                     "`outline_id`, `event_name`, `resource_jid`, `expected_start_state`, "
@@ -3045,22 +3334,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "is present, both state objects include `held_part` and `part_state`."
                 ),
                 (
-                    "- You may author a new `event_name` and new `resource_state` or "
-                    "`part_state` tokens in `expected_end_state`; accepted tokens remain exact "
-                    "symbols in later turns."
+                    "- You may author a new `event_name` and optional new `resource_state` "
+                    "or `part_state` values."
                 ),
                 (
-                    "- A new state token must accompany a concrete holder or location effect, or "
-                    "directly clear a listed recovery condition; changing only a label is invalid."
+                    "- A new state name has no meaning by itself and must accompany a concrete "
+                    "state effect or satisfy a listed recovery condition."
                 ),
                 (
-                    "- If `expected_end_state.resource_state` is an advertised named-pose token, "
-                    "`expected_end_state.resource_location` must preserve that same exact token."
-                ),
-                (
-                    "- Use only listed resource, part, predicate, location, and named-pose tokens; "
-                    "keep existing tokens unchanged, omit execution-layer fields, and split "
-                    "compound recoveries into separate candidates."
+                    "- Use only supplied resources, parts, locations, named poses, predicates, "
+                    "and resource-specific values."
                 ),
             ]
         )

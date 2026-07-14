@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
@@ -19,6 +20,11 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
 )
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    RECOVERY_OUTLINE_PHYSICAL_VALIDATE,
+    RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+    recovery_validation_fingerprint,
+)
 
 
 class ResourceAgent(LlmAgent):
@@ -97,6 +103,15 @@ class ResourceAgent(LlmAgent):
         t_safety.set_metadata("type", "safety_decision")
         self.add_behaviour(self._SafetyDecisionInbox(), t_safety)
 
+        t_recovery_physical_validate = Template()
+        t_recovery_physical_validate.set_metadata(
+            "type", RECOVERY_OUTLINE_PHYSICAL_VALIDATE
+        )
+        self.add_behaviour(
+            self._RecoveryOutlinePhysicalValidationInbox(),
+            t_recovery_physical_validate,
+        )
+
     def _snapshot_state(self) -> dict[str, Any]:
         """
         Best-effort snapshot of resource state for failure context.
@@ -145,10 +160,67 @@ class ResourceAgent(LlmAgent):
             )
         return deepcopy(self._recovery_synthesis_primitive_catalog_cache)
 
+    def recovery_des_model(
+        self,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return this RA's local recovery extended finite automaton."""
+        from cais_spade_llm.resources.resource_primitives import (
+            build_recovery_des_model,
+        )
+
+        return build_recovery_des_model(
+            self,
+            snapshot=snapshot,
+        )
+
     def invalidate_recovery_primitive_catalog(self) -> None:
         """Clear cached primitive catalogs after resource primitive changes."""
         self._recovery_execution_primitive_catalog_cache = None
         self._recovery_synthesis_primitive_catalog_cache = None
+
+    def recovery_validation_resource_matches(self, resource_jid: str) -> bool:
+        """Return whether a physical-validation request targets this exact RA."""
+        receiving_jid = str(getattr(self, "jid", "") or "").strip().split("/", 1)[0]
+        requested_jid = str(resource_jid or "").strip().split("/", 1)[0]
+        return bool(requested_jid and requested_jid == receiving_jid)
+
+    @staticmethod
+    def recovery_physical_validation_snapshot(
+        *,
+        live_snapshot: dict[str, Any],
+        physical_input: dict[str, Any],
+        recovery_des_model: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Overlay PA-projected dynamic facts on fresh RA capability evidence."""
+        validation_snapshot = deepcopy(live_snapshot or {})
+        if physical_input.get("use_projected_recovery_snapshot") is not True:
+            return validation_snapshot
+        projected_snapshot = physical_input.get("projected_recovery_snapshot")
+        if not isinstance(projected_snapshot, dict):
+            return validation_snapshot
+
+        declared_fields = set(
+            dict((recovery_des_model or {}).get("state_variables") or {})
+        )
+        declared_fields.update(
+            {
+                "resource_state",
+                "current_state",
+                "resource_location",
+                "current_location",
+                "held_part",
+                "gripper_state",
+                "occupancy",
+            }
+        )
+        for field_name in sorted(declared_fields):
+            if field_name in projected_snapshot:
+                validation_snapshot[field_name] = deepcopy(
+                    projected_snapshot.get(field_name)
+                )
+        return validation_snapshot
 
     def check_recovery_physical_feasibility(
         self,
@@ -158,13 +230,115 @@ class ResourceAgent(LlmAgent):
         grounded_action: dict[str, Any] | None = None,
         **_compat_kwargs: Any,
     ) -> dict[str, Any]:
-        """Return the default permissive recovery physical feasibility result.
+        """Fail closed when a resource has no physical recovery validator.
 
         Subclasses (RobotAgent, PrintingAgent) can override with
         resource-specific checks.
         """
         del part_context, recovery_snapshot, grounded_action
-        return {"allowed": True, "reason": "default permissive physical feasibility check"}
+        return {
+            "allowed": False,
+            "constraint_code": "resource_validation_unavailable",
+            "reason": "resource_validation_unavailable",
+        }
+
+    def validate_recovery_outline_physical_candidates(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate one same-resource candidate batch against one fresh snapshot."""
+        validator_jid = str(self.jid)
+        snapshot = self.get_recovery_snapshot()
+        recovery_des_model_method = getattr(self, "recovery_des_model", None)
+        if callable(recovery_des_model_method):
+            recovery_des_model = recovery_des_model_method(snapshot=snapshot)
+        else:
+            recovery_des_model = {}
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        results: list[dict[str, Any]] = []
+        for row in candidates:
+            candidate = row if isinstance(row, dict) else {}
+            task = candidate.get("task")
+            task = task if isinstance(task, dict) else {}
+            candidate_index = int(candidate.get("candidate_index") or 0)
+            resource_jid = str(task.get("resource_jid") or "").strip()
+            if not self.recovery_validation_resource_matches(resource_jid):
+                result = {
+                    "allowed": False,
+                    "constraint_code": "wrong_resource_validator",
+                    "reason": (
+                        f"candidate resource_jid '{resource_jid}' does not match "
+                        f"receiving ResourceAgent '{validator_jid}'"
+                    ),
+                }
+            else:
+                physical_input = candidate.get("physical_input")
+                physical_input = (
+                    physical_input if isinstance(physical_input, dict) else {}
+                )
+                validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
+                    live_snapshot=snapshot,
+                    physical_input=physical_input,
+                    recovery_des_model=recovery_des_model,
+                )
+                result = self.check_recovery_physical_feasibility(
+                    part_context=deepcopy(physical_input.get("part_context") or {}),
+                    recovery_snapshot=validation_snapshot,
+                    grounded_action=deepcopy(
+                        physical_input.get("grounded_action") or {}
+                    ),
+                    operation_kind=str(physical_input.get("operation_kind") or ""),
+                    part_name=(
+                        str(physical_input.get("part_name") or "").strip() or None
+                    ),
+                )
+                if not isinstance(result, dict):
+                    result = {
+                        "allowed": False,
+                        "constraint_code": "resource_validation_unavailable",
+                        "reason": "ResourceAgent returned a malformed validation result",
+                    }
+            allowed = bool(result.get("allowed") is True)
+            findings: list[dict[str, Any]] = []
+            if not allowed:
+                findings.append(
+                    {
+                        "validation_category": "physical_feasibility",
+                        "constraint_owner": "resource",
+                        "constraint_family": "resource_feasibility",
+                        "constraint_code": str(
+                            result.get("constraint_code")
+                            or "resource_feasibility_rejected"
+                        ),
+                        "reason": str(
+                            result.get("reason")
+                            or "ResourceAgent rejected physical feasibility"
+                        ),
+                        "resource_jid": resource_jid or validator_jid,
+                        "part_name": task.get("part_name"),
+                        "evidence": deepcopy(result.get("evidence") or {}),
+                    }
+                )
+            results.append(
+                {
+                    "candidate_index": candidate_index,
+                    "allowed": allowed,
+                    "findings": findings,
+                    "resource_result": deepcopy(result),
+                }
+            )
+        return {
+            "validator_jid": validator_jid,
+            "snapshot": deepcopy(snapshot),
+            "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
+            "recovery_des_model": deepcopy(recovery_des_model),
+            "recovery_des_model_fingerprint": str(
+                recovery_des_model.get("descriptor_fingerprint") or ""
+            ),
+            "results": results,
+        }
 
     async def generate_recovery_primitives_batch(
         self,
@@ -930,6 +1104,71 @@ class ResourceAgent(LlmAgent):
                 self,
                 reply,
                 transport_label="resource_ack",
+            )
+
+    class _RecoveryOutlinePhysicalValidationInbox(CyclicBehaviour):
+        """Validate recovery candidates using this ResourceAgent's live state."""
+
+        async def run(self) -> None:
+            agent: ResourceAgent = self.agent  # type: ignore
+            msg = await self.receive(timeout=0.05)
+            if not msg:
+                return
+            started_at = time.perf_counter()
+            try:
+                payload = json.loads(msg.body or "{}")
+            except json.JSONDecodeError:
+                agent.logger.warning(
+                    "[Resource] Malformed recovery_outline_physical_validate body"
+                )
+                return
+            if not isinstance(payload, dict):
+                agent.logger.warning(
+                    "[Resource] Non-object recovery_outline_physical_validate body"
+                )
+                return
+
+            validation = agent.validate_recovery_outline_physical_candidates(payload)
+            validator_jid = str(validation.get("validator_jid") or agent.jid)
+            snapshot = dict(validation.get("snapshot") or {})
+            snapshot_fingerprint = str(
+                validation.get("snapshot_fingerprint") or ""
+            )
+            recovery_des_model = dict(
+                validation.get("recovery_des_model") or {}
+            )
+            recovery_des_model_fingerprint = str(
+                validation.get("recovery_des_model_fingerprint") or ""
+            )
+            results = [
+                deepcopy(row)
+                for row in (validation.get("results") or [])
+                if isinstance(row, dict)
+            ]
+            response = {
+                "request_id": str(payload.get("request_id") or ""),
+                "recovery_session_id": str(
+                    payload.get("recovery_session_id") or ""
+                ),
+                "turn_index": int(payload.get("turn_index") or 0),
+                "state_fingerprint": str(payload.get("state_fingerprint") or ""),
+                "validator_jid": validator_jid,
+                "snapshot": deepcopy(snapshot),
+                "snapshot_fingerprint": snapshot_fingerprint,
+                "recovery_des_model": deepcopy(recovery_des_model),
+                "recovery_des_model_fingerprint": recovery_des_model_fingerprint,
+                "results": results,
+                "latency_ms": (time.perf_counter() - started_at) * 1000.0,
+                "mocked": False,
+            }
+            reply = Message(to=str(payload.get("product_jid") or msg.sender or ""))
+            reply.set_metadata("type", RECOVERY_OUTLINE_PHYSICAL_VALIDATED)
+            reply.body = json.dumps(response, default=str)
+            await send_agent_message(
+                self,
+                reply,
+                trace_category=RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+                transport_label=RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
             )
 
     class _SafetyDecisionInbox(CyclicBehaviour):

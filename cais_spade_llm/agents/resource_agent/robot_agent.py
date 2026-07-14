@@ -1598,6 +1598,48 @@ class RobotAgent(ResourceAgent):
             )
         return deepcopy(self._recovery_synthesis_primitive_catalog_cache)
 
+    def recovery_des_model(
+        self,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the robot's private task-level recovery DES model."""
+        from cais_spade_llm.resources.resource_primitives import (
+            build_recovery_des_model,
+        )
+        from cais_spade_llm.resources.robot.robot_tasks import (
+            robot_recovery_des_descriptor,
+        )
+
+        live_snapshot = deepcopy(snapshot or self.get_recovery_snapshot())
+        task_names = self.resolve_registered_function_names(
+            static_capabilities=self.static_capabilities,
+            named_positions=self.named_positions,
+            controller_config=self.controller_config,
+        )
+        raw_descriptor = robot_recovery_des_descriptor(
+            resource_jid=str(self.jid),
+            snapshot=live_snapshot,
+            task_names=task_names,
+            reachable_locations=list(
+                live_snapshot.get("reachable_locations")
+                or self.static_capabilities.get("reachability")
+                or []
+            ),
+            named_poses=list(
+                live_snapshot.get("named_poses") or self.named_positions or []
+            ),
+            marked_state_conditions=list(
+                self.static_capabilities.get("recovery_marked_state_conditions")
+                or []
+            ),
+        )
+        return build_recovery_des_model(
+            self,
+            snapshot=live_snapshot,
+            descriptor=raw_descriptor,
+        )
+
     def _cached_primitive_catalog(self) -> list:
         """Return the cached primitive catalog, building it on first access."""
         return self.recovery_execution_primitive_catalog()
@@ -1695,7 +1737,7 @@ class RobotAgent(ResourceAgent):
         """
         bounds = self.static_capabilities.get("workspace_bounds")
         if not bounds or not isinstance(bounds, dict):
-            return True, "no workspace_bounds configured; defaulting to allowed"
+            return False, "workspace_bounds capability data is unavailable"
 
         violations: list[str] = []
         for axis in ("x", "y", "z"):
@@ -1717,7 +1759,7 @@ class RobotAgent(ResourceAgent):
             return False, f"pose outside workspace: {', '.join(violations)}"
         return True, "pose within workspace bounds"
 
-    def check_recovery_physical_feasibility(
+    def check_recovery_physical_feasibility(  # noqa: C901
         self,
         *,
         part_context: dict[str, Any],
@@ -1774,7 +1816,23 @@ class RobotAgent(ResourceAgent):
             )
             if str(name).strip()
         }
-        if named_pose and available_named_poses and named_pose not in available_named_poses:
+        if named_pose and not available_named_poses:
+            return {
+                "allowed": False,
+                "constraint_code": "resource_validation_unavailable",
+                "guard": {
+                    "kind": "named_pose_capability_unavailable",
+                    "resource_jid": str(getattr(self, "jid", "") or ""),
+                    "named_pose": named_pose,
+                },
+                "reason": "named-pose capability data is unavailable on this robot",
+                "evidence": {
+                    **evidence,
+                    "named_pose": named_pose,
+                    "available_named_poses": [],
+                },
+            }
+        if named_pose and named_pose not in available_named_poses:
             return {
                 "allowed": False,
                 "constraint_code": "named_pose_unavailable",
@@ -1994,9 +2052,14 @@ class RobotAgent(ResourceAgent):
         evidence["workspace_bounds"] = deepcopy(
             self.static_capabilities.get("workspace_bounds") or {}
         )
+        workspace_data_unavailable = "capability data is unavailable" in reason
         return {
             "allowed": inside,
-            "constraint_code": "workspace_unreachable" if not inside else None,
+            "constraint_code": (
+                "resource_validation_unavailable"
+                if workspace_data_unavailable
+                else "workspace_unreachable" if not inside else None
+            ),
             "guard": (
                 {
                     "kind": "observed_pose_unreachable",
