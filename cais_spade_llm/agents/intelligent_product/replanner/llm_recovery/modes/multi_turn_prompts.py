@@ -31,12 +31,6 @@ _PHASE_TITLES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-_OUTLINE_PART_STATE_FIELDS = (
-    "part_state",
-    "part_location",
-)
-
-
 def _task_resource_jid(task: dict[str, Any]) -> str:
     return str(task.get("resource_jid") or task.get("resource_binding") or "").strip()
 
@@ -134,23 +128,6 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "expected_end_state",
         "rationale",
     ],
-    "allOf": [
-        {
-            "if": {"required": ["part_name"]},
-            "then": {
-                "properties": {
-                    "expected_start_state": {
-                        **deepcopy(_OUTLINE_STATE_SCHEMA),
-                        "required": ["resource_state", "held_part", "part_state"],
-                    },
-                    "expected_end_state": {
-                        **deepcopy(_OUTLINE_STATE_SCHEMA),
-                        "required": ["resource_state", "held_part", "part_state"],
-                    },
-                }
-            },
-        }
-    ],
 }
 
 
@@ -194,14 +171,6 @@ def _outline_symbolic_event_schema(
     event_schema = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
     event_schema["properties"]["expected_start_state"] = deepcopy(state_schema)
     event_schema["properties"]["expected_end_state"] = deepcopy(state_schema)
-    event_schema["allOf"][0]["then"]["properties"]["expected_start_state"] = {
-        **deepcopy(state_schema),
-        "required": ["resource_state", "held_part", "part_state"],
-    }
-    event_schema["allOf"][0]["then"]["properties"]["expected_end_state"] = {
-        **deepcopy(state_schema),
-        "required": ["resource_state", "held_part", "part_state"],
-    }
     return event_schema
 
 
@@ -220,39 +189,6 @@ def _outline_candidate_schema_definitions(
     event_schema["properties"]["expected_end_state"] = {
         "$ref": "#/$defs/outline_state"
     }
-    event_schema["allOf"] = [
-        {
-            "if": {"required": ["part_name"]},
-            "then": {
-                "properties": {
-                    "expected_start_state": {
-                        "allOf": [
-                            {"$ref": "#/$defs/outline_state"},
-                            {
-                                "required": [
-                                    "resource_state",
-                                    "held_part",
-                                    "part_state",
-                                ]
-                            },
-                        ]
-                    },
-                    "expected_end_state": {
-                        "allOf": [
-                            {"$ref": "#/$defs/outline_state"},
-                            {
-                                "required": [
-                                    "resource_state",
-                                    "held_part",
-                                    "part_state",
-                                ]
-                            },
-                        ]
-                    },
-                }
-            },
-        }
-    ]
     return {
         "outline_state": state_schema,
         "outline_event": event_schema,
@@ -670,7 +606,13 @@ def _compact_recovery_goals(
         if not isinstance(blocker, dict):
             continue
         kind = str(blocker.get("kind") or "").strip()
-        if kind == "focused_resource_terminal_state":
+        if kind in {
+            "focused_resource_terminal_state",
+            "safety_destination_occupancy",
+        }:
+            # Destination occupancy is already visible in Current DES State and
+            # its governing rule is rendered under Safety Rules. Keep the
+            # derived blocker private so it cannot steer candidate generation.
             continue
         if str(blocker.get("entity_kind") or "").strip() == "part":
             entity = str(blocker.get("entity") or "").strip()
@@ -1928,9 +1870,8 @@ def _active_event_start_facts_for_prompt(
             resource["current_location"] = deepcopy(expected_start.get("resource_location"))
         if "held_part" in expected_start:
             resource["held_part"] = deepcopy(expected_start.get("held_part"))
-            resource["gripper_state"] = (
-                "closed" if expected_start.get("held_part") not in (None, "") else "open"
-            )
+        if "gripper_state" in expected_start:
+            resource["gripper_state"] = deepcopy(expected_start.get("gripper_state"))
 
     for part in projected_parts:
         if str(part.get("part_name") or "").strip() != part_name:
@@ -2146,6 +2087,15 @@ def _candidate_grounding_target_refs(
     for part in projected_parts:
         if not isinstance(part, dict):
             continue
+        held_location = ""
+        if str(
+            part.get("part_holder_resource_jid")
+            or part.get("current_holder_resource_jid")
+            or ""
+        ).strip():
+            held_location = str(
+                part.get("part_location") or part.get("current_location") or ""
+            ).strip()
         for raw_token in (
             part.get("origin_location"),
             part.get("goal_location"),
@@ -2153,7 +2103,7 @@ def _candidate_grounding_target_refs(
             part.get("current_location"),
         ):
             token = str(raw_token or "").strip()
-            if not token or token.endswith("_gripper"):
+            if not token or token == held_location:
                 continue
             if token not in tokens:
                 tokens.append(token)
@@ -2576,7 +2526,6 @@ def _slim_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
         "current_state",
         "current_location",
         "held_part",
-        "gripper_state",
         "current_pose",
         "current_pose_ref",
         "workspace_bounds",
@@ -3330,8 +3279,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "fields exactly."
                 ),
                 (
-                    "- `part_state` and `part_location` require `part_name`; when `part_name` "
-                    "is present, both state objects include `held_part` and `part_state`."
+                    "- `part_state` and `part_location` require `part_name`. Use `held_part` "
+                    "only when it is present for the responsible resource. When custody "
+                    "changes, include the exact `part_location` if that field is supplied."
                 ),
                 (
                     "- You may author a new `event_name` and optional new `resource_state` "
@@ -3377,7 +3327,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "- Each transition must include outline_id, event_name, resource_jid, expected_start_state, expected_end_state, and rationale.",
                 "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
                 "- Author both expected_start_state and expected_end_state in outline mode.",
-                "- If part_name is present, expected_start_state and expected_end_state must include held_part and part_state; include part_location only when the row constrains a part location.",
+                "- If part_name is present, include only the relevant supplied part fields; when custody changes, include the exact part_location if that field is supplied.",
                 "- If part_name is absent, do not emit part-specific state keys.",
                 "- Bind only entities and location tokens grounded in the current plant state.",
                 "- Rationale should explain enabledness or which recovery goal is advanced.",

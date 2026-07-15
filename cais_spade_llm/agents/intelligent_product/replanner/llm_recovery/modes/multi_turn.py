@@ -62,16 +62,6 @@ _DURABLE_PRUNED_CONSTRAINT_CODES = {
     "order_violation",
 }
 
-_OUTLINE_PART_STATE_FIELDS = (
-    "part_state",
-    "part_location",
-)
-
-_OUTLINE_REQUIRED_PART_STATE_FIELDS = (
-    "held_part",
-    "part_state",
-)
-
 _TRANSITIONS: dict[str, dict[str, str]] = {
     "grounding": {
         "observe": "grounding",
@@ -1515,9 +1505,8 @@ def _continuation_condition_satisfied(  # noqa: C901, PLR0912
             "current_location": ("current_location", "resource_location"),
             "resource_location": ("resource_location", "current_location"),
             "held_part": ("held_part",),
-            "gripper_state": ("gripper_state",),
         }
-        aliases = resource_field_aliases.get(field)
+        aliases = resource_field_aliases.get(field, (field,))
         if row and aliases:
             actual = next(
                 (row.get(alias) for alias in aliases if alias in row),
@@ -1559,15 +1548,16 @@ def _continuation_condition_satisfied(  # noqa: C901, PLR0912
         row = dict(resources_by_jid.get(entity) or {})
         if not row:
             return False
-        if field == "current_state":
-            return _condition_expected_matches(row.get("current_state"), expected)
-        if field == "current_location":
-            return _condition_expected_matches(row.get("current_location"), expected)
-        if field == "held_part":
-            return _condition_expected_matches(row.get("held_part"), expected)
-        if field == "gripper_state":
-            return _condition_expected_matches(row.get("gripper_state"), expected)
-        return False
+        aliases = {
+            "state": ("current_state", "resource_state"),
+            "current_state": ("current_state", "resource_state"),
+            "resource_state": ("resource_state", "current_state"),
+            "location": ("current_location", "resource_location"),
+            "current_location": ("current_location", "resource_location"),
+            "resource_location": ("resource_location", "current_location"),
+        }.get(field, (field,))
+        actual = next((row.get(alias) for alias in aliases if alias in row), None)
+        return _condition_expected_matches(actual, expected)
 
     if kind == "resource_terminal_state" and entity_kind == "part" and entity:
         row = dict(parts_by_name.get(entity) or {})
@@ -2241,6 +2231,7 @@ def _candidate_state_completeness_findings(
     part_name: str,
     start_state: dict[str, Any],
     end_state: dict[str, Any],
+    state_variables: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Require the LLM to emit every explicit predicate key.
 
@@ -2250,10 +2241,13 @@ def _candidate_state_completeness_findings(
     asked to emit the field directly.
     """
     findings: list[dict[str, Any]] = []
-    required_always = ("resource_state",)
-    required_keys = list(required_always) + (
-        list(_OUTLINE_REQUIRED_PART_STATE_FIELDS) if part_name else []
-    )
+    required_keys = ["resource_state"]
+    if part_name:
+        required_keys.extend(
+            field_name
+            for field_name in ("held_part", "part_state")
+            if field_name in state_variables
+        )
     for side, state in (("expected_start_state", start_state), ("expected_end_state", end_state)):
         missing = [key for key in required_keys if key not in state]
         if missing:
@@ -2266,7 +2260,12 @@ def _candidate_state_completeness_findings(
             )
             continue
         if not part_name:
-            unexpected = [key for key in _OUTLINE_PART_STATE_FIELDS if key in state]
+            unexpected = [
+                key
+                for key in state
+                if str(dict(state_variables.get(key) or {}).get("scope") or "resource")
+                == "part"
+            ]
             if unexpected:
                 findings.append(
                     _candidate_schema_finding(
@@ -2278,6 +2277,27 @@ def _candidate_state_completeness_findings(
                         evidence={"field": side, "unexpected": unexpected},
                     )
                 )
+    if (
+        part_name
+        and "held_part" in state_variables
+        and "part_location" in state_variables
+        and str(end_state.get("held_part") or "").strip() == part_name
+        and str(start_state.get("held_part") or "").strip() != part_name
+        and "part_location" not in end_state
+    ):
+        findings.append(
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason=(
+                    "expected_end_state is missing RA-declared part_location for "
+                    f"new custody of '{part_name}'"
+                ),
+                evidence={
+                    "field": "expected_end_state",
+                    "missing": ["part_location"],
+                },
+            )
+        )
     return findings
 
 
@@ -2364,6 +2384,24 @@ def _derive_candidate_outline_task(
     event_name = str(candidate_task.get("event_name") or "").strip()
     part_name = _task_part_name(candidate_task)
     rationale = str(candidate_task.get("rationale") or "").strip()
+    recovery_entry = dict(
+        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
+            resource_jid
+        )
+        or {}
+    )
+    recovery_des_model = dict(
+        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
+        or recovery_entry.get("recovery_des_model")
+        or {}
+    )
+    state_variables = {
+        str(field_name): dict(declaration or {})
+        for field_name, declaration in dict(
+            recovery_des_model.get("state_variables") or {}
+        ).items()
+        if str(field_name)
+    }
 
     unexpected_top_level = sorted(
         key for key in candidate_task if str(key or "").strip() and key not in allowed_fields
@@ -2460,6 +2498,7 @@ def _derive_candidate_outline_task(
         part_name=part_name,
         start_state=start_state,
         end_state=end_state,
+        state_variables=state_variables,
     )
     if completeness_findings:
         return None, completeness_findings
@@ -2515,8 +2554,9 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901
 
     The accepted LLM end state is authoritative. Missing end-state keys leave
     the corresponding symbolic field unchanged. Explicit ``held_part`` effects
-    also keep the existing part holder and location fields consistent across
-    turns.
+    update the common custody fields. Part locations change only when the end
+    state supplies an exact ``part_location``; PA does not invent a
+    resource-specific custody location.
     """
     resource_jid = _task_resource_jid(task)
     part_name = _task_part_name(task)
@@ -2541,10 +2581,6 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901
             res["current_state"] = deepcopy(end_state.get("resource_state"))
         if "held_part" in end_state:
             res["held_part"] = deepcopy(end_state.get("held_part"))
-            if "gripper_state" not in end_state:
-                res["gripper_state"] = (
-                    "closed" if end_state.get("held_part") else "open"
-                )
         if "resource_location" in end_state:
             res["resource_location"] = deepcopy(end_state.get("resource_location"))
             res["current_location"] = deepcopy(end_state.get("resource_location"))
@@ -2583,9 +2619,6 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901
             if held_part == part_name:
                 part["part_holder_resource_jid"] = resource_jid
                 part["current_holder_resource_jid"] = resource_jid
-                held_location = f"{resource_jid}_gripper"
-                part["part_location"] = held_location
-                part["current_location"] = held_location
             elif not held_part:
                 part["part_holder_resource_jid"] = None
                 part["current_holder_resource_jid"] = None

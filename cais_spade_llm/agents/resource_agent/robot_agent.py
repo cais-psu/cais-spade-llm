@@ -1723,6 +1723,36 @@ class RobotAgent(ResourceAgent):
 
         return get_resource_recovery_snapshot(self)
 
+    @staticmethod
+    def recovery_physical_validation_snapshot(
+        *,
+        live_snapshot: dict[str, Any],
+        physical_input: dict[str, Any],
+        recovery_des_model: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build RobotAgent-owned evidence for projected outline validation.
+
+        The first outline transition retains the fresh live gripper evidence.
+        For later unexecuted transitions, ``held_part`` is the authoritative
+        projected custody fact and RobotAgent derives its private gripper
+        evidence without requiring PA or the LLM to author that mechanism.
+        """
+        validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
+            live_snapshot=live_snapshot,
+            physical_input=physical_input,
+            recovery_des_model=recovery_des_model,
+        )
+        projected_snapshot = physical_input.get("projected_recovery_snapshot")
+        if (
+            physical_input.get("use_projected_recovery_snapshot") is True
+            and isinstance(projected_snapshot, dict)
+            and "held_part" in projected_snapshot
+        ):
+            validation_snapshot["gripper_state"] = (
+                "closed" if projected_snapshot.get("held_part") else "open"
+            )
+        return validation_snapshot
+
     # ------------------------------------------------------------------ #
     # Recovery physical feasibility check
     # ------------------------------------------------------------------ #

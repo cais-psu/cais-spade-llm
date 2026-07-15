@@ -468,14 +468,9 @@ def _known_location_tokens(
             for field_name in ("current_location", "location", "origin_location", "goal_location")
             if str(row.get(field_name) or "").strip()
         )
-        holder = _part_row_holder_token(row)
-        if holder:
-            location_tokens.extend([holder, f"{holder}_gripper"])
         location_tokens.extend(_part_row_observed_pose_aliases(row))
-    for resource_jid, raw_resource_row in (resources_by_jid or {}).items():
+    for raw_resource_row in (resources_by_jid or {}).values():
         resource_row = dict(raw_resource_row or {})
-        if resource_jid:
-            location_tokens.extend([resource_jid, f"{resource_jid}_gripper"])
         current_location = str(resource_row.get("current_location") or "").strip()
         if current_location:
             location_tokens.append(current_location)
@@ -667,7 +662,6 @@ def _task_has_resource_semantics(
             _state_resource_state_token(state)
             or _state_pose_value(state)
             or _state_pose_ref_token(state)
-            or str(state.get("gripper_state") or "").strip()
             or _state_resource_location_token(state)
         ):
             return True
@@ -846,12 +840,6 @@ def _infer_source_ref(
             "pose": deepcopy(observed_pose),
         }
     if requested_source_location:
-        if holder and requested_source_location in {holder, f"{holder}_gripper"}:
-            return {
-                "kind": "holder",
-                "holder_resource_jid": holder,
-                "location": f"{holder}_gripper",
-            }
         if current_location and requested_source_location == current_location:
             payload: dict[str, Any] = {
                 "kind": "location",
@@ -868,14 +856,26 @@ def _infer_source_ref(
             if fallback_pose is not None:
                 payload["pose"] = deepcopy(fallback_pose)
             return payload
+        if holder and requested_source_location == holder:
+            return {
+                "kind": "holder",
+                "holder_resource_jid": holder,
+            }
         return None
 
     if holder:
-        return {
+        payload = {
             "kind": "holder",
             "holder_resource_jid": holder,
-            "location": f"{holder}_gripper",
         }
+        holder_location = current_location or fallback_location
+        if holder_location:
+            payload["location"] = holder_location
+        if observed_pose is not None:
+            payload["pose"] = deepcopy(observed_pose)
+        elif fallback_pose is not None:
+            payload["pose"] = deepcopy(fallback_pose)
+        return payload
     if current_location:
         payload = {
             "kind": "location",
@@ -928,10 +928,6 @@ def _build_preconditions_and_effects(
                 "gripper_state",
                 end_state.get("gripper_state")
                 if "gripper_state" in end_state
-                else "closed"
-                if "held_part" in end_state and str(end_state.get("held_part") or "").strip()
-                else "open"
-                if "held_part" in end_state
                 else None,
             ),
             ("held_part", end_state.get("held_part")),
@@ -1015,7 +1011,6 @@ def _build_preconditions_and_effects(
         and not (requested_target_location or part_location or part_pose is not None)
     ):
         expected_part_effect["holder"] = resource_jid
-        expected_part_effect.setdefault("location", f"{resource_jid}_gripper")
 
     preconditions = {
         "resource": {
@@ -1485,6 +1480,7 @@ def _binding_token_findings(
     part_row: dict[str, Any],
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
+    outline_contract: dict[str, Any] | None = None,
     location_validation_mode: str = "strict",
 ) -> list[dict[str, Any]]:
     raw_action_target = dict(task.get("action_target") or {})
@@ -1536,6 +1532,13 @@ def _binding_token_findings(
             part_name=part_name,
         )
     )
+    state_field_domains = dict(dict(outline_contract or {}).get("state_field_domains") or {})
+    for field_name in ("resource_location", "part_location"):
+        known_locations.update(
+            str(token).strip()
+            for token in (state_field_domains.get(field_name) or [])
+            if str(token or "").strip()
+        )
 
     # In relaxed mode, collect goal/origin locations that must still be exact.
     _critical_locations: set[str] = set()
@@ -1685,6 +1688,7 @@ def compile_grounded_recovery_outline_task(
         part_row=dict(parts_by_name.get(effective_part_name) or {}),
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
+        outline_contract=outline_contract,
         location_validation_mode=location_validation_mode,
     )
     if binding_token_findings:

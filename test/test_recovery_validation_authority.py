@@ -487,7 +487,6 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
             "resource_state": "idle",
             "resource_location": "home",
             "held_part": "LG",
-            "gripper_state": "closed",
         },
     ]
     assert result["snapshot"] == {
@@ -501,6 +500,38 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
     assert result["snapshot_fingerprint"] == recovery_validation_fingerprint(
         result["snapshot"]
     )
+
+
+def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
+    released = RobotAgent.recovery_physical_validation_snapshot(
+        live_snapshot={"held_part": "MCP", "gripper_state": "closed"},
+        physical_input={
+            "use_projected_recovery_snapshot": True,
+            "projected_recovery_snapshot": {"held_part": None},
+        },
+        recovery_des_model={
+            "state_variables": {
+                "held_part": {"scope": "resource"},
+                "gripper_state": {"scope": "resource"},
+            }
+        },
+    )
+    acquired = RobotAgent.recovery_physical_validation_snapshot(
+        live_snapshot={"held_part": None, "gripper_state": "open"},
+        physical_input={
+            "use_projected_recovery_snapshot": True,
+            "projected_recovery_snapshot": {"held_part": "LG"},
+        },
+        recovery_des_model={
+            "state_variables": {
+                "held_part": {"scope": "resource"},
+                "gripper_state": {"scope": "resource"},
+            }
+        },
+    )
+
+    assert released["gripper_state"] == "open"
+    assert acquired["gripper_state"] == "closed"
 
 
 def test_production_ra_reply_includes_recovery_des_descriptor() -> None:

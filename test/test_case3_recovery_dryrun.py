@@ -73,7 +73,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (  
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (  # noqa: E402
     write_recovery_artifacts,
 )
-from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent  # noqa: E402
 from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent  # noqa: E402
 from cais_spade_llm.agents.shared_information import llm_agent as llm_agent_module  # noqa: E402
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (  # noqa: E402
@@ -415,7 +414,7 @@ class FakeProductAgent:
             candidate = dict(row or {})
             task = dict(candidate.get("task") or {})
             physical_input = dict(candidate.get("physical_input") or {})
-            validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
+            validation_snapshot = resource.recovery_physical_validation_snapshot(
                 live_snapshot=snapshot,
                 physical_input=physical_input,
                 recovery_des_model=recovery_des_model,
@@ -1203,6 +1202,9 @@ class FakeRecoveryRobot:
         return None
 
     _is_pose_in_workspace = RobotAgent._is_pose_in_workspace
+    recovery_physical_validation_snapshot = staticmethod(
+        RobotAgent.recovery_physical_validation_snapshot
+    )
     check_recovery_physical_feasibility = (
         RobotAgent.check_recovery_physical_feasibility
     )
@@ -2620,6 +2622,7 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                         "resource_state": "lg_secured",
                         "held_part": "LG",
                         "part_state": "lg_under_recovery_control",
+                        "part_location": "ur5e@localhost_gripper",
                     },
                     "rationale": "Acquire LG using its observed pose.",
                 }
@@ -3191,6 +3194,10 @@ def test_case3_dryrun_uses_production_ra_and_cca_validator_functions() -> None:
         is RobotAgent._is_pose_in_workspace
     )
     assert (
+        FakeRecoveryRobot.recovery_physical_validation_snapshot
+        is RobotAgent.recovery_physical_validation_snapshot
+    )
+    assert (
         validate_outline_macro_recovery_safety
         is outline_macro_safety_module.validate_outline_macro_recovery_safety
     )
@@ -3278,6 +3285,34 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         "LG place_approach must occur before MCP place_approach to assembly_board-v1."
         in grounding_prompt
     )
+
+    session_state["current_phase"] = "outline"
+    outline_prompt_input, outline_prompt = multi_turn_mode._build_phase_prompt(
+        prepared_recovery_request,
+        session_state,
+    )
+    occupancy_blockers = [
+        blocker
+        for blocker in (outline_prompt_input.get("current_recovery_blockers") or [])
+        if str(blocker.get("kind") or "") == "safety_destination_occupancy"
+    ]
+    assert occupancy_blockers
+    assert any(
+        str(blocker.get("summary") or "")
+        == "xarm6@localhost currently occupies assembly_board-v1 under SAFE_2"
+        for blocker in occupancy_blockers
+    )
+    assert (
+        "xarm6@localhost currently occupies assembly_board-v1 under SAFE_2"
+        not in outline_prompt
+    )
+    assert '"resource_location": "assembly_board-v1"' in outline_prompt
+    assert (
+        "SAFE_2: ur5e and xarm6 must not both be in the assembly board destination "
+        "area at the same time."
+        in outline_prompt
+    )
+    assert "restore LG to assembly_board-v1" in outline_prompt
 
     session_state["symbolic_parts"]["LG"].update(
         {
@@ -3378,6 +3413,7 @@ def test_acquire_and_release_propagate_part_holder_and_location() -> None:
             "resource_state": "picked",
             "held_part": "LCP",
             "part_state": "in_gripper",
+            "part_location": "xarm6@localhost_gripper",
         },
     }
     release = {
@@ -3446,6 +3482,145 @@ def test_acquire_and_release_propagate_part_holder_and_location() -> None:
     )
     assert projected_parts["LCP"]["current_holder_resource_jid"] is None
     assert projected_parts["LCP"]["current_location"] == "station"
+
+
+def test_pa_custody_propagation_does_not_infer_resource_mechanism_or_location() -> None:
+    acquire = {
+        "resource_jid": "handler@localhost",
+        "part_name": "LCP",
+        "expected_end_state": {
+            "resource_state": "loaded",
+            "held_part": "LCP",
+            "part_state": "controlled",
+        },
+    }
+    session_state = {
+        "recovery_des_models": {
+            "handler@localhost": {
+                "state_variables": {
+                    "resource_state": {"scope": "resource"},
+                    "held_part": {"scope": "resource"},
+                    "part_state": {"scope": "part"},
+                    "part_location": {"scope": "part"},
+                }
+            }
+        },
+        "symbolic_resources": {
+            "handler@localhost": {
+                "resource_jid": "handler@localhost",
+                "current_state": "idle",
+                "held_part": None,
+                "gripper_state": "open",
+            }
+        },
+        "symbolic_parts": {
+            "LCP": {
+                "part_name": "LCP",
+                "current_state": "available",
+                "current_location": "station",
+                "part_location": "station",
+                "current_holder_resource_jid": None,
+            }
+        },
+    }
+
+    multi_turn_mode._apply_task_effects_to_symbolic_state(acquire, session_state)
+
+    resource = session_state["symbolic_resources"]["handler@localhost"]
+    part = session_state["symbolic_parts"]["LCP"]
+    assert resource["held_part"] == "LCP"
+    assert resource["gripper_state"] == "open"
+    assert part["current_holder_resource_jid"] == "handler@localhost"
+    assert part["part_location"] == "station"
+    assert part["current_location"] == "station"
+
+    projected_resources = {
+        "handler@localhost": {
+            "resource_jid": "handler@localhost",
+            "current_state": "idle",
+            "held_part": None,
+            "gripper_state": "open",
+        }
+    }
+    projected_parts = {
+        "LCP": {
+            "part_name": "LCP",
+            "current_state": "available",
+            "current_location": "station",
+            "part_location": "station",
+            "current_holder_resource_jid": None,
+        }
+    }
+    multi_turn_outline_state._apply_outline_task_effects(
+        acquire,
+        resources_by_jid=projected_resources,
+        parts_by_name=projected_parts,
+        task_type="part_handling",
+        state_field_scopes={
+            "resource_state": "resource",
+            "held_part": "resource",
+            "part_state": "part",
+            "part_location": "part",
+        },
+    )
+    assert projected_resources["handler@localhost"]["gripper_state"] == "open"
+    assert projected_parts["LCP"]["current_holder_resource_jid"] == (
+        "handler@localhost"
+    )
+    assert projected_parts["LCP"]["part_location"] == "station"
+
+
+def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
+    common = {
+        "outline_id": "resource_specific_fields",
+        "event_name": "authored_event",
+        "resource_jid": "resource@localhost",
+        "part_name": "LCP",
+    }
+    resource_only_states = {
+        "resource_state": {"scope": "resource", "domain": ["idle", "ready"]}
+    }
+    findings = multi_turn_mode._candidate_state_completeness_findings(
+        candidate_task=common,
+        part_name="LCP",
+        start_state={"resource_state": "idle"},
+        end_state={"resource_state": "ready"},
+        state_variables=resource_only_states,
+    )
+    assert findings == []
+
+    custody_states = {
+        **resource_only_states,
+        "held_part": {"scope": "resource", "domain": [None, "LCP"]},
+        "part_state": {"scope": "part", "domain": ["available", "controlled"]},
+        "part_location": {"scope": "part", "domain": ["station"]},
+    }
+    findings = multi_turn_mode._candidate_state_completeness_findings(
+        candidate_task=common,
+        part_name="LCP",
+        start_state={
+            "resource_state": "idle",
+            "held_part": None,
+            "part_state": "available",
+        },
+        end_state={
+            "resource_state": "ready",
+            "held_part": "LCP",
+            "part_state": "controlled",
+        },
+        state_variables=custody_states,
+    )
+    assert findings[0]["constraint_code"] == "candidate_schema_violation"
+    assert findings[0]["evidence"]["missing"] == ["part_location"]
+
+    response_schema = multi_turn_prompts.multi_turn_phase_response_schema(
+        "outline",
+        outline_mode="incremental_candidates_validated",
+        recovery_selection_mode="neurosymbolic",
+        declared_state_variables=custody_states,
+    )
+    outline_event_schema = response_schema["schema"]["$defs"]["outline_event"]
+    assert "allOf" not in outline_event_schema
 
 
 def test_candidate_prompt_has_no_numeric_selected_index_example() -> None:
@@ -3625,6 +3800,7 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
             "resource_state": "lg_secured",
             "held_part": "LG",
             "part_state": "lg_under_recovery_control",
+            "part_location": "ur5e@localhost_gripper",
         },
         "rationale": "Acquire the observed part using its grounded pose.",
     }

@@ -211,7 +211,6 @@ class ResourceAgent(LlmAgent):
                 "resource_location",
                 "current_location",
                 "held_part",
-                "gripper_state",
                 "occupancy",
             }
         )
@@ -278,7 +277,12 @@ class ResourceAgent(LlmAgent):
                 physical_input = (
                     physical_input if isinstance(physical_input, dict) else {}
                 )
-                validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
+                snapshot_projector = getattr(
+                    self,
+                    "recovery_physical_validation_snapshot",
+                    ResourceAgent.recovery_physical_validation_snapshot,
+                )
+                validation_snapshot = snapshot_projector(
                     live_snapshot=snapshot,
                     physical_input=physical_input,
                     recovery_des_model=recovery_des_model,

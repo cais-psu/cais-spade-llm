@@ -646,13 +646,6 @@ def _infer_outline_macro_signature(
         after_held_part = before_held_part
     after_gripper_state = str(
         _first_non_empty_state_value(end_state, "gripper_state")
-        or (
-            "closed"
-            if "held_part" in end_state and after_held_part
-            else "open"
-            if "held_part" in end_state
-            else ""
-        )
         or before_gripper_state
         or ""
     ).strip()
@@ -942,10 +935,6 @@ def _apply_outline_task_effects(
         resource_row["current_state"] = candidate_state
     if "held_part" in end_state:
         resource_row["held_part"] = deepcopy(end_state.get("held_part"))
-        if "gripper_state" not in end_state:
-            resource_row["gripper_state"] = (
-                "closed" if end_state.get("held_part") else "open"
-            )
     if "resource_location" in end_state:
         resource_row["resource_location"] = deepcopy(end_state.get("resource_location"))
         resource_row["current_location"] = deepcopy(end_state.get("resource_location"))
@@ -977,9 +966,6 @@ def _apply_outline_task_effects(
         if held_part == task_part_name:
             part_row["part_holder_resource_jid"] = resource_jid
             part_row["current_holder_resource_jid"] = resource_jid
-            held_location = f"{resource_jid}_gripper"
-            part_row["part_location"] = held_location
-            part_row["current_location"] = held_location
         elif not held_part:
             part_row["part_holder_resource_jid"] = None
             part_row["current_holder_resource_jid"] = None
