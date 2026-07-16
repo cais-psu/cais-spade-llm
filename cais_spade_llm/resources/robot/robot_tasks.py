@@ -1679,7 +1679,6 @@ def robot_recovery_des_descriptor(
     current_state = snapshot.get("current_state")
     current_location = snapshot.get("current_location")
     held_part = snapshot.get("held_part")
-    gripper_state = snapshot.get("gripper_state")
     resource_states: list[Any] = [current_state]
     part_states: list[Any] = [None]
     part_locations: list[Any] = [None, f"{resource_jid}_gripper"]
@@ -1716,8 +1715,6 @@ def robot_recovery_des_descriptor(
                     if effect.action == "clear"
                     else {"set_from_param": "part_name"}
                 )
-            elif effect.target == "gripper_state" and effect.action == "set":
-                updates["gripper_state"] = {"set": deepcopy(effect.value)}
 
         location_param = str(
             dict(program.context_mapping or {}).get("location_param") or ""
@@ -1781,10 +1778,6 @@ def robot_recovery_des_descriptor(
                 "scope": "resource",
                 "domain": _domain([held_part, None]),
             },
-            "gripper_state": {
-                "scope": "resource",
-                "domain": _domain([gripper_state, "open", "closed"]),
-            },
             "part_state": {"scope": "part", "domain": _domain(part_states)},
             "part_location": {
                 "scope": "part",
@@ -1795,7 +1788,6 @@ def robot_recovery_des_descriptor(
             "resource_state": current_state,
             "resource_location": current_location,
             "held_part": held_part,
-            "gripper_state": gripper_state,
         },
         "events": events,
         "marked_state_conditions": deepcopy(marked_state_conditions or []),

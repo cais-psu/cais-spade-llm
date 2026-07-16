@@ -10,9 +10,15 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.mult
     _build_outline_task_type_lookup,
     _infer_outline_macro_signature,
 )
+from cais_spade_llm.resources.resource_profile import (
+    get_resource_profile,
+    resource_snapshot_carried_entity_location,
+    resource_type_from_value,
+)
 
 SYNTAX_AND_GROUNDING_VALIDATION = "syntax_and_grounding_validation"
 TRANSITION_FEASIBILITY = "transition_feasibility"
+RECOVERY_ADMISSION = "recovery_admission"
 PHYSICAL_FEASIBILITY = "physical_feasibility"
 SAFETY = "safety"
 
@@ -27,7 +33,7 @@ _OUTLINE_VALIDATION_CONTRACT = {
     "disallow_unknown_state_fields": True,
     "require_expected_start_match": True,
     "require_meaningful_delta": True,
-    "require_release_destination_for_release": True,
+    "require_part_traceability": True,
     "require_carrier_for_part_relocation": True,
 }
 
@@ -51,6 +57,7 @@ _SYNTAX_AND_GROUNDING_CODES = {
     "unknown_product_binding",
     "unknown_resource_binding",
     "unknown_state_token",
+    "state_value_outside_ra_domain",
 }
 
 _TRANSITION_FEASIBILITY_CODES = {
@@ -58,16 +65,21 @@ _TRANSITION_FEASIBILITY_CODES = {
     "claimed_condition_not_currently_unmet",
     "dependency_unsatisfied",
     "expected_start_state_mismatch",
+    "held_part_location_mismatch",
     "invalid_dependency_reference",
+    "missing_acquisition_location",
     "missing_release_destination",
-    "no_state_change",
-    "label_only_state_change",
     "order_violation",
+    "part_traceability_violation",
     "part_relocation_without_carrier",
     "source_reference_unavailable",
-    "state_value_outside_ra_domain",
     "supervisor_blocked",
     "unsatisfied_guard_predicate",
+}
+
+_RECOVERY_ADMISSION_CODES = {
+    "label_only_state_change",
+    "no_state_change",
 }
 
 _PHYSICAL_FEASIBILITY_CODES = {
@@ -106,6 +118,8 @@ def validation_category_for_finding(
 
     if code_token == "safety_rule_violation" or family_token == "safety":
         return SAFETY
+    if code_token in _RECOVERY_ADMISSION_CODES:
+        return RECOVERY_ADMISSION
     if stage_token in {"event_enabledness", "plant_enabledness"}:
         return TRANSITION_FEASIBILITY
     if code_token in _TRANSITION_FEASIBILITY_CODES:
@@ -1147,8 +1161,9 @@ def _binding_finding(
     part_name: str | None = None,
     reason: str,
     evidence: dict[str, Any] | None = None,
+    invariant_id: str = "",
 ) -> dict[str, Any]:
-    return {
+    finding = {
         "task_id": str(task.get("outline_id") or "").strip(),
         "resource_jid": str(resource_jid or "").strip() or None,
         "part_name": str(part_name or "").strip() or None,
@@ -1162,6 +1177,87 @@ def _binding_finding(
         "reason": reason,
         "evidence": deepcopy(evidence or {}),
     }
+    if invariant_id:
+        finding["invariant_id"] = invariant_id
+    return finding
+
+
+def _part_traceability_location_finding(
+    *,
+    task: dict[str, Any],
+    contract: dict[str, Any],
+    resource_jid: str,
+    part_name: str,
+    end_held_part: str,
+    explicit_end_location: str,
+    release_requested: bool,
+    acquisition_requested: bool,
+) -> dict[str, Any] | None:
+    if release_requested and not explicit_end_location:
+        return _binding_finding(
+            task=task,
+            constraint_code="missing_release_destination",
+            resource_jid=resource_jid,
+            part_name=part_name,
+            reason=(
+                f"Task releases '{part_name}' without an explicit non-null "
+                "expected_end_state.part_location."
+            ),
+            evidence={"field": "expected_end_state.part_location", "value": None},
+            invariant_id="part_traceability",
+        )
+    if acquisition_requested and not explicit_end_location:
+        return _binding_finding(
+            task=task,
+            constraint_code="missing_acquisition_location",
+            resource_jid=resource_jid,
+            part_name=part_name,
+            reason=(
+                f"Task acquires '{part_name}' without an explicit non-null "
+                "expected_end_state.part_location."
+            ),
+            evidence={"field": "expected_end_state.part_location", "value": None},
+            invariant_id="part_traceability",
+        )
+    if end_held_part != part_name:
+        return None
+    carried_part_location = str(contract.get("carried_part_location") or "").strip()
+    if not carried_part_location:
+        return _binding_finding(
+            task=task,
+            constraint_code="part_traceability_violation",
+            resource_jid=resource_jid,
+            part_name=part_name,
+            reason=(
+                f"The responsible resource '{resource_jid}' does not declare "
+                f"a valid carried-part location for '{part_name}'."
+            ),
+            evidence={
+                "field": "expected_end_state.part_location",
+                "proposed_part_location": explicit_end_location or None,
+                "expected_carried_part_location": None,
+            },
+            invariant_id="part_traceability",
+        )
+    if explicit_end_location == carried_part_location:
+        return None
+    return _binding_finding(
+        task=task,
+        constraint_code="held_part_location_mismatch",
+        resource_jid=resource_jid,
+        part_name=part_name,
+        reason=(
+            f"The proposed successor holds '{part_name}' with "
+            f"expected_end_state.part_location='{explicit_end_location or None}', "
+            f"but the responsible resource declares '{carried_part_location}'."
+        ),
+        evidence={
+            "field": "expected_end_state.part_location",
+            "proposed_part_location": explicit_end_location or None,
+            "expected_carried_part_location": carried_part_location,
+        },
+        invariant_id="part_traceability",
+    )
 
 
 def _outline_contract_finding(  # noqa: C901, PLR0912
@@ -1172,11 +1268,11 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
     part_name: str,
     resource_row: dict[str, Any],
     part_row: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     contract = dict(outline_contract or {})
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
-    action_target = _task_action_target(task)
     state_field_scopes = {
         str(field_name): str(scope or "resource")
         for field_name, scope in dict(contract.get("state_field_scopes") or {}).items()
@@ -1386,7 +1482,7 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
                 },
             )
 
-    if bool(contract.get("require_release_destination_for_release")) and resource_jid and part_name:
+    if bool(contract.get("require_part_traceability")) and resource_jid and part_name:
         current_holder = str(
             (
                 None
@@ -1398,6 +1494,11 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
         ).strip()
         current_held_part = str(resource_row.get("held_part") or "").strip()
         start_held_part = str(start_state.get("held_part") or "").strip()
+        end_held_part = str(end_state.get("held_part") or "").strip()
+        custody_changes = (
+            "held_part" in end_state and start_held_part != end_held_part
+        )
+        explicit_end_location = str(end_state.get("part_location") or "").strip()
         release_requested = (
             "held_part" in end_state and end_state.get("held_part") in (None, "")
         ) and (
@@ -1405,28 +1506,63 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
             or current_holder == resource_jid
             or start_held_part == part_name
         )
-        if release_requested:
-            has_release_destination = bool(
-                _state_location_token(end_state)
-                or str(action_target.get("target_location") or "").strip()
-                or str(action_target.get("named_pose") or "").strip()
-                or _state_pose_ref_token(end_state)
-                or _state_pose_value(end_state) is not None
-                or action_target.get("pose") is not None
-                or action_target.get("slot_pose") is not None
-            )
-            if not has_release_destination:
-                return _binding_finding(
-                    task=task,
-                    constraint_code="missing_release_destination",
-                    resource_jid=resource_jid,
-                    part_name=part_name,
-                    reason=(
-                        f"Task releases '{part_name}' without specifying a concrete grounded "
-                        "destination."
+        acquisition_requested = custody_changes and end_held_part == part_name
+        if held_part_location_finding := _part_traceability_location_finding(
+            task=task,
+            contract=contract,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            end_held_part=end_held_part,
+            explicit_end_location=explicit_end_location,
+            release_requested=release_requested,
+            acquisition_requested=acquisition_requested,
+        ):
+            return held_part_location_finding
+        projected_resources = deepcopy(resources_by_jid)
+        projected_resource = dict(projected_resources.get(resource_jid) or {})
+        if "held_part" in end_state:
+            projected_resource["held_part"] = deepcopy(end_state.get("held_part"))
+        projected_resources[resource_jid] = projected_resource
+        projected_holder_jids = {
+            candidate_resource_jid
+            for candidate_resource_jid, candidate_resource_row in projected_resources.items()
+            if str(dict(candidate_resource_row or {}).get("held_part") or "").strip()
+            == part_name
+        }
+        if current_holder and current_holder != resource_jid:
+            projected_holder_jids.add(current_holder)
+
+        projected_part_holder = current_holder
+        if end_held_part == part_name:
+            projected_part_holder = resource_jid
+        elif release_requested:
+            projected_part_holder = ""
+
+        holder_disagreement = bool(
+            (projected_part_holder and projected_holder_jids != {projected_part_holder})
+            or (not projected_part_holder and projected_holder_jids)
+        )
+        if len(projected_holder_jids) > 1 or holder_disagreement:
+            return _binding_finding(
+                task=task,
+                constraint_code="part_traceability_violation",
+                resource_jid=resource_jid,
+                part_name=part_name,
+                reason=(
+                    f"The proposed successor has inconsistent holder facts for "
+                    f"'{part_name}'."
+                ),
+                evidence={
+                    "field": "expected_end_state.held_part",
+                    "projected_part_holder_resource_jid": (
+                        projected_part_holder or None
                     ),
-                    evidence={"field": "expected_end_state", "release_destination": None},
-                )
+                    "projected_resource_holder_jids": sorted(
+                        projected_holder_jids
+                    ),
+                },
+                invariant_id="part_traceability",
+            )
 
     if bool(contract.get("require_carrier_for_part_relocation")) and resource_jid and part_name:
         changed_part_fields = [
@@ -1671,6 +1807,7 @@ def compile_grounded_recovery_outline_task(
         part_name=effective_part_name,
         resource_row=resource_row,
         part_row=dict(parts_by_name.get(effective_part_name) or {}),
+        resources_by_jid=resources_by_jid,
     )
     if outline_contract_finding:
         return {
@@ -1878,6 +2015,48 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
             part_row["current_holder_resource_jid"] = holder
     return resources_by_jid, parts_by_name
 
+
+def _declared_carried_part_location(
+    *,
+    resource_jid: str,
+    recovery_entry: dict[str, Any],
+    recovery_des_model: dict[str, Any],
+    session_state: dict[str, Any],
+) -> str:
+    """Return the RA-owned carried-part token only when its DES domain permits it."""
+    jid = str(resource_jid or "").strip()
+    if not jid:
+        return ""
+    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
+    recovery_snapshot.update(
+        deepcopy(dict(dict(session_state.get("symbolic_resources") or {}).get(jid) or {}))
+    )
+    resource_type = resource_type_from_value(
+        recovery_entry.get("resource_type")
+        or recovery_snapshot.get("resource_type")
+        or dict(recovery_snapshot.get("resource_core") or {}).get("resource_type")
+    )
+    carried_part_location = resource_snapshot_carried_entity_location(
+        resource_jid=jid,
+        snapshot=recovery_snapshot,
+        profile=get_resource_profile(resource_type),
+    )
+    if not carried_part_location:
+        return ""
+    declaration = dict(
+        dict(recovery_des_model.get("state_variables") or {}).get("part_location")
+        or {}
+    )
+    domain = declaration.get("domain")
+    if (
+        str(declaration.get("scope") or "").strip() != "part"
+        or not isinstance(domain, list)
+        or carried_part_location not in domain
+    ):
+        return ""
+    return carried_part_location
+
+
 def validate_recovery_outline_task(
     *,
     planner: Any,
@@ -1917,6 +2096,12 @@ def validate_recovery_outline_task(
             for field_name, declaration in state_variables.items()
             if isinstance(dict(declaration or {}).get("domain"), list)
         }
+    outline_contract["carried_part_location"] = _declared_carried_part_location(
+        resource_jid=resource_jid,
+        recovery_entry=recovery_entry,
+        recovery_des_model=recovery_des_model,
+        session_state=session_state,
+    )
     outline_contract["label_state_satisfied_condition_ids"] = (
         _label_state_satisfied_condition_ids(
             task=task,
@@ -2098,6 +2283,7 @@ def build_recovery_safety_validation_input(
 
 __all__ = [
     "PHYSICAL_FEASIBILITY",
+    "RECOVERY_ADMISSION",
     "SAFETY",
     "SYNTAX_AND_GROUNDING_VALIDATION",
     "TRANSITION_FEASIBILITY",

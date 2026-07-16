@@ -31,6 +31,7 @@ from cais_spade_llm.resources.resource_primitives import (
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
+    resource_snapshot_carried_entity_location,
 )
 
 _logger = logging.getLogger(__name__)
@@ -1352,6 +1353,24 @@ def _finding_still_unresolved(
             return False
         if current_location:
             return False
+        evidence = dict(finding.get("evidence") or {})
+        checked_pose = deepcopy(
+            evidence.get("checked_pose")
+            or finding.get("checked_pose")
+            or finding.get("pose")
+            or {}
+        )
+        current_observed_pose = deepcopy(part_row.get("observed_pose") or {})
+        if checked_pose and current_observed_pose and checked_pose != current_observed_pose:
+            return False
+        recorded_workspace = deepcopy(
+            evidence.get("workspace_bounds")
+            or finding.get("workspace_bounds")
+            or {}
+        )
+        current_workspace = deepcopy(resource_row.get("workspace_bounds") or {})
+        if recorded_workspace and current_workspace and recorded_workspace != current_workspace:
+            return False
         return True
 
     if constraint_code == "holder_conflict":
@@ -1606,15 +1625,24 @@ def _continuation_condition_satisfied(  # noqa: C901, PLR0912
     for blocker_part in blocker_parts:
         part_row = dict(parts_by_name.get(blocker_part) or {})
         goal_location = str(part_row.get("goal_location") or "").strip()
-        current_state = str(part_row.get("current_state") or "").strip().lower()
         current_location = str(
             part_row.get("current_location") or part_row.get("location") or ""
         ).strip()
-        if current_state in {"placed", "assembled"}:
-            continue
-        if goal_location and current_location == goal_location:
-            continue
-        return False
+        current_holder = str(
+            part_row.get("current_holder_resource_jid")
+            or part_row.get("part_holder_resource_jid")
+            or ""
+        ).strip()
+        resource_holders = {
+            resource_jid
+            for resource_jid, resource_row in resources_by_jid.items()
+            if str(dict(resource_row or {}).get("held_part") or "").strip()
+            == blocker_part
+        }
+        if not goal_location or current_location != goal_location:
+            return False
+        if current_holder or resource_holders:
+            return False
     return True
 
 
@@ -2078,6 +2106,212 @@ def _candidate_feedback_rows(
     return rows
 
 
+def _declared_carried_part_location(
+    *,
+    resource_jid: str,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> str:
+    """Return an RA-owned carried-part location only when its DES domain permits it."""
+    jid = str(resource_jid or "").strip()
+    if not jid:
+        return ""
+    recovery_entry = dict(
+        dict(prepared_recovery_request.get("recovery_resources") or {}).get(jid)
+        or {}
+    )
+    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
+    recovery_snapshot.update(
+        deepcopy(dict(dict(session_state.get("symbolic_resources") or {}).get(jid) or {}))
+    )
+    resource_type = str(
+        recovery_entry.get("resource_type")
+        or recovery_snapshot.get("resource_type")
+        or dict(recovery_snapshot.get("resource_core") or {}).get("resource_type")
+        or "resource"
+    ).strip()
+    profile = get_resource_profile(resource_type)
+    carried_location = resource_snapshot_carried_entity_location(
+        resource_jid=jid,
+        snapshot=recovery_snapshot,
+        profile=profile,
+    )
+    if not carried_location:
+        return ""
+
+    descriptor = dict(
+        dict(session_state.get("recovery_des_models") or {}).get(jid)
+        or recovery_entry.get("recovery_des_model")
+        or {}
+    )
+    declaration = dict(
+        dict(descriptor.get("state_variables") or {}).get("part_location") or {}
+    )
+    if str(declaration.get("scope") or "").strip() != "part":
+        return ""
+    domain = declaration.get("domain")
+    if not isinstance(domain, list) or carried_location not in domain:
+        return ""
+    return carried_location
+
+
+def _feedback_row_findings(row: dict[str, Any]) -> list[dict[str, Any]]:
+    if str(row.get("constraint_code") or "").strip():
+        return [deepcopy(row)]
+    return [
+        deepcopy(finding)
+        for finding in (row.get("validation_findings") or [])
+        if isinstance(finding, dict)
+    ]
+
+
+def _compact_feedback_task(
+    task: dict[str, Any],
+    finding: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep correction identity while excluding rejected event wording and rationale."""
+    compact: dict[str, Any] = {}
+    resource_jid = str(
+        _task_resource_jid(task) or finding.get("resource_jid") or ""
+    ).strip()
+    part_name = str(_task_part_name(task) or finding.get("part_name") or "").strip()
+    if resource_jid:
+        compact["resource_jid"] = resource_jid
+    if part_name:
+        compact["part_name"] = part_name
+    return compact
+
+
+def _enrich_feedback_finding(
+    finding: dict[str, Any],
+    *,
+    task: dict[str, Any],
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = deepcopy(finding)
+    resource_jid = str(
+        enriched.get("resource_jid") or _task_resource_jid(task) or ""
+    ).strip()
+    part_name = str(enriched.get("part_name") or _task_part_name(task) or "").strip()
+    if resource_jid:
+        enriched["resource_jid"] = resource_jid
+    if part_name:
+        enriched["part_name"] = part_name
+    constraint_code = str(enriched.get("constraint_code") or "").strip().lower()
+    if constraint_code in {
+        "held_part_location_mismatch",
+        "missing_acquisition_location",
+        "part_relocation_without_carrier",
+    }:
+        carried_location = _declared_carried_part_location(
+            resource_jid=resource_jid,
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        evidence = deepcopy(dict(enriched.get("evidence") or {}))
+        evidence.pop("target_ref", None)
+        evidence.pop("target_location", None)
+        if carried_location:
+            evidence["carried_part_location"] = carried_location
+            if constraint_code != "part_relocation_without_carrier":
+                evidence["expected_carried_part_location"] = carried_location
+        else:
+            evidence.pop("carried_part_location", None)
+        enriched["evidence"] = evidence
+    return enriched
+
+
+def _candidate_feedback_finding_key(
+    finding: dict[str, Any],
+    *,
+    task: dict[str, Any],
+) -> tuple[str, str, str, str]:
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
+    resource_jid = str(
+        finding.get("resource_jid") or _task_resource_jid(task) or ""
+    ).strip()
+    part_name = str(finding.get("part_name") or _task_part_name(task) or "").strip()
+    evidence = dict(finding.get("evidence") or {})
+    if constraint_code == "part_relocation_without_carrier":
+        relevant_evidence: Any = evidence.get("carried_part_location")
+    elif constraint_code in {
+        "held_part_location_mismatch",
+        "missing_acquisition_location",
+    }:
+        relevant_evidence = {
+            "expected_carried_part_location": evidence.get(
+                "expected_carried_part_location"
+            ),
+            "proposed_part_location": evidence.get("proposed_part_location"),
+        }
+    elif constraint_code == "workspace_unreachable":
+        relevant_evidence = {
+            "checked_pose": evidence.get("checked_pose") or finding.get("checked_pose"),
+            "workspace_bounds": evidence.get("workspace_bounds")
+            or finding.get("workspace_bounds"),
+        }
+    else:
+        relevant_evidence = {
+            "field": evidence.get("field"),
+            "token": evidence.get("token"),
+        }
+    return (
+        constraint_code,
+        resource_jid,
+        part_name,
+        json.dumps(relevant_evidence, sort_keys=True, separators=(",", ":"), default=str),
+    )
+
+
+def _merge_applicable_candidate_feedback(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    current_feedback_rows: list[dict[str, Any]],
+    prune_current: bool,
+) -> list[dict[str, Any]]:
+    """Merge current findings with prior findings that still match authoritative state."""
+    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+    def _add_rows(rows: list[dict[str, Any]], *, retain_only_applicable: bool) -> None:
+        for raw_row in rows:
+            if not isinstance(raw_row, dict):
+                continue
+            task = deepcopy(dict(raw_row.get("task") or {}))
+            for raw_finding in _feedback_row_findings(raw_row):
+                finding = _enrich_feedback_finding(
+                    raw_finding,
+                    task=task,
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                )
+                if retain_only_applicable and not _finding_still_unresolved(
+                    finding,
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                ):
+                    continue
+                compact_task = _compact_feedback_task(task, finding)
+                key = _candidate_feedback_finding_key(finding, task=compact_task)
+                merged[key] = {
+                    "candidate_index": int(raw_row.get("candidate_index") or 0),
+                    "task": compact_task,
+                    "validation_findings": [finding],
+                }
+
+    _add_rows(
+        [
+            deepcopy(row)
+            for row in (session_state.get("candidate_rejection_feedback") or [])
+            if isinstance(row, dict)
+        ],
+        retain_only_applicable=True,
+    )
+    _add_rows(current_feedback_rows, retain_only_applicable=prune_current)
+    return list(merged.values())
+
+
 def _normalized_candidate_feedback_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(row, dict):
         return None
@@ -2243,11 +2477,7 @@ def _candidate_state_completeness_findings(
     findings: list[dict[str, Any]] = []
     required_keys = ["resource_state"]
     if part_name:
-        required_keys.extend(
-            field_name
-            for field_name in ("held_part", "part_state")
-            if field_name in state_variables
-        )
+        required_keys.extend(("held_part", "part_state", "part_location"))
     for side, state in (("expected_start_state", start_state), ("expected_end_state", end_state)):
         missing = [key for key in required_keys if key not in state]
         if missing:
@@ -2277,27 +2507,6 @@ def _candidate_state_completeness_findings(
                         evidence={"field": side, "unexpected": unexpected},
                     )
                 )
-    if (
-        part_name
-        and "held_part" in state_variables
-        and "part_location" in state_variables
-        and str(end_state.get("held_part") or "").strip() == part_name
-        and str(start_state.get("held_part") or "").strip() != part_name
-        and "part_location" not in end_state
-    ):
-        findings.append(
-            _candidate_schema_finding(
-                task=candidate_task,
-                reason=(
-                    "expected_end_state is missing RA-declared part_location for "
-                    f"new custody of '{part_name}'"
-                ),
-                evidence={
-                    "field": "expected_end_state",
-                    "missing": ["part_location"],
-                },
-            )
-        )
     return findings
 
 
@@ -3566,6 +3775,37 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
     return compact_rows
 
 
+def _compact_artifact_validation_stage(stage: Any) -> dict[str, Any]:
+    if not isinstance(stage, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in (
+        "validation_category",
+        "validator_role",
+        "validator_jid",
+        "request_id",
+        "status",
+        "latency_ms",
+        "state_fingerprint",
+        "snapshot_fingerprint",
+        "mocked",
+    ):
+        value = stage.get(key)
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = deepcopy(value)
+    findings = [
+        compact_finding
+        for compact_finding in (
+            _compact_artifact_finding(item) for item in (stage.get("findings") or [])
+        )
+        if compact_finding
+    ]
+    if findings:
+        compact["findings"] = findings
+    return compact
+
+
 def _compact_artifact_candidate_evaluations(  # noqa: C901
     rows: Any,
 ) -> list[dict[str, Any]]:
@@ -3624,9 +3864,12 @@ def _compact_artifact_candidate_evaluations(  # noqa: C901
                 }
             )
         validation_stages = [
-            deepcopy(item)
-            for item in (row.get("validation_stages") or [])
-            if isinstance(item, dict)
+            compact_stage
+            for compact_stage in (
+                _compact_artifact_validation_stage(item)
+                for item in (row.get("validation_stages") or [])
+            )
+            if compact_stage
         ]
         if validation_stages:
             summary["validation_stages"] = validation_stages
@@ -3645,21 +3888,31 @@ def _compact_artifact_candidate_evaluations(  # noqa: C901
             summary["dominated_by_candidate_ids"] = deepcopy(
                 dominated_by_candidate_ids
             )
-        if isinstance(row.get("projected_symbolic_resources"), dict) or isinstance(
-            row.get("projected_symbolic_parts"), dict
+        if isinstance(row.get("tie_representative_evidence"), dict):
+            summary["tie_representative_evidence"] = deepcopy(
+                row.get("tie_representative_evidence") or {}
+            )
+        for key in (
+            "recovery_enabledness_validation_before",
+            "recovery_enabledness_validation_after",
         ):
-            summary["projected_successor"] = {
-                "resources": deepcopy(row.get("projected_symbolic_resources") or {}),
-                "parts": deepcopy(row.get("projected_symbolic_parts") or {}),
-                "safety_dfa_states": deepcopy(
-                    row.get("safety_dfa_states_after") or {}
-                ),
-                "open_recovery_obligation_ids": deepcopy(
-                    dict(row.get("selection_evidence") or {}).get(
-                        "open_recovery_obligation_ids_after"
-                    )
-                    or []
-                ),
+            enabledness = row.get(key)
+            if not isinstance(enabledness, dict):
+                continue
+            summary[key] = {
+                field_name: deepcopy(enabledness.get(field_name) or default)
+                for field_name, default in (
+                    ("symbolically_enabled_event_ids", []),
+                    ("ra_admissible_event_ids", []),
+                    ("cca_admissible_event_ids", []),
+                    ("admissible_event_ids", []),
+                    ("event_evaluations", []),
+                    ("ra_snapshot_fingerprints", {}),
+                    ("ra_descriptor_fingerprints", {}),
+                    ("safety_rule_fingerprint", ""),
+                    ("live_safety_dfa_state_fingerprint", ""),
+                )
+                if enabledness.get(field_name) not in (None, "", [], {})
             }
         summaries.append(summary)
     return summaries
@@ -3810,39 +4063,12 @@ def _artifact_response_payload(
         "recovery_selection_mode",
         "action_horizon",
         "candidate_count",
+        "remaining_blocked_issue_count",
     ):
         if turn_entry.get(key) not in (None, "", [], {}):
             artifact_payload[key] = deepcopy(turn_entry.get(key))
-    thought = str(parsed_response.get("thought") or "").strip()
-    if thought:
-        artifact_payload["thought"] = thought
     if str(turn_entry.get("decision") or "").strip():
         artifact_payload["decision"] = str(turn_entry.get("decision") or "").strip()
-    artifact_payload["candidate_events"] = [
-        _compact_artifact_task(row)
-        for row in (turn_entry.get("candidate_events") or [])
-        if isinstance(row, dict)
-    ]
-    candidate_traces = []
-    for trace in turn_entry.get("candidate_traces") or []:
-        if not isinstance(trace, dict):
-            continue
-        candidate_traces.append(
-            {
-                "events": [
-                    _compact_artifact_task(row)
-                    for row in (trace.get("events") or [])
-                    if isinstance(row, dict)
-                ],
-                **(
-                    {"rationale": str(trace.get("rationale") or "").strip()}
-                    if str(trace.get("rationale") or "").strip()
-                    else {}
-                ),
-            }
-        )
-    if candidate_traces:
-        artifact_payload["candidate_traces"] = candidate_traces
     if isinstance(turn_entry.get("candidate_evaluations"), list):
         artifact_payload["candidate_evaluation_summary"] = _compact_artifact_candidate_evaluations(
             turn_entry.get("candidate_evaluations") or []
@@ -3865,6 +4091,10 @@ def _artifact_response_payload(
         artifact_payload["selection_evidence"] = deepcopy(
             turn_entry.get("selection_evidence") or {}
         )
+    if isinstance(turn_entry.get("tie_representative_evidence"), dict):
+        artifact_payload["tie_representative_evidence"] = deepcopy(
+            turn_entry.get("tie_representative_evidence") or {}
+        )
     if isinstance(turn_entry.get("nondominated_candidate_ids"), list):
         artifact_payload["nondominated_candidate_ids"] = deepcopy(
             turn_entry.get("nondominated_candidate_ids") or []
@@ -3873,23 +4103,10 @@ def _artifact_response_payload(
         artifact_payload["selected_transition"] = _compact_artifact_task(
             turn_entry.get("selected_transition")
         )
-    selected_transition_sequence = [
-        _compact_artifact_task(row)
-        for row in (turn_entry.get("selected_transition_sequence") or [])
-        if isinstance(row, dict)
-    ]
-    if selected_transition_sequence:
-        artifact_payload["selected_transition_sequence"] = selected_transition_sequence
-    if isinstance(turn_entry.get("selected_candidate_task"), dict):
-        artifact_payload["selected_candidate_task"] = _compact_artifact_task(
-            turn_entry.get("selected_candidate_task")
-        )
     if isinstance(turn_entry.get("candidate_rejection_feedback"), list):
         artifact_payload["candidate_rejection_feedback"] = _compact_artifact_feedback_rows(
             turn_entry.get("candidate_rejection_feedback") or []
         )
-    if accepted_prefix:
-        artifact_payload["transition_trace"] = deepcopy(accepted_prefix)
     if isinstance(turn_entry.get("transition_validation"), dict):
         artifact_payload["transition_validation"] = _compact_artifact_transition_validation(
             turn_entry.get("transition_validation") or {}
@@ -3905,11 +4122,6 @@ def _artifact_response_payload(
         artifact_payload.setdefault("nondominated_candidate_ids", [])
         artifact_payload.pop("selected_candidate_index", None)
         artifact_payload.pop("llm_selected_candidate_index", None)
-        private_models = dict(session_state.get("recovery_des_models") or {})
-        if private_models:
-            artifact_payload["private_recovery_des_models"] = deepcopy(
-                private_models
-            )
     selected_candidate_index = artifact_payload.get("selected_candidate_index")
     if isinstance(selected_candidate_index, int) and _selected_candidate_evaluation_is_valid(
         rows=turn_entry.get("candidate_evaluations") or [],

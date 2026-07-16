@@ -128,6 +128,31 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "expected_end_state",
         "rationale",
     ],
+    "allOf": [
+        {
+            "if": {"required": ["part_name"]},
+            "then": {
+                "properties": {
+                    "expected_start_state": {
+                        "required": [
+                            "resource_state",
+                            "held_part",
+                            "part_state",
+                            "part_location",
+                        ]
+                    },
+                    "expected_end_state": {
+                        "required": [
+                            "resource_state",
+                            "held_part",
+                            "part_state",
+                            "part_location",
+                        ]
+                    },
+                }
+            },
+        }
+    ],
 }
 
 
@@ -949,6 +974,8 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
         }
 
     if constraint_code in {
+        "held_part_location_mismatch",
+        "missing_acquisition_location",
         "resource_unbound",
         "part_unbound",
         "missing_release_destination",
@@ -1073,12 +1100,48 @@ def _render_des_event_diagnostic(
         finding.get("constraint_code") or "validation_rejected"
     ).strip()
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
+    normalized_constraint_code = constraint_code.lower()
+    evidence = dict(finding.get("evidence") or {})
+    if normalized_constraint_code == "part_relocation_without_carrier":
+        reason = (
+            "The part location cannot change while the acting resource does not "
+            "hold the part."
+        )
+    elif normalized_constraint_code == "held_part_location_mismatch":
+        reason = (
+            "The proposed held-part location does not match the responsible "
+            "resource's declared carried-part location."
+        )
     line = (
         f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
         f" | constraint_code={constraint_code}"
         f" | reason={reason}"
         f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
     )
+    carried_part_location = str(evidence.get("carried_part_location") or "").strip()
+    expected_carried_part_location = str(
+        evidence.get("expected_carried_part_location") or carried_part_location
+    ).strip()
+    part_name = str(_task_part_name(task) or finding.get("part_name") or "").strip()
+    if (
+        normalized_constraint_code == "part_relocation_without_carrier"
+        and carried_part_location
+        and part_name
+    ):
+        line += (
+            " | correction=First establish custody in a separate transition: "
+            f"held_part={part_name}; part_location={carried_part_location}"
+        )
+    if (
+        normalized_constraint_code
+        in {"held_part_location_mismatch", "missing_acquisition_location"}
+        and expected_carried_part_location
+        and part_name
+    ):
+        line += (
+            " | correction=While the responsible resource holds the part, use: "
+            f"held_part={part_name}; part_location={expected_carried_part_location}"
+        )
     if _finding_durable(finding):
         line += " | persistence=diagnosis persists until the relevant projected state facts change"
     return line
@@ -1097,9 +1160,14 @@ def _candidate_diagnostic_signature(
     collapse when they describe the same event/failure under the same state.
     """
     diagnostic = _des_diagnostic_fields(finding)
+    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     resource_jid = str(task.get("resource_jid") or finding.get("resource_jid") or "").strip()
     part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
-    target_ref = _task_target_ref(task, finding=finding)
+    target_ref = (
+        ""
+        if constraint_code == "part_relocation_without_carrier"
+        else _task_target_ref(task, finding=finding)
+    )
     evidence_text = _finding_state_evidence_text(
         task=task,
         finding=finding,
@@ -1284,7 +1352,6 @@ def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
         outline_id = str(task.get("outline_id") or "").strip()
         resource_jid = str(task.get("resource_jid") or "").strip()
         part_name = str(task.get("part_name") or "").strip()
-        description = str(task.get("description") or "").strip()
         finding_summary = _outline_validation_summary(
             [item for item in (row.get("validation_findings") or []) if isinstance(item, dict)]
         ).replace("\n- ", "; ")
@@ -1870,8 +1937,6 @@ def _active_event_start_facts_for_prompt(
             resource["current_location"] = deepcopy(expected_start.get("resource_location"))
         if "held_part" in expected_start:
             resource["held_part"] = deepcopy(expected_start.get("held_part"))
-        if "gripper_state" in expected_start:
-            resource["gripper_state"] = deepcopy(expected_start.get("gripper_state"))
 
     for part in projected_parts:
         if str(part.get("part_name") or "").strip() != part_name:
@@ -2097,7 +2162,6 @@ def _candidate_grounding_target_refs(
                 part.get("part_location") or part.get("current_location") or ""
             ).strip()
         for raw_token in (
-            part.get("origin_location"),
             part.get("goal_location"),
             part.get("part_location"),
             part.get("current_location"),
@@ -2526,6 +2590,7 @@ def _slim_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
         "current_state",
         "current_location",
         "held_part",
+        "held_part_location",
         "current_pose",
         "current_pose_ref",
         "workspace_bounds",
@@ -2535,6 +2600,9 @@ def _slim_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
         for row in resources
         if isinstance(row, dict)
     ]
+    for row in rows:
+        if row.get("held_part") in (None, ""):
+            row.pop("held_part_location", None)
     return sorted(rows, key=lambda row: str(row.get("resource_jid") or ""))
 
 
@@ -2570,6 +2638,8 @@ def _prompt_outline_resource_view(resource: dict[str, Any]) -> dict[str, Any]:
         view["resource_state"] = deepcopy(resource.get("current_state"))
     if "held_part" in resource:
         view["held_part"] = deepcopy(resource.get("held_part"))
+    if resource.get("held_part") not in (None, "") and "held_part_location" in resource:
+        view["held_part_location"] = deepcopy(resource.get("held_part_location"))
     if "resource_location" in resource:
         view["resource_location"] = deepcopy(resource.get("resource_location"))
     elif "current_location" in resource:
@@ -2601,7 +2671,7 @@ def _prompt_outline_part_view(part: dict[str, Any]) -> dict[str, Any]:
         view["part_holder_resource_jid"] = deepcopy(part.get("current_holder_resource_jid"))
     if "observed_pose" in part:
         view["observed_pose"] = deepcopy(part.get("observed_pose"))
-    for field_name in ("origin_location", "goal_location", "goal_requirement_id"):
+    for field_name in ("goal_location", "goal_requirement_id"):
         if field_name in part:
             view[field_name] = deepcopy(part.get(field_name))
     return view
@@ -3279,9 +3349,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "fields exactly."
                 ),
                 (
-                    "- `part_state` and `part_location` require `part_name`. Use `held_part` "
-                    "only when it is present for the responsible resource. When custody "
-                    "changes, include the exact `part_location` if that field is supplied."
+                    "- A candidate with `part_name` must include `held_part`, `part_state`, "
+                    "and `part_location` in both state objects. A custody-changing end state "
+                    "must use an exact supplied, non-null `part_location`."
                 ),
                 (
                     "- You may author a new `event_name` and optional new `resource_state` "
@@ -3327,7 +3397,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "- Each transition must include outline_id, event_name, resource_jid, expected_start_state, expected_end_state, and rationale.",
                 "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
                 "- Author both expected_start_state and expected_end_state in outline mode.",
-                "- If part_name is present, include only the relevant supplied part fields; when custody changes, include the exact part_location if that field is supplied.",
+                "- If part_name is present, include held_part, part_state, and part_location in both state objects; a custody-changing end state requires an exact supplied, non-null part_location.",
                 "- If part_name is absent, do not emit part-specific state keys.",
                 "- Bind only entities and location tokens grounded in the current plant state.",
                 "- Rationale should explain enabledness or which recovery goal is advanced.",

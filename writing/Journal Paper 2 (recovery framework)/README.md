@@ -42,12 +42,13 @@ as a proxy validator.
 | --- | --- | --- |
 | Proposal generation | LLM called by PA | `pure_llm` produces three candidate events and selects one index; `neurosymbolic` produces one to `candidate_proposal_budget` next-event candidates without selecting. |
 | Syntax and grounding | PA | Verifies response structure and exact formal-system bindings. |
-| Transition feasibility | PA | Verifies expected-start agreement and a meaningful projected state or blocker effect. |
+| Transition feasibility | PA | Verifies exact expected-start agreement and the Product-owned `part_traceability` invariant on the proposed successor, including the responsible RA's exact carried-part location. |
+| Recovery admission | PA | Rejects `no_state_change` and `label_only_state_change`; this concrete-effect policy is reported separately from DES transition feasibility. |
 | Physical feasibility | Responsible live RA | Uses a fresh RA snapshot and resource-specific feasibility checks. |
 | Local plant model | Responsible live RA | Privately supplies `G_r` as a task-level extended finite automaton with exact variables, finite domains, valuation, local alphabet, guards, updates, event classifications, marked conditions, and descriptor fingerprint. The LLM does not receive this descriptor. |
 | Candidate safety | Live CCA | Uses current CCA safety rules and `validate_outline_macro_recovery_safety()`. |
-| Model-based selection | PA | In `neurosymbolic`, compares PA/RA/CCA-valid successors through exact open recovery obligations and recovery-relevant admissible enabled events from RA-owned models. |
-| Candidate commit | PA | Rechecks the PA fingerprint. `pure_llm` preserves valid LLM selection; `neurosymbolic` commits only a unique nondominated successor. |
+| Model-based selection | PA | In `neurosymbolic`, compares PA/RA/CCA-valid successors through exact open recovery obligations, recovery-relevant enabled events, and exact nominal-reentry enabled events. |
+| Candidate commit | PA | Rechecks the PA fingerprint. `pure_llm` preserves valid LLM selection; `neurosymbolic` commits the lexicographically preferred symbolic successor and uses a stable exact-effect representative only for a remaining tie. |
 | Post-outline safety generation | CCA | Produces the recovery safety bundle after outline completion. |
 | Runtime safety gating | CCA | Supervises dispatch and execution; this is not the outline-time candidate check. |
 | Primitive execution | Responsible RA | Generates and executes the resource-owned primitive program. |
@@ -96,9 +97,11 @@ Robot descriptors contain task-level `RobotTaskProgram` transitions rather
 than controller primitives, sensing functions, or geometry-computation
 functions. Continuous pose and workspace evidence remain outside the finite DES
 state and are used by the RA physical validator. `RobotAgent` retains
-`gripper_state` because robot-task enabledness and physical feasibility use it
-with `held_part`. `PrintingAgent` represents `pause_job`, `resume_job`, and
-`cancel_job` through `resource_state` only. Printer snapshots and primitive
+binary `gripper_state` only as private runtime and physical-validation evidence.
+It is not a RobotAgent recovery DES variable or an LLM candidate field. For a
+later unexecuted outline transition, RobotAgent may privately derive this
+evidence from explicit `held_part`. `PrintingAgent` represents `pause_job`,
+`resume_job`, and `cancel_job` through `resource_state` only. Printer snapshots and primitive
 execution still retain `job_state` and `active_job` as runtime evidence, but
 they are not PrintingAgent DES variables. Another ResourceAgent declares only
 the exact finite variables needed by its own enabledness, marked conditions,
@@ -117,10 +120,9 @@ The response schema uses the union of RA-declared state-field names so one LLM
 response can contain candidates for different resources. PA nevertheless
 authorizes each candidate against only the descriptor owned by its exact
 `resource_jid` and enforces each field's declared `resource` or `part` scope.
-Thus `gripper_state` is a valid RobotAgent variable only when that RobotAgent
-declares it. `job_state` is not accepted for that robot or for the current
-PrintingAgent private DES descriptor. Resource-specific values must belong to
-the responsible RA's exact finite domain. Adding another ResourceAgent changes
+Thus neither `gripper_state` nor `job_state` is accepted by the current
+RobotAgent and PrintingAgent recovery descriptors. Resource-specific values
+must belong to the responsible RA's exact finite domain. Adding another ResourceAgent changes
 its descriptor, not PA validation code. Accepted declared values are preserved
 in PA state and the RA/CCA projections.
 
@@ -135,40 +137,122 @@ exact state value clears a supplied recovery obligation. No validation or
 selection stage derives motion, acquisition, release, safety, or progress from
 wording inside an LLM-authored event or state name.
 
+### Transition feasibility and explicit successor states
+
+At outline turn `k`, let `q_k` denote the PA's authoritative projected
+symbolic state. Each LLM candidate explicitly declares an
+`expected_start_state` and an `expected_end_state`. DES enabledness is checked
+by exact agreement between every declared start field and the corresponding
+field in `q_k`. The declared end state is the proposed successor; PA does not
+infer a missing `part_location` from `held_part`.
+
+PA accepts the successor as transition-feasible only when the Product-owned
+`part_traceability` invariant also holds. A candidate with `part_name` must
+include `held_part`, `part_state`, and `part_location` in both state objects. A
+null start `part_location` is permitted when the current location is genuinely
+unknown, but an acquisition or release must declare a supplied non-null end
+`part_location`. Whenever the responsible resource holds the part, the end
+`part_location` must equal that RA's exact declared carried-part location. The
+projected holder must agree with explicit `held_part`, and no two projected
+resources may hold the same part.
+
+Exact-start and `part_traceability` failures are reported as
+`transition_feasibility`. Candidate shape, exact-token, field-scope, and
+RA-domain failures belong to `syntax_and_grounding_validation`. The additional
+`no_state_change` and `label_only_state_change` policy belongs to
+`recovery_admission`, not standard DES transition feasibility.
+
+Once accepted, an LLM-authored event contributes one validated
+recovery-session transition `(q_k, event_name, q_{k+1})` extending the nominal
+transition relation used by the recovery outline. Newly authored
+`resource_state` and `part_state` values remain uninterpreted exact labels and
+carry no meaning by name alone.
+
+The recovery relation is extended through atomic custody transitions. An
+acquisition explicitly changes `held_part` from null to `part_name` and assigns
+the responsible resource's declared carried-part `part_location`. A subsequent
+placement or release changes `held_part` from `part_name` to null and assigns
+the concrete destination. A candidate that keeps `held_part` null while moving
+`part_location` is rejected as `part_relocation_without_carrier`, because it
+would conceal acquisition, transport, and release inside one transition and
+would bypass the separate PA, RA, and CCA checks for those custody states.
+
+Revision guidance is derived from validation rather than from a scripted
+recovery answer. Only after this carrier rejection, PA obtains the acting
+resource's exact carried-part location from its existing `ResourceProfile` and
+checks that token against the same RA's private `part_location` domain. The
+same scoped correction is used for `held_part_location_mismatch` and
+`missing_acquisition_location`. Other resources' tokens remain absent. A
+resource without such a declared token receives no custody hint and fails
+closed. Carrier and workspace findings persist only while their
+authoritative symbolic, observation, and capability evidence remains unchanged,
+and clear after custody or that evidence changes. Rejected rationale, accepted
+event names, candidate order, and the transition stack are not fed to the next
+LLM turn.
+
+Recovery completion is Product-owned accounting performed after transition
+validation. Reaching a part's exact `goal_location` does not clear its recovery
+obligation while the part retains a projected holder or any projected resource
+reports `held_part == part_name`. Any exact supplied final part-state condition
+must also hold. Conversely, the method does not require a fixed vocabulary such
+as `placed` or `assembled` when no exact final state label was supplied.
+
+The outline prompt keeps compact live state, observations, genuinely available
+named poses and reachable locations, recovery goals, active safety rules, and
+current validation findings. Nominal `origin_location` remains private to
+nominal-reentry comparison and debug evidence instead of steering the LLM's
+proposal. These live capabilities, goals, and safety rules are instance
+conditioning, not hard-coded recovery answers.
+
 For current composed state `q`, let `O(q)` be the exact open recovery
 obligations: PA Recovery Goals, continuation blockers, reentry requirements,
 and CCA safety-condition identifiers. Let `Q_m^R` be the set of
-recovery-compatible marked states. Let `Gamma^R_{S/G}(q)` denote the
-recovery-relevant controllable events enabled by exact RA guards at the
-CCA-accepted projected state, after backward relevance from `O(q)` and `Q_m^R`.
-Every PA/RA/CCA-valid LLM event `e_i` yields `q'_i = delta(q, e_i)`.
+recovery-compatible marked states. Define the recovery-enabled set as
 
-The event progresses when it strictly reduces `O(q)` without introducing
-another obligation, or preserves `O(q)` while enabling at least one previously
-disabled recovery-relevant event in the successor. The evidence also records
-the exact RA event whose update realizes and is consumed by the candidate.
-Literal enabled-set inclusion is not used as the progress test because an
-ordinary DES event often disables itself while enabling its successor.
+\[
+\Gamma^R_{S/G}(q)
+= \Gamma^R_G(q) \cap \Gamma^R_{\mathrm{RA}}(q) \cap \Gamma^R_S(q).
+\]
 
-The partial order is:
+Here, `Gamma^R_G(q)` is the backward-relevant set of bound RA-declared events
+whose exact symbolic guards hold; `Gamma^R_RA(q)` is the subset physically
+realizable according to the responsible RA; and `Gamma^R_S(q)` is the subset
+admitted by the CCA safety projection. RA queries bind the exact affected
+resource, part, location, observation, and projected state. Their snapshot and
+descriptor fingerprints, and the corresponding CCA fingerprints, make this an
+explicitly snapshot-specific enabledness result. Every PA/RA/CCA-valid LLM
+event `e_i` yields `q'_i = delta(q, e_i)`.
 
-`e_i` dominates `e_j` iff `O(q'_i) ⊆ O(q'_j)` and
-`Gamma^R_{S/G}(q'_i) ⊇ Gamma^R_{S/G}(q'_j)`, with at least one strict relation.
+Let `Gamma^N_{S/G}(q)` denote the CCA-admissible exact nominal-reentry events
+whose verified task guards hold for affected resources and parts on their
+continuation paths. It is computed from verified task status and guards,
+resource/part state, holder and location facts, and CCA projection. Unrelated
+unfinished nominal tasks are excluded.
 
-One unique nondominated event is appended and projected before the next LLM
-turn. No valid/progressing event returns `need_revision`. Equivalent or
-incomparable nondominated events return `selection_ambiguous`, append nothing,
-and expose only compact obligation and enabled-event comparison evidence to the
-next LLM request. Descriptor and supervisor fingerprints remain private in the
-result artifact. The next request asks for at most one
-representative per equivalent successor class. Three unresolved revisions under
-the same plant and supervisor fingerprints terminate as `selection_unresolved`.
-If a representative is rejected, its exact current PA/RA/CCA finding is shown
-alongside the still-active one-representative constraint until a transition is
-committed or an authoritative fingerprint changes.
-No LLM preference, candidate position,
-`event_name`, `rationale`, resource name, token ordering, or random tie breaker
-is used. PA, RA, and CCA never invent a symbolic fallback event.
+A candidate is progressing when one of these ordered cases holds:
+
+1. `O(q'_i)` is strictly smaller and the successor introduces no obligation;
+2. `O(q'_i)` is unchanged and `Gamma^R_{S/G}(q'_i)` is a strict expansion; or
+3. both are unchanged and `Gamma^N_{S/G}(q'_i)` is a strict expansion.
+
+Selection applies the same lexicographic order. If symbolic evidence remains
+tied or incomparable, the smallest existing exact-effect `candidate_id` is
+appended immediately as a stable representative. This reproducibility
+convention is arbitrary and is not an optimality claim. No valid/progressing
+event returns `need_revision`. Three repeated turns with no valid progressing
+candidate under unchanged plant and supervisor fingerprints terminate as
+`selection_unresolved`. No LLM preference, candidate position, `event_name`,
+`rationale`, resource type, location wording, distance, duration, energy,
+execution effort, or random rule is used. PA, RA, and CCA never invent a
+symbolic fallback event.
+
+When one candidate is committed, PA retains only rejected PA/RA/CCA findings
+that still apply to the committed state and unchanged evidence. For example, a
+`workspace_unreachable` result remains available to the next LLM turn after an
+unrelated candidate is accepted, then clears when the affected observation,
+holder/location state, capability fingerprint, or physical result changes.
+Accepted event names, rationales, comparison scores, and the transition stack
+remain debug-only; they are not included in later prompts.
 
 CCA owns safety projection and returns `safety_dfa_states_before` and
 `safety_dfa_states_after`. The first candidate uses the live CCA DFA state;
@@ -176,12 +260,17 @@ later unexecuted outline transitions use the previously selected projected DFA
 state. Temporary validation monitors do not mutate the live monitor. Stale rule
 or live-state fingerprints fail closed.
 
-The method should be described as one-step receding-horizon successor dominance,
-not BFS, global shortest-path recovery, or a formal nonblocking supervisor over
-a complete event alphabet. Its explicit limitation is that incomparable
-successors cannot be resolved without a separately declared objective. Outline
-validation remains snapshot-specific and does not guarantee primitive,
-trajectory, Gazebo, or hardware execution.
+The method should be described as one-step receding-horizon logical/symbolic
+supervisory selection, not BFS, global shortest-path recovery, optimal
+supervisory control, or a formal nonblocking supervisor over a complete event
+alphabet. Cost-based optimal supervisory control is reserved for a future
+comparison mode. Related DES literature separates logical requirements from
+optional cost or throughput objectives; representative comparisons include
+[Automatica](https://www.sciencedirect.com/science/article/pii/S0005109824001274),
+[IFAC optimal DES control](https://www.sciencedirect.com/science/article/pii/S1474667017512197),
+and [IFAC throughput control](https://www.sciencedirect.com/science/article/pii/S1474667015374036).
+Outline validation remains snapshot-specific and does not
+guarantee primitive, trajectory, Gazebo, or hardware execution.
 
 ## Current System Strengths
 

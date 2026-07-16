@@ -194,6 +194,8 @@ class RecoverySessionMixin:
                     "params": deepcopy(task.get("params") or {}),
                     "status": deepcopy(task.get("status")),
                     "sequence_index": deepcopy(task.get("sequence_index")),
+                    "predecessors": deepcopy(task.get("predecessors") or []),
+                    "successors": deepcopy(task.get("successors") or []),
                 }
             )
 
@@ -2560,6 +2562,15 @@ class RecoverySessionMixin:
             current_row = dict(current_resource_by_jid.get(resource_jid) or {})
             recovery_entry = dict(recovery_resources.get(resource_jid) or {})
             recovery_snapshot = self._build_prompt_recovery_snapshot(recovery_entry)
+            resource_type = str(
+                recovery_entry.get("resource_type")
+                or recovery_snapshot.get("resource_type")
+                or dict(recovery_snapshot.get("resource_core") or {}).get(
+                    "resource_type"
+                )
+                or "resource"
+            ).strip()
+            profile = get_resource_profile(resource_type)
             observed_resource = {
                 "resource_jid": resource_jid,
                 "current_state": deepcopy(
@@ -2583,6 +2594,13 @@ class RecoverySessionMixin:
                     else recovery_snapshot.get("held_part")
                 ),
             }
+            held_part_location = resource_snapshot_carried_entity_location(
+                resource_jid=resource_jid,
+                snapshot=recovery_snapshot,
+                profile=profile,
+            )
+            if held_part_location:
+                observed_resource["held_part_location"] = held_part_location
             for optional_field in (
                 "gripper_state",
                 "current_pose",

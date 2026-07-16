@@ -18,7 +18,7 @@
       "static_capabilities": {
         "resource_type": "robot",
         "reachability": [
-          "prusa-mk4-2",
+          "prusa-mk4-1",
           "prusa-mk3",
           "assembly_board-v1"
         ],
@@ -60,7 +60,7 @@
             ],
             "slot_floor_z_m": 1.04
           },
-          "prusa-mk4-2": {
+          "prusa-mk4-1": {
             "anchor_pose": {
               "x": 0.4,
               "y": -0.3,

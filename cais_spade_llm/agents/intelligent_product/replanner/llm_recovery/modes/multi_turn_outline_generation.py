@@ -14,11 +14,13 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes impo
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     PHYSICAL_FEASIBILITY,
+    RECOVERY_ADMISSION,
     SAFETY,
     SYNTAX_AND_GROUNDING_VALIDATION,
     TRANSITION_FEASIBILITY,
     build_recovery_physical_validation_input,
     build_recovery_safety_validation_input,
+    compile_grounded_recovery_outline_task,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     projected_outline_validation_context as _service_projected_outline_validation_context,
@@ -611,6 +613,213 @@ def _efa_guard_is_satisfied(condition: Any, actual: Any) -> bool:
     )
 
 
+def _nominal_reentry_event_id(task: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "task_id": str(task.get("task_id") or "").strip(),
+            "resource_jid": str(task.get("resource_jid") or "").strip(),
+            "function_name": str(task.get("function_name") or "").strip(),
+            "part_name": str(task.get("part_name") or "").strip(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _nominal_task_tool_row(
+    *,
+    task: dict[str, Any],
+    tools_catalog: list[dict[str, Any]],
+) -> dict[str, Any]:
+    function_name = str(task.get("function_name") or "").strip()
+    resource_name = str(task.get("resource_jid") or "").split("@", 1)[0].strip()
+    fallback: dict[str, Any] = {}
+    for raw_row in tools_catalog:
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        if str(row.get("function") or "").strip() != function_name:
+            continue
+        owner = str(row.get("function_owner_agent") or "").split("@", 1)[0].strip()
+        if owner == resource_name:
+            return row
+        if not fallback:
+            fallback = row
+    return fallback
+
+
+def _task_reaches_pending_task(
+    *,
+    task_id: str,
+    pending_task_ids: set[str],
+    successors_by_task_id: dict[str, set[str]],
+) -> bool:
+    if task_id in pending_task_ids:
+        return True
+    frontier = list(successors_by_task_id.get(task_id) or set())
+    visited: set[str] = set()
+    while frontier:
+        successor_id = frontier.pop()
+        if successor_id in pending_task_ids:
+            return True
+        if successor_id in visited:
+            continue
+        visited.add(successor_id)
+        frontier.extend(successors_by_task_id.get(successor_id) or set())
+    return False
+
+
+def _nominal_reentry_event_rows(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build private exact nominal events on affected continuation paths."""
+    recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
+    pending_task_ids = {
+        str(task.get("id") or "").strip()
+        for raw_resource in recovery_resources.values()
+        if isinstance(raw_resource, dict)
+        for task in (raw_resource.get("pending_tasks") or [])
+        if isinstance(task, dict) and str(task.get("id") or "").strip()
+    }
+    if not pending_task_ids:
+        return []
+
+    task_rows = [
+        deepcopy(task)
+        for raw_tasks in dict(
+            prepared_recovery_request.get("requirement_task_index") or {}
+        ).values()
+        if isinstance(raw_tasks, list)
+        for task in raw_tasks
+        if isinstance(task, dict) and str(task.get("task_id") or "").strip()
+    ]
+    if not task_rows:
+        return []
+    task_by_id = {
+        str(task.get("task_id") or "").strip(): task for task in task_rows
+    }
+    successors_by_task_id = {
+        task_id: {
+            str(successor_id).strip()
+            for successor_id in (task.get("successors") or [])
+            if str(successor_id).strip()
+        }
+        for task_id, task in task_by_id.items()
+    }
+    tasks_by_requirement: dict[str, list[dict[str, Any]]] = {}
+    task_requirement_map = dict(
+        prepared_recovery_request.get("task_requirement_map") or {}
+    )
+    for task_id, task in task_by_id.items():
+        requirement_id = str(task_requirement_map.get(task_id) or "").strip()
+        if requirement_id:
+            tasks_by_requirement.setdefault(requirement_id, []).append(task)
+
+    pending_requirement_ids = {
+        str(task_requirement_map.get(task_id) or "").strip()
+        for task_id in pending_task_ids
+        if str(task_requirement_map.get(task_id) or "").strip()
+    }
+    tools_catalog = [
+        deepcopy(row)
+        for row in (prepared_recovery_request.get("tools_catalog") or [])
+        if isinstance(row, dict)
+    ]
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    rows: list[dict[str, Any]] = []
+    for requirement_id in sorted(pending_requirement_ids):
+        requirement_tasks = tasks_by_requirement.get(requirement_id) or []
+        requirement_pending_ids = {
+            task_id
+            for task_id in pending_task_ids
+            if str(task_requirement_map.get(task_id) or "").strip() == requirement_id
+        }
+        affected_parts = {
+            str(task.get("part_name") or "").strip()
+            for task in requirement_tasks
+            if str(task.get("task_id") or "").strip() in requirement_pending_ids
+            and str(task.get("part_name") or "").strip()
+        }
+        affected_resources = {
+            str(task.get("resource_jid") or "").strip()
+            for task in requirement_tasks
+            if str(task.get("task_id") or "").strip() in requirement_pending_ids
+            and str(task.get("resource_jid") or "").strip()
+        }
+        for task in requirement_tasks:
+            task_id = str(task.get("task_id") or "").strip()
+            resource_jid = str(task.get("resource_jid") or "").strip()
+            part_name = str(task.get("part_name") or "").strip()
+            if resource_jid not in affected_resources:
+                continue
+            if affected_parts and part_name and part_name not in affected_parts:
+                continue
+            if str(task.get("status") or "").strip() not in {"completed", "pending"}:
+                continue
+            if not _task_reaches_pending_task(
+                task_id=task_id,
+                pending_task_ids=requirement_pending_ids,
+                successors_by_task_id=successors_by_task_id,
+            ):
+                continue
+            tool_row = _nominal_task_tool_row(
+                task=task,
+                tools_catalog=tools_catalog,
+            )
+            resource_model = dict(models.get(resource_jid) or {})
+            exact_ra_event = next(
+                (
+                    deepcopy(event)
+                    for event in (resource_model.get("events") or [])
+                    if isinstance(event, dict)
+                    and str(event.get("event_name") or "").strip()
+                    == str(task.get("function_name") or "").strip()
+                ),
+                {},
+            )
+            if not tool_row or not exact_ra_event:
+                continue
+            params = dict(task.get("params") or {})
+            context_mapping = dict(tool_row.get("context_mapping") or {})
+            location_param = str(context_mapping.get("location_param") or "").strip()
+            location_value = params.get(location_param) if location_param else None
+            safety_task = {
+                "outline_id": task_id,
+                "event_name": str(task.get("function_name") or "").strip(),
+                "resource_jid": resource_jid,
+                "part_name": part_name or None,
+                "action_target": {
+                    "target_location": deepcopy(location_value),
+                },
+            }
+            rows.append(
+                {
+                    "event_id": _nominal_reentry_event_id(task),
+                    "task": deepcopy(task),
+                    "tool": deepcopy(tool_row),
+                    "ra_event": exact_ra_event,
+                    "safety_task": safety_task,
+                    "safety_signature": {
+                        "inferable_primary_part": part_name,
+                        "task_kind": "part_handling" if part_name else "resource_action",
+                        "changes_part_world": bool(
+                            part_name
+                            and (
+                                tool_row.get("part_transition")
+                                or location_value not in (None, "")
+                            )
+                        ),
+                    },
+                }
+            )
+    return sorted(rows, key=lambda row: str(row.get("event_id") or ""))
+
+
 def _admissible_recovery_enabled_event_ids(
     *,
     session_state: dict[str, Any],
@@ -706,6 +915,908 @@ def _admissible_recovery_enabled_event_ids(
                         )
                     )
     return enabled
+
+
+def _recovery_relevant_part_names(
+    *,
+    unresolved_condition_ids: set[str],
+    prepared_recovery_request: dict[str, Any],
+    available_part_names: set[str],
+) -> set[str]:
+    relevant = {
+        str(condition.get("entity") or "").strip()
+        for condition in _shared._active_continuation_conditions(
+            prepared_recovery_request
+        )
+        if _exact_condition_identifier(condition) in unresolved_condition_ids
+        and str(condition.get("entity_kind") or "").strip().lower() == "part"
+        and str(condition.get("entity") or "").strip() in available_part_names
+    }
+    return relevant or set(available_part_names)
+
+
+def _recovery_event_requires_part_binding(
+    *,
+    event: dict[str, Any],
+    state_variables: dict[str, Any],
+) -> bool:
+    for field_name in set(dict(event.get("guards") or {})) | set(
+        dict(event.get("updates") or {})
+    ):
+        declaration = dict(state_variables.get(str(field_name)) or {})
+        if str(declaration.get("scope") or "resource").strip() == "part":
+            return True
+    held_part_update = dict(dict(event.get("updates") or {}).get("held_part") or {})
+    return bool(
+        str(held_part_update.get("set_from_param") or "").strip() == "part_name"
+        or "part_name" in (held_part_update.get("set_from_param_any_of") or [])
+    )
+
+
+def _recovery_event_update_value(
+    *,
+    field_name: str,
+    update: Any,
+    resource_jid: str,
+    part_name: str,
+    part_row: dict[str, Any],
+) -> tuple[bool, Any]:
+    if not isinstance(update, dict):
+        return False, None
+    if "set" in update:
+        return True, deepcopy(update.get("set"))
+    parameter_names: list[str] = []
+    if str(update.get("set_from_param") or "").strip():
+        parameter_names.append(str(update.get("set_from_param") or "").strip())
+    parameter_names.extend(
+        str(item).strip()
+        for item in (update.get("set_from_param_any_of") or [])
+        if str(item).strip()
+    )
+    for parameter_name in parameter_names:
+        if parameter_name == "part_name" and part_name:
+            return True, part_name
+        if field_name == "part_location":
+            for source_name in ("goal_location", "current_location", "origin_location"):
+                value = part_row.get(source_name)
+                if value not in (None, ""):
+                    return True, deepcopy(value)
+        if field_name == "resource_location":
+            for source_name in ("current_location", "origin_location", "goal_location"):
+                value = part_row.get(source_name)
+                if value not in (None, ""):
+                    return True, deepcopy(value)
+        if parameter_name in {"resource_jid", "holder_resource_jid"}:
+            return True, resource_jid
+    return False, None
+
+
+def _recovery_event_instance_task(
+    *,
+    event_id: str,
+    resource_jid: str,
+    event: dict[str, Any],
+    resource_row: dict[str, Any],
+    part_name: str,
+    part_row: dict[str, Any],
+    state_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    start_state: dict[str, Any] = {}
+    end_state: dict[str, Any] = {}
+    for field_name, raw_declaration in state_variables.items():
+        declaration = dict(raw_declaration or {})
+        scope = str(declaration.get("scope") or "resource").strip()
+        if scope == "part" and not part_name:
+            continue
+        source_row = part_row if scope == "part" else resource_row
+        value = _exact_state_field_value(source_row, str(field_name))
+        start_state[str(field_name)] = deepcopy(value)
+        end_state[str(field_name)] = deepcopy(value)
+
+    if "resource_state" not in start_state:
+        start_state["resource_state"] = _exact_state_field_value(
+            resource_row, "resource_state"
+        )
+        end_state["resource_state"] = deepcopy(start_state["resource_state"])
+    if "held_part" not in start_state:
+        start_state["held_part"] = deepcopy(resource_row.get("held_part"))
+        end_state["held_part"] = deepcopy(resource_row.get("held_part"))
+    if part_name:
+        if "part_state" not in start_state:
+            start_state["part_state"] = _exact_state_field_value(
+                part_row, "part_state"
+            )
+            end_state["part_state"] = deepcopy(start_state["part_state"])
+        if "part_location" not in start_state:
+            start_state["part_location"] = _exact_state_field_value(
+                part_row, "part_location"
+            )
+            end_state["part_location"] = deepcopy(start_state["part_location"])
+
+    applied_update = False
+    for field_name, update in dict(event.get("updates") or {}).items():
+        resolved, value = _recovery_event_update_value(
+            field_name=str(field_name),
+            update=update,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            part_row=part_row,
+        )
+        if not resolved:
+            continue
+        end_state[str(field_name)] = deepcopy(value)
+        applied_update = True
+    if not applied_update:
+        return None
+
+    start_held_part = str(start_state.get("held_part") or "").strip()
+    end_held_part = str(end_state.get("held_part") or "").strip()
+    action_target: dict[str, Any] = {}
+    if part_name and start_held_part != part_name and end_held_part == part_name:
+        if dict(part_row.get("observed_pose") or {}):
+            action_target["source_location"] = "observed_pose"
+        elif part_row.get("current_location") not in (None, ""):
+            action_target["source_location"] = deepcopy(
+                part_row.get("current_location")
+            )
+    if part_name and start_held_part == part_name and end_held_part != part_name:
+        if end_state.get("part_location") not in (None, ""):
+            action_target["target_location"] = deepcopy(
+                end_state.get("part_location")
+            )
+
+    task: dict[str, Any] = {
+        "outline_id": f"enabledness_{recovery_validation_fingerprint(event_id)[:16]}",
+        "event_name": str(event.get("event_name") or "").strip(),
+        "resource_jid": resource_jid,
+        "expected_start_state": start_state,
+        "expected_end_state": end_state,
+        "rationale": "",
+    }
+    if part_name:
+        task["part_name"] = part_name
+    if action_target:
+        task["action_target"] = action_target
+    return task
+
+
+def _symbolically_enabled_recovery_event_instances(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    unresolved_condition_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not unresolved_condition_ids:
+        return []
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    relevant_resources = _recovery_relevant_resource_ids(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        resource_ids=set(models),
+    )
+    relevant_event_ids = _recovery_relevant_event_ids(
+        models=models,
+        relevant_resource_ids=relevant_resources,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
+    relevant_parts = _recovery_relevant_part_names(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        available_part_names=set(parts_by_name),
+    )
+    instances: list[dict[str, Any]] = []
+    for resource_jid in sorted(relevant_resources):
+        resource_row = dict(resources_by_jid.get(resource_jid) or {})
+        resource_model = dict(models.get(resource_jid) or {})
+        state_variables = dict(resource_model.get("state_variables") or {})
+        for raw_event in resource_model.get("events") or []:
+            if not isinstance(raw_event, dict) or raw_event.get("controllable") is not True:
+                continue
+            event = dict(raw_event)
+            base_event_id = json.dumps(
+                {
+                    "resource_jid": resource_jid,
+                    "event_name": str(event.get("event_name") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if base_event_id not in relevant_event_ids:
+                continue
+            part_bindings = (
+                sorted(relevant_parts)
+                if _recovery_event_requires_part_binding(
+                    event=event,
+                    state_variables=state_variables,
+                )
+                else [""]
+            )
+            for part_name in part_bindings:
+                part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+                guards = dict(event.get("guards") or {})
+                if not all(
+                    _efa_guard_is_satisfied(
+                        condition,
+                        _exact_state_field_value(
+                            part_row
+                            if str(
+                                dict(state_variables.get(str(field_name)) or {}).get(
+                                    "scope"
+                                )
+                                or "resource"
+                            ).strip()
+                            == "part"
+                            else resource_row,
+                            str(field_name),
+                        ),
+                    )
+                    for field_name, condition in guards.items()
+                ):
+                    continue
+                event_id = json.dumps(
+                    {
+                        "resource_jid": resource_jid,
+                        "event_name": str(event.get("event_name") or ""),
+                        **({"part_name": part_name} if part_name else {}),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                task = _recovery_event_instance_task(
+                    event_id=event_id,
+                    resource_jid=resource_jid,
+                    event=event,
+                    resource_row=resource_row,
+                    part_name=part_name,
+                    part_row=part_row,
+                    state_variables=state_variables,
+                )
+                if task is None:
+                    continue
+                grounding = compile_grounded_recovery_outline_task(
+                    task,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                    location_validation_mode="relaxed",
+                )
+                grounded_action = dict(grounding.get("grounded_action") or {})
+                if not grounded_action:
+                    continue
+                physical_input = build_recovery_physical_validation_input(
+                    task=task,
+                    grounded_action=grounded_action,
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                )
+                physical_input["use_projected_recovery_snapshot"] = True
+                instances.append(
+                    {
+                        "event_id": event_id,
+                        "resource_jid": resource_jid,
+                        "part_name": part_name or None,
+                        "task": task,
+                        "grounded_action": grounded_action,
+                        "physical_input": physical_input,
+                        "safety_input": build_recovery_safety_validation_input(
+                            task=task,
+                            session_state=session_state,
+                            prepared_recovery_request=prepared_recovery_request,
+                        ),
+                    }
+                )
+    return sorted(instances, key=lambda row: str(row.get("event_id") or ""))
+
+
+def _exact_state_field_value(row: dict[str, Any], field_name: str) -> Any:
+    aliases = {
+        "resource_state": "current_state",
+        "resource_location": "current_location",
+        "part_state": "current_state",
+        "part_location": "current_location",
+    }
+    if field_name in row:
+        return row.get(field_name)
+    return row.get(aliases.get(field_name, field_name))
+
+
+def _resource_reachable_location_tokens(resource_row: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for field_name in ("reachability", "reachable_locations", "known_locations"):
+        raw_value = resource_row.get(field_name)
+        if isinstance(raw_value, (dict, list, tuple, set)):
+            tokens.update(
+                str(token).strip() for token in raw_value if str(token).strip()
+            )
+    return tokens
+
+
+def _nominal_reentry_guard_is_enabled(
+    *,
+    row: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    task = dict(row.get("task") or {})
+    tool = dict(row.get("tool") or {})
+    ra_event = dict(row.get("ra_event") or {})
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+    if not resource_jid or not resource_row:
+        return False
+
+    required_resource_state = str(tool.get("in_state") or "").strip()
+    actual_resource_state = str(
+        _exact_state_field_value(resource_row, "resource_state") or ""
+    ).strip()
+    if (
+        required_resource_state
+        and required_resource_state.lower() != "any"
+        and actual_resource_state != required_resource_state
+    ):
+        return False
+    required_part_state = str(tool.get("part_in_state") or "").strip()
+    if required_part_state and (
+        not part_name
+        or str(
+            _exact_state_field_value(part_row, "part_state") or ""
+        ).strip()
+        != required_part_state
+    ):
+        return False
+
+    params = dict(task.get("params") or {})
+    context_mapping = dict(tool.get("context_mapping") or {})
+    location_param = str(context_mapping.get("location_param") or "").strip()
+    location_type = str(context_mapping.get("location_type") or "").strip()
+    location_value = params.get(location_param) if location_param else None
+    if location_param and location_value not in (None, ""):
+        if location_type == "part_location":
+            if not part_name or _exact_state_field_value(
+                part_row, "part_location"
+            ) != location_value:
+                return False
+        elif location_type == "current_location":
+            if _exact_state_field_value(
+                resource_row, "resource_location"
+            ) != location_value:
+                return False
+        elif (
+            location_type == "reachable_location"
+            and str(location_value)
+            not in _resource_reachable_location_tokens(resource_row)
+        ):
+            return False
+
+    state_variables = dict(row.get("state_variables") or {})
+    for field_name, condition in dict(ra_event.get("guards") or {}).items():
+        scope = str(
+            dict(state_variables.get(str(field_name)) or {}).get("scope")
+            or ("part" if str(field_name).startswith("part_") else "resource")
+        ).strip()
+        source_row = part_row if scope == "part" else resource_row
+        if not _efa_guard_is_satisfied(
+            condition,
+            _exact_state_field_value(source_row, str(field_name)),
+        ):
+            return False
+    return True
+
+
+def _admissible_nominal_reentry_event_ids(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    cca_admissible_event_ids: set[str],
+) -> set[str]:
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    enabled: set[str] = set()
+    for row in _nominal_reentry_event_rows(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    ):
+        event_id = str(row.get("event_id") or "").strip()
+        resource_jid = str(dict(row.get("task") or {}).get("resource_jid") or "").strip()
+        enriched_row = deepcopy(row)
+        enriched_row["state_variables"] = deepcopy(
+            dict(dict(models.get(resource_jid) or {}).get("state_variables") or {})
+        )
+        if (
+            event_id
+            and event_id in cca_admissible_event_ids
+            and _nominal_reentry_guard_is_enabled(
+                row=enriched_row,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            )
+        ):
+            enabled.add(event_id)
+    return enabled
+
+
+async def _agent_filtered_recovery_enabledness(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    unresolved_condition_ids: set[str],
+    planner: Any,
+) -> dict[str, Any]:
+    """Return recovery events admitted by symbolic, RA, and CCA validation."""
+    instances = _symbolically_enabled_recovery_event_instances(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
+    result: dict[str, Any] = {
+        "symbolically_enabled_event_ids": [
+            str(row.get("event_id") or "") for row in instances
+        ],
+        "ra_admissible_event_ids": [],
+        "cca_admissible_event_ids": [],
+        "admissible_event_ids": [],
+        "event_evaluations": [],
+        "ra_snapshot_fingerprints": {},
+        "ra_descriptor_fingerprints": {},
+        "safety_rule_fingerprint": "",
+        "live_safety_dfa_state_fingerprint": "",
+    }
+    if not instances:
+        return result
+
+    product_agent = getattr(planner, "product_agent", None)
+    request_physical = getattr(
+        product_agent, "request_recovery_outline_physical_validation", None
+    )
+    request_safety = getattr(
+        product_agent, "request_recovery_outline_safety_validation", None
+    )
+    if not callable(request_physical) or not callable(request_safety):
+        result["event_evaluations"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "resource_jid": str(row.get("resource_jid") or ""),
+                "part_name": row.get("part_name"),
+                "ra_status": "unavailable",
+                "cca_status": "skipped",
+                "constraint_codes": ["resource_validation_unavailable"],
+            }
+            for row in instances
+        ]
+        return result
+
+    recovery_session_id = str(
+        session_state.get("recovery_session_id")
+        or session_state.get("session_id")
+        or dict(prepared_recovery_request.get("recovery_session") or {}).get(
+            "session_id"
+        )
+        or prepared_recovery_request.get("recovery_session_id")
+        or ""
+    ).strip()
+    turn_index = int(
+        session_state.get("turn_index")
+        or len(list(session_state.get("turns") or [])) + 1
+    )
+    state_fingerprint = _pa_state_fingerprint(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    instances_by_resource: dict[str, list[dict[str, Any]]] = {}
+    for index, instance in enumerate(instances):
+        instance["enabledness_index"] = index
+        instances_by_resource.setdefault(
+            str(instance.get("resource_jid") or ""), []
+        ).append(instance)
+
+    async def validate_resource_group(
+        resource_jid: str,
+        rows: list[dict[str, Any]],
+    ) -> tuple[str, dict[str, Any] | Exception]:
+        payload = {
+            "recovery_session_id": recovery_session_id,
+            "turn_index": turn_index,
+            "state_fingerprint": state_fingerprint,
+            "candidates": [
+                {
+                    "candidate_index": int(row.get("enabledness_index") or 0),
+                    "event_id": str(row.get("event_id") or ""),
+                    "task": deepcopy(row.get("task") or {}),
+                    "physical_input": deepcopy(row.get("physical_input") or {}),
+                }
+                for row in rows
+            ],
+        }
+        try:
+            reply = await request_physical(
+                resource_jid=resource_jid,
+                payload=payload,
+                timeout_s=10.0,
+            )
+            return resource_jid, reply
+        except Exception as exc:  # noqa: BLE001 - enabledness must fail closed
+            return resource_jid, exc
+
+    ra_replies = await asyncio.gather(
+        *[
+            validate_resource_group(resource_jid, rows)
+            for resource_jid, rows in sorted(instances_by_resource.items())
+        ]
+    )
+    evaluations_by_event_id = {
+        str(row.get("event_id") or ""): {
+            "event_id": str(row.get("event_id") or ""),
+            "resource_jid": str(row.get("resource_jid") or ""),
+            "part_name": row.get("part_name"),
+            "ra_status": "unavailable",
+            "cca_status": "skipped",
+            "constraint_codes": [],
+        }
+        for row in instances
+    }
+    ra_admissible_instances: list[dict[str, Any]] = []
+    instance_by_index = {
+        int(row.get("enabledness_index") or 0): row for row in instances
+    }
+    expected_models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    for resource_jid, reply_or_error in ra_replies:
+        resource_instances = instances_by_resource.get(resource_jid) or []
+        if isinstance(reply_or_error, Exception):
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = str(reply_or_error)
+            continue
+        reply = dict(reply_or_error or {})
+        snapshot = dict(reply.get("snapshot") or {})
+        snapshot_fingerprint = str(reply.get("snapshot_fingerprint") or "").strip()
+        if (
+            not snapshot_fingerprint
+            or snapshot_fingerprint != recovery_validation_fingerprint(snapshot)
+        ):
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = "ResourceAgent enabledness snapshot fingerprint is invalid"
+            continue
+        expected_descriptor_fingerprint = str(
+            dict(expected_models.get(resource_jid) or {}).get("descriptor_fingerprint")
+            or ""
+        ).strip()
+        try:
+            _, descriptor_fingerprint = _verified_recovery_des_model(
+                ra_reply=reply,
+                expected_fingerprint=expected_descriptor_fingerprint,
+            )
+        except Exception as exc:  # noqa: BLE001 - descriptor mismatch fails closed
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = str(exc)
+            continue
+        result["ra_snapshot_fingerprints"][resource_jid] = snapshot_fingerprint
+        result["ra_descriptor_fingerprints"][resource_jid] = descriptor_fingerprint
+        for raw_row in reply.get("results") or []:
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            instance = instance_by_index.get(int(row.get("candidate_index") or 0))
+            if not instance or str(instance.get("resource_jid") or "") != resource_jid:
+                continue
+            event_id = str(instance.get("event_id") or "")
+            evaluation = evaluations_by_event_id[event_id]
+            findings = [
+                dict(item)
+                for item in (row.get("findings") or [])
+                if isinstance(item, dict)
+            ]
+            evaluation["ra_status"] = "passed" if bool(row.get("allowed")) else "rejected"
+            evaluation["ra_mocked"] = bool(reply.get("mocked"))
+            evaluation["constraint_codes"] = sorted(
+                {
+                    str(item.get("constraint_code") or "").strip()
+                    for item in findings
+                    if str(item.get("constraint_code") or "").strip()
+                }
+            )
+            if findings:
+                evaluation["findings"] = [
+                    {
+                        key: deepcopy(finding.get(key))
+                        for key in (
+                            "validation_category",
+                            "constraint_code",
+                            "constraint_owner",
+                            "resource_jid",
+                            "part_name",
+                            "reason",
+                        )
+                        if finding.get(key) not in (None, "", [], {})
+                    }
+                    | (
+                        {
+                            "evidence": {
+                                evidence_key: deepcopy(
+                                    dict(finding.get("evidence") or {}).get(
+                                        evidence_key
+                                    )
+                                )
+                                for evidence_key in (
+                                    "checked_pose",
+                                    "workspace_bounds",
+                                )
+                                if dict(finding.get("evidence") or {}).get(
+                                    evidence_key
+                                )
+                                not in (None, "", [], {})
+                            }
+                        }
+                        if any(
+                            dict(finding.get("evidence") or {}).get(evidence_key)
+                            not in (None, "", [], {})
+                            for evidence_key in ("checked_pose", "workspace_bounds")
+                        )
+                        else {}
+                    )
+                    for finding in findings
+                ]
+            if bool(row.get("allowed")):
+                ra_admissible_instances.append(instance)
+
+    result["ra_admissible_event_ids"] = sorted(
+        {str(row.get("event_id") or "") for row in ra_admissible_instances}
+    )
+    if not ra_admissible_instances:
+        result["event_evaluations"] = [
+            evaluations_by_event_id[event_id]
+            for event_id in sorted(evaluations_by_event_id)
+        ]
+        return result
+
+    nominal_reentry_events = _nominal_reentry_event_rows(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    active_safety_condition_ids = [
+        str(row.get("condition_id") or row.get("id") or "").strip()
+        for row in _shared._active_candidate_recovery_blockers(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        if isinstance(row, dict)
+        and str(row.get("condition_id") or row.get("id") or "").strip()
+    ]
+    cca_candidates: list[dict[str, Any]] = []
+    for instance in ra_admissible_instances:
+        safety_input = deepcopy(instance.get("safety_input") or {})
+        safety_input.setdefault("llm_input", {})["nominal_reentry_events"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "task": deepcopy(row.get("safety_task") or {}),
+                "signature": deepcopy(row.get("safety_signature") or {}),
+            }
+            for row in nominal_reentry_events
+            if str(row.get("event_id") or "")
+        ]
+        cca_candidates.append(
+            {
+                "candidate_index": int(instance.get("enabledness_index") or 0),
+                "event_id": str(instance.get("event_id") or ""),
+                "task": deepcopy(instance.get("task") or {}),
+                "safety_input": safety_input,
+                "active_safety_condition_ids": active_safety_condition_ids,
+                **(
+                    {
+                        "safety_dfa_states_before": deepcopy(
+                            session_state.get("projected_safety_dfa_states") or {}
+                        )
+                    }
+                    if session_state.get("projected_safety_dfa_states")
+                    else {}
+                ),
+                **(
+                    {
+                        "safety_rule_fingerprint": str(
+                            session_state.get("projected_safety_rule_fingerprint")
+                            or ""
+                        ).strip()
+                    }
+                    if str(
+                        session_state.get("projected_safety_rule_fingerprint") or ""
+                    ).strip()
+                    else {}
+                ),
+                **(
+                    {
+                        "live_safety_dfa_state_fingerprint": str(
+                            session_state.get("live_safety_dfa_state_fingerprint")
+                            or ""
+                        ).strip()
+                    }
+                    if str(
+                        session_state.get("live_safety_dfa_state_fingerprint") or ""
+                    ).strip()
+                    else {}
+                ),
+            }
+        )
+    try:
+        cca_reply = await request_safety(
+            payload={
+                "recovery_session_id": recovery_session_id,
+                "turn_index": turn_index,
+                "state_fingerprint": state_fingerprint,
+                "candidates": cca_candidates,
+            },
+            timeout_s=10.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - enabledness must fail closed
+        for instance in ra_admissible_instances:
+            evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+            evaluation["cca_status"] = "unavailable"
+            evaluation["constraint_codes"] = sorted(
+                set(evaluation.get("constraint_codes") or [])
+                | {"safety_validation_unavailable"}
+            )
+            evaluation["reason"] = str(exc)
+        result["event_evaluations"] = [
+            evaluations_by_event_id[event_id]
+            for event_id in sorted(evaluations_by_event_id)
+        ]
+        return result
+
+    result["safety_rule_fingerprint"] = str(
+        cca_reply.get("safety_rule_fingerprint") or ""
+    ).strip()
+    result["live_safety_dfa_state_fingerprint"] = str(
+        cca_reply.get("live_safety_dfa_state_fingerprint") or ""
+    ).strip()
+    cca_admissible: set[str] = set()
+    for raw_row in cca_reply.get("results") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        instance = instance_by_index.get(int(row.get("candidate_index") or 0))
+        if not instance:
+            continue
+        event_id = str(instance.get("event_id") or "")
+        evaluation = evaluations_by_event_id[event_id]
+        findings = [
+            dict(item)
+            for item in (row.get("findings") or [])
+            if isinstance(item, dict)
+        ]
+        evaluation["cca_status"] = "passed" if bool(row.get("is_safe")) else "rejected"
+        evaluation["cca_mocked"] = bool(cca_reply.get("mocked"))
+        evaluation["safety_dfa_states_before"] = deepcopy(
+            row.get("safety_dfa_states_before") or {}
+        )
+        evaluation["safety_dfa_states_after"] = deepcopy(
+            row.get("safety_dfa_states_after") or {}
+        )
+        if findings:
+            evaluation["findings"] = deepcopy(
+                list(evaluation.get("findings") or [])
+                + [
+                    {
+                        key: deepcopy(finding.get(key))
+                        for key in (
+                            "validation_category",
+                            "constraint_code",
+                            "constraint_owner",
+                            "resource_jid",
+                            "part_name",
+                            "reason",
+                        )
+                        if finding.get(key) not in (None, "", [], {})
+                    }
+                    for finding in findings
+                ]
+            )
+            evaluation["constraint_codes"] = sorted(
+                set(evaluation.get("constraint_codes") or [])
+                | {
+                    str(item.get("constraint_code") or "").strip()
+                    for item in findings
+                    if str(item.get("constraint_code") or "").strip()
+                }
+            )
+        if bool(row.get("is_safe")):
+            cca_admissible.add(event_id)
+
+    result["cca_admissible_event_ids"] = sorted(cca_admissible)
+    result["admissible_event_ids"] = sorted(
+        set(result["symbolically_enabled_event_ids"])
+        & set(result["ra_admissible_event_ids"])
+        & cca_admissible
+    )
+    result["event_evaluations"] = [
+        evaluations_by_event_id[event_id]
+        for event_id in sorted(evaluations_by_event_id)
+    ]
+    return result
+
+
+async def _populate_agent_filtered_enabledness(
+    *,
+    candidate_evaluations: list[dict[str, Any]],
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    planner: Any,
+) -> None:
+    current_unresolved = _unresolved_condition_ids(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    valid_rows = [
+        row
+        for row in candidate_evaluations
+        if isinstance(row, dict) and bool(row.get("valid"))
+    ]
+    current_task = asyncio.create_task(
+        _agent_filtered_recovery_enabledness(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            unresolved_condition_ids=current_unresolved,
+            planner=planner,
+        )
+    )
+    after_tasks: list[tuple[dict[str, Any], asyncio.Task[dict[str, Any]]]] = []
+    for evaluation in valid_rows:
+        projected_session = _candidate_projected_session(
+            session_state=session_state,
+            evaluation=evaluation,
+        )
+        remaining = _unresolved_condition_ids(
+            session_state=projected_session,
+            prepared_recovery_request=prepared_recovery_request,
+            safety_condition_ids=list(
+                evaluation.get("remaining_safety_condition_identifiers") or []
+            ),
+        )
+        after_tasks.append(
+            (
+                evaluation,
+                asyncio.create_task(
+                    _agent_filtered_recovery_enabledness(
+                        session_state=projected_session,
+                        prepared_recovery_request=prepared_recovery_request,
+                        unresolved_condition_ids=remaining,
+                        planner=planner,
+                    )
+                ),
+            )
+        )
+    current = await current_task
+    for evaluation, task in after_tasks:
+        after = await task
+        evaluation["agent_filtered_enabledness"] = True
+        evaluation["admissible_recovery_enabled_event_ids_before"] = deepcopy(
+            current.get("admissible_event_ids") or []
+        )
+        evaluation["admissible_recovery_enabled_event_ids_after"] = deepcopy(
+            after.get("admissible_event_ids") or []
+        )
+        evaluation["recovery_enabledness_validation_before"] = deepcopy(current)
+        evaluation["recovery_enabledness_validation_after"] = deepcopy(after)
 
 
 def _candidate_realizer_event_ids(
@@ -815,7 +1926,7 @@ def _candidate_projected_session(
     return projected
 
 
-def _apply_neurosymbolic_comparison(
+def _apply_neurosymbolic_comparison(  # noqa: C901
     *,
     candidate_sequences: list[dict[str, Any]],
     candidate_evaluations: list[dict[str, Any]],
@@ -826,11 +1937,38 @@ def _apply_neurosymbolic_comparison(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    current_enabled_events = _admissible_recovery_enabled_event_ids(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-        unresolved_condition_ids=current_unresolved,
+    filtered_current_rows = [
+        row
+        for row in candidate_evaluations
+        if isinstance(row, dict)
+        and bool(row.get("agent_filtered_enabledness"))
+        and "admissible_recovery_enabled_event_ids_before" in row
+    ]
+    current_enabled_events = (
+        {
+            str(item).strip()
+            for item in (
+                filtered_current_rows[0].get(
+                    "admissible_recovery_enabled_event_ids_before"
+                )
+                or []
+            )
+            if str(item).strip()
+        }
+        if filtered_current_rows
+        else _admissible_recovery_enabled_event_ids(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            unresolved_condition_ids=current_unresolved,
+        )
     )
+    current_nominal_reentry_events = {
+        str(item).strip()
+        for row in candidate_evaluations
+        if isinstance(row, dict) and bool(row.get("valid"))
+        for item in (row.get("admissible_nominal_reentry_event_ids_before") or [])
+        if str(item).strip()
+    }
     candidate_by_index = {
         int(row.get("candidate_index") or 0): row for row in candidate_sequences
     }
@@ -859,13 +1997,38 @@ def _apply_neurosymbolic_comparison(
         )
         cleared = current_unresolved - remaining
         introduced = remaining - current_unresolved
-        enabled_events_after = _admissible_recovery_enabled_event_ids(
+        enabled_events_after = (
+            {
+                str(item).strip()
+                for item in (
+                    evaluation.get("admissible_recovery_enabled_event_ids_after")
+                    or []
+                )
+                if str(item).strip()
+            }
+            if bool(evaluation.get("agent_filtered_enabledness"))
+            else _admissible_recovery_enabled_event_ids(
+                session_state=projected_session,
+                prepared_recovery_request=prepared_recovery_request,
+                unresolved_condition_ids=remaining,
+            )
+        )
+        nominal_reentry_events_after = _admissible_nominal_reentry_event_ids(
             session_state=projected_session,
             prepared_recovery_request=prepared_recovery_request,
-            unresolved_condition_ids=remaining,
+            cca_admissible_event_ids={
+                str(item).strip()
+                for item in (
+                    evaluation.get("admissible_nominal_reentry_event_ids") or []
+                )
+                if str(item).strip()
+            },
         )
         newly_enabled = enabled_events_after - current_enabled_events
         disabled_events = current_enabled_events - enabled_events_after
+        newly_enabled_nominal_reentry_events = (
+            nominal_reentry_events_after - current_nominal_reentry_events
+        )
         realizer_events = _candidate_realizer_event_ids(
             candidate=candidate,
             session_state=session_state,
@@ -877,6 +2040,10 @@ def _apply_neurosymbolic_comparison(
         ) or (
             remaining == current_unresolved
             and bool(newly_enabled)
+        ) or (
+            remaining == current_unresolved
+            and enabled_events_after == current_enabled_events
+            and bool(newly_enabled_nominal_reentry_events)
         )
         evidence = {
             "open_recovery_obligation_ids_before": sorted(current_unresolved),
@@ -895,6 +2062,15 @@ def _apply_neurosymbolic_comparison(
             ),
             "newly_enabled_recovery_event_ids": sorted(newly_enabled),
             "disabled_recovery_event_ids": sorted(disabled_events),
+            "admissible_nominal_reentry_event_ids_after": sorted(
+                nominal_reentry_events_after
+            ),
+            "admissible_nominal_reentry_event_ids_before": sorted(
+                current_nominal_reentry_events
+            ),
+            "newly_enabled_nominal_reentry_event_ids": sorted(
+                newly_enabled_nominal_reentry_events
+            ),
             "safety_dfa_states_before": deepcopy(
                 evaluation.get("safety_dfa_states_before") or {}
             ),
@@ -906,6 +2082,9 @@ def _apply_neurosymbolic_comparison(
         evaluation["admissible_recovery_enabled_event_ids_after"] = sorted(
             enabled_events_after
         )
+        evaluation["admissible_nominal_reentry_event_ids_after"] = sorted(
+            nominal_reentry_events_after
+        )
         evaluation["progressing"] = progressing_candidate
         evaluation["selection_status"] = (
             "eligible" if progressing_candidate else "excluded_no_progress"
@@ -913,54 +2092,124 @@ def _apply_neurosymbolic_comparison(
         if progressing_candidate:
             progressing.append(evaluation)
 
-    nondominated: list[dict[str, Any]] = []
-    for candidate in progressing:
-        candidate_remaining = set(
+    if not progressing:
+        return []
+
+    minimum_obligation_count = min(
+        len(
             dict(candidate.get("selection_evidence") or {}).get(
                 "open_recovery_obligation_ids_after"
             )
             or []
         )
-        candidate_enabled_events = set(
+        for candidate in progressing
+    )
+    obligation_preferred = [
+        candidate
+        for candidate in progressing
+        if len(
+            dict(candidate.get("selection_evidence") or {}).get(
+                "open_recovery_obligation_ids_after"
+            )
+            or []
+        )
+        == minimum_obligation_count
+    ]
+    for candidate in progressing:
+        if candidate not in obligation_preferred:
+            candidate["selection_status"] = "dominated_open_obligations"
+
+    recovery_preferred: list[dict[str, Any]] = []
+    for candidate in obligation_preferred:
+        candidate_events = set(
             candidate.get("admissible_recovery_enabled_event_ids_after") or []
         )
-        dominated_by: list[str] = []
-        for other in progressing:
-            if other is candidate:
-                continue
-            other_remaining = set(
-                dict(other.get("selection_evidence") or {}).get(
-                    "open_recovery_obligation_ids_after"
-                )
-                or []
-            )
-            other_enabled_events = set(
-                other.get("admissible_recovery_enabled_event_ids_after") or []
-            )
-            if (
-                other_remaining <= candidate_remaining
-                and other_enabled_events >= candidate_enabled_events
-                and (
-                    other_remaining < candidate_remaining
-                    or other_enabled_events > candidate_enabled_events
-                )
-            ):
-                dominated_by.append(str(other.get("candidate_id") or ""))
+        dominators = [
+            other
+            for other in obligation_preferred
+            if other is not candidate
+            and set(other.get("admissible_recovery_enabled_event_ids_after") or [])
+            > candidate_events
+        ]
         candidate["dominated_by_candidate_ids"] = sorted(
-            token for token in dominated_by if token
+            {
+                str(other.get("candidate_id") or "")
+                for other in dominators
+                if str(other.get("candidate_id") or "")
+            }
         )
-        if dominated_by:
-            candidate["selection_status"] = "dominated"
+        if dominators:
+            candidate["selection_status"] = "dominated_recovery_enabledness"
         else:
+            recovery_preferred.append(candidate)
+
+    nominal_preferred: list[dict[str, Any]] = []
+    for candidate in recovery_preferred:
+        candidate_events = set(
+            candidate.get("admissible_nominal_reentry_event_ids_after") or []
+        )
+        dominators = [
+            other
+            for other in recovery_preferred
+            if other is not candidate
+            and set(other.get("admissible_nominal_reentry_event_ids_after") or [])
+            > candidate_events
+        ]
+        if dominators:
+            candidate["selection_status"] = "dominated_nominal_reentry_enabledness"
+            candidate["dominated_by_candidate_ids"] = sorted(
+                {
+                    str(other.get("candidate_id") or "")
+                    for other in dominators
+                    if str(other.get("candidate_id") or "")
+                }
+            )
+        else:
+            nominal_preferred.append(candidate)
+
+    representative_candidate_id = min(
+        str(candidate.get("candidate_id") or "")
+        for candidate in nominal_preferred
+        if str(candidate.get("candidate_id") or "")
+    )
+    representative_rows = [
+        candidate
+        for candidate in nominal_preferred
+        if str(candidate.get("candidate_id") or "") == representative_candidate_id
+    ]
+    representative = min(
+        representative_rows,
+        key=lambda candidate: str(
+            dict(candidate.get("task") or {}).get("outline_id") or ""
+        ),
+    )
+    symbolically_tied_candidate_ids = sorted(
+        {
+            str(candidate.get("candidate_id") or "")
+            for candidate in nominal_preferred
+            if str(candidate.get("candidate_id") or "")
+        }
+    )
+    tie_representative_used = len(nominal_preferred) > 1
+    for candidate in nominal_preferred:
+        if candidate is representative:
             candidate["selection_status"] = "nondominated"
-            nondominated.append(candidate)
+            candidate["tie_representative_evidence"] = {
+                "used": tie_representative_used,
+                "rule": "smallest_exact_effect_candidate_id",
+                "representative_candidate_id": representative_candidate_id,
+                "symbolically_tied_candidate_ids": symbolically_tied_candidate_ids,
+                "operational_superiority_claimed": False,
+            }
+        else:
+            candidate["selection_status"] = "stable_representative_not_selected"
+            candidate["dominated_by_candidate_ids"] = [representative_candidate_id]
+    nondominated = [representative]
     for successor_class_id, rows in candidates_by_successor_class.items():
         if len(rows) <= 1:
             continue
         for row in rows:
             row["equivalent_successor_class_id"] = successor_class_id
-            if row in nondominated:
-                row["selection_status"] = "equivalent_nondominated"
     return sorted(str(row.get("candidate_id") or "") for row in nondominated)
 
 
@@ -1233,7 +2482,13 @@ def _append_pa_validation_stages(
         deepcopy(row)
         for row in findings
         if str(row.get("validation_category") or "").strip()
-        != SYNTAX_AND_GROUNDING_VALIDATION
+        not in {SYNTAX_AND_GROUNDING_VALIDATION, RECOVERY_ADMISSION}
+    ]
+    admission_findings = [
+        deepcopy(row)
+        for row in findings
+        if str(row.get("validation_category") or "").strip()
+        == RECOVERY_ADMISSION
     ]
     stages.append(
         recovery_validation_stage(
@@ -1256,6 +2511,20 @@ def _append_pa_validation_stages(
                 else "rejected" if transition_findings else "passed"
             ),
             findings=transition_findings,
+            state_fingerprint=state_fingerprint,
+        )
+    )
+    stages.append(
+        recovery_validation_stage(
+            validation_category=RECOVERY_ADMISSION,
+            validator_role="PA",
+            validator_jid=product_jid,
+            status=(
+                "skipped"
+                if syntax_findings or transition_findings
+                else "rejected" if admission_findings else "passed"
+            ),
+            findings=admission_findings,
             state_fingerprint=state_fingerprint,
         )
     )
@@ -1475,6 +2744,8 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
     safety_dfa_states_after: dict[str, str] = deepcopy(
         working_session_state.get("projected_safety_dfa_states") or {}
     )
+    admissible_nominal_reentry_event_ids_before: list[str] = []
+    admissible_nominal_reentry_event_ids_after: list[str] = []
 
     for event_index, surface_event in enumerate(surface_events):
         working_task = deepcopy(surface_event)
@@ -1718,6 +2989,19 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             session_state=working_session_state,
             prepared_recovery_request=prepared_recovery_request,
         )
+        nominal_reentry_events = _nominal_reentry_event_rows(
+            session_state=working_session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        safety_input.setdefault("llm_input", {})["nominal_reentry_events"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "task": deepcopy(row.get("safety_task") or {}),
+                "signature": deepcopy(row.get("safety_signature") or {}),
+            }
+            for row in nominal_reentry_events
+            if str(row.get("event_id") or "")
+        ]
         active_safety_condition_ids = [
             str(row.get("condition_id") or row.get("id") or "").strip()
             for row in _shared._active_candidate_recovery_blockers(
@@ -1927,6 +3211,38 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         working_session_state["projected_safety_condition_identifiers"] = deepcopy(
             remaining_safety_condition_identifiers
         )
+        event_admissible_nominal_reentry_event_ids_before = [
+            str(item).strip()
+            for item in (
+                cca_result.get("admissible_nominal_reentry_event_ids_before") or []
+            )
+            if str(item).strip()
+        ]
+        event_admissible_nominal_reentry_event_ids_after = [
+            str(item).strip()
+            for item in (
+                cca_result.get("admissible_nominal_reentry_event_ids_after")
+                or cca_result.get("admissible_nominal_reentry_event_ids")
+                or []
+            )
+            if str(item).strip()
+        ]
+        if event_index == 0:
+            admissible_nominal_reentry_event_ids_before = deepcopy(
+                event_admissible_nominal_reentry_event_ids_before
+            )
+        admissible_nominal_reentry_event_ids_after = deepcopy(
+            event_admissible_nominal_reentry_event_ids_after
+        )
+        evaluation["admissible_nominal_reentry_event_ids_before"] = deepcopy(
+            admissible_nominal_reentry_event_ids_before
+        )
+        evaluation["admissible_nominal_reentry_event_ids_after"] = deepcopy(
+            admissible_nominal_reentry_event_ids_after
+        )
+        evaluation["admissible_nominal_reentry_event_ids"] = deepcopy(
+            admissible_nominal_reentry_event_ids_after
+        )
 
         committed_event = _shared._commit_selected_candidate_task(
             task=dict(validated_task or {}),
@@ -1983,6 +3299,12 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
     evaluation["live_safety_dfa_state_fingerprint"] = str(
         working_session_state.get("live_safety_dfa_state_fingerprint") or ""
     ).strip()
+    evaluation["admissible_nominal_reentry_event_ids_before"] = deepcopy(
+        admissible_nominal_reentry_event_ids_before
+    )
+    evaluation["admissible_nominal_reentry_event_ids_after"] = deepcopy(
+        admissible_nominal_reentry_event_ids_after
+    )
     projected_resources, projected_parts = _projected_outline_validation_context(
         session_state=working_session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -2168,6 +3490,14 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         )
     )
 
+    if recovery_selection_mode == "neurosymbolic":
+        await _populate_agent_filtered_enabledness(
+            candidate_evaluations=candidate_evaluations,
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+
     turn_entry["candidate_evaluations"] = deepcopy(candidate_evaluations)
     _shared._promote_durable_candidate_rejections(
         session_state=session_state,
@@ -2286,15 +3616,21 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                         "constraint_code": "no_progressing_candidate",
                         "reason": (
                             "Validated candidates neither reduce open recovery "
-                            "obligations nor enable a previously disabled "
-                            "recovery-relevant RA event."
+                            "obligations, enable a previously inadmissible "
+                            "recovery-relevant event, nor enable a previously "
+                            "inadmissible exact nominal-reentry event."
                         ),
                         "evidence": {"candidate_comparison": comparison_evidence},
                     }
                 )
 
-            feedback_rows = _shared._candidate_feedback_rows(
-                candidate_evaluations
+            feedback_rows = _shared._merge_applicable_candidate_feedback(
+                session_state=session_state,
+                prepared_recovery_request=prepared_recovery_request,
+                current_feedback_rows=_shared._candidate_feedback_rows(
+                    candidate_evaluations
+                ),
+                prune_current=False,
             )
             transition_findings = [
                 deepcopy(finding)
@@ -2367,7 +3703,14 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
             None,
         )
 
-    feedback_rows = _shared._candidate_feedback_rows([selected] if selected else [])
+    feedback_rows = _shared._merge_applicable_candidate_feedback(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        current_feedback_rows=_shared._candidate_feedback_rows(
+            [selected] if selected else []
+        ),
+        prune_current=False,
+    )
     selected_valid = bool(selected and selected.get("valid"))
     if not selected_valid or selected_candidate_index is None:
         session_state["candidate_rejection_feedback"] = deepcopy(feedback_rows)
@@ -2412,8 +3755,13 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                 "reason": "PA projected state changed before candidate commit.",
             }
         )
-        feedback_rows = _shared._candidate_feedback_rows(
-            [{**dict(selected), "validation_findings": [finding]}]
+        feedback_rows = _shared._merge_applicable_candidate_feedback(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            current_feedback_rows=_shared._candidate_feedback_rows(
+                [{**dict(selected), "validation_findings": [finding]}]
+            ),
+            prune_current=False,
         )
         session_state["candidate_rejection_feedback"] = deepcopy(feedback_rows)
         turn_entry["candidate_rejection_feedback"] = deepcopy(feedback_rows)
@@ -2451,6 +3799,9 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         turn_entry["selection_evidence"] = deepcopy(
             selected.get("selection_evidence") or {}
         )
+        turn_entry["tie_representative_evidence"] = deepcopy(
+            selected.get("tie_representative_evidence") or {}
+        )
         turn_entry["nondominated_candidate_ids"] = deepcopy(
             nondominated_candidate_ids
         )
@@ -2477,7 +3828,6 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
     accepted_prefix.extend(deepcopy(selected_committed_events))
     session_state["accepted_outline_prefix"] = accepted_prefix
     session_state["outline_lookahead"] = []
-    session_state["candidate_rejection_feedback"] = []
     session_state["selection_revision_count"] = 0
     session_state["selection_revision_fingerprint"] = ""
     session_state["selection_revision_safety_rule_fingerprints"] = []
@@ -2504,6 +3854,69 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
 
     for selected_event in selected_committed_events:
         _shared._apply_task_effects_to_symbolic_state(selected_event, session_state)
+    applicable_feedback_rows: list[dict[str, Any]] = []
+    for evaluation in candidate_evaluations:
+        if not isinstance(evaluation, dict) or bool(evaluation.get("valid")):
+            continue
+        findings = _shared._prune_resolved_outline_validation_findings(
+            [
+                deepcopy(item)
+                for item in (evaluation.get("validation_findings") or [])
+                if isinstance(item, dict)
+            ],
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        if not findings:
+            continue
+        applicable_feedback_rows.append(
+            {
+                "candidate_index": int(evaluation.get("candidate_index") or 0),
+                "task": deepcopy(evaluation.get("task") or {}),
+                "validation_findings": findings,
+            }
+        )
+    enabledness_after = dict(
+        selected.get("recovery_enabledness_validation_after") or {}
+    )
+    for event_evaluation in enabledness_after.get("event_evaluations") or []:
+        if not isinstance(event_evaluation, dict):
+            continue
+        findings = _shared._prune_resolved_outline_validation_findings(
+            [
+                deepcopy(item)
+                for item in (event_evaluation.get("findings") or [])
+                if isinstance(item, dict)
+            ],
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        )
+        if not findings:
+            continue
+        applicable_feedback_rows.append(
+            {
+                "candidate_index": -1,
+                "task": {
+                    "resource_jid": str(
+                        event_evaluation.get("resource_jid") or ""
+                    ).strip(),
+                    "part_name": event_evaluation.get("part_name"),
+                },
+                "validation_findings": findings,
+            }
+        )
+    applicable_feedback_rows = _shared._merge_applicable_candidate_feedback(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        current_feedback_rows=applicable_feedback_rows,
+        prune_current=True,
+    )
+    session_state["candidate_rejection_feedback"] = deepcopy(
+        applicable_feedback_rows
+    )
+    turn_entry["candidate_rejection_feedback"] = deepcopy(
+        applicable_feedback_rows
+    )
     session_state["pruned_actions"] = _shared._active_pruned_actions(
         session_state,
         prepared_recovery_request,
@@ -2577,6 +3990,14 @@ async def _handle_outline_phase(
             planner=planner,
             parsed_response=parsed_response,
         )
+
+    remaining_findings, remaining_conditions = _shared._remaining_blocked_issue_counts(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    turn_entry["remaining_blocked_issue_count"] = int(
+        remaining_findings or 0
+    ) + int(remaining_conditions or 0)
 
     if decision in {"outline_ready", "need_next_task"}:
         _clear_primitive_escalation_state(session_state)

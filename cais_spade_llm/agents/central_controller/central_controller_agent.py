@@ -2281,6 +2281,7 @@ class CentralControllerAgent(LlmAgent):
                 results.append(
                     {
                         "candidate_index": candidate_index,
+                        "event_id": str(candidate.get("event_id") or "").strip(),
                         "is_safe": bool(result.get("is_safe") is True),
                         "findings": findings,
                         "active_rule_identifiers": deepcopy(rule_ids),
@@ -2292,6 +2293,17 @@ class CentralControllerAgent(LlmAgent):
                         ),
                         "safety_dfa_states_after": deepcopy(
                             result.get("safety_dfa_states_after") or {}
+                        ),
+                        "admissible_nominal_reentry_event_ids": deepcopy(
+                            result.get("admissible_nominal_reentry_event_ids") or []
+                        ),
+                        "admissible_nominal_reentry_event_ids_before": deepcopy(
+                            result.get("admissible_nominal_reentry_event_ids_before")
+                            or []
+                        ),
+                        "admissible_nominal_reentry_event_ids_after": deepcopy(
+                            result.get("admissible_nominal_reentry_event_ids_after")
+                            or []
                         ),
                     }
                 )
@@ -2305,6 +2317,14 @@ class CentralControllerAgent(LlmAgent):
                 "state_fingerprint": str(payload.get("state_fingerprint") or ""),
                 "validator_jid": str(agent.jid),
                 "results": results,
+                "admissible_recovery_event_ids": sorted(
+                    {
+                        str(row.get("event_id") or "").strip()
+                        for row in results
+                        if bool(row.get("is_safe"))
+                        and str(row.get("event_id") or "").strip()
+                    }
+                ),
                 "active_rule_identifiers": deepcopy(rule_ids),
                 "safety_rule_fingerprint": safety_rule_fingerprint,
                 "live_safety_dfa_states": deepcopy(live_safety_dfa_states),

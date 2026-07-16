@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+
 def _task_findings_block_projected_state(findings: list[dict[str, Any]]) -> bool:
     return bool(findings)
 
@@ -631,11 +632,6 @@ def _infer_outline_macro_signature(
         or str(resource_row.get("current_state") or "").strip()
     )
     after_resource_state = _outline_state_resource_state_token(end_state) or before_resource_state
-    before_gripper_state = str(
-        _first_non_empty_state_value(start_state, "gripper_state")
-        or resource_row.get("gripper_state")
-        or ""
-    ).strip()
     if "held_part" in start_state:
         before_held_part = str(start_state.get("held_part") or "").strip()
     else:
@@ -644,11 +640,6 @@ def _infer_outline_macro_signature(
         after_held_part = str(end_state.get("held_part") or "").strip()
     else:
         after_held_part = before_held_part
-    after_gripper_state = str(
-        _first_non_empty_state_value(end_state, "gripper_state")
-        or before_gripper_state
-        or ""
-    ).strip()
     before_named_pose = (
         _outline_resource_named_pose_token(
             state=start_state,
@@ -673,7 +664,6 @@ def _infer_outline_macro_signature(
     resource_delta: dict[str, Any] = {}
     for field_name, before_value, after_value in (
         ("current_state", before_resource_state or None, after_resource_state or None),
-        ("gripper_state", before_gripper_state or None, after_gripper_state or None),
         ("held_part", before_held_part or None, after_held_part or None),
         ("current_location", before_named_pose or None, after_named_pose or None),
         ("current_pose", before_resource_pose, after_resource_pose),
@@ -832,14 +822,12 @@ def _infer_outline_macro_signature(
     return {
         "resource_before": {
             "current_state": before_resource_state or None,
-            "gripper_state": before_gripper_state or None,
             "held_part": before_held_part or None,
             "current_location": before_named_pose or None,
             "current_pose": deepcopy(before_resource_pose),
         },
         "resource_after": {
             "current_state": after_resource_state or None,
-            "gripper_state": after_gripper_state or None,
             "held_part": after_held_part or None,
             "current_location": after_named_pose or None,
             "current_pose": deepcopy(after_resource_pose),

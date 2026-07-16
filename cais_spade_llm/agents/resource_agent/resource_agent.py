@@ -328,6 +328,7 @@ class ResourceAgent(LlmAgent):
             results.append(
                 {
                     "candidate_index": candidate_index,
+                    "event_id": str(candidate.get("event_id") or "").strip(),
                     "allowed": allowed,
                     "findings": findings,
                     "resource_result": deepcopy(result),
@@ -342,6 +343,14 @@ class ResourceAgent(LlmAgent):
                 recovery_des_model.get("descriptor_fingerprint") or ""
             ),
             "results": results,
+            "enabled_event_ids": sorted(
+                {
+                    str(row.get("event_id") or "").strip()
+                    for row in results
+                    if bool(row.get("allowed"))
+                    and str(row.get("event_id") or "").strip()
+                }
+            ),
         }
 
     async def generate_recovery_primitives_batch(
@@ -1162,6 +1171,9 @@ class ResourceAgent(LlmAgent):
                 "recovery_des_model": deepcopy(recovery_des_model),
                 "recovery_des_model_fingerprint": recovery_des_model_fingerprint,
                 "results": results,
+                "enabled_event_ids": deepcopy(
+                    validation.get("enabled_event_ids") or []
+                ),
                 "latency_ms": (time.perf_counter() - started_at) * 1000.0,
                 "mocked": False,
             }

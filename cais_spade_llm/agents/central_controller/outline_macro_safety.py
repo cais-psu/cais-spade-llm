@@ -632,6 +632,54 @@ def _safe_next_task_ids_after_projection(
     return _dedupe_tokens(safe_next_task_ids), _dedupe_tokens(cleared_condition_ids)
 
 
+def _admissible_nominal_reentry_event_ids(
+    *,
+    rules: list[dict[str, Any]],
+    projected_resources: dict[str, dict[str, Any]],
+    projected_parts: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
+    safety_dfa_states: dict[str, str],
+) -> list[str]:
+    """Evaluate private nominal-reentry event admissibility without mutating CCA state."""
+    raw_events = [
+        deepcopy(row)
+        for row in (llm_input.get("nominal_reentry_events") or [])
+        if isinstance(row, dict) and str(row.get("event_id") or "").strip()
+    ]
+    if not rules:
+        return sorted(
+            {str(row.get("event_id") or "").strip() for row in raw_events}
+        )
+
+    admissible: list[str] = []
+    for row in raw_events:
+        event_id = str(row.get("event_id") or "").strip()
+        projection = project_outline_macro_recovery_aps(
+            task=deepcopy(row.get("task") or {}),
+            signature=deepcopy(row.get("signature") or {}),
+            pre_resources=projected_resources,
+            pre_parts=projected_parts,
+            projected_resources=projected_resources,
+            projected_parts=projected_parts,
+            llm_input=llm_input,
+        )
+        monitor = _build_recovery_safety_monitor(
+            rules=rules,
+            state_aps=list(projection.get("current_state_aps") or []),
+            llm_input=llm_input,
+        )
+        for rule_id, state in safety_dfa_states.items():
+            if rule_id in monitor.current_states:
+                monitor.current_states[rule_id] = str(state)
+        allowed, _ = monitor.online_safety_validation(
+            list(projection.get("candidate_aps") or []),
+            predicted_state_aps=list(projection.get("predicted_state_aps") or []),
+        )
+        if allowed:
+            admissible.append(event_id)
+    return sorted(set(admissible))
+
+
 def validate_outline_macro_recovery_safety(
     *,
     task: dict[str, Any],
@@ -683,6 +731,33 @@ def validate_outline_macro_recovery_safety(
             "cleared_condition_ids": [],
             "safety_dfa_states_before": {},
             "safety_dfa_states_after": {},
+            "admissible_nominal_reentry_event_ids_before": (
+                _admissible_nominal_reentry_event_ids(
+                    rules=[],
+                    projected_resources=pre_resources,
+                    projected_parts=pre_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
+            "admissible_nominal_reentry_event_ids_after": (
+                _admissible_nominal_reentry_event_ids(
+                    rules=[],
+                    projected_resources=projected_resources,
+                    projected_parts=projected_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
+            "admissible_nominal_reentry_event_ids": (
+                _admissible_nominal_reentry_event_ids(
+                    rules=[],
+                    projected_resources=projected_resources,
+                    projected_parts=projected_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
         }
 
     monitor = _build_recovery_safety_monitor(
@@ -822,6 +897,28 @@ def validate_outline_macro_recovery_safety(
 
     handled_condition_ids = _dedupe_tokens(related_condition_ids + cleared_condition_ids)
     dfa_states_after = candidate_dfa_states_after
+    admissible_nominal_reentry_event_ids_before = (
+        _admissible_nominal_reentry_event_ids(
+            rules=rules,
+            projected_resources=pre_resources,
+            projected_parts=pre_parts,
+            llm_input=llm_input,
+            safety_dfa_states=dfa_states_before,
+        )
+        if allowed
+        else []
+    )
+    admissible_nominal_reentry_event_ids_after = (
+        _admissible_nominal_reentry_event_ids(
+            rules=rules,
+            projected_resources=projected_resources,
+            projected_parts=projected_parts,
+            llm_input=llm_input,
+            safety_dfa_states=dfa_states_after,
+        )
+        if allowed
+        else []
+    )
     return {
         "is_safe": bool(allowed),
         "safety_ctx": safety_ctx,
@@ -830,6 +927,15 @@ def validate_outline_macro_recovery_safety(
         "cleared_condition_ids": cleared_condition_ids,
         "safety_dfa_states_before": dfa_states_before,
         "safety_dfa_states_after": dfa_states_after,
+        "admissible_nominal_reentry_event_ids_before": (
+            admissible_nominal_reentry_event_ids_before
+        ),
+        "admissible_nominal_reentry_event_ids_after": (
+            admissible_nominal_reentry_event_ids_after
+        ),
+        "admissible_nominal_reentry_event_ids": (
+            admissible_nominal_reentry_event_ids_after
+        ),
     }
 
 

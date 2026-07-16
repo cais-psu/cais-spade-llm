@@ -11,7 +11,8 @@
       "expected_start_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "misplaced"
+        "part_state": "misplaced",
+        "part_location": null
       },
       "expected_end_state": {
         "resource_state": "idle",
@@ -30,7 +31,8 @@
       "expected_start_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "misplaced"
+        "part_state": "misplaced",
+        "part_location": null
       },
       "expected_end_state": {
         "resource_state": "idle",
@@ -49,7 +51,8 @@
       "expected_start_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "misplaced"
+        "part_state": "misplaced",
+        "part_location": null
       },
       "expected_end_state": {
         "resource_state": "idle",

@@ -405,6 +405,12 @@ def _extract_remaining_blocked_issue_count(payload: dict[str, Any]) -> int | Non
     raw_response = latest_turn.get("raw_response")
     if not isinstance(raw_response, dict):
         raw_response = {}
+    for source in (latest_turn, raw_response):
+        if source.get("remaining_blocked_issue_count") not in (None, "", [], {}):
+            try:
+                return int(source.get("remaining_blocked_issue_count"))
+            except (TypeError, ValueError):
+                return None
     selected_candidate_index = _extract_selected_candidate_index(payload)
     candidate_rows = []
     for source in (latest_turn, raw_response):
@@ -465,17 +471,15 @@ def _outline_result_payload(
             "artifact_paths": deepcopy(artifact_paths),
         }
     )
-    result_payload.setdefault(
-        "selected_candidate_index",
-        _extract_selected_candidate_index(payload),
-    )
+    if str(result_payload.get("recovery_selection_mode") or "").strip() != "neurosymbolic":
+        result_payload.setdefault(
+            "selected_candidate_index",
+            _extract_selected_candidate_index(payload),
+        )
     selected_transition_outline_id = _extract_selected_transition_outline_id(payload)
     if selected_transition_outline_id:
         result_payload["selected_transition_outline_id"] = selected_transition_outline_id
-    result_payload.setdefault(
-        "transition_trace",
-        _extract_outline_transition_trace(payload),
-    )
+    result_payload.pop("transition_trace", None)
     return result_payload
 
 

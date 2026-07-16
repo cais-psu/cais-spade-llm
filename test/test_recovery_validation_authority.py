@@ -512,7 +512,6 @@ def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
         recovery_des_model={
             "state_variables": {
                 "held_part": {"scope": "resource"},
-                "gripper_state": {"scope": "resource"},
             }
         },
     )
@@ -525,7 +524,6 @@ def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
         recovery_des_model={
             "state_variables": {
                 "held_part": {"scope": "resource"},
-                "gripper_state": {"scope": "resource"},
             }
         },
     )
