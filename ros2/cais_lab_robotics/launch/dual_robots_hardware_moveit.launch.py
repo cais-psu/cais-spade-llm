@@ -30,7 +30,7 @@ RG2_PREFIX = "ur5e_rg2_"
 
 def _load_hardware_arms_config() -> dict[str, Any]:
     path = (
-        Path(get_package_share_directory("xarm_gazebo"))
+        Path(get_package_share_directory("cais_lab_robotics"))
         / "config"
         / "hardware_runtime"
         / "xarm6_ur5e_hardware_runtime.yaml"
@@ -514,7 +514,7 @@ def launch_setup(context, *args, **kwargs):
     )
 
     rviz_config = PathJoinSubstitution(
-        [FindPackageShare("xarm_gazebo"), "rviz", "dual_robots_hardware_moveit.rviz"]
+        [FindPackageShare("cais_lab_robotics"), "rviz", "dual_robots_hardware_moveit.rviz"]
     )
     rviz = Node(
         package="rviz2",

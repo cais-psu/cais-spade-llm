@@ -10,7 +10,7 @@ planning group for paired xArm6 + UR5e motion, or toggle to individual groups:
   - ur5e_ur_manipulator   → UR5e arm (6-DOF)
 
 Usage:
-    ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+    ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 """
 
 import os
@@ -460,7 +460,6 @@ def _launch_arg_enabled(context, name, default='false'):
 def launch_setup(context, *args, **kwargs):
     xarm_prefix = 'xarm6_'
     ur5e_prefix = 'ur5e_'
-    fast_sim = LaunchConfiguration('fast_sim')
     run_perception = LaunchConfiguration('run_perception')
     include_assembly_parts = LaunchConfiguration('include_assembly_parts')
     launch_gazebo = _launch_arg_enabled(context, 'launch_gazebo', default='true')
@@ -471,12 +470,11 @@ def launch_setup(context, *args, **kwargs):
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
-                FindPackageShare('xarm_gazebo'), 'launch',
+                FindPackageShare('cais_lab_robotics'), 'launch',
                 'xarm6_ur5e_gazebo.launch.py',
             ])
         ),
         launch_arguments={
-            'fast_sim': fast_sim,
             'run_perception': run_perception,
             'include_assembly_parts': include_assembly_parts,
         }.items(),
@@ -511,7 +509,7 @@ def launch_setup(context, *args, **kwargs):
         # 4. Single RViz — toggle Planning Group dropdown to switch robots:
         #    dual_robots, xarm6_xarm6, xarm6_xarm_gripper, ur5e_ur_manipulator
         rviz_config = PathJoinSubstitution([
-            FindPackageShare('xarm_gazebo'), 'rviz', 'dual_moveit.rviz',
+            FindPackageShare('cais_lab_robotics'), 'rviz', 'dual_moveit.rviz',
         ])
         rviz = Node(
             package='rviz2',
@@ -537,11 +535,6 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'fast_sim',
-            default_value='false',
-            description='Use the fast Gazebo world timing profile.',
-        ),
         DeclareLaunchArgument(
             'launch_rviz',
             default_value='true',

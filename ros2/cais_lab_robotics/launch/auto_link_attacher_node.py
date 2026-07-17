@@ -184,7 +184,7 @@ class AutoLinkAttacher(Node):
     def _load_part_positions(self) -> dict[str, tuple[float, float, float]]:
         positions = dict(DEFAULT_PART_POSES)
         try:
-            world_path = Path(get_package_share_directory('xarm_gazebo')) / 'worlds' / 'table.world'
+            world_path = Path(get_package_share_directory('cais_lab_robotics')) / 'worlds' / 'table.world'
             root = ET.parse(str(world_path)).getroot()
             world_elem = root.find('world')
             if world_elem is None:

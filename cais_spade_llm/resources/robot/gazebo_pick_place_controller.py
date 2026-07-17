@@ -73,7 +73,7 @@ def _gazebo_world_file_candidates() -> list[Path]:
     module_path = Path(__file__).resolve()
     for parent in module_path.parents:
         candidates.append(parent / "ros2/cais_lab_robotics/worlds/table.world")
-    candidates.append(Path.home() / "ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world")
+    candidates.append(Path.home() / "ros2_ws/src/cais_lab_robotics/worlds/table.world")
     return candidates
 
 

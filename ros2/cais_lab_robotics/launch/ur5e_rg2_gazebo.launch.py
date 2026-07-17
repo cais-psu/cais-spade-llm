@@ -3,8 +3,8 @@
 Gazebo Classic launch: UR5e + OnRobot RG2 in a single-table world.
 
 Usage:
-    ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py
-    ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false
+    ros2 launch cais_lab_robotics ur5e_rg2_gazebo.launch.py
+    ros2 launch cais_lab_robotics ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false
 """
 
 import os
@@ -15,6 +15,7 @@ from pathlib import Path
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    AppendEnvironmentVariable,
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
@@ -292,13 +293,13 @@ def launch_setup(context, *args, **kwargs):
     }
 
     controllers_yaml = os.path.join(
-        get_package_share_directory('xarm_gazebo'),
+        get_package_share_directory('cais_lab_robotics'),
         'config',
         'gazebo_ros2_control',
         'ur5e_rg2_gazebo_ros2_control_controllers.yaml',
     )
 
-    gazebo_world = PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'worlds', 'single_table.world'])
+    gazebo_world = PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'worlds', 'single_table.world'])
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'])
@@ -366,6 +367,11 @@ def launch_setup(context, *args, **kwargs):
         )
 
     launch_actions = [
+        AppendEnvironmentVariable(
+            name='GAZEBO_MODEL_PATH',
+            value=str(Path(get_package_share_directory('cais_lab_robotics')) / 'models'),
+            prepend=True,
+        ),
         gazebo,
         state_publisher,
         spawn,

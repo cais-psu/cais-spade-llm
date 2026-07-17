@@ -3,7 +3,7 @@
 All-in-one: xArm6 + xArm gripper in Gazebo Classic with MoveIt2.
 
 Usage:
-    ros2 launch xarm_gazebo xarm6_moveit_single_gazebo.launch.py
+    ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py
 """
 
 import os
@@ -105,7 +105,7 @@ def launch_setup(context, *args, **kwargs):
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'launch', 'xarm6_single_gazebo.launch.py'])
+            PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'launch', 'xarm6_single_gazebo.launch.py'])
         ),
     )
 

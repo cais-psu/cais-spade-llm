@@ -36,26 +36,12 @@ git clone https://github.com/tonydle/OnRobot_ROS2_Description.git
 git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
 ```
 
-## 3. Copy Versioned Custom Files From This Repo
+## 3. Register Versioned Custom Files From This Repo
 
 From your project root (`~/projects/cais-spade-llm`):
 
 ```bash
-# xarm_gazebo custom launch/world/rviz
-cp ros2/cais_lab_robotics/worlds/table.world \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
-cp ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/auto_link_attacher_node.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/auto_link_attacher_node.py
-cp ros2/cais_lab_robotics/rviz/dual_moveit.rviz \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz/dual_moveit.rviz
-
-# Patched IFRA plugin source (multi-attach + preserve grasp pose)
-cp ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp \
-  ~/ros2_ws/src/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp
+make bootstrap-gazebo
 ```
 
 ## 4. Build (Plugin First, Then Gazebo Package)
@@ -63,7 +49,7 @@ cp ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher
 ```bash
 cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select linkattacher_msgs ros2_linkattacher xarm_gazebo
+colcon build --packages-select linkattacher_msgs ros2_linkattacher cais_lab_robotics xarm_gazebo
 source ~/ros2_ws/install/setup.bash
 ```
 
@@ -72,7 +58,7 @@ source ~/ros2_ws/install/setup.bash
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
 
 ## 6. Confirm World Plugin Line Exists

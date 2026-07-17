@@ -19,7 +19,7 @@ Replaces the tedious RViz drag-and-plan workflow with direct keyboard control th
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
-ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
 
 Wait ~40 seconds for Gazebo + MoveIt + RViz to fully load. You should see both robots in RViz.

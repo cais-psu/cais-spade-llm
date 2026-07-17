@@ -344,8 +344,8 @@ def launch_setup(context, *args, **kwargs):
         )
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
-    world_name = 'table_fast.world' if _launch_arg_enabled(context, 'fast_sim') else 'table.world'
-    gazebo_world_path = Path(get_package_share_directory('xarm_gazebo')) / 'worlds' / world_name
+    cais_lab_robotics_share = Path(get_package_share_directory('cais_lab_robotics'))
+    gazebo_world_path = cais_lab_robotics_share / 'worlds' / 'table.world'
     gazebo_world = str(gazebo_world_path) if include_assembly_parts else _world_without_assembly_parts(gazebo_world_path)
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -360,7 +360,7 @@ def launch_setup(context, *args, **kwargs):
 
     # ── Combined controllers YAML ─────────────────────────────────────────────
     combined_controllers_yaml = os.path.join(
-        get_package_share_directory('xarm_gazebo'),
+        get_package_share_directory('cais_lab_robotics'),
         'config',
         'gazebo_ros2_control',
         'xarm6_ur5e_gazebo_ros2_control_controllers.yaml',
@@ -429,7 +429,7 @@ def launch_setup(context, *args, **kwargs):
     # ══════════════════════════════════════════════════════════════════════════
     ur5e_prefix = 'ur5e_'
     ur5e_initial_positions_file = os.path.join(
-        get_package_share_directory('xarm_gazebo'),
+        get_package_share_directory('cais_lab_robotics'),
         'config',
         'gazebo_initial_joint_positions',
         'ur5e_gazebo_initial_joint_positions.yaml',
@@ -599,7 +599,7 @@ def launch_setup(context, *args, **kwargs):
                 'source /opt/ros/humble/setup.bash && '
                 'source ', os.path.expanduser('~/ros2_ws/install/setup.bash'),
                 ' && python3 ',
-                PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'launch', 'auto_link_attacher_node.py']),
+                PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'launch', 'auto_link_attacher_node.py']),
                 ' --ros-args -p use_sim_time:=true',
                 ' -p attach_distance_threshold:=0.06',
                 ' -p finger_distance_threshold:=0.04',
@@ -655,6 +655,11 @@ def launch_setup(context, *args, **kwargs):
     ])
 
     launch_actions = [
+        AppendEnvironmentVariable(
+            name='GAZEBO_MODEL_PATH',
+            value=str(cais_lab_robotics_share / 'models'),
+            prepend=True,
+        ),
         gazebo_launch,
         combined_rsp,
         combined_spawn,
@@ -682,11 +687,6 @@ def generate_launch_description():
             'run_perception',
             default_value='true',
             description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
-        ),
-        DeclareLaunchArgument(
-            'fast_sim',
-            default_value='false',
-            description='Use the fast Gazebo world timing profile.',
         ),
         DeclareLaunchArgument(
             'passive',

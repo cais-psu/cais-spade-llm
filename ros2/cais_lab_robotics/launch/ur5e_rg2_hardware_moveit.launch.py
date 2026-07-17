@@ -3,7 +3,7 @@
 UR5e hardware MoveIt2 with an attached OnRobot RG2.
 
 Usage:
-    ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py
+    ros2 launch cais_lab_robotics ur5e_rg2_hardware_moveit.launch.py
 """
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 RG2_PREFIX = "ur5e_rg2_"
+UR5E_BASE_XYZ = "0.0 0.0 1.021"
+UR5E_BASE_RPY = "0 0 3.142"
 
 
 def _load_hardware_arms_config() -> dict[str, Any]:
     path = (
-        Path(get_package_share_directory("xarm_gazebo"))
+        Path(get_package_share_directory("cais_lab_robotics"))
         / "config"
         / "hardware_runtime"
         / "xarm6_ur5e_hardware_runtime.yaml"
@@ -135,6 +137,21 @@ def _build_urdf():
         "use_fake_hardware:=false",
     ]).decode("utf-8")
     ur5e_root = ET.fromstring(ur5e_raw)
+    for joint in ur5e_root.findall("joint"):
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if (
+            parent is not None
+            and child is not None
+            and parent.get("link") == "world"
+            and child.get("link") == "base_link"
+        ):
+            origin = joint.find("origin")
+            if origin is None:
+                origin = ET.SubElement(joint, "origin")
+            origin.set("xyz", UR5E_BASE_XYZ)
+            origin.set("rpy", UR5E_BASE_RPY)
+            break
 
     onrobot_raw = subprocess.check_output([
         "xacro",
@@ -158,32 +175,6 @@ def _build_urdf():
 
     ur5e_root.attrib["name"] = "ur5e_rg2_hardware"
     return ET.tostring(ur5e_root, encoding="unicode")
-
-
-def _build_rg2_tf_urdf():
-    onrobot_raw = subprocess.check_output([
-        "xacro",
-        str(Path(get_package_share_directory("onrobot_description")) / "urdf" / "onrobot.urdf.xacro"),
-        "onrobot_type:=rg2",
-        "name:=rg2",
-        f"prefix:={RG2_PREFIX}",
-        "sim_gazebo:=false",
-    ]).decode("utf-8")
-    onrobot_root = ET.fromstring(onrobot_raw)
-    _strip_world_and_ground(onrobot_root)
-
-    rg2_tf_root = ET.Element("robot", {"name": "ur5e_rg2_tf"})
-    ET.SubElement(rg2_tf_root, "link", {"name": "tool0"})
-    for elem in list(onrobot_root):
-        rg2_tf_root.append(elem)
-
-    mounting_joint = ET.Element("joint", {"name": "ur5e_rg2_gripper_mount_joint", "type": "fixed"})
-    ET.SubElement(mounting_joint, "parent", {"link": "tool0"})
-    ET.SubElement(mounting_joint, "child", {"link": f"{RG2_PREFIX}onrobot_base_link"})
-    ET.SubElement(mounting_joint, "origin", {"xyz": "0 0 0", "rpy": "0 0 -1.57079632679"})
-    rg2_tf_root.append(mounting_joint)
-
-    return ET.tostring(rg2_tf_root, encoding="unicode")
 
 
 def _build_srdf():
@@ -382,7 +373,6 @@ def launch_setup(context, *args, **kwargs):
     launch_rviz = _launch_arg_enabled(context, "launch_rviz", default="true")
 
     urdf = _build_urdf()
-    rg2_tf_urdf = _build_rg2_tf_urdf()
     srdf = _build_srdf()
     moveit_config = _build_moveit_params(urdf, srdf)
 
@@ -393,7 +383,7 @@ def launch_setup(context, *args, **kwargs):
         output="log",
         parameters=[
             {
-                "robot_description": rg2_tf_urdf,
+                "robot_description": urdf,
                 "use_sim_time": False,
             },
         ],
@@ -407,7 +397,7 @@ def launch_setup(context, *args, **kwargs):
     )
 
     rviz_config = PathJoinSubstitution([
-        FindPackageShare("xarm_gazebo"),
+        FindPackageShare("cais_lab_robotics"),
         "rviz",
         "ur5e_rg2_hardware_moveit.rviz",
     ])

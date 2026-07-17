@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 ROS2_WS="${ROS2_WS:-$HOME/ros2_ws}"
 ROS_SETUP="/opt/ros/${ROS_DISTRO}/setup.bash"
+CAIS_PACKAGE_SOURCE="${REPO_ROOT}/ros2/cais_lab_robotics"
+CAIS_PACKAGE_LINK="${ROS2_WS}/src/cais_lab_robotics"
 
 if [[ ! -f "${ROS_SETUP}" ]]; then
   echo "ROS 2 ${ROS_DISTRO} is not installed at ${ROS_SETUP}." >&2
@@ -46,56 +48,30 @@ copy_file_if_not_same() {
   cp "${src}" "${dst_dir}/"
 }
 
-copy_glob_if_not_same() {
-  local src_dir="$1"
-  local pattern="$2"
-  local dst_dir="$3"
-  local src
-  shopt -s nullglob
-  for src in "${src_dir}"/${pattern}; do
-    copy_file_if_not_same "${src}" "${dst_dir}"
-  done
-  shopt -u nullglob
-}
+if [[ ! -f "${CAIS_PACKAGE_SOURCE}/package.xml" ]]; then
+  echo "cais_lab_robotics package is missing at ${CAIS_PACKAGE_SOURCE}." >&2
+  exit 1
+fi
 
-copy_tree_if_not_same() {
-  local src_dir="$1"
-  local dst_dir="$2"
-  local src rel rel_dir
-  if [[ ! -d "${src_dir}" ]]; then
-    return
+if [[ -L "${CAIS_PACKAGE_LINK}" ]]; then
+  if [[ "$(readlink -f "${CAIS_PACKAGE_LINK}")" != "$(readlink -f "${CAIS_PACKAGE_SOURCE}")" ]]; then
+    echo "${CAIS_PACKAGE_LINK} points to a different package. Remove it manually and rerun." >&2
+    exit 1
   fi
-  while IFS= read -r -d '' src; do
-    rel="${src#${src_dir}/}"
-    rel_dir="$(dirname "${rel}")"
-    mkdir -p "${dst_dir}/${rel_dir}"
-    copy_file_if_not_same "${src}" "${dst_dir}/${rel_dir}"
-  done < <(find "${src_dir}" -type f -print0)
-}
+elif [[ -e "${CAIS_PACKAGE_LINK}" ]]; then
+  echo "${CAIS_PACKAGE_LINK} already exists and is not the CAIS repository symlink." >&2
+  echo "Move it out of the way manually, then rerun this script." >&2
+  exit 1
+else
+  ln -s "${CAIS_PACKAGE_SOURCE}" "${CAIS_PACKAGE_LINK}"
+fi
 
-remove_legacy_cais_config_files() {
-  local config_dir="$1"
-  rm -f \
-    "${config_dir}/hardware_arms.yaml" \
-    "${config_dir}/xarm6_ur5e_controllers.yaml" \
-    "${config_dir}/ur5e_rg2_controllers.yaml" \
-    "${config_dir}/ur5e_initial_positions.yaml"
-}
+# colcon does not remove deleted package assets from an existing install tree.
+STALE_FAST_WORLD="${ROS2_WS}/install/cais_lab_robotics/share/cais_lab_robotics/worlds/table_fast.world"
+if [[ -e "${STALE_FAST_WORLD}" || -L "${STALE_FAST_WORLD}" ]]; then
+  rm -f "${STALE_FAST_WORLD}"
+fi
 
-mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
-mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
-mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
-mkdir -p "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
-
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/worlds" "*.world" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/worlds"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/launch" "*.py" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/launch"
-copy_tree_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/config" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
-remove_legacy_cais_config_files "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/config"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/rviz" "*.rviz" \
-  "${ROS2_WS}/src/xarm_ros2/xarm_gazebo/rviz"
 copy_file_if_not_same \
   "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
   "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher/src"
@@ -109,17 +85,7 @@ cd "${ROS2_WS}"
 # Skip optional xArm vision/hand-eye package that pulls in
 # object_recognition_msgs, which is not needed for this repo's dual-robot
 # Gazebo + MoveIt bring-up.
-colcon build --packages-skip d435i_xarm_setup
-
-# Upstream xarm_gazebo installs only `worlds/` and `launch/`. Our custom dual-
-# robot flow also requires `config/` and `rviz/` assets at runtime.
-mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
-mkdir -p "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
-copy_tree_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/config" \
-  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
-remove_legacy_cais_config_files "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/config"
-copy_glob_if_not_same "${REPO_ROOT}/ros2/cais_lab_robotics/rviz" "*.rviz" \
-  "${ROS2_WS}/install/xarm_gazebo/share/xarm_gazebo/rviz"
+colcon build --executor sequential --packages-skip d435i_xarm_setup
 
 cat <<EOF
 
@@ -128,7 +94,7 @@ Gazebo workspace is ready.
 Next steps:
   source ${ROS_SETUP}
   source ${ROS2_WS}/install/setup.bash
-  ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+  ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 
 Then, in a separate terminal:
   cd ${REPO_ROOT}

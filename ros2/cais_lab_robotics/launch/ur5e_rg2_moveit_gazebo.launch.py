@@ -3,7 +3,7 @@
 All-in-one: UR5e + OnRobot RG2 in Gazebo Classic with MoveIt2.
 
 Usage:
-    ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py
+    ros2 launch cais_lab_robotics ur5e_rg2_moveit_gazebo.launch.py
 """
 
 import subprocess
@@ -270,7 +270,7 @@ def launch_setup(context, *args, **kwargs):
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'launch', 'ur5e_rg2_gazebo.launch.py'])
+            PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'launch', 'ur5e_rg2_gazebo.launch.py'])
         ),
     )
 

@@ -31,7 +31,7 @@ ros2 node list   # should return empty
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch xarm_gazebo xarm6_moveit_dual.launch.py
+ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py
 ```
 
 This starts:
@@ -144,7 +144,7 @@ MoveIt ──commands──► Real xArm6 ──joint_states──► Gazebo (pa
 
 | | Mode 1: Simulation | Mode 2: Real Hardware |
 |---|---|---|
-| **Command** | `ros2 launch xarm_gazebo xarm6_moveit_dual.launch.py` | T1: `ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.240` <br> T2: `ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py robot_ip:=192.168.1.240 add_gripper:=true` |
+| **Command** | `ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py` | T1: `ros2 launch xarm_api xarm6_driver.launch.py robot_ip:=192.168.1.240` <br> T2: `ros2 launch xarm_moveit_config xarm6_moveit_realmove.launch.py robot_ip:=192.168.1.240 add_gripper:=true` |
 | **Terminals** | 1 | 2 |
 | **MoveIt GUI** | ✅ Same | ✅ Same |
 | **Python code** | ✅ Same | ✅ Same |

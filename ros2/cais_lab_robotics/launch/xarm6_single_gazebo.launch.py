@@ -3,8 +3,8 @@
 Gazebo Classic launch: xArm6 + xArm gripper in a single-table world.
 
 Usage:
-    ros2 launch xarm_gazebo xarm6_single_gazebo.launch.py
-    ros2 launch xarm_gazebo xarm6_single_gazebo.launch.py passive:=true
+    ros2 launch cais_lab_robotics xarm6_single_gazebo.launch.py
+    ros2 launch cais_lab_robotics xarm6_single_gazebo.launch.py passive:=true
 """
 
 import os
@@ -14,6 +14,7 @@ from pathlib import Path
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    AppendEnvironmentVariable,
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     OpaqueFunction,
@@ -135,7 +136,7 @@ def launch_setup(context, *args, **kwargs):
         '1', 'true', 'yes', 'on',
     }
 
-    gazebo_world = PathJoinSubstitution([FindPackageShare('xarm_gazebo'), 'worlds', 'single_table.world'])
+    gazebo_world = PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'worlds', 'single_table.world'])
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'])
@@ -171,6 +172,11 @@ def launch_setup(context, *args, **kwargs):
     )
 
     launch_actions = [
+        AppendEnvironmentVariable(
+            name='GAZEBO_MODEL_PATH',
+            value=str(Path(get_package_share_directory('cais_lab_robotics')) / 'models'),
+            prepend=True,
+        ),
         gazebo,
         state_publisher,
         spawn,

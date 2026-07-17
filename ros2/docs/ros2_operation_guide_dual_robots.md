@@ -53,7 +53,7 @@ pkill -9 -f gazebo
 
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select xarm_gazebo
+colcon build --packages-select cais_lab_robotics xarm_gazebo
 source install/setup.bash
 ```
 
@@ -64,7 +64,7 @@ source install/setup.bash
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py
+ros2 launch cais_lab_robotics xarm6_ur5e_gazebo.launch.py
 ```
 
 **What happens:**
@@ -152,7 +152,7 @@ ros2 run tf2_ros tf2_echo ur5e_base_link ur5e_tool0
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
 
 **What happens (timeline):**
@@ -235,14 +235,14 @@ corresponding ROS2 controller action server at the root namespace.
 # MoveIt launch (Gazebo + MoveIt for both robots)
 ~/projects/cais-spade-llm/ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py
 
-# Runtime copy used by ros2 launch after build
-~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
+# Package source registered in the ROS2 workspace
+~/ros2_ws/src/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py
 ```
 
 After any changes, rebuild:
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select xarm_gazebo
+colcon build --packages-select cais_lab_robotics xarm_gazebo
 source install/setup.bash
 ```
 
@@ -257,7 +257,7 @@ source install/setup.bash
 | Robots not visible | Wait 35+ seconds after launch; spawn is delayed 30s |
 | `spawn_entity: service not available` | Gazebo not ready yet — wait longer, or increase `TimerAction(period=...)` |
 | Controllers not loading | Check `ros2 control list_controllers`; spawn must complete first |
-| `xarm6_xarm6_traj_controller` not found | Rebuild workspace: `colcon build --packages-select xarm_gazebo` |
+| `xarm6_xarm6_traj_controller` not found | Rebuild workspace: `colcon build --packages-select cais_lab_robotics xarm_gazebo` |
 | `ur5e_joint_trajectory_controller` not found | Rebuild workspace; verify `xarm6_ur5e_gazebo_ros2_control_controllers.yaml` is installed |
 | Closing Gazebo window kills everything | Rebuild with the current launch file — it uses `gui_required:=false` |
 | UR5e doesn't move in Gazebo | Verify `ur5e_joint_trajectory_controller` is `active` in controller list |

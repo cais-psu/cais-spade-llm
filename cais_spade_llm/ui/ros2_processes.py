@@ -125,36 +125,37 @@ def build_ros2_launch_cmds(
     )
     return {
         "gazebo_dual": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "run_perception:=false include_assembly_parts:=false"
         ),
         "gazebo_dual_gazebo_only": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "launch_moveit:=false launch_rviz:=false "
             "run_perception:=false include_assembly_parts:=false"
         ),
         "gazebo_dual_moveit_only": (
-            "ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py "
+            "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "launch_gazebo:=false launch_moveit:=true launch_rviz:=true "
             "run_perception:=false include_assembly_parts:=false"
         ),
         "gazebo_dual_passive": (
-            "ros2 launch xarm_gazebo xarm6_ur5e_gazebo.launch.py "
+            "ros2 launch cais_lab_robotics xarm6_ur5e_gazebo.launch.py "
             "passive:=true run_perception:=false include_assembly_parts:=false"
         ),
-        "gazebo_xarm6": "ros2 launch xarm_gazebo xarm6_moveit_single_gazebo.launch.py",
-        "gazebo_ur5e": "ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py",
+        "gazebo_xarm6": "ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py",
+        "gazebo_ur5e": "ros2 launch cais_lab_robotics ur5e_rg2_moveit_gazebo.launch.py",
         "gazebo_xarm6_passive": (
-            "ros2 launch xarm_gazebo xarm6_single_gazebo.launch.py passive:=true"
+            "ros2 launch cais_lab_robotics xarm6_single_gazebo.launch.py passive:=true"
         ),
         "gazebo_ur5e_passive": (
-            "ros2 launch xarm_gazebo ur5e_rg2_gazebo.launch.py passive:=true run_perception:=false"
+            "ros2 launch cais_lab_robotics ur5e_rg2_gazebo.launch.py "
+            "passive:=true run_perception:=false"
         ),
         "hardware_xarm6_driver": (
-            "ros2 launch xarm_gazebo xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}"
+            "ros2 launch cais_lab_robotics xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}"
         ),
         "hardware_xarm6_moveit": (
-            "ros2 launch xarm_gazebo xarm6_hardware_moveit.launch.py robot_ip:={xarm6_ip}"
+            "ros2 launch cais_lab_robotics xarm6_hardware_moveit.launch.py robot_ip:={xarm6_ip}"
         ),
         "hardware_ur5e_rtde_trajectory_server": (
             f"{venv_python} {ur5e_rtde_trajectory_script} "
@@ -166,10 +167,12 @@ def build_ros2_launch_cmds(
             f"--config {hardware_config_path} --backend {ur5e_gripper_backend}"
         ),
         "hardware_ur5e_moveit": (
-            "ros2 launch xarm_gazebo ur5e_rg2_hardware_moveit.launch.py launch_rviz:=true"
+            "ros2 launch cais_lab_robotics ur5e_rg2_hardware_moveit.launch.py "
+            "launch_rviz:=true"
         ),
         "hardware_dual_robots_moveit": (
-            "ros2 launch xarm_gazebo dual_robots_hardware_moveit.launch.py launch_rviz:=true"
+            "ros2 launch cais_lab_robotics dual_robots_hardware_moveit.launch.py "
+            "launch_rviz:=true"
         ),
         "perception": f"python3.10 {perception_script}",
         "teleop_xarm6": f"python3.10 {teleop_script} --robot xarm6",
@@ -182,12 +185,8 @@ def render_ros2_launch_cmd(
     hardware_ips: dict[str, str],
     hw_ip_defaults: dict[str, str],
     name: str,
-    *,
-    fast_forward_simulation: bool | None = None,
 ) -> str:
     cmd = commands[name]
-    if str(name or "").strip().lower() == "gazebo_dual" and bool(fast_forward_simulation):
-        cmd = f"{cmd} fast_sim:=true launch_rviz:=false"
     return cmd.format(
         xarm6_ip=hardware_ips.get("xarm6", hw_ip_defaults["xarm6"]),
         ur5e_ip=hardware_ips.get("ur5e", hw_ip_defaults["ur5e"]),
@@ -252,7 +251,7 @@ def ros2_workspace_setup_path() -> Path:
 
 
 def ros2_workspace_launch_dir() -> Path:
-    return ros2_workspace_root() / "src" / "xarm_ros2" / "xarm_gazebo" / "launch"
+    return ros2_workspace_root() / "src" / "cais_lab_robotics" / "launch"
 
 
 def ros2_workspace_install_pkg_path(pkg_name: str) -> Path:
@@ -276,7 +275,7 @@ def ros2_launch_required_paths(
     ur5e_rtde_trajectory_script: Path,
 ) -> list[tuple[Path, str]]:
     launch_key = str(name or "").strip().lower()
-    xarm_gazebo_share = ros2_workspace_install_share_pkg_path("xarm_gazebo")
+    cais_lab_robotics_share = ros2_workspace_install_share_pkg_path("cais_lab_robotics")
     repo_hardware_config = (
         Path(ur5e_rtde_trajectory_script).resolve().parents[1]
         / "config"
@@ -284,13 +283,23 @@ def ros2_launch_required_paths(
         / "xarm6_ur5e_hardware_runtime.yaml"
     )
     hardware_config_asset = (
-        xarm_gazebo_share / "config" / "hardware_runtime" / "xarm6_ur5e_hardware_runtime.yaml",
+        cais_lab_robotics_share
+        / "config"
+        / "hardware_runtime"
+        / "xarm6_ur5e_hardware_runtime.yaml",
         "ROS2 workspace is missing the xArm6 + UR5e hardware runtime config. "
         "Re-run `make bootstrap-gazebo`.",
     )
     repo_hardware_config_asset = (
         repo_hardware_config,
         f"xArm6 + UR5e hardware runtime config is missing at {repo_hardware_config}.",
+    )
+    workspace_cais = (
+        (
+            ros2_workspace_install_pkg_path("cais_lab_robotics"),
+            "ROS2 workspace is missing package 'cais_lab_robotics'. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
     )
     workspace_xarm = (
         (
@@ -340,15 +349,15 @@ def ros2_launch_required_paths(
     )
     dual_assets = (
         (
-            xarm_gazebo_share
+            cais_lab_robotics_share
             / "config"
             / "gazebo_ros2_control"
             / "xarm6_ur5e_gazebo_ros2_control_controllers.yaml",
-            "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. "
+            "ROS2 workspace is missing the dual-robot cais_lab_robotics controller config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share
+            cais_lab_robotics_share
             / "config"
             / "gazebo_initial_joint_positions"
             / "ur5e_gazebo_initial_joint_positions.yaml",
@@ -356,21 +365,21 @@ def ros2_launch_required_paths(
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share / "rviz" / "dual_moveit.rviz",
+            cais_lab_robotics_share / "rviz" / "dual_moveit.rviz",
             "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
         ),
     )
     dual_passive_assets = (
         (
-            xarm_gazebo_share
+            cais_lab_robotics_share
             / "config"
             / "gazebo_ros2_control"
             / "xarm6_ur5e_gazebo_ros2_control_controllers.yaml",
-            "ROS2 workspace is missing the dual-robot xarm_gazebo controller config. "
+            "ROS2 workspace is missing the dual-robot cais_lab_robotics controller config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share
+            cais_lab_robotics_share
             / "config"
             / "gazebo_initial_joint_positions"
             / "ur5e_gazebo_initial_joint_positions.yaml",
@@ -380,7 +389,7 @@ def ros2_launch_required_paths(
     )
     xarm_hardware_driver_assets = (
         (
-            xarm_gazebo_share / "launch" / "xarm6_hardware_driver.launch.py",
+            cais_lab_robotics_share / "launch" / "xarm6_hardware_driver.launch.py",
             "ROS2 workspace is missing the xArm6 hardware driver launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
@@ -388,7 +397,7 @@ def ros2_launch_required_paths(
     xarm_hardware_moveit_assets = (
         hardware_config_asset,
         (
-            xarm_gazebo_share / "launch" / "xarm6_hardware_moveit.launch.py",
+            cais_lab_robotics_share / "launch" / "xarm6_hardware_moveit.launch.py",
             "ROS2 workspace is missing the xArm6 hardware MoveIt launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
@@ -396,19 +405,19 @@ def ros2_launch_required_paths(
     dual_hardware_moveit_assets = (
         hardware_config_asset,
         (
-            xarm_gazebo_share / "launch" / "dual_robots_hardware_moveit.launch.py",
+            cais_lab_robotics_share / "launch" / "dual_robots_hardware_moveit.launch.py",
             "ROS2 workspace is missing the dual robots hardware MoveIt launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share / "rviz" / "dual_robots_hardware_moveit.rviz",
+            cais_lab_robotics_share / "rviz" / "dual_robots_hardware_moveit.rviz",
             "ROS2 workspace is missing the dual robots hardware RViz config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
     ur_assets = (
         (
-            xarm_gazebo_share
+            cais_lab_robotics_share
             / "config"
             / "gazebo_ros2_control"
             / "ur5e_rg2_gazebo_ros2_control_controllers.yaml",
@@ -419,12 +428,12 @@ def ros2_launch_required_paths(
     ur_hardware_rg2_assets = (
         hardware_config_asset,
         (
-            xarm_gazebo_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
+            cais_lab_robotics_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
             "ROS2 workspace is missing the UR5e RG2 hardware MoveIt launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
         (
-            xarm_gazebo_share / "rviz" / "ur5e_rg2_hardware_moveit.rviz",
+            cais_lab_robotics_share / "rviz" / "ur5e_rg2_hardware_moveit.rviz",
             "ROS2 workspace is missing the UR5e RG2 hardware RViz config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
@@ -456,6 +465,7 @@ def ros2_launch_required_paths(
 
     if launch_key == "gazebo_dual":
         return [
+            *workspace_cais,
             *workspace_xarm,
             *moveit_core,
             *ur_stack,
@@ -464,11 +474,18 @@ def ros2_launch_required_paths(
             *dual_assets,
         ]
     if launch_key == "gazebo_dual_passive":
-        return [*workspace_xarm, *ur_stack, *onrobot_ws, *dual_passive_assets]
+        return [
+            *workspace_cais,
+            *workspace_xarm,
+            *ur_stack,
+            *onrobot_ws,
+            *dual_passive_assets,
+        ]
     if launch_key == "gazebo_xarm6":
-        return [*workspace_xarm, *moveit_core, *link_attacher_ws]
+        return [*workspace_cais, *workspace_xarm, *moveit_core, *link_attacher_ws]
     if launch_key == "gazebo_ur5e":
         return [
+            *workspace_cais,
             *workspace_xarm,
             *moveit_core,
             *ur_stack,
@@ -477,15 +494,21 @@ def ros2_launch_required_paths(
             *ur_assets,
         ]
     if launch_key == "gazebo_xarm6_passive":
-        return [*workspace_xarm]
+        return [*workspace_cais, *workspace_xarm]
     if launch_key == "gazebo_ur5e_passive":
-        return [*workspace_xarm, *ur_stack, *onrobot_ws, *ur_assets]
+        return [*workspace_cais, *workspace_xarm, *ur_stack, *onrobot_ws, *ur_assets]
     if launch_key == "hardware_xarm6_driver":
-        return [*workspace_xarm, *xarm_hardware_driver_assets]
+        return [*workspace_cais, *workspace_xarm, *xarm_hardware_driver_assets]
     if launch_key == "hardware_xarm6_moveit":
-        return [*workspace_xarm, *moveit_core, *xarm_hardware_moveit_assets]
+        return [
+            *workspace_cais,
+            *workspace_xarm,
+            *moveit_core,
+            *xarm_hardware_moveit_assets,
+        ]
     if launch_key == "hardware_dual_robots_moveit":
         return [
+            *workspace_cais,
             *workspace_xarm,
             *moveit_core,
             *ur_stack,
@@ -493,7 +516,13 @@ def ros2_launch_required_paths(
             *dual_hardware_moveit_assets,
         ]
     if launch_key == "hardware_ur5e_moveit":
-        return [*moveit_core, *ur_stack, *onrobot_ws, *ur_hardware_rg2_assets]
+        return [
+            *workspace_cais,
+            *moveit_core,
+            *ur_stack,
+            *onrobot_ws,
+            *ur_hardware_rg2_assets,
+        ]
     if launch_key == "hardware_ur5e_rg2_gripper":
         return [*ur_rg2_bridge_assets]
     if launch_key == "hardware_ur5e_rtde_trajectory_server":
@@ -529,7 +558,7 @@ def ros2_launch_prereq_error(
         if not launch_path.is_file():
             return (
                 f"ROS2 workspace is missing {launch_file} at {launch_path}. "
-                "Re-run `make bootstrap-gazebo` to copy the custom Gazebo launch files and rebuild."
+                "Re-run `make bootstrap-gazebo` to install cais_lab_robotics and rebuild."
             )
     for required_path, remedy in ros2_launch_required_paths(
         name,

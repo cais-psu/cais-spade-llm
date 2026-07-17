@@ -21,7 +21,7 @@ from uf_ros_lib.uf_robot_utils import generate_ros2_control_params_temp_file
 
 def _load_hardware_arms_config() -> dict[str, Any]:
     path = (
-        Path(get_package_share_directory("xarm_gazebo"))
+        Path(get_package_share_directory("cais_lab_robotics"))
         / "config"
         / "hardware_runtime"
         / "xarm6_ur5e_hardware_runtime.yaml"

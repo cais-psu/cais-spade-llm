@@ -419,7 +419,6 @@ class SystemBridge:
         # Configuration (set from UI before start).
         self.execution_mode: str = "simulation"
         self.robot_env: str = "gazebo"
-        self.fast_forward_simulation_enabled: bool = False
         self.selected_product: str = ""
         self.selected_requirement_file: str = ""
         self.selected_product_order_file: str = ""
@@ -4127,9 +4126,8 @@ class SystemBridge:
             self._set_startup_phase("prepare_environment")
             os.environ["ROBOT_ENV"] = self.robot_env
             os.environ["EXECUTION_MODE"] = self.execution_mode
-            fast_forward_runtime = self._fast_forward_simulation_runtime_enabled()
-            os.environ["CAIS_GAZEBO_WAIT_SCALE"] = "0.35" if fast_forward_runtime else "1.0"
-            os.environ["CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE"] = "1" if fast_forward_runtime else "0"
+            os.environ["CAIS_GAZEBO_WAIT_SCALE"] = "1.0"
+            os.environ["CAIS_SKIP_RECOVERY_HOME_AFTER_PLACE"] = "0"
             perception_backend = self._perception_backend_for_mode()
             os.environ["PERCEPTION_BACKEND"] = perception_backend
 
@@ -5059,25 +5057,12 @@ class SystemBridge:
         self._hw_ping_last_ts = now
         return {k: dict(v) for k, v in result.items()}
 
-    def _fast_forward_simulation_runtime_enabled(self) -> bool:
-        return (
-            bool(getattr(self, "fast_forward_simulation_enabled", False))
-            and str(self.execution_mode or "").strip().lower() == "simulation"
-            and str(self.robot_env or "").strip().lower() == "gazebo"
-        )
-
-    def _render_ros2_launch_cmd(
-        self,
-        name: str,
-        *,
-        fast_forward_simulation: bool | None = None,
-    ) -> str:
+    def _render_ros2_launch_cmd(self, name: str) -> str:
         return ros2_processes.render_ros2_launch_cmd(
             self.ROS2_LAUNCH_CMDS,
             self.hardware_ips,
             self._HW_IP_DEFAULTS,
             name,
-            fast_forward_simulation=fast_forward_simulation,
         )
 
     def _hardware_stack_for_robot(self, robot: str) -> tuple[str, ...] | None:
@@ -5550,6 +5535,11 @@ class SystemBridge:
         if not target:
             return "action name is empty"
 
+        action_service_names = {
+            f"{target}/_action/send_goal",
+            f"{target}/_action/get_result",
+            f"{target}/_action/cancel_goal",
+        }
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
@@ -5559,16 +5549,16 @@ class SystemBridge:
                 return f"{process_name} exited before {target} became available"
 
             ok, out = self._ros2_command_output(
-                "ros2 action list",
-                timeout_sec=3.0,
+                "ros2 service list --include-hidden-services --no-daemon --spin-time 2.0",
+                timeout_sec=7.0,
                 ros_domain_id=ros_domain_id,
                 emit_slow_diag=False,
                 emit_failure_diag=False,
                 emit_timeout_diag=False,
             )
             if ok:
-                actions = [line.strip() for line in out.splitlines() if line.strip()]
-                if any(action == target or action.endswith(target) for action in actions):
+                services = {line.strip() for line in out.splitlines() if line.strip()}
+                if action_service_names.issubset(services):
                     return None
             time.sleep(max(0.1, float(poll_interval_sec)))
 
@@ -10105,12 +10095,7 @@ class SystemBridge:
             )
         time.sleep(2)
 
-    def ros2_start(
-        self,
-        name: str,
-        *,
-        fast_forward_simulation: bool | None = None,
-    ) -> str | None:
+    def ros2_start(self, name: str) -> str | None:
         """Start a ROS2 process by name. Returns error string or None on success."""
         if name not in self.ROS2_LAUNCH_CMDS:
             return f"Unknown process: {name}"
@@ -10159,10 +10144,7 @@ class SystemBridge:
             if err:
                 return f"UR5e RTDE trajectory server is not ready: {err}"
 
-        cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(
-            name,
-            fast_forward_simulation=fast_forward_simulation,
-        )
+        cmd = self._ROS2_ENV + self._render_ros2_launch_cmd(name)
         try:
             proc = subprocess.Popen(
                 ["bash", "-c", cmd],

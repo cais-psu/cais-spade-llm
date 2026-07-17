@@ -1,37 +1,32 @@
-# ROS2 Setup From Scratch (Three Control Modes)
+# ROS2 Setup From Scratch
 
-This guide reproduces all three simulation/control modes on ROS2 Humble:
+This guide prepares the three CAIS-SPADE simulation modes on Ubuntu 22.04 with
+ROS2 Humble:
 
-1. `ur5e_rg2_moveit_gazebo.launch.py` (UR5e + RG2 + one table)
-2. `xarm6_moveit_single_gazebo.launch.py` (xArm6 + xArm gripper + one table)
-3. `dual_moveit_gazebo.launch.py` (UR5e + RG2 + xArm6 + xArm gripper)
+1. `ur5e_rg2_moveit_gazebo.launch.py`
+2. `xarm6_moveit_single_gazebo.launch.py`
+3. `dual_moveit_gazebo.launch.py`
 
-For operation details after setup, see:
-`ros2/docs/ros2_three_mode_control_guide.md`
+The root `README.md` is the primary full-application installation guide. This
+document covers the ROS2 workspace specifically.
 
-For IFRA LinkAttacher world-plugin setup (including patched multi-attach source), see:
-`ros2/docs/ifra_linkattacher_setup_from_scratch.md`
+## 1. Install the Base Environment
 
-## 0. Base Environment
+Install Ubuntu 22.04 and ROS2 Humble. For WSL2, follow
+`ros2/docs/wsl_ubuntu22_ros2_humble_setup.md` first.
 
-Use Ubuntu 22.04 + ROS2 Humble.
-
-- If you still need OS/ROS installation on WSL, follow:
-  `ros2/docs/wsl_ubuntu22_ros2_humble_setup.md`
-- Continue here after ROS is installed.
-
-Important:
-- Do not run ROS2/Gazebo commands inside Poetry venv.
-- In ROS terminals always source:
-  `source /opt/ros/humble/setup.bash`
-
-## 1. Install Required ROS Packages
+Do not run raw ROS2, Gazebo, MoveIt, or RViz commands inside the Poetry virtual
+environment.
 
 ```bash
-sudo apt update && sudo apt install -y \
+sudo apt update
+sudo apt install -y \
+  ros-humble-desktop \
+  python3-colcon-common-extensions \
+  python3-rosdep \
+  ros-humble-moveit \
   ros-humble-gazebo-ros-pkgs \
   ros-humble-gazebo-ros2-control \
-  ros-humble-ur-robot-driver \
   ros-humble-ur-description \
   ros-humble-ur-moveit-config \
   ros-humble-controller-manager \
@@ -41,148 +36,147 @@ sudo apt update && sudo apt install -y \
   ros-humble-robot-state-publisher
 ```
 
-## 2. Create Workspace And Clone Upstream Repos
+Initialize rosdep once:
 
 ```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-
-git clone -b humble https://github.com/xArm-Developer/xarm_ros2.git --recursive
-git clone https://github.com/tonydle/OnRobot_ROS2_Description.git
+if [ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+  sudo rosdep init
+fi
+rosdep update
 ```
 
-## 3. Copy Custom Files Into `xarm_ros2/xarm_gazebo`
+The real UR5e runtime uses the repository's RTDE trajectory server. It does not
+require `ur_robot_driver`.
 
-From `~/projects/cais-spade-llm`:
+## 2. Clone CAIS-SPADE-LLM
 
 ```bash
-# Worlds
-cp ros2/cais_lab_robotics/worlds/table.world \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/table.world
-cp ros2/cais_lab_robotics/worlds/single_table.world \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/worlds/single_table.world
-
-# Gazebo launches
-cp ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_ur5e_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/ur5e_rg2_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/xarm6_single_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_single_gazebo.launch.py
-
-# MoveIt + Gazebo launches
-cp ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/dual_moveit_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/ur5e_rg2_moveit_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/ur5e_rg2_moveit_gazebo.launch.py
-cp ros2/cais_lab_robotics/launch/xarm6_moveit_single_gazebo.launch.py \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/launch/xarm6_moveit_single_gazebo.launch.py
-
-# ros2_control configs
-mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control
-cp ros2/cais_lab_robotics/config/gazebo_ros2_control/xarm6_ur5e_gazebo_ros2_control_controllers.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control/xarm6_ur5e_gazebo_ros2_control_controllers.yaml
-cp ros2/cais_lab_robotics/config/gazebo_ros2_control/ur5e_rg2_gazebo_ros2_control_controllers.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_ros2_control/ur5e_rg2_gazebo_ros2_control_controllers.yaml
-mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_initial_joint_positions
-cp ros2/cais_lab_robotics/config/gazebo_initial_joint_positions/ur5e_gazebo_initial_joint_positions.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/gazebo_initial_joint_positions/ur5e_gazebo_initial_joint_positions.yaml
-mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/hardware_runtime
-cp ros2/cais_lab_robotics/config/hardware_runtime/xarm6_ur5e_hardware_runtime.yaml \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/config/hardware_runtime/xarm6_ur5e_hardware_runtime.yaml
-
-# RViz profile for dual mode
-mkdir -p ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz
-cp ros2/cais_lab_robotics/rviz/dual_moveit.rviz \
-  ~/ros2_ws/src/xarm_ros2/xarm_gazebo/rviz/dual_moveit.rviz
+mkdir -p ~/projects
+cd ~/projects
+git clone <CAIS-SPADE-LLM-REPOSITORY-URL> cais-spade-llm
+cd cais-spade-llm
 ```
 
-## 4. Build
+If the repository is already present, run the remaining commands from its root.
+
+## 3. Build `~/ros2_ws`
 
 ```bash
-cd ~/ros2_ws
-source /opt/ros/humble/setup.bash
-colcon build --packages-select xarm_gazebo
-source install/setup.bash
+make bootstrap-gazebo
 ```
 
-## 5. Run One Of The Three Modes
+Bootstrap is the complete workspace setup. It:
+
+- creates or reuses `~/ros2_ws`;
+- clones `xarm_ros2`, `OnRobot_ROS2_Description`, and `IFRA_LinkAttacher`;
+- registers the tracked `ros2/cais_lab_robotics` package through
+  `~/ros2_ws/src/cais_lab_robotics`;
+- applies the maintained IFRA link-attacher source patch; and
+- builds all required packages with `colcon`.
+
+Do not manually copy project files into `xarm_gazebo`, and do not perform a
+second initial build after bootstrap.
+
+## 4. Understand the Workspace
+
+```text
+Repository source:
+  ~/projects/cais-spade-llm/ros2/cais_lab_robotics/
+
+ROS2 source registration:
+  ~/ros2_ws/src/cais_lab_robotics -> repository source
+
+Generated colcon state:
+  ~/ros2_ws/build/
+  ~/ros2_ws/log/
+  ~/ros2_ws/install/
+```
+
+Edit the repository source. Never edit generated files under `build` or
+`install`. Gazebo, MoveIt, RViz, hardware control, and the digital twin need the
+installed workspace; Python-only planning and `dry_run` do not.
+
+## 5. Source and Verify Packages
 
 ```bash
+deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
+
+ros2 pkg prefix cais_lab_robotics
+ros2 pkg prefix xarm_gazebo
+ros2 pkg prefix xarm_description
+ros2 pkg prefix ur_description
+ros2 pkg prefix ur_moveit_config
+ros2 pkg prefix onrobot_description
+ros2 pkg prefix linkattacher_msgs
+ros2 pkg prefix ros2_linkattacher
 ```
 
-Mode 1 (UR5e + RG2, one table):
+The CAIS, xArm, OnRobot, and IFRA packages should resolve from
+`~/ros2_ws/install`. The UR packages should resolve from `/opt/ros/humble`.
+
+## 6. Run One of the Three Simulation Modes
+
+In a terminal where both ROS2 setup files are sourced:
+
+UR5e with RG2:
 
 ```bash
-ros2 launch xarm_gazebo ur5e_rg2_moveit_gazebo.launch.py
+ros2 launch cais_lab_robotics ur5e_rg2_moveit_gazebo.launch.py
 ```
-This single command opens both Gazebo and MoveIt (RViz).
 
-Mode 2 (xArm6 + gripper, one table):
+xArm6 with xArm gripper:
 
 ```bash
-ros2 launch xarm_gazebo xarm6_moveit_single_gazebo.launch.py
+ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py
 ```
-This single command opens both Gazebo and MoveIt (RViz).
 
-Mode 3 (dual robots + both grippers):
+Dual robots:
 
 ```bash
-ros2 launch xarm_gazebo dual_moveit_gazebo.launch.py
+ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
-This single command opens both Gazebo and MoveIt (RViz).
 
-Hardware commands for each mode are documented in:
-`ros2/docs/ros2_three_mode_control_guide.md`
-(sections "Step C: Hardware" for all three modes).
+The dual simulation uses the single world file
+`ros2/cais_lab_robotics/worlds/table.world`.
 
-## 6. Verify
+## 7. Verify the Running Simulation
 
 ```bash
 ros2 control list_controllers
 ```
 
-Expected per mode:
-- Mode 1: `ur5e_joint_trajectory_controller`, `ur5e_rg2_gripper_traj_controller`
-- Mode 2: `xarm6_xarm6_traj_controller`, `xarm6_xarm_gripper_traj_controller`
-- Mode 3: all four controllers above
+Expected controllers:
 
-Check MoveIt planning groups in RViz:
-- Mode 1: `ur5e_ur_manipulator`, `ur5e_rg2_gripper`
-- Mode 2: `xarm6_xarm6`, `xarm6_xarm_gripper`
-- Mode 3: all four groups above
+- UR5e mode: `ur5e_joint_trajectory_controller` and
+  `ur5e_rg2_gripper_traj_controller`.
+- xArm6 mode: `xarm6_xarm6_traj_controller` and
+  `xarm6_xarm_gripper_traj_controller`.
+- Dual mode: all four controllers.
 
-## 7. Smoke Tests
+Check the corresponding planning groups in the RViz MotionPlanning panel.
 
-UR5e RG2 close/open:
+## 8. Rebuild After Source Changes
 
 ```bash
-ros2 topic pub --once /ur5e_rg2_gripper_traj_controller/joint_trajectory \
-  trajectory_msgs/msg/JointTrajectory \
-  "{joint_names: ['ur5e_rg2_finger_width'], points: [{positions: [0.08], time_from_start: {sec: 2}}]}"
+cd ~/projects/cais-spade-llm
+make bootstrap-gazebo
+
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ```
 
-xArm gripper close/open:
+For hardware commands and daily operation, continue with
+`ros2/docs/ros2_three_mode_control_guide.md`. For IFRA details, see
+`ros2/docs/ifra_linkattacher_setup_from_scratch.md`.
 
-```bash
-ros2 topic pub --once /xarm6_xarm_gripper_traj_controller/joint_trajectory \
-  trajectory_msgs/msg/JointTrajectory \
-  "{joint_names: ['xarm6_drive_joint'], points: [{positions: [0.85], time_from_start: {sec: 2}}]}"
-```
+## Common Issues
 
-## 8. Robot Placement
-
-- UR5e single mode: `(0.0, 0.0, 1.021)`, yaw `3.142` (180 degrees)
-- xArm6 single mode: `(0.0, 0.0, 1.021)`, yaw `3.142` (180 degrees)
-- Dual mode:
-  xArm6 `(0.0, -0.7, 1.021)`, yaw `3.142`
-  UR5e `(0.0, 0.7, 1.021)`, yaw `3.142`
-
-## 9. Common Issues
-
-- `No module named 'lxml'`: Poetry venv is active; run `deactivate`.
-- Gazebo spawn timeout on WSL: wait longer or restart stale Gazebo processes.
-- Missing RG2 controls in RViz: confirm `ur5e_rg2_moveit_gazebo.launch.py` and `ur5e_rg2_gazebo_ros2_control_controllers.yaml` were copied and rebuilt.
-- RG2 instability: confirm updated `ur5e_rg2_gazebo.launch.py` is installed and rebuilt.
+| Problem | Resolution |
+|---|---|
+| `Package 'cais_lab_robotics' not found` | Run bootstrap and source `~/ros2_ws/install/setup.bash`. |
+| A launch/config/RViz change is ignored | Rebuild with bootstrap and use a newly sourced terminal. |
+| `No module named 'lxml'` or `rclpy` import failure | Deactivate the Poetry virtual environment for raw ROS2 commands. |
+| Gazebo spawn timeout | Stop stale Gazebo processes and relaunch. |
+| `/ATTACHLINK` or `/DETACHLINK` is missing | Verify the IFRA packages and rerun bootstrap. |
