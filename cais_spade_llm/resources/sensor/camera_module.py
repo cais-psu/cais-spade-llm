@@ -16,12 +16,12 @@ class CameraModule:
       - none: no observation (dry-run placeholder path).
       - mock: deterministic map from mock_observations.
       - gazebo_gt: ROS2 /detect_part and /detect_all from Gazebo perception node.
-      - yolo: direct physical perception module (no ROS2 dependency).
+      - yolo: ROS2 /detect_part and /detect_all from the RealSense node.
     """
 
     def __init__(
         self,
-        mock_observations: dict[str, dict[str, float]] | None = None,
+        mock_observations: dict[str, dict[str, Any]] | None = None,
         use_ros2: bool = False,
         backend: str | None = None,
         ros2_timeout_sec: float = 5.0,
@@ -32,13 +32,18 @@ class CameraModule:
             use_ros2=use_ros2,
             mock_observations=mock_observations,
         )
-        self._mock_observations: dict[str, dict[str, float] | None] = mock_observations or {}
-        self._use_ros2 = self._backend == "gazebo_gt"
+        self._mock_observations: dict[str, dict[str, Any] | None] = mock_observations or {}
+        self._use_ros2 = self._backend in {"gazebo_gt", "yolo"}
         self._ros2_timeout = ros2_timeout_sec
         self._ros2_call_retries = max(1, int(ros2_call_retries))
+        default_node_name = (
+            "/realsense_roboflow_perception"
+            if self._backend == "yolo"
+            else "/perception_node"
+        )
         self._perception_node_name = (
-            str(os.environ.get("PERCEPTION_NODE_NAME", "/perception_node")).strip()
-            or "/perception_node"
+            str(os.environ.get("PERCEPTION_NODE_NAME", default_node_name)).strip()
+            or default_node_name
         )
 
         self._ros2_node = None
@@ -55,7 +60,7 @@ class CameraModule:
         *,
         backend: str | None,
         use_ros2: bool,
-        mock_observations: dict[str, dict[str, float]] | None,
+        mock_observations: dict[str, dict[str, Any]] | None,
     ) -> str:
         aliases = {
             "ros2": "gazebo_gt",
@@ -126,8 +131,6 @@ class CameraModule:
             return self._mock_observations.get(part_name)
         if self._backend == "none":
             return None
-        if self._backend == "yolo":
-            return self._observe_physical(part_name)
         if self._ensure_ros2():
             return self._observe_ros2_trigger(part_name)
         return None
@@ -177,51 +180,27 @@ class CameraModule:
             if result is None:
                 return None
 
+            if not result.success:
+                logger.warning("CameraModule: /detect_part rejected: %s", result.message)
+                return None
             data = json.loads(result.message)
             if data.get("detected"):
-                return {
-                    "x": float(data["x"]) * 1000.0,
-                    "y": float(data["y"]) * 1000.0,
-                    "z": float(data["z"]) * 1000.0,
-                }
+                return dict(data)
             return None
         except Exception:
             logger.exception("CameraModule: /detect_part Trigger call failed")
             return None
 
-    def observe_all(self) -> dict[str, dict[str, float]]:
+    def observe_all(self) -> dict[str, dict[str, Any]]:
         if self._backend == "mock":
             return {k: v for k, v in self._mock_observations.items() if v is not None}
         if self._backend == "none":
             return {}
-        if self._backend == "yolo":
-            return self._observe_all_physical()
         if self._ensure_ros2():
             return self._observe_all_ros2_trigger()
         return {}
 
-    def _observe_physical(self, part_name: str) -> dict[str, Any] | None:
-        """Call direct physical perception module (non-ROS path)."""
-        try:
-            from resources.sensor.physical.detect_part_service import detect_part
-
-            return detect_part(str(part_name or "").strip().upper())
-        except Exception:
-            logger.exception("CameraModule: physical detect_part call failed")
-            return None
-
-    def _observe_all_physical(self) -> dict[str, dict[str, float]]:
-        """Call direct physical perception module (non-ROS path)."""
-        try:
-            from resources.sensor.physical.detect_all_service import detect_all
-
-            result = detect_all()
-            return result if isinstance(result, dict) else {}
-        except Exception:
-            logger.exception("CameraModule: physical detect_all call failed")
-            return {}
-
-    def _observe_all_ros2_trigger(self) -> dict[str, dict[str, float]]:
+    def _observe_all_ros2_trigger(self) -> dict[str, dict[str, Any]]:
         if not (self._legacy_detect_all_client and self._Trigger):
             return {}
 
@@ -239,15 +218,14 @@ class CameraModule:
             result = future.result()
             if result is None:
                 return {}
+            if not result.success:
+                logger.warning("CameraModule: /detect_all rejected: %s", result.message)
+                return {}
 
             detections = json.loads(result.message)
-            parsed: dict[str, dict[str, float]] = {}
+            parsed: dict[str, dict[str, Any]] = {}
             for d in detections:
-                parsed[str(d["part_name"])] = {
-                    "x": float(d["x"]) * 1000.0,
-                    "y": float(d["y"]) * 1000.0,
-                    "z": float(d["z"]) * 1000.0,
-                }
+                parsed[str(d["part_name"])] = dict(d)
             return parsed
         except Exception:
             logger.exception("CameraModule: /detect_all Trigger call failed")

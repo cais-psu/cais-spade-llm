@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="gear_small">
+    <link name="link">
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>3.1623847563e-06</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>3.1623847563e-06</iyy><iyz>0</iyz><izz>2.9914361793e-06</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.01093880465</radius><length>0.02</length></cylinder></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <pose>-0.21316049955 -0.1518883057 -0.0697159157 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://gear_small/meshes/Gear_Small.STL</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

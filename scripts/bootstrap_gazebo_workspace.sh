@@ -79,12 +79,22 @@ copy_file_if_not_same \
 # ROS setup scripts are not consistently safe under `set -u`.
 set +u
 source "${ROS_SETUP}"
+if [[ -f "${ROS2_WS}/install/setup.bash" ]]; then
+  source "${ROS2_WS}/install/setup.bash"
+fi
 set -u
 
+if ! ros2 pkg prefix realsense2_camera >/dev/null 2>&1 || \
+   ! ros2 pkg prefix realsense2_description >/dev/null 2>&1; then
+  echo "RealSense ROS packages are required for wrist-camera perception." >&2
+  echo "Install them, then rerun bootstrap:" >&2
+  echo "  sudo apt install ros-${ROS_DISTRO}-realsense2-camera ros-${ROS_DISTRO}-realsense2-description" >&2
+  exit 1
+fi
+
 cd "${ROS2_WS}"
-# Skip optional xArm vision/hand-eye package that pulls in
-# object_recognition_msgs, which is not needed for this repo's dual-robot
-# Gazebo + MoveIt bring-up.
+# Skip the vendor xArm D435i helper; CAIS uses the official RealSense wrapper
+# and its own calibrated wrist-camera pipeline.
 colcon build --executor sequential --packages-skip d435i_xarm_setup
 
 cat <<EOF

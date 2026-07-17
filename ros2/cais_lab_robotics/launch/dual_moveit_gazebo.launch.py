@@ -462,6 +462,7 @@ def launch_setup(context, *args, **kwargs):
     ur5e_prefix = 'ur5e_'
     run_perception = LaunchConfiguration('run_perception')
     include_assembly_parts = LaunchConfiguration('include_assembly_parts')
+    include_loose_parts = LaunchConfiguration('include_loose_parts')
     launch_gazebo = _launch_arg_enabled(context, 'launch_gazebo', default='true')
     launch_moveit = _launch_arg_enabled(context, 'launch_moveit', default='true')
     launch_rviz = _launch_arg_enabled(context, 'launch_rviz', default='true')
@@ -477,6 +478,7 @@ def launch_setup(context, *args, **kwargs):
         launch_arguments={
             'run_perception': run_perception,
             'include_assembly_parts': include_assembly_parts,
+            'include_loose_parts': include_loose_parts,
         }.items(),
     )
 
@@ -559,6 +561,11 @@ def generate_launch_description():
             'include_assembly_parts',
             default_value='true',
             description='Spawn assembly board, gray/black boards, fixtures, and loose parts.',
+        ),
+        DeclareLaunchArgument(
+            'include_loose_parts',
+            default_value='true',
+            description='Spawn loose gears and pins. Digital twin perception sets this false.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

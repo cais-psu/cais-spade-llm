@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from .detect_all_service import detect_all
+from .roboflow_detector import UNSUPPORTED_PARTS
+
 
 def detect_part(part_name: str) -> dict[str, Any] | None:
     """
     Direct physical perception entrypoint for a single part.
 
-    Contract:
-      - Return None when not detected.
-      - Return dict containing at least x,y,z in mm when detected.
-      - Optional keys: confidence, camera_id, orientation, model_name.
+    Coordinates are world-frame metres. Unsupported LG remains blocked.
     """
-    _ = str(part_name or "").strip().upper()
-    # TODO: implement YOLO + depth + calibration pipeline.
-    return None
+    target = str(part_name or "").strip().upper()
+    if target in UNSUPPORTED_PARTS:
+        return None
+    return detect_all().get(target)

@@ -1013,6 +1013,18 @@ def _normalize_detected_item_output(item: Any, *, fallback_name: str = "") -> di
     model_name = str(item.get("model_name") or "").strip()
     if model_name:
         output["model_name"] = model_name
+    for key in (
+        "confidence",
+        "captured_at",
+        "frame_id",
+        "source",
+        "workflow_id",
+        "model_id",
+        "depth_sample_count",
+        "depth_mad_m",
+    ):
+        if item.get(key) is not None:
+            output[key] = deepcopy(item[key])
     current_location = str(item.get("current_location") or "").strip()
     if current_location:
         output["current_location"] = current_location

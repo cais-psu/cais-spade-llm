@@ -21,6 +21,9 @@ graphviz = "^0.21"
 pytest = "^9.0.2"
 scipy = "^1.14.1"
 ur-rtde = "^1.6.0"
+inference-sdk = "0.37.1"
+numpy = ">=1.26,<2"
+opencv-contrib-python-headless = "4.10.0.84"
 
 [tool.ruff]
 target-version = "py310"

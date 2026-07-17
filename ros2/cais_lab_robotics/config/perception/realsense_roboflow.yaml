@@ -1,0 +1,15 @@
+realsense_roboflow_perception:
+  ros__parameters:
+    color_topic: /camera/camera/color/image_raw
+    aligned_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    world_frame: world
+    tool_frame: tool0
+    camera_link_frame: camera_link
+    camera_optical_frame: camera_color_optical_frame
+    minimum_confidence: 0.70
+    minimum_depth_samples: 25
+    maximum_depth_mad_m: 0.003
+    maximum_frame_age_sec: 1.0
+    background_rate_hz: 0.2
+    snapshot_path: /tmp/cais_physical_perception.json

@@ -77,6 +77,38 @@ def _gazebo_world_file_candidates() -> list[Path]:
     return candidates
 
 
+def _gazebo_model_file_candidates(model_name: str) -> list[Path]:
+    candidates: list[Path] = []
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        candidates.append(
+            parent / f"ros2/cais_lab_robotics/models/{model_name}/model.sdf"
+        )
+    candidates.append(
+        Path.home()
+        / f"ros2_ws/install/cais_lab_robotics/share/cais_lab_robotics/models/{model_name}/model.sdf"
+    )
+    return candidates
+
+
+def _footprint_width_from_xml(root: ET.Element) -> float | None:
+    for geometry in root.iter("geometry"):
+        cylinder = geometry.find("cylinder")
+        if cylinder is not None:
+            radius = _as_float(cylinder.findtext("radius"), 0.0)
+            if radius > 0.0:
+                return radius * 2.0
+        box = geometry.find("box")
+        if box is not None:
+            tokens = str(box.findtext("size") or "").split()
+            if len(tokens) >= 2:
+                try:
+                    return max(float(tokens[0]), float(tokens[1]))
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
 def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
     target_model = str(model_name or "").strip()
     if not target_model:
@@ -91,23 +123,24 @@ def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
         for model in root.iter("model"):
             if str(model.attrib.get("name") or "").strip() != target_model:
                 continue
-            for geometry in model.iter("geometry"):
-                cylinder = geometry.find("cylinder")
-                if cylinder is not None:
-                    radius = _as_float(
-                        cylinder.findtext("radius"),
-                        0.0,
-                    )
-                    if radius > 0.0:
-                        return radius * 2.0
-                box = geometry.find("box")
-                if box is not None:
-                    tokens = str(box.findtext("size") or "").split()
-                    if len(tokens) >= 2:
-                        try:
-                            return max(float(tokens[0]), float(tokens[1]))
-                        except (TypeError, ValueError):
-                            continue
+            width = _footprint_width_from_xml(model)
+            if width is not None:
+                return width
+        included_names = {
+            str(include.findtext("name") or "").strip()
+            for include in root.iter("include")
+        }
+        if target_model not in included_names:
+            continue
+        for model_path in _gazebo_model_file_candidates(target_model):
+            if not model_path.is_file():
+                continue
+            try:
+                width = _footprint_width_from_xml(ET.parse(model_path).getroot())
+            except (ET.ParseError, OSError):
+                continue
+            if width is not None:
+                return width
     return None
 
 
@@ -584,10 +617,9 @@ class GazeboPickPlaceController:
             self.service_execute_traj,
             callback_group=self._cb_group,
         )
-        if self.execution_mode != "physical":
-            self._detect_all_client_legacy = self._node.create_client(
-                Trigger, self.service_detect_all, callback_group=self._cb_group
-            )
+        self._detect_all_client_legacy = self._node.create_client(
+            Trigger, self.service_detect_all, callback_group=self._cb_group
+        )
         self._set_state_client = self._node.create_client(
             SetEntityState, self.service_set_entity_state, callback_group=self._cb_group
         )
@@ -608,7 +640,7 @@ class GazeboPickPlaceController:
         )
 
         self._attach_srv, self._detach_srv = _import_linkattacher_srvs()
-        if self._attach_srv and self._detach_srv:
+        if self.execution_mode != "physical" and self._attach_srv and self._detach_srv:
             self._attach_client = self._node.create_client(
                 self._attach_srv, self.service_attach, callback_group=self._cb_group
             )
@@ -681,11 +713,10 @@ class GazeboPickPlaceController:
         self._log().info("Waiting for services/actions...")
         deadline = time.monotonic() + timeout_sec
 
-        if self.execution_mode != "physical":
-            if not self._wait_service(
-                self._detect_all_client_legacy, self.service_detect_all, deadline
-            ):
-                return False
+        if not self._wait_service(
+            self._detect_all_client_legacy, self.service_detect_all, deadline
+        ):
+            return False
         if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
             return False
         if not self._wait_action_server(self._exec_client, self.service_execute_traj, deadline):
@@ -1922,15 +1953,8 @@ class GazeboPickPlaceController:
         """
         if not self.wait_for_services():
             return []
-        if self.execution_mode == "physical":
-            self._log().warning(
-                "Physical mode detect_parts is unavailable in ROS2 controller path; "
-                "use direct physical perception integration."
-            )
-            return []
-
         future = self._detect_all_client_legacy.call_async(self._Trigger.Request())
-        result = self._wait_future(future, timeout_sec=10.0, label="detect_all_legacy")
+        result = self._wait_future(future, timeout_sec=30.0, label="detect_all_legacy")
         if not result or not result.success:
             msg = result.message if result else "timeout"
             self._log().error(f"/detect_all failed: {msg}")

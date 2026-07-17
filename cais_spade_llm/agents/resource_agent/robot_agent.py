@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (
@@ -1644,6 +1646,43 @@ class RobotAgent(ResourceAgent):
         """Return the cached primitive catalog, building it on first access."""
         return self.recovery_execution_primitive_catalog()
 
+    def _emit_physical_part_ownership_event(
+        self,
+        primitive: str,
+        params: dict[str, Any],
+    ) -> None:
+        """Emit a mirror-only event after completed UR5e hardware custody changes."""
+        if self.execution_mode != "physical" or str(self.name).strip().lower() != "ur5e":
+            return
+        primitive_name = str(primitive or "").strip()
+        if primitive_name not in {"grasp_part", "release_part"}:
+            return
+        part_name = str(
+            params.get("part_name") or params.get("model_name") or self._held_part or ""
+        ).strip()
+        model_map = {"SG": "gear_small", "MG": "gear_medium", "LG": "gear_large"}
+        model_name = str(params.get("model_name") or model_map.get(part_name) or "").strip()
+        if model_name not in model_map.values():
+            return
+        event = {
+            "sequence": str(time.time_ns()),
+            "occurred_at": time.time(),
+            "action": "held" if primitive_name == "grasp_part" else "released",
+            "part_name": part_name,
+            "model_name": model_name,
+            "source": "hardware_ur5e",
+        }
+        path = Path("/tmp/cais_physical_part_ownership.json")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(json.dumps(event, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as exc:
+            self.logger.warning(
+                "[Robot] hardware action completed but Gazebo ownership event failed: %s",
+                exc,
+            )
+
     async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
         if self.execution_mode == "dry_run":
@@ -1703,6 +1742,8 @@ class RobotAgent(ResourceAgent):
                         "[Robot] release_part completed using release_mode=%s",
                         release_mode,
                     )
+                if normalized.get("success"):
+                    self._emit_physical_part_ownership_event(primitive, normalized_params)
                 return normalized
             return {"success": False, "message": f"{primitive} returned unexpected type"}
         except Exception as exc:

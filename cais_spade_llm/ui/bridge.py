@@ -185,11 +185,20 @@ class SystemBridge:
     _DIGITAL_TWIN_MARKER_PROCESS_NAMES = {
         "digital_twin_dual_robots_paired_markers",
     }
+    _DIGITAL_TWIN_PERCEPTION_PROCESS_NAMES = {
+        "digital_twin_ur5e_only_realsense_camera",
+        "digital_twin_ur5e_only_physical_perception",
+        "digital_twin_ur5e_only_physical_part_sync",
+        "digital_twin_dual_robots_realsense_camera",
+        "digital_twin_dual_robots_physical_perception",
+        "digital_twin_dual_robots_physical_part_sync",
+    }
     _DIGITAL_TWIN_PROCESS_NAMES = (
         _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
         | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
         | _DIGITAL_TWIN_SYNC_PROCESS_NAMES
         | _DIGITAL_TWIN_MARKER_PROCESS_NAMES
+        | _DIGITAL_TWIN_PERCEPTION_PROCESS_NAMES
     )
     _GAZEBO_PROCESS_NAMES = _BASE_GAZEBO_PROCESS_NAMES | _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
     _HARDWARE_PROCESS_NAMES = _BASE_HARDWARE_PROCESS_NAMES | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
@@ -238,6 +247,11 @@ class SystemBridge:
             },
             "model_name": "ur5e_rg2",
             "sync_process": "digital_twin_ur5e_only_sync",
+            "perception_processes": {
+                "camera": "digital_twin_ur5e_only_realsense_camera",
+                "perception": "digital_twin_ur5e_only_physical_perception",
+                "part_sync": "digital_twin_ur5e_only_physical_part_sync",
+            },
             "hardware_supported": True,
         },
         "dual robots": {
@@ -268,6 +282,11 @@ class SystemBridge:
             "sync_processes": {
                 "xarm6": "digital_twin_dual_robots_sync_xarm6",
                 "ur5e": "digital_twin_dual_robots_sync_ur5e",
+            },
+            "perception_processes": {
+                "camera": "digital_twin_dual_robots_realsense_camera",
+                "perception": "digital_twin_dual_robots_physical_perception",
+                "part_sync": "digital_twin_dual_robots_physical_part_sync",
             },
             "hardware_supported": True,
             "sim_modes": ("monitor",),
@@ -385,6 +404,7 @@ class SystemBridge:
         "hardware_ur5e_moveit": "ur5e_rg2_hardware_moveit.launch.py",
         "hardware_xarm6_driver": "xarm6_hardware_driver.launch.py",
         "hardware_dual_robots_moveit": "dual_robots_hardware_moveit.launch.py",
+        "realsense_camera": "realsense_camera.launch.py",
     }
 
     @classmethod
@@ -5141,21 +5161,148 @@ class SystemBridge:
         return "none"
 
     def physical_perception_ready(self) -> tuple[bool, str]:
-        """Gate physical mode until real YOLO perception backend is integrated."""
+        """Gate physical execution on the validated RealSense/Roboflow node."""
         if self._perception_backend_for_mode() != "yolo":
             return True, ""
+        status = self.physical_perception_status()
+        if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
+            return False, "Physical mode is blocked: ROBOFLOW_API_KEY is not configured in .env."
+        if not status.get("calibration_ready"):
+            return False, str(status.get("calibration_error") or "hand-eye calibration is missing")
+        if not status.get("camera_process_running"):
+            return False, "Physical mode is blocked: start the RealSense camera process."
+        if not status.get("perception_process_running"):
+            return False, "Physical mode is blocked: start the physical perception process."
+        if not status.get("realsense_connected"):
+            return False, "Physical mode is blocked: no synchronized RealSense color/depth frame."
+        frame_age = status.get("frame_age_sec")
+        if frame_age is None or float(frame_age) > 8.0:
+            return False, "Physical mode is blocked: the RealSense frame snapshot is stale."
+        if not status.get("roboflow_ready"):
+            reason = str(status.get("last_error") or "Roboflow model inference is not validated")
+            return False, f"Physical mode is blocked: Roboflow is not ready: {reason}"
+        return True, ""
 
-        allow_placeholder = str(
-            os.environ.get("ALLOW_PLACEHOLDER_PHYSICAL_PERCEPTION", "")
-        ).strip().lower() in {"1", "true", "yes"}
-        if allow_placeholder:
-            return True, ""
+    def physical_perception_status(self) -> dict[str, Any]:
+        """Return process, frame, model, calibration, detection, and twin status."""
+        snapshot_path = Path("/tmp/cais_physical_perception.json")
+        twin_path = Path("/tmp/cais_physical_part_twin_status.json")
 
-        return (
-            False,
-            "Physical mode is blocked: perception backend 'yolo' is still a placeholder. "
-            "Set ALLOW_PLACEHOLDER_PHYSICAL_PERCEPTION=1 to override intentionally.",
+        def _load(path: Path) -> dict[str, Any]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                return {}
+            return payload if isinstance(payload, dict) else {}
+
+        snapshot = _load(snapshot_path)
+        twin = _load(twin_path)
+        calibration_path = Path(
+            os.path.expanduser(
+                os.environ.get(
+                    "REALSENSE_HAND_EYE_CONFIG",
+                    "~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml",
+                )
+            )
         )
+        calibration_ready = False
+        calibration_error = ""
+        if not calibration_path.is_file():
+            calibration_error = f"Hand-eye calibration not found: {calibration_path}"
+        else:
+            try:
+                import yaml
+            except ImportError as exc:
+                calibration_error = f"Cannot read hand-eye calibration: {exc}"
+            else:
+                try:
+                    calibration_payload = yaml.safe_load(
+                        calibration_path.read_text(encoding="utf-8")
+                    ) or {}
+                    calibration_ready = bool(
+                        (calibration_payload.get("validation") or {}).get("accepted", False)
+                    )
+                    if not calibration_ready:
+                        calibration_error = "Hand-eye calibration is not marked accepted."
+                except (OSError, TypeError, yaml.YAMLError) as exc:
+                    calibration_error = f"Cannot read hand-eye calibration: {exc}"
+
+        camera_processes = {
+            "realsense_camera",
+            "digital_twin_ur5e_only_realsense_camera",
+            "digital_twin_dual_robots_realsense_camera",
+        }
+        perception_processes = {
+            "physical_perception",
+            "digital_twin_ur5e_only_physical_perception",
+            "digital_twin_dual_robots_physical_perception",
+        }
+        frame_captured_at = snapshot.get("frame_captured_at")
+        frame_age_sec = (
+            max(0.0, time.time() - float(frame_captured_at))
+            if frame_captured_at is not None
+            else None
+        )
+        return {
+            **snapshot,
+            "snapshot_path": str(snapshot_path),
+            "frame_age_sec": frame_age_sec,
+            "camera_process_running": any(
+                self.ros2_proc_status(name) == "running" for name in camera_processes
+            ),
+            "perception_process_running": any(
+                self.ros2_proc_status(name) == "running" for name in perception_processes
+            ),
+            "calibration_ready": calibration_ready,
+            "calibration_error": calibration_error,
+            "calibration_path": str(calibration_path),
+            "twin": twin,
+            "lg_status": "LG unavailable: model has no large_gear class",
+        }
+
+    def test_physical_detection(self) -> dict[str, Any]:
+        """Request one fresh validated detection without initiating robot motion."""
+        digital_twin_perception_running = any(
+            self.ros2_proc_status(name) == "running"
+            for name in {
+                "digital_twin_ur5e_only_physical_perception",
+                "digital_twin_dual_robots_physical_perception",
+            }
+        )
+        domain_id = (
+            self._digital_twin_domain_ids()["hardware"]
+            if digital_twin_perception_running
+            else self._default_ros_domain_id()
+        )
+        started_at = time.time()
+        cmd = (
+            self._ROS2_ENV
+            + self._ros2_domain_export(domain_id)
+            + "timeout 30 ros2 service call /detect_all std_srvs/srv/Trigger '{}'"
+        )
+        try:
+            result = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=35.0,
+            )
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": "Test Detection timed out", "detections": []}
+        status = self.physical_perception_status()
+        updated_at = float(status.get("updated_at", 0.0) or 0.0)
+        last_error = str(status.get("last_error") or "").strip()
+        success = result.returncode == 0 and updated_at >= started_at and not last_error
+        message = "Detection validated; no robot motion was requested."
+        if not success:
+            message = last_error or result.stderr.strip() or result.stdout.strip() or "Detection failed"
+        detections = status.get("detections", [])
+        return {
+            "success": success,
+            "message": message,
+            "detections": detections if isinstance(detections, list) else [],
+            "status": status,
+        }
 
     def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
         """Return whether Gazebo simulation startup is ready enough for agent start."""
@@ -7280,6 +7427,39 @@ class SystemBridge:
     def _digital_twin_dual_robots_already_started(self, cfg: dict[str, Any]) -> bool:
         return self._digital_twin_dual_robots_core_started(cfg)
 
+    def _start_digital_twin_perception_processes(
+        self,
+        cfg: dict[str, Any],
+        *,
+        domains: dict[str, int],
+    ) -> str | None:
+        """Start RealSense/inference in hardware and the gear mirror in Gazebo."""
+        configured = cfg.get("perception_processes") or {}
+        if not isinstance(configured, dict) or not configured:
+            return None
+        process_specs = (
+            ("camera", "realsense_camera", domains["hardware"]),
+            ("perception", "physical_perception", domains["hardware"]),
+            ("part_sync", "physical_part_twin_sync", domains["gazebo"]),
+        )
+        errors: list[str] = []
+        for process_key, command_key, domain_id in process_specs:
+            process_name = str(configured.get(process_key) or "").strip()
+            if not process_name or self.ros2_proc_status(process_name) == "running":
+                continue
+            prereq_err = self._ros2_launch_prereq_error(command_key)
+            if prereq_err:
+                errors.append(prereq_err)
+                continue
+            start_err = self._start_tracked_ros2_command(
+                process_name,
+                self._render_ros2_launch_cmd(command_key),
+                ros_domain_id=domain_id,
+            )
+            if start_err:
+                errors.append(f"{command_key}: {start_err}")
+        return "; ".join(dict.fromkeys(errors)) or None
+
     def digital_twin_start(self, target: str) -> str | None:
         cfg = self._digital_twin_target(target)
         if not cfg:
@@ -7325,6 +7505,17 @@ class SystemBridge:
             self._force_kill_digital_twin_helpers()
             self._kill_stale_gazebo_helpers()
             self._force_kill_gazebo_core(reason="digital_twin_prelaunch_restart")
+
+        perception_err = self._start_digital_twin_perception_processes(
+            cfg,
+            domains=domains,
+        )
+        if perception_err:
+            self.last_notice = (
+                "Digital twin robot synchronization is starting, but physical gear perception "
+                f"is degraded: {perception_err}"
+            )
+            log.warning("Digital twin physical perception degraded: %s", perception_err)
 
         if target == "dual robots":
             teach_mode = self._digital_twin_sim_mode(target) == "teach"
@@ -10113,8 +10304,23 @@ class SystemBridge:
             if backend != "gazebo_gt":
                 return (
                     "Perception ROS2 process is simulation-only (gazebo_gt). "
-                    "Physical backend 'yolo' runs in-app under "
-                    "cais_spade_llm/resources/sensor/physical (no ROS2 node)."
+                    "Use physical_perception for the RealSense backend 'yolo'."
+                )
+        if name == "physical_perception":
+            if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
+                return "ROBOFLOW_API_KEY is not configured in the ignored .env file."
+            calibration = Path(
+                os.path.expanduser(
+                    os.environ.get(
+                        "REALSENSE_HAND_EYE_CONFIG",
+                        "~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml",
+                    )
+                )
+            )
+            if not calibration.is_file():
+                return (
+                    f"Hand-eye calibration is missing at {calibration}. "
+                    "Run the ChArUco calibration command first."
                 )
 
         # Keep simulation and hardware stacks mutually exclusive.

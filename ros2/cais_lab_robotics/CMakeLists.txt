@@ -3,6 +3,8 @@ project(cais_lab_robotics)
 
 find_package(ament_cmake REQUIRED)
 
+ament_environment_hooks(env-hooks/cais_lab_robotics_gazebo.dsv.in)
+
 install(
   DIRECTORY
     config
@@ -28,6 +30,7 @@ install(
   PROGRAMS
     launch/auto_link_attacher_node.py
     sensor/gazebo_camera_detector.py
+    scripts/physical_part_twin_sync.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

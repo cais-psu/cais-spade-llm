@@ -298,6 +298,33 @@ class HardwarePickPlaceController(GazeboPickPlaceController):
 
     taught_functions_root = TAUGHT_FUNCTIONS_ROOT
 
+    def attach_part(
+        self,
+        model_name: str,
+        link: str | None = None,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Record physical mechanical custody without calling a Gazebo service."""
+        _ = link
+        target = str(model_name or part_name or "").strip()
+        if not target:
+            return {"success": False, "message": "physical grasp target is empty"}
+        self._attached_model = str(model_name or target)
+        return {"success": True, "message": f"physical grasp custody recorded for {target}"}
+
+    def detach_part(
+        self,
+        model_name: str = "",
+        link: str | None = None,
+        assume_released_if_open: bool = False,
+    ) -> dict[str, Any]:
+        """Clear physical custody after the hardware gripper opens."""
+        _ = (link, assume_released_if_open)
+        target = str(model_name or self._attached_model or "held part").strip()
+        self._attached_model = None
+        self._attached_link = None
+        return {"success": True, "message": f"physical release custody recorded for {target}"}
+
     @staticmethod
     def _safe_name(name: object) -> str:
         value = str(name or "").strip()

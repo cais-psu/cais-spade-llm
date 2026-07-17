@@ -67,6 +67,17 @@ ASSEMBLY_PART_MODELS = {
     'cam_mk4_2',
     'cam_assembly',
 }
+LOOSE_PART_MODELS = {
+    'gear_small',
+    'rect_pin_small',
+    'circ_pin_small',
+    'gear_medium',
+    'rect_pin_medium',
+    'circ_pin_medium',
+    'gear_large',
+    'rect_pin_large',
+    'circ_pin_large',
+}
 
 
 def _strip_gazebo_ros2_control_plugin(root):
@@ -304,13 +315,20 @@ def _launch_arg_enabled(context, name, default='false'):
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-def _world_without_assembly_parts(world_path):
+def _filtered_world(world_path, *, include_assembly_parts, include_loose_parts):
     tree = ET.parse(world_path)
     root = tree.getroot()
     for world in root.findall('world'):
-        for model in list(world.findall('model')):
-            if model.get('name') in ASSEMBLY_PART_MODELS:
-                world.remove(model)
+        for element in [*list(world.findall('model')), *list(world.findall('include'))]:
+            model_name = (
+                element.get('name')
+                if element.tag == 'model'
+                else str(element.findtext('name') or '').strip()
+            )
+            remove_assembly = not include_assembly_parts and model_name in ASSEMBLY_PART_MODELS
+            remove_loose = not include_loose_parts and model_name in LOOSE_PART_MODELS
+            if remove_assembly or remove_loose:
+                world.remove(element)
     tmp = tempfile.NamedTemporaryFile(
         mode='w',
         encoding='utf-8',
@@ -327,6 +345,7 @@ def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
     passive = _launch_arg_enabled(context, 'passive')
     include_assembly_parts = _launch_arg_enabled(context, 'include_assembly_parts', default='true')
+    include_loose_parts = _launch_arg_enabled(context, 'include_loose_parts', default='true')
 
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
     append_gazebo_plugin_path = None
@@ -346,7 +365,15 @@ def launch_setup(context, *args, **kwargs):
     # ── Gazebo Classic ────────────────────────────────────────────────────────
     cais_lab_robotics_share = Path(get_package_share_directory('cais_lab_robotics'))
     gazebo_world_path = cais_lab_robotics_share / 'worlds' / 'table.world'
-    gazebo_world = str(gazebo_world_path) if include_assembly_parts else _world_without_assembly_parts(gazebo_world_path)
+    gazebo_world = (
+        str(gazebo_world_path)
+        if include_assembly_parts and include_loose_parts
+        else _filtered_world(
+            gazebo_world_path,
+            include_assembly_parts=include_assembly_parts,
+            include_loose_parts=include_loose_parts,
+        )
+    )
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'])
@@ -697,6 +724,11 @@ def generate_launch_description():
             'include_assembly_parts',
             default_value='true',
             description='Spawn assembly board, gray/black boards, fixtures, and loose parts in the dual Gazebo world.',
+        ),
+        DeclareLaunchArgument(
+            'include_loose_parts',
+            default_value='true',
+            description='Spawn loose gears and pins. Digital twin perception sets this false.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

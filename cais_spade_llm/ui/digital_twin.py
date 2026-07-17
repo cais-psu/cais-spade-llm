@@ -167,6 +167,12 @@ def digital_twin_process_names(cfg: dict[str, Any]) -> list[str]:
                 name = str(value or "").strip()
                 if name and name not in names:
                     names.append(name)
+    perception_processes = cfg.get("perception_processes") or {}
+    if isinstance(perception_processes, dict):
+        for value in perception_processes.values():
+            name = str(value or "").strip()
+            if name and name not in names:
+                names.append(name)
     return names
 
 

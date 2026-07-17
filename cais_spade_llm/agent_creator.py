@@ -53,8 +53,8 @@ def _build_camera(backend: str) -> CameraModule:
         return CameraModule(
             backend="mock",
             mock_observations={
-                "SG": {"x": 750.0, "y": -200.0, "z": 50.0},
-                "MCP": {"x": 400.0, "y": -100.0, "z": 50.0},
+                "SG": {"x": 0.750, "y": -0.200, "z": 0.050, "frame_id": "world"},
+                "MCP": {"x": 0.400, "y": -0.100, "z": 0.050, "frame_id": "world"},
             },
         )
     return CameraModule(backend=backend)

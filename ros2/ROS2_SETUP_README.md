@@ -82,6 +82,8 @@ sudo apt install -y \
   ros-humble-controller-manager \
   ros-humble-joint-state-broadcaster \
   ros-humble-joint-trajectory-controller \
+  ros-humble-realsense2-camera \
+  ros-humble-realsense2-description \
   ros-humble-xacro \
   ros-humble-robot-state-publisher
 ```

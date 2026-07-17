@@ -2658,10 +2658,6 @@ class ProductRecoveryController:
             if exec_mode == "dry_run" or perception_backend in {"", "none"}:
                 entry["state"] = "assembled"
                 entry["camera_verification"] = "skipped_dry_run"
-            elif perception_backend == "yolo":
-                # Placeholder for future physical-camera verification.
-                entry["state"] = "assembled"
-                entry["camera_verification"] = "todo_yolo_placeholder"
             else:
                 position = self.camera.observe(part_name)
                 if position is not None:
@@ -2688,7 +2684,7 @@ class ProductRecoveryController:
             if last_known:
                 entry["last_known_location"] = last_known
 
-            if exec_mode == "dry_run" or perception_backend in {"", "none", "yolo"}:
+            if exec_mode == "dry_run" or perception_backend in {"", "none"}:
                 entry["state"] = "untracked"
                 entry["observation_required"] = True
                 entry["camera_verification"] = "unavailable"

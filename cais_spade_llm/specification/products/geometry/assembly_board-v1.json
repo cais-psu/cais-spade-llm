@@ -33,8 +33,8 @@
         "LCP": "circ_pin_large"
       },
       "heights_m": {
-        "SG": 0.01,
-        "MG": 0.015,
+        "SG": 0.02,
+        "MG": 0.02,
         "LG": 0.02,
         "SRP": 0.06,
         "MRP": 0.08,
@@ -84,8 +84,8 @@
         "LCP": "circ_pin_large"
       },
       "heights_m": {
-        "SG": 0.01,
-        "MG": 0.015,
+        "SG": 0.02,
+        "MG": 0.02,
         "LG": 0.02,
         "SRP": 0.06,
         "MRP": 0.08,

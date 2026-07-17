@@ -26,6 +26,16 @@ def digital_twin_sync_script_path(project_root: Path) -> Path:
     return Path(project_root) / "ros2" / "cais_lab_robotics" / "scripts" / "digital_twin_sync.py"
 
 
+def physical_part_twin_sync_script_path(project_root: Path) -> Path:
+    return (
+        Path(project_root)
+        / "ros2"
+        / "cais_lab_robotics"
+        / "scripts"
+        / "physical_part_twin_sync.py"
+    )
+
+
 def hardware_arms_config_path(project_root: Path) -> Path:
     """Return the checked-in ROS2 hardware runtime config path."""
     return (
@@ -118,6 +128,14 @@ def build_ros2_launch_cmds(
     perception_script = (
         Path(project_root) / "ros2" / "cais_lab_robotics" / "sensor" / "gazebo_camera_detector.py"
     )
+    physical_perception_config = (
+        Path(project_root)
+        / "ros2"
+        / "cais_lab_robotics"
+        / "config"
+        / "perception"
+        / "realsense_roboflow.yaml"
+    )
     ur5e_gripper_backend = hardware_arms_str(
         hardware_config,
         ("ur5e", "gripper", "backend"),
@@ -126,21 +144,21 @@ def build_ros2_launch_cmds(
     return {
         "gazebo_dual": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
-            "run_perception:=false include_assembly_parts:=false"
+            "run_perception:=false include_assembly_parts:=true include_loose_parts:=true"
         ),
         "gazebo_dual_gazebo_only": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "launch_moveit:=false launch_rviz:=false "
-            "run_perception:=false include_assembly_parts:=false"
+            "run_perception:=false include_assembly_parts:=true include_loose_parts:=false"
         ),
         "gazebo_dual_moveit_only": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "launch_gazebo:=false launch_moveit:=true launch_rviz:=true "
-            "run_perception:=false include_assembly_parts:=false"
+            "run_perception:=false include_assembly_parts:=true include_loose_parts:=false"
         ),
         "gazebo_dual_passive": (
             "ros2 launch cais_lab_robotics xarm6_ur5e_gazebo.launch.py "
-            "passive:=true run_perception:=false include_assembly_parts:=false"
+            "passive:=true run_perception:=false include_assembly_parts:=true include_loose_parts:=false"
         ),
         "gazebo_xarm6": "ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ros2 launch cais_lab_robotics ur5e_rg2_moveit_gazebo.launch.py",
@@ -173,6 +191,15 @@ def build_ros2_launch_cmds(
         "hardware_dual_robots_moveit": (
             "ros2 launch cais_lab_robotics dual_robots_hardware_moveit.launch.py "
             "launch_rviz:=true"
+        ),
+        "realsense_camera": "ros2 launch cais_lab_robotics realsense_camera.launch.py",
+        "physical_perception": (
+            f"{venv_python} -m "
+            "cais_spade_llm.resources.sensor.physical.realsense_roboflow_node "
+            f"--ros-args --params-file {physical_perception_config}"
+        ),
+        "physical_part_twin_sync": (
+            "ros2 run cais_lab_robotics physical_part_twin_sync.py"
         ),
         "perception": f"python3.10 {perception_script}",
         "teleop_xarm6": f"python3.10 {teleop_script} --robot xarm6",
@@ -527,6 +554,48 @@ def ros2_launch_required_paths(
         return [*ur_rg2_bridge_assets]
     if launch_key == "hardware_ur5e_rtde_trajectory_server":
         return [*ur_rtde_trajectory_assets]
+    if launch_key == "realsense_camera":
+        return [
+            *workspace_cais,
+            (
+                ros2_system_share_pkg_path("realsense2_camera"),
+                "RealSense ROS is not installed. Install "
+                "`sudo apt install ros-humble-realsense2-camera "
+                "ros-humble-realsense2-description`.",
+            ),
+            (
+                ros2_system_share_pkg_path("realsense2_description"),
+                "RealSense description is not installed. Install "
+                "`sudo apt install ros-humble-realsense2-camera "
+                "ros-humble-realsense2-description`.",
+            ),
+        ]
+    if launch_key == "physical_perception":
+        return [
+            *workspace_cais,
+            (
+                venv_python,
+                f"Python venv is missing at {venv_python}. Run `poetry install`.",
+            ),
+            (
+                cais_lab_robotics_share
+                / "config"
+                / "perception"
+                / "realsense_roboflow.yaml",
+                "ROS2 workspace is missing the RealSense Roboflow config. "
+                "Re-run `make bootstrap-gazebo`.",
+            ),
+        ]
+    if launch_key == "physical_part_twin_sync":
+        return [
+            *workspace_cais,
+            *link_attacher_ws,
+            (
+                cais_lab_robotics_share / "models" / "gear_small" / "model.sdf",
+                "ROS2 workspace is missing the Gazebo gear models. "
+                "Re-run `make bootstrap-gazebo`.",
+            ),
+        ]
     return []
 
 

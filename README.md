@@ -21,13 +21,13 @@ For code orientation after installation, read [docs/codebase_map.md](docs/codeba
 | --- | --- | --- |
 | `dry_run` | UI, agents, planning, safety files, sample product flow | Python 3.10, Poetry, OpenAI key |
 | Gazebo + RViz | xArm6 + UR5e simulation with MoveIt/RViz | ROS2 Humble, Gazebo Classic, `~/ros2_ws`, bootstrap |
-| digital twin | hardware MoveIt/RViz with Gazebo as visual mirror | ROS2 stack, `~/ros2_ws`, xArm6 network, UR5e RTDE network, RG2 bridge |
-| physical product flow | real robots plus production perception | lab networking, calibration, physical perception implementation |
+| digital twin | hardware MoveIt/RViz with Gazebo as visual mirror and physical gear poses | ROS2 stack, `~/ros2_ws`, robot networks, RealSense, Roboflow, hand-eye calibration |
+| physical product flow | real robots plus validated SG/MG world poses | lab networking, RealSense, Roboflow key, accepted hand-eye calibration |
 
-The physical perception files are still stubs:
-
-- [cais_spade_llm/resources/sensor/physical/detect_all_service.py](cais_spade_llm/resources/sensor/physical/detect_all_service.py)
-- [cais_spade_llm/resources/sensor/physical/detect_part_service.py](cais_spade_llm/resources/sensor/physical/detect_part_service.py)
+Physical gear perception supports exact `small_gear → SG` and
+`medium_gear → MG` mappings. `gear_large` is fully available in Gazebo, but
+`LG` perception remains blocked until the Roboflow model contains the exact
+`large_gear` class.
 
 ## Minimum First Run Without ROS2
 
@@ -189,6 +189,8 @@ sudo apt install -y \
   ros-humble-controller-manager \
   ros-humble-joint-state-broadcaster \
   ros-humble-joint-trajectory-controller \
+  ros-humble-realsense2-camera \
+  ros-humble-realsense2-description \
   ros-humble-xacro \
   ros-humble-robot-state-publisher
 ```
@@ -572,6 +574,8 @@ sudo apt install -y \
   ros-humble-controller-manager \
   ros-humble-joint-state-broadcaster \
   ros-humble-joint-trajectory-controller \
+  ros-humble-realsense2-camera \
+  ros-humble-realsense2-description \
   ros-humble-xacro \
   ros-humble-robot-state-publisher
 
@@ -588,4 +592,43 @@ The install is reproducible, but a real hardware digital twin still depends on:
 2. correct robot IPs in the Control page
 3. robot-side safety and calibration setup
 4. RG2 availability on the UR5e setup
-5. physical perception implementation for production use
+5. a rigid RealSense wrist mount and an accepted ChArUco hand-eye calibration
+
+## Wrist RealSense and Roboflow Setup
+
+Rotate any Roboflow key that has appeared in chat or logs. Put the replacement
+only in the ignored `.env` file, never in source:
+
+```text
+ROBOFLOW_API_KEY=...
+ROBOFLOW_API_URL=https://detect.roboflow.com
+ROBOFLOW_MODEL_ID=hrc-assembly-gph6m/5
+REALSENSE_SERIAL=
+REALSENSE_HAND_EYE_CONFIG=~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml
+```
+
+The runtime sends the synchronized RealSense color image directly to the
+published `hrc-assembly-gph6m/5` model. No Roboflow Workflow is required.
+
+Generate, print, and verify the 5×7 ChArUco board, then collect 25–30 stationary
+poses and solve the calibration:
+
+```bash
+poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye board /tmp/ur5e_charuco.png
+poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye capture /tmp/ur5e_hand_eye_samples.json --poses 25
+poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye solve /tmp/ur5e_hand_eye_samples.json
+```
+
+Print the board at exactly 125 × 175 mm with scaling disabled and verify a
+square is 25 mm. Calibration is written only when median reprojection error is
+at most 1 px, fixed-board translation RMS is at most 5 mm, and rotation RMS is
+at most 1 degree.
+
+The dashboard provides `Start Camera + Perception` and `Test Detection`. The
+test action calls `/detect_all` and never initiates robot motion.
+
+| Mode | Pose authority | Gazebo gear behavior |
+| --- | --- | --- |
+| Gazebo only | `gazebo_gt` `/detect_all` | predefined world models remain authoritative |
+| Hardware only | RealSense + Roboflow `/detect_all` in world-frame metres | no Gazebo gear synchronization process |
+| digital twin | the same physical `/detect_all` payload | the atomic snapshot crosses ROS domains; Gazebo spawns/updates/freezes/attaches the matching model |
