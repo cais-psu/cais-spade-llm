@@ -11,6 +11,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -575,6 +576,8 @@ def _status_base() -> dict[str, Any]:
         "message": "",
         "blocked_reason": "",
         "rtde_connected": False,
+        "rtde_receive_connected": False,
+        "rtde_control_connected": False,
         "joint_states_fresh": False,
         "start_delta_rad": None,
         "start_delta_joint": "",
@@ -686,29 +689,38 @@ class UR5eRTDETrajectoryServer(Node):
         robot_ip: str,
         status_file: Path,
         publish_rate_hz: float = 50.0,
+        monitor_only: bool = False,
         control_factory: Callable[[str], Any] | None = None,
         receive_factory: Callable[[str], Any] | None = None,
     ) -> None:
         super().__init__("ur5e_rtde_trajectory_server")
         self.robot_ip = str(robot_ip or "").strip()
         self.status_file = Path(status_file)
+        self.monitor_only = bool(monitor_only)
         self.control_factory = control_factory
         self.receive_factory = receive_factory
         self.control = None
         self.receive = None
         self.current_positions: list[float] | None = None
         self.current_positions_monotonic: float | None = None
+        self._receive_lock = threading.Lock()
+        self._next_receive_connect_monotonic = 0.0
+        self._receive_error = ""
+        self._control_error = ""
+        self._joint_status_announced = False
         self._active_lock = threading.Lock()
         self._active_goal = None
         self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
         self._timer = self.create_timer(1.0 / max(1.0, float(publish_rate_hz)), self._publish_joint_state)
-        self._action_server = ActionServer(
-            self,
-            FollowJointTrajectory,
-            ACTION_NAME,
-            execute_callback=self._execute,
-            cancel_callback=self._cancel,
-        )
+        self._action_server = None
+        if not self.monitor_only:
+            self._action_server = ActionServer(
+                self,
+                FollowJointTrajectory,
+                ACTION_NAME,
+                execute_callback=self._execute,
+                cancel_callback=self._cancel,
+            )
         status = _status_base()
         if not self.robot_ip:
             status.update(state="blocked", blocked_reason="--robot-ip is required", message="blocked: --robot-ip is required")
@@ -718,44 +730,163 @@ class UR5eRTDETrajectoryServer(Node):
 
     def _write_status(self, payload: dict[str, Any]) -> None:
         body = dict(payload)
+        body["monitor_only"] = self.monitor_only
+        if self.monitor_only:
+            body["action"] = ""
+            body["action_name"] = ""
         body["updated_at"] = time.time()
         _atomic_json_write(self.status_file, body)
 
     def _connect_rtde(self) -> None:
         status = _status_base()
+        receive_connected = False
+        control_connected = False
+        try:
+            if self.receive_factory is None:
+                import rtde_receive
+
+                self.receive_factory = rtde_receive.RTDEReceiveInterface
+            self.receive = self.receive_factory(self.robot_ip)
+            receive_connected = True
+            self._receive_error = ""
+        except (ImportError, OSError, RuntimeError) as exc:
+            self.receive = None
+            self._receive_error = f"{type(exc).__name__}: {exc}"
+            self._next_receive_connect_monotonic = time.monotonic() + 1.0
+
+        if self.monitor_only:
+            self.control = None
+            self._control_error = "disabled for read-only calibration monitoring"
+        else:
+            try:
+                if self.control_factory is None:
+                    import rtde_control
+
+                    self.control_factory = rtde_control.RTDEControlInterface
+                self.control = self.control_factory(self.robot_ip)
+                control_connected = True
+                self._control_error = ""
+            except (ImportError, OSError, RuntimeError) as exc:
+                self.control = None
+                self._control_error = f"{type(exc).__name__}: {exc}"
+
+        status.update(
+            rtde_connected=receive_connected and control_connected,
+            rtde_receive_connected=receive_connected,
+            rtde_control_connected=control_connected,
+            joint_states_fresh=False,
+        )
+        if receive_connected and control_connected:
+            status.update(state="ready", message="UR5e RTDE trajectory server ready")
+        elif receive_connected:
+            if self.monitor_only:
+                status.update(
+                    state="monitoring",
+                    blocked_reason="",
+                    message="UR5e read-only calibration monitoring ready in Local Control",
+                )
+            else:
+                reason = f"RTDE control unavailable: {self._control_error}"
+                status.update(
+                    state="monitoring",
+                    blocked_reason=reason,
+                    message=(
+                        "UR5e joint-state monitoring ready in Local Control; "
+                        "trajectory motion requires Remote Control"
+                    ),
+                )
+        else:
+            details = [f"RTDE receive unavailable: {self._receive_error}"]
+            if self._control_error and not self.monitor_only:
+                details.append(f"RTDE control unavailable: {self._control_error}")
+            reason = "; ".join(details)
+            status.update(state="blocked", blocked_reason=reason, message=f"blocked: {reason}")
+        self._write_status(status)
+
+    def _reconnect_receive_locked(self) -> bool:
+        if self.receive_factory is None:
+            try:
+                import rtde_receive
+            except ImportError as exc:
+                self._receive_error = f"{type(exc).__name__}: {exc}"
+                self._next_receive_connect_monotonic = time.monotonic() + 1.0
+                return False
+            self.receive_factory = rtde_receive.RTDEReceiveInterface
+        try:
+            self.receive = self.receive_factory(self.robot_ip)
+        except (OSError, RuntimeError) as exc:
+            self.receive = None
+            self._receive_error = f"{type(exc).__name__}: {exc}"
+            self._next_receive_connect_monotonic = time.monotonic() + 1.0
+            return False
+        self._receive_error = ""
+        self._next_receive_connect_monotonic = 0.0
+        return True
+
+    def _connect_control_for_goal(self) -> str | None:
+        if self.control is not None:
+            is_connected = getattr(self.control, "isConnected", None)
+            if is_connected is None:
+                return None
+            try:
+                if bool(is_connected()):
+                    return None
+            except RuntimeError:
+                pass
+            disconnect = getattr(self.control, "disconnect", None)
+            if disconnect is not None:
+                with suppress(RuntimeError):
+                    disconnect()
+            self.control = None
         try:
             if self.control_factory is None:
                 import rtde_control
 
                 self.control_factory = rtde_control.RTDEControlInterface
-            if self.receive_factory is None:
-                import rtde_receive
-
-                self.receive_factory = rtde_receive.RTDEReceiveInterface
             self.control = self.control_factory(self.robot_ip)
-            self.receive = self.receive_factory(self.robot_ip)
-            status.update(state="ready", message="UR5e RTDE trajectory server ready", rtde_connected=True)
-        except Exception as exc:
-            status.update(
-                state="blocked",
-                blocked_reason=f"RTDE connection failed: {type(exc).__name__}: {exc}",
-                message=f"blocked: RTDE connection failed: {type(exc).__name__}: {exc}",
-                rtde_connected=False,
+        except (ImportError, OSError, RuntimeError) as exc:
+            self.control = None
+            self._control_error = f"{type(exc).__name__}: {exc}"
+            return (
+                "UR5e RTDE control unavailable. Set the teach pendant to Remote Control "
+                f"before commanding motion: {self._control_error}"
             )
-        self._write_status(status)
+        self._control_error = ""
+        return None
 
     def _read_actual_q(self) -> list[float] | None:
-        if self.receive is None:
-            return None
-        try:
-            values = [float(value) for value in list(self.receive.getActualQ())]
-        except Exception as exc:
+        error = ""
+        recovered = False
+        with self._receive_lock:
+            if self.receive is None:
+                if time.monotonic() < self._next_receive_connect_monotonic:
+                    return None
+                if not self._reconnect_receive_locked():
+                    error = self._receive_error
+                else:
+                    recovered = True
+            if self.receive is not None:
+                try:
+                    values = [float(value) for value in list(self.receive.getActualQ())]
+                except (OSError, RuntimeError) as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    disconnect = getattr(self.receive, "disconnect", None)
+                    if disconnect is not None:
+                        with suppress(RuntimeError):
+                            disconnect()
+                    self.receive = None
+                    self._receive_error = error
+                    self._next_receive_connect_monotonic = time.monotonic() + 1.0
+        if error:
+            self._joint_status_announced = False
             status = _status_base()
             status.update(
                 state="blocked",
-                blocked_reason=f"RTDE getActualQ failed: {type(exc).__name__}: {exc}",
-                message=f"blocked: RTDE getActualQ failed: {type(exc).__name__}: {exc}",
-                rtde_connected=self.control is not None and self.receive is not None,
+                blocked_reason=f"RTDE getActualQ failed: {error}",
+                message=f"blocked: RTDE getActualQ failed: {error}",
+                rtde_connected=False,
+                rtde_receive_connected=False,
+                rtde_control_connected=self.control is not None,
             )
             self._write_status(status)
             return None
@@ -763,6 +894,35 @@ class UR5eRTDETrajectoryServer(Node):
             return None
         self.current_positions = values[: len(ARM_JOINTS)]
         self.current_positions_monotonic = time.monotonic()
+        if recovered or not self._joint_status_announced:
+            control_connected = self.control is not None
+            status = _status_base()
+            status.update(
+                state="ready" if control_connected else "monitoring",
+                message=(
+                    "UR5e RTDE trajectory server ready"
+                    if control_connected
+                    else (
+                        "UR5e read-only calibration monitoring ready in Local Control"
+                        if self.monitor_only
+                        else (
+                            "UR5e joint-state monitoring ready in Local Control; "
+                            "trajectory motion requires Remote Control"
+                        )
+                    )
+                ),
+                blocked_reason=(
+                    ""
+                    if control_connected or self.monitor_only
+                    else f"RTDE control unavailable: {self._control_error}"
+                ),
+                rtde_connected=control_connected,
+                rtde_receive_connected=True,
+                rtde_control_connected=control_connected,
+                joint_states_fresh=True,
+            )
+            self._write_status(status)
+            self._joint_status_announced = True
         return self.current_positions
 
     def _current_position_map(self) -> dict[str, float] | None:
@@ -844,7 +1004,10 @@ class UR5eRTDETrajectoryServer(Node):
         suffix = "; ".join(type_errors)
         return f"{repr(result)}; blocking_fallback=True; {suffix}", "blocking_fallback"
 
-    def _execute(self, goal_handle: Any) -> FollowJointTrajectory.Result:
+    def _execute(  # noqa: PLR0915 - guarded hardware execution keeps one status lifecycle.
+        self,
+        goal_handle: Any,
+    ) -> FollowJointTrajectory.Result:
         with self._active_lock:
             if self._active_goal is not None:
                 reason = "UR5e RTDE trajectory already executing"
@@ -854,6 +1017,8 @@ class UR5eRTDETrajectoryServer(Node):
                     blocked_reason=reason,
                     message=f"blocked: {reason}",
                     rtde_connected=self.control is not None and self.receive is not None,
+                    rtde_receive_connected=self.receive is not None,
+                    rtde_control_connected=self.control is not None,
                     joint_states_fresh=self._joint_states_fresh(),
                 )
                 self._write_status(status)
@@ -861,7 +1026,24 @@ class UR5eRTDETrajectoryServer(Node):
                 return self._result(-1, reason)
             self._active_goal = goal_handle
         status = _status_base()
+        control_error = self._connect_control_for_goal()
+        if control_error:
+            status.update(
+                state="blocked",
+                blocked_reason=control_error,
+                message=f"blocked: {control_error}",
+                rtde_connected=False,
+                rtde_receive_connected=self.receive is not None,
+                rtde_control_connected=False,
+                joint_states_fresh=self._joint_states_fresh(),
+            )
+            self._write_status(status)
+            goal_handle.abort()
+            self._clear_active_goal(goal_handle)
+            return self._result(-1, control_error)
         status["rtde_connected"] = self.control is not None and self.receive is not None
+        status["rtde_receive_connected"] = self.receive is not None
+        status["rtde_control_connected"] = self.control is not None
         current_positions = self._current_position_map()
         status["joint_states_fresh"] = self._joint_states_fresh()
         if current_positions is None or not status["joint_states_fresh"]:
@@ -877,6 +1059,8 @@ class UR5eRTDETrajectoryServer(Node):
             current_positions,
         )
         status["rtde_connected"] = self.control is not None and self.receive is not None
+        status["rtde_receive_connected"] = self.receive is not None
+        status["rtde_control_connected"] = self.control is not None
         status["joint_states_fresh"] = self._joint_states_fresh()
         if not ok or guarded_trajectory is None:
             self._write_status(status)
@@ -934,6 +1118,14 @@ class UR5eRTDETrajectoryServer(Node):
         except Exception as exc:
             reason = f"UR5e RTDE trajectory failed: {type(exc).__name__}: {exc}"
             self._stop_motion()
+            disconnect = getattr(self.control, "disconnect", None)
+            if disconnect is not None:
+                with suppress(RuntimeError):
+                    disconnect()
+            self.control = None
+            status["rtde_connected"] = False
+            status["rtde_control_connected"] = False
+            status["rtde_receive_connected"] = self.receive is not None
             status.update(state="failed", message=reason, blocked_reason=reason)
             self._write_status(status)
             goal_handle.abort()
@@ -967,6 +1159,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-file", default=str(default_status_file))
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_FILE))
     parser.add_argument("--publish-rate-hz", type=float, default=50.0)
+    parser.add_argument(
+        "--monitor-only",
+        action="store_true",
+        help="publish read-only UR5e joint feedback without RTDE control or an action server",
+    )
     return parser
 
 
@@ -978,6 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
         robot_ip=str(args.robot_ip),
         status_file=Path(args.status_file),
         publish_rate_hz=float(args.publish_rate_hz),
+        monitor_only=bool(args.monitor_only),
     )
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)

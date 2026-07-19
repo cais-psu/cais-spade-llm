@@ -1,5 +1,6 @@
-realsense_roboflow_perception:
+/**:
   ros__parameters:
+    camera_role: ur5e
     color_topic: /camera/camera/color/image_raw
     aligned_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
     camera_info_topic: /camera/camera/color/camera_info
@@ -13,3 +14,7 @@ realsense_roboflow_perception:
     maximum_frame_age_sec: 1.0
     background_rate_hz: 0.2
     snapshot_path: /tmp/cais_physical_perception.json
+    detect_all_service: /perception/ur5e/detect_all
+    detect_part_service: /perception/ur5e/detect_part
+    publish_canonical_services: true
+    table_plane_config: ""

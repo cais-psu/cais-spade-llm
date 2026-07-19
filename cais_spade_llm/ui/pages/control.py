@@ -528,8 +528,7 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
         container = ui.column().classes("w-full gap-3")
         refresh_state = {"signature": None, "busy": False}
 
-        def _signature() -> tuple:
-            rows = bridge.digital_twin_statuses()
+        def _signature(rows: dict[str, dict]) -> tuple:
             compact_rows = []
             for target, row in rows.items():
                 hardware = dict(row.get("hardware") or {})
@@ -568,11 +567,11 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
                 return
             refresh_state["busy"] = True
             try:
-                signature = _signature()
+                rows = bridge.digital_twin_statuses()
+                signature = _signature(rows)
                 if not force and signature == refresh_state["signature"]:
                     return
                 refresh_state["signature"] = signature
-                rows = bridge.digital_twin_statuses()
             finally:
                 refresh_state["busy"] = False
 
@@ -862,33 +861,47 @@ def _function_record_panel(bridge: SystemBridge) -> None:
         target_select.on_value_change(_refresh_body)
         _refresh_body()
 
-        def _sync_active_target() -> None:
+        active_target_refresh = {"busy": False}
+
+        async def _sync_active_target() -> None:
             if not _client_alive(body):
                 return
-            current_rows = bridge.digital_twin_statuses()
-            current_targets = [
-                target for target, row in current_rows.items() if bool(row.get("supported", False))
-            ]
-            if not current_targets:
+            if active_target_refresh["busy"]:
                 return
-            current_active = _digital_twin_active_target(current_rows)
-            target_select.options = current_targets
-            desired = (
-                current_active
-                if current_active in current_targets
-                else str(target_select.value or "").strip()
-            )
-            if desired not in current_targets:
-                desired = "dual robots" if "dual robots" in current_targets else current_targets[0]
-            changed = target_select.value != desired
-            target_select.value = desired
-            if current_active:
-                target_select.disable()
-            else:
-                target_select.enable()
-            target_select.update()
-            if changed:
-                _refresh_body()
+            active_target_refresh["busy"] = True
+            try:
+                current_rows = await asyncio.to_thread(bridge.digital_twin_statuses)
+                if not _client_alive(body):
+                    return
+                current_targets = [
+                    target
+                    for target, row in current_rows.items()
+                    if bool(row.get("supported", False))
+                ]
+                if not current_targets:
+                    return
+                current_active = _digital_twin_active_target(current_rows)
+                target_select.options = current_targets
+                desired = (
+                    current_active
+                    if current_active in current_targets
+                    else str(target_select.value or "").strip()
+                )
+                if desired not in current_targets:
+                    desired = (
+                        "dual robots" if "dual robots" in current_targets else current_targets[0]
+                    )
+                changed = target_select.value != desired
+                target_select.value = desired
+                if current_active:
+                    target_select.disable()
+                else:
+                    target_select.enable()
+                target_select.update()
+                if changed:
+                    _refresh_body()
+            finally:
+                active_target_refresh["busy"] = False
 
         ui.timer(3.0, _sync_active_target)
 
@@ -1570,9 +1583,19 @@ def _teleop_section(bridge: SystemBridge) -> None:
         teleop_warning_label = ui.label("").classes("text-xs text-amber-700")
 
         # Robot selector.
+        xarm6_initial_target = bridge.teleop_target("xarm6", "state")
+        ur5e_initial_target = bridge.teleop_target("ur5e", "state")
+        initial_robot = (
+            "ur5e"
+            if bool(ur5e_initial_target.get("ready"))
+            and not bool(xarm6_initial_target.get("ready"))
+            else "xarm6"
+        )
         with ui.row().classes("items-center gap-4 mb-4"):
             ui.label("Robot:").classes("font-semibold text-sm")
-            robot_select = ui.toggle(["xarm6", "ur5e"], value="xarm6").classes("text-sm")
+            robot_select = ui.toggle(["xarm6", "ur5e"], value=initial_robot).classes(
+                "text-sm"
+            )
 
         mode_state = {"mode": "cartesian"}  # cartesian | gripper | joint
         axis_state = {"axis": "y"}  # x | y | z
@@ -2080,6 +2103,58 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     .classes("w-48")
                 )
                 named_pos_busy = {"moving": False}
+                named_pos_readiness_state = {
+                    "busy": False,
+                    "ready": False,
+                    "robot": "",
+                }
+                named_pos_readiness_label = ui.label(
+                    "Trajectory interface: checking..."
+                ).classes("text-xs text-slate-500")
+
+                def _update_named_position_go_enabled() -> None:
+                    go_btn.set_enabled(
+                        bool(
+                            named_pos_readiness_state["ready"]
+                            and named_pos_select.value
+                            and not named_pos_busy["moving"]
+                        )
+                    )
+
+                async def _refresh_named_position_readiness() -> None:
+                    if named_pos_readiness_state["busy"]:
+                        return
+                    if not _client_alive(named_pos_readiness_label):
+                        return
+                    named_pos_readiness_state["busy"] = True
+                    robot = str(robot_select.value or "xarm6")
+                    if named_pos_readiness_state["robot"] != robot:
+                        named_pos_readiness_state["robot"] = robot
+                        named_pos_readiness_state["ready"] = False
+                        _update_named_position_go_enabled()
+                    try:
+                        ready, message = await asyncio.to_thread(
+                            bridge.teleop_named_position_readiness,
+                            robot,
+                        )
+                        if not _client_alive(named_pos_readiness_label):
+                            return
+                        if robot != str(robot_select.value or "xarm6"):
+                            return
+                        named_pos_readiness_state["ready"] = bool(ready)
+                        named_pos_readiness_label.set_text(
+                            f"Trajectory interface ({robot}): {message}"
+                        )
+                        named_pos_readiness_label.classes(
+                            replace=(
+                                "text-xs text-green-700"
+                                if ready
+                                else "text-xs text-red-700"
+                            )
+                        )
+                        _update_named_position_go_enabled()
+                    finally:
+                        named_pos_readiness_state["busy"] = False
 
                 def _refresh_named_positions() -> None:
                     robot = robot_select.value
@@ -2091,6 +2166,8 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     if named_pos_select.value not in options:
                         named_pos_select.value = options[0] if options else None
                     named_pos_select.update()
+                    _update_named_position_go_enabled()
+                    asyncio.create_task(_refresh_named_position_readiness())
 
                 async def _go_to_named() -> None:
                     name = named_pos_select.value
@@ -2109,6 +2186,7 @@ def _teleop_section(bridge: SystemBridge) -> None:
                         )
                         return
                     named_pos_busy["moving"] = True
+                    _update_named_position_go_enabled()
                     go_btn.props("loading")
                     try:
                         ok, msg = await asyncio.to_thread(bridge.teleop_go_to_position, robot, name)
@@ -2136,17 +2214,22 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     finally:
                         named_pos_busy["moving"] = False
                         go_btn.props(remove="loading")
+                        _update_named_position_go_enabled()
+                        asyncio.create_task(_refresh_named_position_readiness())
 
                 with ui.row().classes("gap-2 items-center mt-2"):
                     go_btn = ui.button("Go", on_click=_go_to_named, icon="play_arrow").props(
                         "color=primary"
                     )
+                    go_btn.set_enabled(False)
                     ui.button("Refresh", on_click=_refresh_named_positions, icon="refresh").props(
                         "outline dense"
                     )
 
                 _refresh_named_positions()
+                named_pos_select.on_value_change(lambda _: _update_named_position_go_enabled())
                 robot_select.on_value_change(lambda _: _refresh_named_positions())
+                ui.timer(3.0, _refresh_named_position_readiness)
 
         _refresh_teleop_status()
         ui.timer(1.0, _refresh_teleop_status)

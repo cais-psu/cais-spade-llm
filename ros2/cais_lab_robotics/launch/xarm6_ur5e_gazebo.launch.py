@@ -11,6 +11,8 @@ TF prefixes:
   UR5e  → prefix: ur5e_,   pos: (0.0, 0.62, 1.021)  [180° yaw (3.142)]
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import tempfile
@@ -46,6 +48,7 @@ RG2_FINGER_WIDTH_EFFORT = '18'
 RG2_FINGER_WIDTH_VELOCITY = '0.40'
 XARM_GRIPPER_EFFORT = '12'
 XARM_GRIPPER_VELOCITY = '0.60'
+GAZEBO_TABLE_SURFACE_Z_M = 1.015
 ASSEMBLY_PART_MODELS = {
     'table_xarm6',
     'table_ur5e',
@@ -86,6 +89,19 @@ def _strip_gazebo_ros2_control_plugin(root):
         plugin = gazebo_elem.find('plugin')
         if plugin is not None and 'gazebo_ros2_control' in (plugin.get('filename', '') + plugin.get('name', '')):
             root.remove(gazebo_elem)
+
+
+def _strip_passive_ur5e_mount_collision(root, prefix):
+    """Remove the passive mirror's table-intersecting UR5e base collision."""
+    link_name = f'{prefix}base_link_inertia'
+    link = next((item for item in root.findall('link') if item.get('name') == link_name), None)
+    if link is None:
+        raise RuntimeError(f'UR5e mount link is missing: {link_name}')
+    collisions = list(link.findall('collision'))
+    if not collisions:
+        raise RuntimeError(f'UR5e mount collision is missing: {link_name}')
+    for collision in collisions:
+        link.remove(collision)
 
 
 def _make_controller_spawner(controller_names):
@@ -315,7 +331,42 @@ def _launch_arg_enabled(context, name, default='false'):
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-def _filtered_world(world_path, *, include_assembly_parts, include_loose_parts):
+def _physical_table_surface_z():
+    calibration_path = Path(
+        os.path.expanduser(
+            os.environ.get(
+                'REALSENSE_HAND_EYE_CONFIG',
+                '~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml',
+            )
+        )
+    )
+    try:
+        payload = yaml.safe_load(calibration_path.read_text(encoding='utf-8')) or {}
+    except (FileNotFoundError, OSError, yaml.YAMLError):
+        return None
+    table_plane = payload.get('table_plane')
+    if not isinstance(table_plane, dict) or not bool(table_plane.get('accepted', False)):
+        return None
+    if str(table_plane.get('world_frame') or '') != 'world':
+        raise RuntimeError('table-plane calibration must use world_frame=world')
+    try:
+        surface_z_m = float(table_plane['surface_z_m'])
+        frame_count = int(table_plane['frame_count'])
+        mad_m = float(table_plane['mad_m'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError('table-plane calibration is incomplete') from exc
+    if frame_count < 10 or mad_m > 0.002:
+        raise RuntimeError('table-plane calibration fails the 10-frame / 2 mm MAD contract')
+    return surface_z_m
+
+
+def _filtered_world(
+    world_path,
+    *,
+    include_assembly_parts,
+    include_loose_parts,
+    table_surface_z_m=None,
+):
     tree = ET.parse(world_path)
     root = tree.getroot()
     for world in root.findall('world'):
@@ -329,16 +380,23 @@ def _filtered_world(world_path, *, include_assembly_parts, include_loose_parts):
             remove_loose = not include_loose_parts and model_name in LOOSE_PART_MODELS
             if remove_assembly or remove_loose:
                 world.remove(element)
-    tmp = tempfile.NamedTemporaryFile(
+                continue
+            if element.tag == 'include' and model_name == 'table_ur5e' and table_surface_z_m is not None:
+                pose = element.find('pose')
+                if pose is None:
+                    pose = ET.SubElement(element, 'pose')
+                table_model_z = float(table_surface_z_m) - GAZEBO_TABLE_SURFACE_Z_M
+                pose.text = f'0.0 -0.40 {table_model_z:.9f} 0 0 0'
+    with tempfile.NamedTemporaryFile(
         mode='w',
         encoding='utf-8',
         prefix='cais_dual_passive_no_assembly_parts_',
         suffix='.world',
         delete=False,
-    )
-    with tmp:
-        tree.write(tmp, encoding='unicode', xml_declaration=True)
-    return tmp.name
+    ) as temporary:
+        tree.write(temporary, encoding='unicode', xml_declaration=True)
+        temporary_path = temporary.name
+    return temporary_path
 
 
 def launch_setup(context, *args, **kwargs):
@@ -346,6 +404,7 @@ def launch_setup(context, *args, **kwargs):
     passive = _launch_arg_enabled(context, 'passive')
     include_assembly_parts = _launch_arg_enabled(context, 'include_assembly_parts', default='true')
     include_loose_parts = _launch_arg_enabled(context, 'include_loose_parts', default='true')
+    table_surface_z_m = _physical_table_surface_z() if passive else None
 
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
     append_gazebo_plugin_path = None
@@ -367,11 +426,12 @@ def launch_setup(context, *args, **kwargs):
     gazebo_world_path = cais_lab_robotics_share / 'worlds' / 'table.world'
     gazebo_world = (
         str(gazebo_world_path)
-        if include_assembly_parts and include_loose_parts
+        if include_assembly_parts and include_loose_parts and table_surface_z_m is None
         else _filtered_world(
             gazebo_world_path,
             include_assembly_parts=include_assembly_parts,
             include_loose_parts=include_loose_parts,
+            table_surface_z_m=table_surface_z_m,
         )
     )
     gazebo_launch = IncludeLaunchDescription(
@@ -484,6 +544,8 @@ def launch_setup(context, *args, **kwargs):
     # Strip the gazebo_ros2_control plugin injected by sim_gazebo:=true
     _strip_gazebo_ros2_control_plugin(ur5e_root)
     _strip_grasp_fix_plugins(ur5e_root)
+    if passive:
+        _strip_passive_ur5e_mount_collision(ur5e_root, ur5e_prefix)
     # Do NOT inject <static>true</static> — UR5e now has physics!
 
     # ── Inject OnRobot RG2 Gripper onto UR5e ──────────────────────────────────
@@ -692,6 +754,20 @@ def launch_setup(context, *args, **kwargs):
         combined_spawn,
         TimerAction(period=2.0, actions=[controller_spawner]),
     ]
+    if passive and table_surface_z_m is None:
+        launch_actions.append(
+            LogInfo(
+                msg='[cais_lab_robotics] Passive table alignment is unavailable. '
+                    'Run calibrate_hand_eye table-plane before mirroring physical gears.'
+            )
+        )
+    elif passive:
+        launch_actions.append(
+            LogInfo(
+                msg=f'[cais_lab_robotics] Passive table_ur5e surface aligned to '
+                    f'z={table_surface_z_m:.6f} m.'
+            )
+        )
     if post_controller_actions:
         launch_actions.append(
             RegisterEventHandler(

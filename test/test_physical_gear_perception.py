@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import threading
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,11 +21,13 @@ from cais_spade_llm.resources.sensor.physical.realsense_pose_estimator import (
     ColorIntrinsics,
     DepthQualityError,
     RigidTransform,
+    constrain_gear_center_to_table_plane,
     deproject_pixel,
     gear_center_world_point,
     load_hand_eye_calibration,
     pose_motion,
     robust_surface_depth,
+    table_surface_z_from_calibration,
 )
 from cais_spade_llm.resources.sensor.physical.realsense_roboflow_node import (
     RealSenseRoboflowNode,
@@ -42,6 +47,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def _twin_sync_module() -> object:
     path = ROOT / "ros2/cais_lab_robotics/scripts/physical_part_twin_sync.py"
     spec = importlib.util.spec_from_file_location("physical_part_twin_sync_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _module_from_path(name: str, relative_path: str) -> object:
+    path = ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -187,6 +201,98 @@ def test_deprojection_transform_and_top_to_center_correction() -> None:
     assert world.tolist() == pytest.approx([1.01, 2.01, 3.49])
 
 
+def test_table_plane_estimation_rejects_outliers_and_constrains_center(
+    tmp_path: Path,
+) -> None:
+    frames = [
+        [
+            {
+                "part_name": "SG",
+                "frame_id": "world",
+                "z": 1.038 + index * 0.00005,
+            },
+            {
+                "part_name": "MG",
+                "frame_id": "world",
+                "z": 1.0384 + index * 0.00005,
+            },
+        ]
+        for index in range(10)
+    ]
+    frames[0].append(
+        {"part_name": "SG", "frame_id": "world", "z": 1.200}
+    )
+    table_plane = calibrate_hand_eye.estimate_table_plane(frames)
+    assert table_plane["accepted"] is True
+    assert table_plane["frame_count"] == 10
+    assert table_plane["rejected_sample_count"] == 1
+    assert table_plane["surface_z_m"] == pytest.approx(1.028425, abs=0.0003)
+    assert table_plane["mad_m"] <= 0.002
+    assert table_plane["timestamp"] > 0.0
+
+    calibration_path = tmp_path / "calibration.yaml"
+    calibration_path.write_text(
+        yaml.safe_dump(
+            {
+                "calibration_id": "existing-hand-eye",
+                "validation": {"accepted": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    updated = calibrate_hand_eye.write_table_plane_calibration(
+        calibration_path,
+        table_plane,
+    )
+    assert updated["calibration_id"] == "existing-hand-eye"
+    assert updated["table_plane"]["sample_count"] == 20
+    assert updated["table_plane"]["timestamp"] == table_plane["timestamp"]
+
+    calibration = {"table_plane": table_plane}
+    surface_z = table_surface_z_from_calibration(calibration)
+    assert surface_z == pytest.approx(table_plane["surface_z_m"])
+    constrained = constrain_gear_center_to_table_plane(
+        np.array([0.1, -0.2, surface_z + 0.011]),
+        surface_z,
+    )
+    assert constrained.tolist() == pytest.approx([0.1, -0.2, surface_z + 0.010])
+
+
+def test_table_plane_rejects_class_disagreement_and_preserves_previous_file(
+    tmp_path: Path,
+) -> None:
+    frames = [
+        [
+            {"part_name": "SG", "frame_id": "world", "z": 1.038},
+            {"part_name": "MG", "frame_id": "world", "z": 1.044},
+        ]
+        for _ in range(10)
+    ]
+    with pytest.raises(RuntimeError, match="SG/MG median disagreement"):
+        calibrate_hand_eye.estimate_table_plane(frames)
+
+    calibration_path = tmp_path / "calibration.yaml"
+    previous = {
+        "validation": {"accepted": True},
+        "table_plane": {"accepted": True, "surface_z_m": 1.02},
+    }
+    calibration_path.write_text(yaml.safe_dump(previous), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="rejected"):
+        calibrate_hand_eye.write_table_plane_calibration(
+            calibration_path,
+            {"accepted": False},
+        )
+    assert yaml.safe_load(calibration_path.read_text(encoding="utf-8")) == previous
+
+
+def test_table_plane_constraint_rejects_inconsistent_observed_height() -> None:
+    with pytest.raises(CalibrationError, match="disagrees"):
+        constrain_gear_center_to_table_plane(
+            np.array([0.0, 0.0, 1.050]),
+            1.028,
+        )
+
+
 def test_robot_movement_gate_measurements() -> None:
     before = RigidTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
     half_angle = math.radians(0.5)
@@ -312,12 +418,152 @@ def test_physical_perception_converts_missing_tf_to_calibration_error() -> None:
         perception._lookup_transform("world", "tool0")
 
 
+def test_missing_world_tf_still_writes_visual_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._inference_lock = threading.Lock()
+    perception._last_rows = [{"part_name": "old"}]
+    perception._last_inference_latency_ms = None
+    perception._roboflow_model_validated = False
+    perception.camera_role = "ur5e"
+    perception.world_frame = "world"
+    perception.tool_frame = "tool0"
+    perception.camera_optical_frame = "camera_color_optical_frame"
+    stamp = SimpleNamespace(sec=10, nanosec=0)
+    color = np.zeros((100, 100, 3), dtype=np.uint8)
+    depth = np.full((100, 100), 0.5, dtype=np.float32)
+    perception._frame_copy = lambda: (
+        stamp,
+        color,
+        depth,
+        ColorIntrinsics(fx=100.0, fy=100.0, cx=50.0, cy=50.0),
+    )
+    perception._lookup_transform = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        CalibrationError("TF unavailable for world <- tool0: world does not exist")
+    )
+    detector_calls: list[np.ndarray] = []
+    perception._detector = SimpleNamespace(
+        detect=lambda image: detector_calls.append(image) or [_box()],
+        settings=SimpleNamespace(model_id="hrc-assembly-gph6m/5"),
+    )
+    previews: list[dict[str, object]] = []
+    statuses: list[dict[str, object]] = []
+    perception._write_detection_preview = lambda *_args, **kwargs: previews.append(kwargs)
+    perception._write_detection_status = lambda *_args, **kwargs: statuses.append(kwargs)
+    perception._reload_table_plane_calibration = lambda: None
+    monkeypatch.setattr(
+        "cais_spade_llm.resources.sensor.physical.realsense_roboflow_node.time.sleep",
+        lambda _seconds: None,
+    )
+
+    with pytest.raises(CalibrationError, match="TF unavailable for world <- tool0"):
+        perception._run_detection()
+
+    assert len(detector_calls) == 1
+    assert detector_calls[0] is color
+    assert previews[0]["world_pose_ready"] is False
+    assert "world <- tool0" in str(previews[0]["pose_error"])
+    assert statuses[-1]["world_pose_ready"] is False
+    assert perception._last_rows == []
+
+
+def test_valid_tf_keeps_world_pose_payload_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._inference_lock = threading.Lock()
+    perception._last_rows = []
+    perception._last_error = ""
+    perception._last_inference_latency_ms = None
+    perception._roboflow_model_validated = False
+    perception._table_surface_z_m = None
+    perception.camera_role = "ur5e"
+    perception.world_frame = "world"
+    perception.tool_frame = "tool0"
+    perception.camera_optical_frame = "camera_color_optical_frame"
+    stamp = SimpleNamespace(sec=10, nanosec=0)
+    color = np.zeros((100, 100, 3), dtype=np.uint8)
+    depth = np.full((100, 100), 0.5, dtype=np.float32)
+    perception._frame_copy = lambda: (
+        stamp,
+        color,
+        depth,
+        ColorIntrinsics(fx=100.0, fy=100.0, cx=50.0, cy=50.0),
+    )
+    perception._lookup_transform = lambda *_args, **_kwargs: RigidTransform(
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    perception._detector = SimpleNamespace(
+        detect=lambda _image: [_box()],
+        settings=SimpleNamespace(model_id="hrc-assembly-gph6m/5"),
+    )
+    perception.node = SimpleNamespace(
+        get_parameter=lambda name: SimpleNamespace(
+            value={"minimum_depth_samples": 25, "maximum_depth_mad_m": 0.003}[name]
+        )
+    )
+    statuses: list[dict[str, object]] = []
+    snapshots: list[list[dict[str, object]]] = []
+    perception._write_detection_preview = lambda *_args, **_kwargs: None
+    perception._write_detection_status = lambda *_args, **kwargs: statuses.append(kwargs)
+    perception._write_snapshot = lambda rows: snapshots.append(rows)
+    perception._reload_table_plane_calibration = lambda: None
+    monkeypatch.setattr(
+        "cais_spade_llm.resources.sensor.physical.realsense_roboflow_node.time.sleep",
+        lambda _seconds: None,
+    )
+
+    rows = perception._run_detection()
+
+    assert rows[0]["part_name"] == "SG"
+    assert rows[0]["model_name"] == "gear_small"
+    assert rows[0]["frame_id"] == "world"
+    assert rows[0]["z"] == pytest.approx(0.49)
+    assert statuses[-1]["world_pose_ready"] is True
+    assert snapshots[-1] == rows
+
+    perception._table_surface_z_m = 1.0
+    perception._last_rows = [{"part_name": "existing_executable_pose"}]
+    statuses.clear()
+    snapshots.clear()
+    measurement_rows = perception._run_detection(
+        constrain_table_plane=False,
+        publish_executable_snapshot=False,
+    )
+
+    assert measurement_rows[0]["z"] == pytest.approx(0.49)
+    assert perception._last_rows == [{"part_name": "existing_executable_pose"}]
+    assert snapshots == []
+    assert statuses[-1]["world_pose_ready"] is False
+    assert "calibration measurement only" in str(statuses[-1]["pose_error"])
+
+
+def test_pose_rejection_clears_executable_detection_rows() -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._last_rows = [{"part_name": "SG", "frame_id": "world"}]
+    perception._run_detection = lambda: (_ for _ in ()).throw(
+        CalibrationError("TF unavailable for world <- tool0")
+    )
+    snapshots: list[list[dict[str, object]]] = []
+    perception._write_snapshot = lambda rows: snapshots.append(rows)
+    response = SimpleNamespace(success=True, message="")
+
+    result = perception._service_result(response)
+
+    assert result.success is False
+    assert "TF unavailable" in result.message
+    assert perception._last_rows == []
+    assert snapshots == [[]]
+
+
 @pytest.mark.parametrize(
     ("model_name", "mesh_name", "diameter_m", "offset"),
     [
-        ("gear_small", "Gear_Small.STL", 0.0218776093, "-0.21316049955 -0.1518883057 -0.0697159157 0 0 0"),
-        ("gear_medium", "Gear_Medium.STL", 0.0419959259, "-0.21316049955 -0.18188829805 -0.0697159157 0 0 0"),
-        ("gear_large", "Gear_Large.STL", 0.0619944, "-0.2131604996 -0.231888298 -0.0697159157 0 0 0"),
+        ("gear_small", "Gear_Small.STL", 0.0218776093, "-0.21316049955 0.1518883057 0.0697159157 3.141592653589793 0 0"),
+        ("gear_medium", "Gear_Medium.STL", 0.0419959259, "-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0"),
+        ("gear_large", "Gear_Large.STL", 0.0619944, "-0.2131604996 0.231888298 0.0697159157 3.141592653589793 0 0"),
     ],
 )
 def test_gazebo_gear_model_contract(
@@ -359,10 +605,114 @@ def test_world_and_mode_contracts_for_loose_parts() -> None:
     assert "gazebo_dual_passive" in commands and "include_loose_parts:=false" in commands
 
 
+def test_passive_worlds_align_only_the_physical_ur5e_table() -> None:
+    single_launch = _module_from_path(
+        "ur5e_rg2_gazebo_alignment_test",
+        "ros2/cais_lab_robotics/launch/ur5e_rg2_gazebo.launch.py",
+    )
+    single_generated = Path(
+        single_launch._aligned_single_table_world(
+            ROOT / "ros2/cais_lab_robotics/worlds/single_table.world",
+            1.028,
+        )
+    )
+    try:
+        root = ET.parse(single_generated).getroot()
+        work_table = next(
+            include
+            for include in root.iter("include")
+            if include.findtext("name") == "work_table"
+        )
+        assert work_table.findtext("pose") == "0.0 0.0 0.013000000 0 0 0"
+    finally:
+        single_generated.unlink()
+
+    dual_launch = _module_from_path(
+        "xarm6_ur5e_gazebo_alignment_test",
+        "ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py",
+    )
+    dual_generated = Path(
+        dual_launch._filtered_world(
+            ROOT / "ros2/cais_lab_robotics/worlds/table.world",
+            include_assembly_parts=True,
+            include_loose_parts=False,
+            table_surface_z_m=1.028,
+        )
+    )
+    try:
+        root = ET.parse(dual_generated).getroot()
+        poses = {
+            include.findtext("name"): include.findtext("pose")
+            for include in root.iter("include")
+        }
+        assert poses["table_ur5e"] == "0.0 -0.40 0.013000000 0 0 0"
+        assert poses["table_xarm6"] == "0.0 0.40 0 0 0 0"
+    finally:
+        dual_generated.unlink()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "launch_path"),
+    [
+        (
+            "ur5e_rg2_gazebo_passive_collision_test",
+            "ros2/cais_lab_robotics/launch/ur5e_rg2_gazebo.launch.py",
+        ),
+        (
+            "xarm6_ur5e_gazebo_passive_collision_test",
+            "ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py",
+        ),
+    ],
+)
+def test_passive_ur5e_mount_collision_is_removed_without_changing_other_geometry(
+    module_name: str,
+    launch_path: str,
+) -> None:
+    module = _module_from_path(module_name, launch_path)
+    root = ET.fromstring(
+        """
+        <robot name="test">
+          <link name="ur5e_base_link_inertia">
+            <visual name="base_visual"/>
+            <collision name="base_collision"/>
+            <inertial><mass value="4.0"/></inertial>
+          </link>
+          <link name="ur5e_shoulder_link">
+            <collision name="shoulder_collision"/>
+          </link>
+        </robot>
+        """
+    )
+
+    module._strip_passive_ur5e_mount_collision(root, "ur5e_")
+
+    base = root.find("link[@name='ur5e_base_link_inertia']")
+    shoulder = root.find("link[@name='ur5e_shoulder_link']")
+    assert base is not None
+    assert base.find("collision") is None
+    assert base.find("visual") is not None
+    assert base.find("inertial") is not None
+    assert shoulder is not None and shoulder.find("collision") is not None
+
+
+def test_passive_ur5e_mount_collision_suppression_is_passive_only() -> None:
+    single_source = (
+        ROOT / "ros2/cais_lab_robotics/launch/ur5e_rg2_gazebo.launch.py"
+    ).read_text(encoding="utf-8")
+    dual_source = (
+        ROOT / "ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_build_ur5e_rg2_description(\n        controllers_yaml,\n        passive=passive," in single_source
+    assert "if passive:\n        _strip_passive_ur5e_mount_collision" in dual_source
+
+
 def test_twin_sync_spawns_updates_and_freezes_held_parts(tmp_path: Path) -> None:
     module = _twin_sync_module()
     sync = object.__new__(module.PhysicalPartTwinSync)
     sync._degraded_reason = ""
+    sync._waiting_reason = ""
+    sync._mirrored_models = set()
     sync.deadband_m = 0.002
     sync._held_models = {"gear_medium"}
     sync._release_after = {}
@@ -384,6 +734,129 @@ def test_twin_sync_spawns_updates_and_freezes_held_parts(tmp_path: Path) -> None
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert status["mirrored_models"] == ["gear_small"]
     assert status["held_models"] == ["gear_medium"]
+    assert status["state"] == "mirrored"
+    assert status["synchronizer_pid"] > 0
+    assert status["heartbeat_at"] == status["updated_at"]
+
+
+def test_twin_sync_waits_for_late_validated_pose_then_spawns(tmp_path: Path) -> None:
+    module = _twin_sync_module()
+    snapshot_path = tmp_path / "perception.json"
+    status_path = tmp_path / "status.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "table_plane_ready": True,
+                "detections": [],
+                "last_error": (
+                    "observed gear surface disagrees with the calibrated table plane by 6.15 mm"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    sync = object.__new__(module.PhysicalPartTwinSync)
+    sync.snapshot_path = snapshot_path
+    sync.status_path = status_path
+    sync.maximum_detection_age_sec = 15.0
+    sync._degraded_reason = ""
+    sync._waiting_reason = ""
+    sync._mirrored_models = set()
+    sync._held_models = set()
+    sync._release_after = {}
+    sync.deadband_m = 0.002
+    sync._process_ownership = lambda: None
+    sync._entity_state = lambda _model_name: None
+    spawned: list[str] = []
+    sync._spawn = lambda model_name, _row: spawned.append(model_name) or True
+
+    sync.sync_once()
+
+    waiting = json.loads(status_path.read_text(encoding="utf-8"))
+    assert spawned == []
+    assert waiting["state"] == "waiting"
+    assert waiting["waiting_reason"] == (
+        "world pose rejected: observed gear surface disagrees with the calibrated table plane "
+        "by 6.15 mm"
+    )
+
+    captured_at = time.time()
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "table_plane_ready": True,
+                "detections": [
+                    {
+                        "part_name": "SG",
+                        "model_name": "gear_small",
+                        "captured_at": captured_at,
+                    }
+                ],
+                "last_error": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sync.sync_once()
+
+    mirrored = json.loads(status_path.read_text(encoding="utf-8"))
+    assert spawned == ["gear_small"]
+    assert mirrored["state"] == "mirrored"
+    assert mirrored["mirrored_models"] == ["gear_small"]
+    assert mirrored["waiting_reason"] == ""
+
+
+def test_twin_sync_singleton_lock_rejects_second_process(tmp_path: Path) -> None:
+    module = _twin_sync_module()
+    lock_path = tmp_path / "part_sync.lock"
+    first = module._acquire_singleton_lock(lock_path)
+    assert first is not None
+    try:
+        assert module._acquire_singleton_lock(lock_path) is None
+    finally:
+        module.fcntl.flock(first.fileno(), module.fcntl.LOCK_UN)
+        first.close()
+
+
+def test_bridge_starts_part_sync_only_after_gazebo_services_and_reconciles_late() -> None:
+    bridge = (ROOT / "cais_spade_llm/ui/bridge.py").read_text(encoding="utf-8")
+    start = bridge.index("    def _start_digital_twin_part_sync_when_ready(")
+    end = bridge.index("    def _reconcile_physical_part_twin_sync(", start)
+    method = bridge[start:end]
+
+    services = '["/spawn_entity", "/get_entity_state", "/set_entity_state"]'
+    assert services in method
+    assert method.index(services) < method.index("_stop_stale_physical_part_twin_sync()")
+    assert method.index("_stop_stale_physical_part_twin_sync()") < method.index(
+        "_start_tracked_ros2_command("
+    )
+    assert "waiting to spawn" in method
+    assert "_reconcile_physical_part_twin_sync" in bridge
+    assert "def _active_digital_twin_target_from_status(" in bridge
+    assert "self._physical_part_twin_reconcile_lock" in bridge
+    assert "self._active_digital_twin_target_from_status()" in bridge
+    assert "timeout_sec=3.0" in bridge
+
+    manager = (ROOT / "cais_spade_llm/ui/perception_manager.py").read_text(
+        encoding="utf-8"
+    )
+    assert "self._reconcile_part_twin_sync(key)" in manager
+
+
+def test_twin_sync_does_not_fight_vertical_settling_inside_xy_deadband() -> None:
+    module = _twin_sync_module()
+    sync = object.__new__(module.PhysicalPartTwinSync)
+    sync.deadband_m = 0.002
+    sync._pose_from_row = lambda _row: SimpleNamespace(
+        position=SimpleNamespace(x=0.001, y=0.0, z=1.038)
+    )
+    state = SimpleNamespace(
+        pose=SimpleNamespace(position=SimpleNamespace(x=0.0, y=0.0, z=1.025))
+    )
+    sync._call = lambda *_args, **_kwargs: pytest.fail("vertical-only drift was updated")
+
+    assert sync._update("gear_small", {}, state) is True
 
 
 def test_twin_sync_ownership_attach_release_and_freshness(tmp_path: Path) -> None:
@@ -490,7 +963,14 @@ def test_physical_snapshot_client_rejects_error_and_stale_detection(
         "z": 0.3,
     }
     snapshot.write_text(
-        json.dumps({"updated_at": 20.0, "last_error": "", "detections": [row]}),
+        json.dumps(
+            {
+                "updated_at": 20.0,
+                "last_error": "",
+                "table_plane_ready": True,
+                "detections": [row],
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(detect_all_service.time, "time", lambda: 20.0)
@@ -498,7 +978,14 @@ def test_physical_snapshot_client_rejects_error_and_stale_detection(
 
     row["captured_at"] = 9.0
     snapshot.write_text(
-        json.dumps({"updated_at": 20.0, "last_error": "", "detections": [row]}),
+        json.dumps(
+            {
+                "updated_at": 20.0,
+                "last_error": "",
+                "table_plane_ready": True,
+                "detections": [row],
+            }
+        ),
         encoding="utf-8",
     )
     assert detect_all_service.detect_all() == {}
@@ -509,6 +996,20 @@ def test_physical_snapshot_client_rejects_error_and_stale_detection(
             {
                 "updated_at": 20.0,
                 "last_error": "UR5e moved during inference",
+                "table_plane_ready": True,
+                "detections": [row],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert detect_all_service.detect_all() == {}
+
+    snapshot.write_text(
+        json.dumps(
+            {
+                "updated_at": 20.0,
+                "last_error": "",
+                "table_plane_ready": False,
                 "detections": [row],
             }
         ),

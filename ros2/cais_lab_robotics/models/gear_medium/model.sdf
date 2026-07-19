@@ -17,7 +17,7 @@
         </surface>
       </collision>
       <visual name="visual">
-        <pose>-0.21316049955 -0.18188829805 -0.0697159157 0 0 0</pose>
+        <pose>-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0</pose>
         <geometry>
           <mesh>
             <uri>model://gear_medium/meshes/Gear_Medium.STL</uri>

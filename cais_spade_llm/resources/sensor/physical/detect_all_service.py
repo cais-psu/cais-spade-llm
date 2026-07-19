@@ -28,6 +28,8 @@ def detect_all() -> dict[str, dict[str, Any]]:
         return {}
     if str(payload.get("last_error") or "").strip():
         return {}
+    if not bool(payload.get("table_plane_ready", False)):
+        return {}
     rows = payload.get("detections", [])
     if not isinstance(rows, list):
         return {}

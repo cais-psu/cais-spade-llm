@@ -55,13 +55,51 @@ def load_hand_eye_calibration(path: str | Path) -> dict[str, Any]:
         raise CalibrationError(f"hand-eye calibration not found: {expanded}")
     with expanded.open(encoding="utf-8") as stream:
         payload = yaml.safe_load(stream) or {}
-    transform = payload.get("tool0_to_camera_color_optical_frame")
+    transform = payload.get("parent_to_camera_color_optical_frame") or payload.get(
+        "tool0_to_camera_color_optical_frame"
+    )
     validation = payload.get("validation")
     if not isinstance(transform, dict) or not isinstance(validation, dict):
-        raise CalibrationError("hand-eye calibration is missing transform or validation data")
+        raise CalibrationError("camera calibration is missing transform or validation data")
     if not bool(validation.get("accepted", False)):
         raise CalibrationError("hand-eye calibration is not marked accepted")
     return payload
+
+
+def table_surface_z_from_calibration(
+    calibration: dict[str, Any],
+    *,
+    world_frame: str = "world",
+    required: bool = True,
+) -> float | None:
+    """Return the accepted physical table surface height in the requested frame."""
+    table_plane = calibration.get("table_plane")
+    if not isinstance(table_plane, dict):
+        if required:
+            raise CalibrationError(
+                "table-plane calibration is missing; run calibrate_hand_eye table-plane"
+            )
+        return None
+    if not bool(table_plane.get("accepted", False)):
+        raise CalibrationError("table-plane calibration is not marked accepted")
+    if str(table_plane.get("world_frame") or "") != world_frame:
+        raise CalibrationError(
+            "table-plane calibration frame mismatch: "
+            f"expected {world_frame}, received {table_plane.get('world_frame')}"
+        )
+    try:
+        surface_z_m = float(table_plane["surface_z_m"])
+        mad_m = float(table_plane["mad_m"])
+        frame_count = int(table_plane["frame_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CalibrationError("table-plane calibration is incomplete") from exc
+    if not math.isfinite(surface_z_m) or not math.isfinite(mad_m):
+        raise CalibrationError("table-plane calibration contains a non-finite value")
+    if frame_count < 10 or mad_m > 0.002:
+        raise CalibrationError(
+            "table-plane calibration does not satisfy the 10-frame / 2 mm MAD contract"
+        )
+    return surface_z_m
 
 
 def _bounded_box(
@@ -172,6 +210,26 @@ def gear_center_world_point(
     point_world = transform_point(point_camera, camera_to_world)
     point_world[2] -= float(gear_height_m) * 0.5
     return point_world
+
+
+def constrain_gear_center_to_table_plane(
+    observed_center_world: np.ndarray,
+    table_surface_z_m: float,
+    *,
+    gear_height_m: float = 0.020,
+    maximum_surface_error_m: float = 0.005,
+) -> np.ndarray:
+    """Validate observed Z against the table and return a plane-constrained center."""
+    constrained = np.asarray(observed_center_world, dtype=np.float64).copy()
+    observed_surface_z = float(constrained[2]) - float(gear_height_m) * 0.5
+    surface_error_m = abs(observed_surface_z - float(table_surface_z_m))
+    if surface_error_m > float(maximum_surface_error_m):
+        raise CalibrationError(
+            "observed gear surface disagrees with the calibrated table plane by "
+            f"{surface_error_m * 1000.0:.2f} mm"
+        )
+    constrained[2] = float(table_surface_z_m) + float(gear_height_m) * 0.5
+    return constrained
 
 
 def pose_motion(

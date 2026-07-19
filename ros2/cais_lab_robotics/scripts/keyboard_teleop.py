@@ -36,6 +36,8 @@ Common:
     Q                  — quit
 """
 
+from __future__ import annotations
+
 import argparse
 import copy
 import json
@@ -176,15 +178,23 @@ class KeyboardTeleop(Node):
         cartesian_max_step_mm=30.0,
         joint_duration_sec=0.25,
         gripper_duration_sec=0.20,
+        ur5e_hardware_trajectory_action=(
+            '/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory'
+        ),
         node_name='keyboard_teleop',
     ):
         super().__init__(str(node_name or 'keyboard_teleop'))
         self.cb_group = ReentrantCallbackGroup()
         self.joint_positions = {}
         self.joint_state_map = {}
+        self.joint_state_received_monotonic = {}
         self.cartesian_max_step_m = max(0.001, cartesian_max_step_mm / 1000.0)
         self.joint_duration_sec = max(0.05, float(joint_duration_sec))
         self.gripper_duration_sec = max(0.05, float(gripper_duration_sec))
+        self.ur5e_hardware_trajectory_action = str(
+            ur5e_hardware_trajectory_action
+            or '/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory'
+        ).strip()
 
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
         self.tf_buffer = tf2_ros.Buffer()
@@ -192,6 +202,16 @@ class KeyboardTeleop(Node):
 
         self.execute_client = ActionClient(
             self, ExecuteTrajectory, '/execute_trajectory', callback_group=self.cb_group)
+        self.ur5e_hardware_trajectory_client = (
+            ActionClient(
+                self,
+                FollowJointTrajectory,
+                self.ur5e_hardware_trajectory_action,
+                callback_group=self.cb_group,
+            )
+            if FollowJointTrajectory is not None
+            else None
+        )
         self.cartesian_client = self.create_client(
             GetCartesianPath, '/compute_cartesian_path', callback_group=self.cb_group)
         self.arm_publishers = {}
@@ -338,7 +358,7 @@ class KeyboardTeleop(Node):
     def _call_service(self, client, request, timeout_sec=2.0):
         try:
             future = client.call_async(request)
-        except Exception as exc:
+        except RuntimeError as exc:
             return None, str(exc)
         if not self._wait_future(future, timeout=timeout_sec):
             return None, 'timeout'
@@ -561,6 +581,7 @@ class KeyboardTeleop(Node):
                 if len(positions) == len(joint_names):
                     self.joint_positions[robot_name] = [positions[n] for n in joint_names]
                     self.active_joint_names[robot_name] = list(joint_names)
+                    self.joint_state_received_monotonic[robot_name] = time.monotonic()
                     break
             for gj in self._gripper_joint_candidates(robot_name):
                 if gj in self.joint_state_map:
@@ -657,6 +678,9 @@ class KeyboardTeleop(Node):
             joints = [float(v) for v in joints]
             state['joints_rad'] = joints
             state['joints_deg'] = [math.degrees(v) for v in joints]
+            received_at = self.joint_state_received_monotonic.get(robot)
+            if received_at is not None:
+                state['joint_state_age_sec'] = max(0.0, time.monotonic() - received_at)
 
         ee = self.get_ee_pose(robot)
         if ee is not None:
@@ -804,6 +828,13 @@ class KeyboardTeleop(Node):
             return False, f'Expected {len(joint_names)} joints, got {len(target_joints)}'
         move_duration = self.joint_duration_sec if duration_sec is None else max(0.05, float(duration_sec))
 
+        if robot == 'ur5e' and self.infer_robot_environment(robot) == 'real':
+            return self._move_ur5e_arm_action(
+                joint_names,
+                target_joints,
+                duration_sec=move_duration,
+            )
+
         arm_pub, _topic = self._pick_publisher(self.arm_publishers[robot])
         ok, msg = self._publish_joint_trajectory(
             arm_pub,
@@ -819,6 +850,62 @@ class KeyboardTeleop(Node):
         for name, pos in zip(joint_names, target_joints):
             self.joint_state_map[name] = pos
         return True, 'OK'
+
+    def _move_ur5e_arm_action(self, joint_names, target_joints, duration_sec):
+        """Send a real UR5e joint target through the guarded RTDE action."""
+        client = self.ur5e_hardware_trajectory_client
+        if client is None or FollowJointTrajectory is None:
+            return False, 'UR5e RTDE FollowJointTrajectory action type is unavailable'
+        if not client.wait_for_server(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_trajectory_action} is not available'
+
+        current_positions = self.joint_positions.get('ur5e')
+        if current_positions is None or len(current_positions) != len(joint_names):
+            return False, 'UR5e current joint state is unavailable'
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = list(joint_names)
+        start_point = JointTrajectoryPoint()
+        start_point.positions = [float(position) for position in current_positions]
+        start_point.time_from_start = self._duration_msg(0.0)
+        target_point = JointTrajectoryPoint()
+        target_point.positions = [float(position) for position in target_joints]
+        target_point.time_from_start = self._duration_msg(duration_sec)
+        goal.trajectory.points = [start_point, target_point]
+        try:
+            send_future = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_trajectory_action}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=3.0):
+            return False, f'{self.ur5e_hardware_trajectory_action}: send timeout'
+        try:
+            goal_handle = send_future.result()
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_trajectory_action}: send failed ({exc})'
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{self.ur5e_hardware_trajectory_action}: goal rejected'
+
+        result_future = goal_handle.get_result_async()
+        result_timeout = max(10.0, float(duration_sec) + 20.0)
+        if not self._wait_future(result_future, timeout=result_timeout):
+            return False, f'{self.ur5e_hardware_trajectory_action}: result timeout'
+        try:
+            wrapped = result_future.result()
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_trajectory_action}: result failed ({exc})'
+        result = getattr(wrapped, 'result', None)
+        error_code = int(getattr(result, 'error_code', -1))
+        error_string = str(getattr(result, 'error_string', '')).strip()
+        if error_code != 0:
+            detail = f'error_code={error_code}'
+            if error_string:
+                detail += f' {error_string}'
+            return False, f'{self.ur5e_hardware_trajectory_action}: {detail}'
+
+        self.joint_positions['ur5e'] = [float(position) for position in target_joints]
+        for name, position in zip(joint_names, target_joints, strict=True):
+            self.joint_state_map[name] = float(position)
+        return True, f'{self.ur5e_hardware_trajectory_action}: succeeded'
 
     def move_gripper(self, robot, direction, step_size, velocity_scale=1.0):
         """Jog gripper open/close by step size."""
@@ -1228,6 +1315,7 @@ def run_server(args):
         cartesian_max_step_mm=args.cart_max_step_mm,
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
+        ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
     )
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
@@ -1461,6 +1549,7 @@ def run_once(args):
         cartesian_max_step_mm=args.cart_max_step_mm,
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
+        ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
     )
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
@@ -1560,6 +1649,11 @@ def main():
                         help='gripper command duration (seconds)')
     parser.add_argument('--home-duration-sec', type=float, default=1.2,
                         help='home command duration for both arms (seconds)')
+    parser.add_argument(
+        '--ur5e-hardware-trajectory-action',
+        default='/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory',
+        help='guarded FollowJointTrajectory action for real UR5e arm commands',
+    )
     parser.add_argument('--key-poll-ms', type=float, default=8.0,
                         help='keyboard polling interval in milliseconds')
     parser.add_argument('--robot', choices=['xarm6', 'ur5e'], default='xarm6')
@@ -1604,6 +1698,7 @@ def main():
         cartesian_max_step_mm=args.cart_max_step_mm,
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
+        ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
     )
 
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)

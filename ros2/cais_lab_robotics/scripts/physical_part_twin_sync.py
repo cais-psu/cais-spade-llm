@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import logging
 import math
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from ament_index_python import get_package_share_directory
 
 PART_MODELS = {"SG": "gear_small", "MG": "gear_medium", "LG": "gear_large"}
+DEFAULT_LOCK_PATH = Path("/tmp/cais_physical_part_twin_sync.lock")
+
+log = logging.getLogger(__name__)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -29,6 +34,21 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _acquire_singleton_lock(path: Path) -> TextIO | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
 
 
 class PhysicalPartTwinSync:
@@ -79,6 +99,8 @@ class PhysicalPartTwinSync:
         self._release_after: dict[str, float] = {}
         self._last_ownership_sequence = ""
         self._degraded_reason = ""
+        self._waiting_reason = "waiting for validated world pose"
+        self._mirrored_models: set[str] = set()
         self._model_root = Path(get_package_share_directory("cais_lab_robotics")) / "models"
 
     @staticmethod
@@ -155,12 +177,11 @@ class PhysicalPartTwinSync:
 
     def _update(self, model_name: str, row: dict[str, Any], state: Any) -> bool:
         target = self._pose_from_row(row)
-        distance = math.sqrt(
+        horizontal_distance = math.sqrt(
             (float(state.pose.position.x) - target.position.x) ** 2
             + (float(state.pose.position.y) - target.position.y) ** 2
-            + (float(state.pose.position.z) - target.position.z) ** 2
         )
-        if distance <= self.deadband_m:
+        if horizontal_distance <= self.deadband_m:
             return True
         request = self._SetEntityState.Request()
         request.state.name = model_name
@@ -237,11 +258,15 @@ class PhysicalPartTwinSync:
 
     def _accepted_rows(self) -> list[dict[str, Any]]:
         snapshot = _read_json(self.snapshot_path)
+        if not bool(snapshot.get("table_plane_ready", False)):
+            self._waiting_reason = "physical table plane is not calibrated"
+            return []
         rows = snapshot.get("detections", [])
         now = time.time()
         if not isinstance(rows, list):
+            self._waiting_reason = "perception snapshot has no detection list"
             return []
-        return [
+        accepted = [
             row
             for row in rows
             if isinstance(row, dict)
@@ -249,12 +274,22 @@ class PhysicalPartTwinSync:
             and row.get("model_name") == PART_MODELS[row["part_name"]]
             and now - float(row.get("captured_at", 0.0)) <= self.maximum_detection_age_sec
         ]
+        if accepted:
+            self._waiting_reason = ""
+            return accepted
+        last_error = str(snapshot.get("last_error") or "").strip()
+        if last_error:
+            self._waiting_reason = f"world pose rejected: {last_error}"
+        elif rows:
+            self._waiting_reason = "latest validated detection is stale or unsupported"
+        else:
+            self._waiting_reason = "waiting for validated world pose"
+        return []
 
     def sync_once(self) -> None:
         self._degraded_reason = ""
         self._process_ownership()
         rows = self._accepted_rows()
-        mirrored: list[str] = []
         for row in rows:
             model_name = str(row["model_name"])
             if model_name in self._held_models:
@@ -265,19 +300,33 @@ class PhysicalPartTwinSync:
             state = self._entity_state(model_name)
             if state is None:
                 if self._spawn(model_name, row):
-                    mirrored.append(model_name)
+                    self._mirrored_models.add(model_name)
             elif self._update(model_name, row, state):
-                mirrored.append(model_name)
-        self._write_status(mirrored)
+                self._mirrored_models.add(model_name)
+        self._write_status()
 
-    def _write_status(self, mirrored: list[str]) -> None:
+    def _write_status(self, mirrored: list[str] | None = None) -> None:
+        if mirrored:
+            self._mirrored_models.update(mirrored)
+        heartbeat_at = time.time()
+        if self._degraded_reason:
+            state = "degraded"
+        elif self._mirrored_models:
+            state = "mirrored"
+        elif self._waiting_reason:
+            state = "waiting"
+        else:
+            state = "ready"
         _atomic_write_json(
             self.status_path,
             {
-                "updated_at": time.time(),
-                "state": "degraded" if self._degraded_reason else "ready",
+                "updated_at": heartbeat_at,
+                "heartbeat_at": heartbeat_at,
+                "synchronizer_pid": os.getpid(),
+                "state": state,
                 "degraded_reason": self._degraded_reason,
-                "mirrored_models": sorted(set(mirrored)),
+                "waiting_reason": self._waiting_reason,
+                "mirrored_models": sorted(self._mirrored_models),
                 "held_models": sorted(self._held_models),
                 "deadband_m": self.deadband_m,
             },
@@ -289,6 +338,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot", default="/tmp/cais_physical_perception.json")
     parser.add_argument("--ownership", default="/tmp/cais_physical_part_ownership.json")
     parser.add_argument("--status", default="/tmp/cais_physical_part_twin_status.json")
+    parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_PATH))
     parser.add_argument("--deadband-m", type=float, default=0.002)
     parser.add_argument("--maximum-detection-age-sec", type=float, default=15.0)
     parser.add_argument("--poll-sec", type=float, default=0.5)
@@ -308,6 +358,11 @@ def main() -> None:
     import rclpy
 
     args = _build_parser().parse_args()
+    lock_path = Path(args.lock_file)
+    lock_handle = _acquire_singleton_lock(lock_path)
+    if lock_handle is None:
+        log.warning("Physical part twin synchronizer is already running: %s", lock_path)
+        return
     rclpy.init()
     sync = PhysicalPartTwinSync(
         snapshot_path=Path(args.snapshot),
@@ -330,6 +385,8 @@ def main() -> None:
         sync.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
 
 
 if __name__ == "__main__":

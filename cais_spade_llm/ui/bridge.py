@@ -50,6 +50,8 @@ from cais_spade_llm.product.order import (
 )
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.ui import digital_twin, ros2_processes
+from cais_spade_llm.ui.perception_manager import PerceptionManager
+from cais_spade_llm.ui.process_registry import UIProcessRegistry
 
 log = logging.getLogger("ui.bridge")
 
@@ -202,6 +204,10 @@ class SystemBridge:
     )
     _GAZEBO_PROCESS_NAMES = _BASE_GAZEBO_PROCESS_NAMES | _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
     _HARDWARE_PROCESS_NAMES = _BASE_HARDWARE_PROCESS_NAMES | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
+    _PERCEPTION_UR5E_READ_ONLY_PROCESS_NAMES = {
+        "ur5e_calibration_rtde_monitor",
+        "ur5e_calibration_state_publisher",
+    }
     _HARDWARE_STACKS = {
         # xArm6 MoveIt realmove includes UFRobotSystemHardware (embedded driver path).
         "xarm6": ("hardware_xarm6_moveit",),
@@ -472,6 +478,12 @@ class SystemBridge:
 
         # ROS2 subprocess tracking.
         self._ros2_procs: dict[str, subprocess.Popen] = {}
+        self._ui_process_registry = UIProcessRegistry()
+        self.perception_manager = PerceptionManager(
+            self,
+            project_root=_PROJECT_ROOT,
+            venv_python=_VENV_PYTHON,
+        )
         self._teleop_server_proc: subprocess.Popen | None = None
         self._teleop_server_ros_domain_id: int | None = None
         self._teleop_server_lock = threading.Lock()
@@ -486,6 +498,9 @@ class SystemBridge:
         self._digital_twin_prepare_threads: dict[str, threading.Thread] = {}
         self._digital_twin_sync_restart_threads: dict[str, threading.Thread] = {}
         self._digital_twin_sync_restart_last_attempt: dict[str, float] = {}
+        self._physical_part_twin_reconcile_lock = threading.Lock()
+        self._physical_part_twin_reconcile_last_attempt = 0.0
+        self._physical_part_twin_reconcile_last_result: str | None = None
         self._ur5e_controller_status_cache: dict[str, dict[str, Any]] = {}
         self._ur5e_controller_auto_repair_last_attempt: dict[str, float] = {}
         self._gazebo_prewarm_lock = threading.Lock()
@@ -4085,6 +4100,11 @@ class SystemBridge:
             stderr=subprocess.DEVNULL,
             preexec_fn=os.setsid,
         )
+        self._register_ui_process(
+            "embedded_xmpp_server",
+            self._xmpp_proc,
+            " ".join(cmd),
+        )
         self._diag_emit(f"spawned xmpp runner pid={self._xmpp_proc.pid}")
         await self._wait_for_xmpp_ready(timeout_sec=45.0)
         log.info("Embedded XMPP server started on localhost:5222 (pid=%s)", self._xmpp_proc.pid)
@@ -4095,6 +4115,7 @@ class SystemBridge:
         if proc is None:
             return
         if proc.poll() is not None:
+            self._unregister_ui_process("embedded_xmpp_server", proc)
             return
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGINT)
@@ -4105,6 +4126,7 @@ class SystemBridge:
                 return
         for _ in range(25):
             if proc.poll() is not None:
+                self._unregister_ui_process("embedded_xmpp_server", proc)
                 return
             await asyncio.sleep(0.1)
         try:
@@ -4114,6 +4136,7 @@ class SystemBridge:
                 proc.kill()
             except Exception:
                 pass
+        self._unregister_ui_process("embedded_xmpp_server", proc)
 
     # ------------------------------------------------------------------
     # System lifecycle
@@ -4761,7 +4784,55 @@ class SystemBridge:
         rc = proc.poll()
         if rc is None:
             return "running"
+        self._ros2_procs.pop(name, None)
+        self._unregister_ui_process(name, proc)
         return "stopped"
+
+    def _register_ui_process(
+        self,
+        name: str,
+        proc: subprocess.Popen,
+        command: str,
+    ) -> None:
+        """Persist one UI-owned process group for cleanup after an unclean exit."""
+        try:
+            self._ui_process_registry.register(name, os.getpgid(proc.pid), command)
+        except (OSError, ValueError) as exc:
+            log.warning("Could not register UI process %s: %s", name, exc)
+
+    def _unregister_ui_process(self, name: str, proc: subprocess.Popen | None = None) -> None:
+        """Forget one UI-owned process after it exits."""
+        process_group = None
+        if proc is not None:
+            try:
+                process_group = os.getpgid(proc.pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                process_group = proc.pid
+        try:
+            self._ui_process_registry.unregister(name, process_group=process_group)
+        except OSError as exc:
+            log.warning("Could not unregister UI process %s: %s", name, exc)
+
+    def cleanup_previous_ui_processes(self) -> dict[str, list[str]]:
+        """Stop verified processes owned by a previous UI that exited uncleanly."""
+        summary = self._ui_process_registry.cleanup_previous()
+        if summary["stopped"]:
+            log.info(
+                "Stopped processes left by the previous UI: %s",
+                ", ".join(summary["stopped"]),
+            )
+        if summary["active_owner"]:
+            log.warning(
+                "Previous UI is still active; preserved its processes: %s",
+                ", ".join(summary["active_owner"]),
+            )
+        if summary["errors"]:
+            log.warning("Previous UI process cleanup errors: %s", "; ".join(summary["errors"]))
+        return summary
+
+    def release_ui_process_ownership(self) -> None:
+        """Release records for processes intentionally preserved for debugging."""
+        self._ui_process_registry.release_current_owner()
 
     def ros2_all_statuses(self) -> dict[str, str]:
         names = set(self.ROS2_LAUNCH_CMDS) | self._DIGITAL_TWIN_PROCESS_NAMES
@@ -4797,18 +4868,22 @@ class SystemBridge:
 
     def _digital_twin_teleop_target(self, robot: str) -> tuple[str, dict[str, Any]] | None:
         key = str(robot).strip().lower()
+        status_target = self._active_digital_twin_target_from_status()
         for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
             hardware_robots = {str(r).strip().lower() for r in (cfg.get("hardware") or ())}
             if str(cfg.get("robot") or "").strip().lower() != key and key not in hardware_robots:
                 continue
             process_names = self._digital_twin_process_names(cfg)
-            if self._running_process_names(process_names):
+            if self._running_process_names(process_names) or status_target == target:
                 return target, cfg
         return None
 
     def _any_teleop_environment_running(self) -> bool:
         names = self._GAZEBO_PROCESS_NAMES | self._HARDWARE_PROCESS_NAMES
-        return self._any_running(names)
+        return (
+            self._any_running(names)
+            or self._active_digital_twin_target_from_status() is not None
+        )
 
     def teleop_environment_running(self) -> bool:
         return self._any_teleop_environment_running()
@@ -4845,8 +4920,12 @@ class SystemBridge:
             return result
 
         digital_twin_target = self._digital_twin_teleop_target(key)
+        externally_detected_digital_twin = False
         if digital_twin_target is not None:
             target, cfg = digital_twin_target
+            externally_detected_digital_twin = not bool(
+                self._running_process_names(self._digital_twin_process_names(cfg))
+            )
             hardware_processes = self._digital_twin_hardware_processes_for_robot(cfg, key)
             gripper_process = str(
                 hardware_processes.get("gripper")
@@ -4859,6 +4938,7 @@ class SystemBridge:
                     "environment": "real",
                     "ros_domain_id": self._digital_twin_hardware_domain_id(cfg, key, domains),
                     "source": f"digital_twin:{target}",
+                    "externally_detected": externally_detected_digital_twin,
                     "moveit_process": str(hardware_processes.get("moveit") or "").strip(),
                     "gripper_process": gripper_process,
                 }
@@ -4924,7 +5004,16 @@ class SystemBridge:
                 warning = "MoveIt is not running. Start the matching Gazebo, Hardware Stack, or Digital Twin launch first."
 
         required = [name for name in required if name]
-        ready = bool(required) and all(self._teleop_process_running(name) for name in required)
+        external_ur5e_runtime = (
+            externally_detected_digital_twin
+            and key == "ur5e"
+            and result.get("environment") == "real"
+            and op_key
+            in {"cartesian", "joint", "home", "move_joints", "save_position", "state"}
+        )
+        ready = external_ur5e_runtime or (
+            bool(required) and all(self._teleop_process_running(name) for name in required)
+        )
         result["required_processes"] = required
         result["ready"] = ready
         result["warning"] = "" if ready else warning
@@ -4948,6 +5037,47 @@ class SystemBridge:
             "warning": str(target.get("warning") or ""),
             "pid": pid,
         }
+
+    def teleop_named_position_readiness(self, robot: str) -> tuple[bool, str]:
+        """Validate the trajectory interface and live state used by Named Positions."""
+        key = str(robot or "").strip().lower()
+        target = self.teleop_target(key, "move_joints")
+        warning = str(target.get("warning") or "").strip()
+        if warning:
+            return False, warning
+        if key != "ur5e" or target.get("environment") != "real":
+            return True, "Gazebo trajectory interface ready"
+        rtde_status = self._ur5e_rtde_trajectory_status()
+        try:
+            rtde_status_age_sec = time.time() - float(rtde_status.get("updated_at"))
+        except (TypeError, ValueError):
+            rtde_status_age_sec = float("inf")
+        if (
+            rtde_status_age_sec <= 5.0
+            and rtde_status.get("rtde_control_connected") is False
+        ):
+            message = str(rtde_status.get("message") or "").strip()
+            return False, message or (
+                "UR5e joint-state monitoring is available, but motion requires "
+                "Remote Control on the teach pendant"
+            )
+        action_error = self._wait_for_ros_action(
+            _UR5E_RTDE_TRAJECTORY_ACTION,
+            timeout_sec=3.0,
+            ros_domain_id=target.get("ros_domain_id"),
+        )
+        if action_error:
+            return False, f"UR5e RTDE trajectory action unavailable: {action_error}"
+        state_ok, state_message, _state = self.teleop_state(key)
+        if not state_ok:
+            return False, f"UR5e joint state unavailable: {state_message}"
+        try:
+            joint_state_age_sec = float(_state.get("joint_state_age_sec"))
+        except (TypeError, ValueError):
+            return False, "UR5e joint state freshness is unavailable"
+        if joint_state_age_sec > 2.0:
+            return False, f"UR5e joint state is stale ({joint_state_age_sec:.2f} s old)"
+        return True, f"UR5e RTDE action ready: {_UR5E_RTDE_TRAJECTORY_ACTION}"
 
     @staticmethod
     def _extract_robot_ip_from_resource(path: Path, robot_key: str) -> str | None:
@@ -5078,11 +5208,29 @@ class SystemBridge:
         return {k: dict(v) for k, v in result.items()}
 
     def _render_ros2_launch_cmd(self, name: str) -> str:
-        return ros2_processes.render_ros2_launch_cmd(
+        command = ros2_processes.render_ros2_launch_cmd(
             self.ROS2_LAUNCH_CMDS,
             self.hardware_ips,
             self._HW_IP_DEFAULTS,
             name,
+        )
+        if name not in {"realsense_camera", "physical_perception"}:
+            return command
+        camera = self.perception_manager.config()["cameras"]["ur5e"]
+        if name == "realsense_camera":
+            serial = str(camera.get("serial") or "").strip()
+            if serial:
+                command += f" serial_no:={serial}"
+            return command
+        calibration_path = str(Path(str(camera["calibration_path"])).expanduser())
+        return (
+            command
+            + " -p camera_role:=ur5e"
+            + f" -p hand_eye_config:={shlex.quote(calibration_path)}"
+            + f" -p table_plane_config:={shlex.quote(calibration_path)}"
+            + " -p detect_all_service:=/perception/ur5e/detect_all"
+            + " -p detect_part_service:=/perception/ur5e/detect_part"
+            + " -p publish_canonical_services:=true"
         )
 
     def _hardware_stack_for_robot(self, robot: str) -> tuple[str, ...] | None:
@@ -5175,6 +5323,11 @@ class SystemBridge:
             return False, "Physical mode is blocked: start the physical perception process."
         if not status.get("realsense_connected"):
             return False, "Physical mode is blocked: no synchronized RealSense color/depth frame."
+        if not status.get("table_plane_ready"):
+            return False, (
+                "Physical mode is blocked: calibrate the physical table plane and restart "
+                "the perception process."
+            )
         frame_age = status.get("frame_age_sec")
         if frame_age is None or float(frame_age) > 8.0:
             return False, "Physical mode is blocked: the RealSense frame snapshot is stale."
@@ -5198,13 +5351,8 @@ class SystemBridge:
         snapshot = _load(snapshot_path)
         twin = _load(twin_path)
         calibration_path = Path(
-            os.path.expanduser(
-                os.environ.get(
-                    "REALSENSE_HAND_EYE_CONFIG",
-                    "~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml",
-                )
-            )
-        )
+            str(self.perception_manager.config()["cameras"]["ur5e"]["calibration_path"])
+        ).expanduser()
         calibration_ready = False
         calibration_error = ""
         if not calibration_path.is_file():
@@ -5224,6 +5372,21 @@ class SystemBridge:
                     )
                     if not calibration_ready:
                         calibration_error = "Hand-eye calibration is not marked accepted."
+                    table_plane = calibration_payload.get("table_plane") or {}
+                    try:
+                        table_plane_ready = bool(table_plane.get("accepted", False)) and (
+                            str(table_plane.get("world_frame") or "") == "world"
+                            and int(table_plane.get("frame_count", 0)) >= 10
+                            and float(table_plane.get("mad_m", float("inf"))) <= 0.002
+                        )
+                    except (TypeError, ValueError):
+                        table_plane_ready = False
+                    if calibration_ready and not table_plane_ready:
+                        calibration_ready = False
+                        calibration_error = (
+                            "Table-plane calibration is missing or invalid. Run "
+                            "calibrate_hand_eye table-plane."
+                        )
                 except (OSError, TypeError, yaml.YAMLError) as exc:
                     calibration_error = f"Cannot read hand-eye calibration: {exc}"
 
@@ -5303,6 +5466,115 @@ class SystemBridge:
             "detections": detections if isinstance(detections, list) else [],
             "status": status,
         }
+
+    def perception_status(self) -> dict[str, Any]:
+        """Return three-camera status for the Perception operator page."""
+        return self.perception_manager.status()
+
+    def perception_discover_devices(self) -> list[dict[str, str]]:
+        """Return connected RealSense devices without changing host state."""
+        return self.perception_manager.discover_devices()
+
+    def perception_discover_wsl_attachments(self) -> list[dict[str, str]]:
+        """Return Windows RealSense USB rows visible to usbipd-win."""
+        return self.perception_manager.discover_wsl_attachments()
+
+    def perception_attach_wsl_camera(self, busid: str) -> str | None:
+        """Attach one previously administrator-bound RealSense to WSL."""
+        return self.perception_manager.attach_wsl_camera(busid)
+
+    def perception_save_assignments(self, assignments: dict[str, str]) -> dict[str, Any]:
+        """Persist deployment-specific RealSense serial assignments."""
+        return self.perception_manager.save_assignments(assignments)
+
+    def perception_save_stationary_board_pose(self, pose: dict[str, Any]) -> dict[str, Any]:
+        """Persist the surveyed stationary ChArUco board pose."""
+        return self.perception_manager.save_stationary_board_pose(pose)
+
+    def perception_start_camera(self, role: str) -> str | None:
+        """Start one RealSense driver and its preview writer."""
+        return self.perception_manager.start_camera(role)
+
+    def perception_stop_camera(self, role: str) -> None:
+        """Stop one role-specific camera stack."""
+        self.perception_manager.stop_camera(role)
+
+    def perception_start_all(self) -> dict[str, str]:
+        """Start detection and the complete camera stack for every assigned role."""
+        return self.perception_manager.start_all()
+
+    def perception_stop_all(self) -> None:
+        """Stop detection and the complete camera stack for every role."""
+        self.perception_manager.stop_all()
+
+    def perception_reconcile_connections(self) -> dict[str, dict[str, Any]]:
+        """Run one bounded RealSense USB recovery pass."""
+        return self.perception_manager.reconcile_connections()
+
+    def perception_start_detection(self, role: str) -> str | None:
+        """Start one complete camera stack and request its first detection."""
+        return self.perception_manager.start_detection(role)
+
+    def perception_stop_detection(self, role: str) -> None:
+        """Stop detection and the complete role-specific camera stack."""
+        self.perception_manager.stop_detection(role)
+
+    def perception_reset_camera(self, role: str) -> str | None:
+        """Clean and restart one role-specific camera and detection stack."""
+        return self.perception_manager.reset_camera(role)
+
+    def perception_test_detection(self, role: str) -> dict[str, Any]:
+        """Capture one role-specific detection without requesting robot motion."""
+        return self.perception_manager.test_detection(role)
+
+    def perception_open_viewer(self, role: str) -> str | None:
+        """Open an optional external color viewer for one camera."""
+        return self.perception_manager.open_external_viewer(role)
+
+    def perception_save_snapshot(self, role: str, stream: str = "color") -> Path:
+        """Save the latest camera preview for diagnostics."""
+        return self.perception_manager.save_snapshot(role, stream)
+
+    def perception_record_diagnostics(self, *, duration_sec: float = 5.0) -> Path:
+        """Record short no-inference camera diagnostics."""
+        return self.perception_manager.record_diagnostics(duration_sec=duration_sec)
+
+    def perception_save_pose_and_capture(self, role: str) -> dict[str, Any]:
+        """Save one reviewed calibration pose and capture one board observation."""
+        return self.perception_manager.save_pose_and_capture(role)
+
+    def perception_solve_calibration(self, role: str) -> Path:
+        """Solve an accepted candidate calibration without activating it."""
+        return self.perception_manager.solve_calibration(role)
+
+    def perception_activate_calibration(self, role: str) -> Path:
+        """Activate an accepted role-specific candidate calibration."""
+        return self.perception_manager.activate_calibration(role)
+
+    def perception_rollback_calibration(self, role: str) -> Path:
+        """Restore the previous accepted role-specific calibration."""
+        return self.perception_manager.rollback_calibration(role)
+
+    def perception_start_table_plane_calibration(self) -> str | None:
+        """Start the authoritative 10-frame UR5e table-plane calibration."""
+        return self.perception_manager.start_table_plane_calibration()
+
+    def perception_calibration_replay_control(self, role: str, action: str) -> Path:
+        """Control an active teach-then-replay calibration run."""
+        return self.perception_manager.calibration_replay_control(role, action)
+
+    def perception_start_calibration_replay(
+        self,
+        role: str,
+        *,
+        confirmed: bool,
+    ) -> str | None:
+        """Start explicitly confirmed replay of a reviewed calibration pose set."""
+        return self.perception_manager.start_calibration_replay(role, confirmed=confirmed)
+
+    def perception_preview_calibration_replay(self, role: str) -> str | None:
+        """Plan every reviewed calibration pose without robot motion."""
+        return self.perception_manager.preview_calibration_replay(role)
 
     def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
         """Return whether Gazebo simulation startup is ready enough for agent start."""
@@ -5780,6 +6052,8 @@ class SystemBridge:
         for key in (
             "robot_ip",
             "action_name",
+            "rtde_receive_connected",
+            "rtde_control_connected",
             "point_count",
             "start_delta_rad",
             "start_delta_joint",
@@ -6071,6 +6345,39 @@ class SystemBridge:
             if self._running_process_names(self._digital_twin_process_names(cfg)):
                 return target
         return None
+
+    def _active_digital_twin_target_from_status(
+        self,
+        *,
+        maximum_age_sec: float = 6.0,
+    ) -> str | None:
+        """Recover the active target when Gazebo was started by an earlier UI process."""
+        now = time.time()
+        candidates: list[tuple[float, str]] = []
+        active_states = {"running", "mirroring", "starting", "teach"}
+        for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
+            if not bool(cfg.get("hardware_supported", False)):
+                continue
+            paths = [self._digital_twin_status_path(target)]
+            sync_items = self._digital_twin_sync_process_items(cfg)
+            if len(sync_items) > 1:
+                paths.extend(
+                    self._digital_twin_sync_status_path(target, str(robot).strip().lower())
+                    for robot, _process in sync_items
+                    if str(robot).strip()
+                )
+            for path in paths:
+                payload = self._read_json_file(path)
+                try:
+                    updated_at = float(payload.get("updated_at") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                state = str(payload.get("state") or "").strip().lower()
+                if state in active_states and updated_at and now - updated_at <= maximum_age_sec:
+                    candidates.append((updated_at, target))
+        if not candidates:
+            return None
+        return max(candidates)[1]
 
     def _digital_twin_hardware_status(self, cfg: dict[str, Any]) -> dict[str, Any]:
         hardware_processes = cfg.get("hardware_processes") or {}
@@ -6563,6 +6870,7 @@ class SystemBridge:
                 preexec_fn=os.setsid,
             )
             self._ros2_procs[name] = proc
+            self._register_ui_process(name, proc, cmd)
             log.info("Started ROS2 process %s (pid=%d)", name, proc.pid)
             return None
         except Exception as exc:
@@ -6574,6 +6882,8 @@ class SystemBridge:
         *,
         ros_domain_id: int | None = None,
     ) -> str | None:
+        for calibration_process in self._PERCEPTION_UR5E_READ_ONLY_PROCESS_NAMES:
+            self.ros2_stop(calibration_process, reason="ur5e_control_stack_start")
         name = str(process_name or "").strip()
         if not name:
             return None
@@ -7433,14 +7743,13 @@ class SystemBridge:
         *,
         domains: dict[str, int],
     ) -> str | None:
-        """Start RealSense/inference in hardware and the gear mirror in Gazebo."""
+        """Start RealSense and inference in hardware independently of Gazebo."""
         configured = cfg.get("perception_processes") or {}
         if not isinstance(configured, dict) or not configured:
             return None
         process_specs = (
             ("camera", "realsense_camera", domains["hardware"]),
             ("perception", "physical_perception", domains["hardware"]),
-            ("part_sync", "physical_part_twin_sync", domains["gazebo"]),
         )
         errors: list[str] = []
         for process_key, command_key, domain_id in process_specs:
@@ -7459,6 +7768,110 @@ class SystemBridge:
             if start_err:
                 errors.append(f"{command_key}: {start_err}")
         return "; ".join(dict.fromkeys(errors)) or None
+
+    @staticmethod
+    def _stop_stale_physical_part_twin_sync() -> None:
+        """Stop orphaned Gazebo-side gear synchronizers from an earlier UI."""
+        pattern = "physical_part_twin_sync.py"
+        subprocess.run(["pkill", "-TERM", "-f", pattern], capture_output=True)
+        time.sleep(0.25)
+        subprocess.run(["pkill", "-KILL", "-f", pattern], capture_output=True)
+
+    @staticmethod
+    def _write_physical_part_twin_waiting(reason: str) -> None:
+        """Expose why the passive gear mirror has not started yet."""
+        heartbeat_at = time.time()
+        atomic_json_write(
+            Path("/tmp/cais_physical_part_twin_status.json"),
+            {
+                "updated_at": heartbeat_at,
+                "heartbeat_at": heartbeat_at,
+                "synchronizer_pid": None,
+                "state": "waiting",
+                "degraded_reason": "",
+                "waiting_reason": str(reason),
+                "mirrored_models": [],
+                "held_models": [],
+                "deadband_m": 0.002,
+            },
+        )
+
+    def _start_digital_twin_part_sync_when_ready(
+        self,
+        cfg: dict[str, Any],
+        *,
+        domains: dict[str, int],
+        gazebo_process: str | None,
+        timeout_sec: float = 35.0,
+    ) -> str | None:
+        """Start one gear synchronizer after Gazebo entity services are ready."""
+        configured = cfg.get("perception_processes") or {}
+        if not isinstance(configured, dict):
+            return None
+        process_name = str(configured.get("part_sync") or "").strip()
+        if not process_name or self.ros2_proc_status(process_name) == "running":
+            return None
+        service_error = self._wait_for_ros_services(
+            ["/spawn_entity", "/get_entity_state", "/set_entity_state"],
+            timeout_sec=timeout_sec,
+            process_name=gazebo_process or None,
+            ros_domain_id=domains["gazebo"],
+        )
+        if service_error:
+            reason = f"waiting to spawn: Gazebo services are not ready ({service_error})"
+            self._write_physical_part_twin_waiting(reason)
+            return reason
+        prereq_error = self._ros2_launch_prereq_error("physical_part_twin_sync")
+        if prereq_error:
+            self._write_physical_part_twin_waiting(prereq_error)
+            return prereq_error
+        self._stop_stale_physical_part_twin_sync()
+        self._write_physical_part_twin_waiting(
+            "waiting to spawn: synchronizer is starting and needs a validated world pose"
+        )
+        return self._start_tracked_ros2_command(
+            process_name,
+            self._render_ros2_launch_cmd("physical_part_twin_sync"),
+            ros_domain_id=domains["gazebo"],
+        )
+
+    def _reconcile_physical_part_twin_sync(self) -> str | None:
+        """Restore the singleton gear mirror for an active passive Digital Twin."""
+        with self._physical_part_twin_reconcile_lock:
+            for cfg in self._DIGITAL_TWIN_TARGETS.values():
+                configured = cfg.get("perception_processes") or {}
+                if not isinstance(configured, dict):
+                    continue
+                process_name = str(configured.get("part_sync") or "").strip()
+                if process_name and self.ros2_proc_status(process_name) == "running":
+                    return None
+
+            now = time.monotonic()
+            if now - self._physical_part_twin_reconcile_last_attempt < 8.0:
+                return self._physical_part_twin_reconcile_last_result
+            self._physical_part_twin_reconcile_last_attempt = now
+
+            target = self._active_digital_twin_target()
+            tracked_gazebo_process: str | None = None
+            if target:
+                cfg = self._DIGITAL_TWIN_TARGETS[target]
+                tracked_gazebo_process = str(cfg.get("gazebo_process") or "").strip() or None
+            else:
+                target = self._active_digital_twin_target_from_status()
+                cfg = self._DIGITAL_TWIN_TARGETS.get(str(target or ""), {})
+            configured = cfg.get("perception_processes") or {}
+            if not target or not isinstance(configured, dict) or not configured:
+                self._physical_part_twin_reconcile_last_result = None
+                return None
+
+            result = self._start_digital_twin_part_sync_when_ready(
+                cfg,
+                domains=self._digital_twin_domain_ids(),
+                gazebo_process=tracked_gazebo_process,
+                timeout_sec=3.0,
+            )
+            self._physical_part_twin_reconcile_last_result = result
+            return result
 
     def digital_twin_start(self, target: str) -> str | None:
         cfg = self._digital_twin_target(target)
@@ -7624,6 +8037,18 @@ class SystemBridge:
                 )
                 return err
 
+            part_sync_err = self._start_digital_twin_part_sync_when_ready(
+                cfg,
+                domains=domains,
+                gazebo_process=gazebo_process,
+            )
+            if part_sync_err:
+                self.last_notice = (
+                    "Digital twin robot synchronization is running, but physical gear mirroring "
+                    f"is degraded: {part_sync_err}"
+                )
+                log.warning("Digital twin physical gear mirror degraded: %s", part_sync_err)
+
             init_err = None
             if teach_mode or not dual_already_started:
                 init_err = self._initialize_digital_twin_gazebo_from_hardware(
@@ -7709,6 +8134,18 @@ class SystemBridge:
                 },
             )
             return err
+
+        part_sync_err = self._start_digital_twin_part_sync_when_ready(
+            cfg,
+            domains=domains,
+            gazebo_process=gazebo_process,
+        )
+        if part_sync_err:
+            self.last_notice = (
+                "Digital twin robot synchronization is running, but physical gear mirroring "
+                f"is degraded: {part_sync_err}"
+            )
+            log.warning("Digital twin physical gear mirror degraded: %s", part_sync_err)
 
         err = self._start_digital_twin_hardware_stack(
             target,
@@ -10245,6 +10682,7 @@ class SystemBridge:
             "pkill -9 -f rviz2 2>/dev/null",
             "pkill -9 -f dual_drag_markers.py 2>/dev/null",
             "pkill -9 -f digital_twin_sync.py 2>/dev/null",
+            "pkill -9 -f physical_part_twin_sync.py 2>/dev/null",
             "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
             "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
             "pkill -9 -f dual_robots_hardware_moveit.launch.py 2>/dev/null",
@@ -10309,14 +10747,8 @@ class SystemBridge:
         if name == "physical_perception":
             if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
                 return "ROBOFLOW_API_KEY is not configured in the ignored .env file."
-            calibration = Path(
-                os.path.expanduser(
-                    os.environ.get(
-                        "REALSENSE_HAND_EYE_CONFIG",
-                        "~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml",
-                    )
-                )
-            )
+            camera = self.perception_manager.config()["cameras"]["ur5e"]
+            calibration = Path(str(camera["calibration_path"])).expanduser()
             if not calibration.is_file():
                 return (
                     f"Hand-eye calibration is missing at {calibration}. "
@@ -10359,6 +10791,7 @@ class SystemBridge:
                 preexec_fn=os.setsid,  # New process group for clean shutdown.
             )
             self._ros2_procs[name] = proc
+            self._register_ui_process(name, proc, cmd)
             log.info("Started ROS2 process %s (pid=%d)", name, proc.pid)
             if name in self._GAZEBO_PROCESS_NAMES:
                 self._begin_gazebo_launch_timing(name, proc.pid)
@@ -10372,6 +10805,7 @@ class SystemBridge:
         proc = self._ros2_procs.get(name)
         if proc is None or proc.poll() is not None:
             self._ros2_procs.pop(name, None)
+            self._unregister_ui_process(name, proc)
             if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(
                 self._GAZEBO_PROCESS_NAMES
             ):
@@ -10389,6 +10823,7 @@ class SystemBridge:
         except Exception as exc:
             log.warning("Error stopping %s: %s", name, exc)
         self._ros2_procs.pop(name, None)
+        self._unregister_ui_process(name, proc)
         if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
@@ -10418,6 +10853,7 @@ class SystemBridge:
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
             "pkill -9 -f dual_drag_markers.py 2>/dev/null",
             "pkill -9 -f digital_twin_sync.py 2>/dev/null",
+            "pkill -9 -f physical_part_twin_sync.py 2>/dev/null",
             "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",
             "pkill -9 -f XArm6JointStateRelay 2>/dev/null",
             "pkill -9 -f ur5e_rg2_rtde_gripper.py 2>/dev/null",
@@ -10440,6 +10876,7 @@ class SystemBridge:
             "killall -9 move_group rviz2 robot_state_publisher joint_state_publisher static_transform_publisher ros2_control_node 2>/dev/null",
             "pkill -9 -f keyboard_teleop.py 2>/dev/null",
             "pkill -9 -f dual_drag_markers.py 2>/dev/null",
+            "pkill -9 -f physical_part_twin_sync.py 2>/dev/null",
             "pkill -9 -f spawn_entity.py 2>/dev/null",
             "pkill -9 -f xarm_driver_node 2>/dev/null",
             "pkill -9 -f controller_manager 2>/dev/null",
@@ -10812,6 +11249,7 @@ class SystemBridge:
             pass
         self._teleop_server_proc = None
         self._teleop_server_ros_domain_id = None
+        self._unregister_ui_process("interactive_teleop_server", proc)
 
     def _stop_teleop_server(self) -> None:
         with self._teleop_server_lock:
@@ -10882,7 +11320,11 @@ class SystemBridge:
         self._stop_teleop_server_locked()
 
         quoted_script = shlex.quote(self._TELEOP_SCRIPT)
-        cmd = f"python3.10 {quoted_script} --server --service-timeout-sec 8 --tf-warmup-sec 0.2"
+        trajectory_action = shlex.quote(_UR5E_RTDE_TRAJECTORY_ACTION)
+        cmd = (
+            f"python3.10 {quoted_script} --server --service-timeout-sec 8 "
+            f"--tf-warmup-sec 0.2 --ur5e-hardware-trajectory-action {trajectory_action}"
+        )
         try:
             proc = subprocess.Popen(
                 ["bash", "-c", self._ROS2_ENV + self._ros2_domain_export(resolved_domain_id) + cmd],
@@ -10898,6 +11340,7 @@ class SystemBridge:
 
         self._teleop_server_proc = proc
         self._teleop_server_ros_domain_id = resolved_domain_id
+        self._register_ui_process("interactive_teleop_server", proc, cmd)
         ok, msg, _payload = self._read_teleop_response_locked(timeout_sec=25.0)
         if not ok:
             self._stop_teleop_server_locked()
@@ -10974,7 +11417,11 @@ class SystemBridge:
     ) -> tuple[bool, str]:
         quoted_script = shlex.quote(self._TELEOP_SCRIPT)
         quoted_args = " ".join(shlex.quote(str(arg)) for arg in args)
-        cmd = f"python3.10 {quoted_script} {quoted_args}".strip()
+        trajectory_action = shlex.quote(_UR5E_RTDE_TRAJECTORY_ACTION)
+        cmd = (
+            f"python3.10 {quoted_script} --ur5e-hardware-trajectory-action "
+            f"{trajectory_action} {quoted_args}"
+        ).strip()
         return self.ros2_exec(
             self._ros2_domain_export(ros_domain_id) + cmd,
             timeout_sec=timeout_sec,
@@ -11104,6 +11551,9 @@ class SystemBridge:
         joints = positions.get(name)
         if not joints or not isinstance(joints, list):
             return False, f"named position '{name}' not found for {robot}"
+        ready, readiness_message = self.teleop_named_position_readiness(robot)
+        if not ready:
+            return False, readiness_message
         return self._teleop_request(
             payload={
                 "op": "move_joints",

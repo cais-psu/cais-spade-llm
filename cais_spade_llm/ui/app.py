@@ -3,17 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
+import base64
+from contextlib import nullcontext, suppress
 from pathlib import Path
 
 from nicegui import app, ui
 from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
+from starlette.responses import StreamingResponse
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
 
 _STATIC_DIR = Path(__file__).parent / "static"
+_NO_PERCEPTION_FRAME_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQ"
+    "FxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMK"
+    "ChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo"
+    "KCgoKCj/wAARCAAMABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBg"
+    "cICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0"
+    "KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZW"
+    "ZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxM"
+    "XGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQ"
+    "AAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQ"
+    "dhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSE"
+    "lKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqK"
+    "mqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADA"
+    "MBAAIRAxEAPwD6DooooA//2Q=="
+)
 
 
 # Colour palette.
@@ -21,6 +38,7 @@ _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
+    ("Perception", "/perception", "photo_camera"),
     ("Control", "/control", "gamepad"),
     ("Safety", "/safety", "shield"),
     ("Products", "/products", "inventory_2"),
@@ -126,6 +144,7 @@ def create_app() -> None:
     _patch_nicegui_lifecycle()
     bridge = SystemBridge.instance()
     watchdog_task: asyncio.Task | None = None
+    perception_recovery_task: asyncio.Task | None = None
 
     # Serve static assets and set Penn State favicon.
     app.add_static_files("/static", str(_STATIC_DIR))
@@ -139,7 +158,58 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.ui.pages import control, dashboard, products, resources, safety
+    from cais_spade_llm.ui.pages import control, dashboard, perception, products, resources, safety
+
+    @app.get("/perception/stream/{camera_role}/{stream_name}")
+    async def perception_stream(camera_role: str, stream_name: str) -> StreamingResponse:
+        """Stream throttled preview JPEGs without invoking Roboflow inference."""
+        from cais_spade_llm.ui.perception_manager import CAMERA_ROLES, PREVIEW_ROOT
+
+        if camera_role not in CAMERA_ROLES or stream_name not in {
+            "color",
+            "depth",
+            "detection",
+        }:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="unknown perception preview")
+        image_path = PREVIEW_ROOT / camera_role / f"{stream_name}.jpg"
+        fallback_path = (
+            PREVIEW_ROOT / camera_role / "color.jpg"
+            if stream_name == "detection"
+            else image_path
+        )
+
+        async def frames():
+            last_image: tuple[str, int] | None = None
+            while True:
+                try:
+                    current_path = image_path if image_path.is_file() else fallback_path
+                    if current_path.is_file():
+                        modified_ns = current_path.stat().st_mtime_ns
+                        image_identity = (str(current_path), modified_ns)
+                        payload = current_path.read_bytes()
+                    else:
+                        image_identity = ("no-perception-frame", 0)
+                        payload = _NO_PERCEPTION_FRAME_JPEG
+                except OSError:
+                    image_identity = ("no-perception-frame", 0)
+                    payload = _NO_PERCEPTION_FRAME_JPEG
+                if image_identity != last_image:
+                    last_image = image_identity
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                        + payload
+                        + b"\r\n"
+                    )
+                await asyncio.sleep(0.15)
+
+        return StreamingResponse(
+            frames(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @ui.page("/")
     def index_page():
@@ -150,6 +220,11 @@ def create_app() -> None:
     def control_page():
         _page_wrapper(bridge)
         control.render(bridge)
+
+    @ui.page("/perception")
+    def perception_page():
+        _page_wrapper(bridge)
+        perception.render(bridge)
 
     @ui.page("/resources")
     def resources_page():
@@ -190,28 +265,48 @@ def create_app() -> None:
                 except Exception:
                     pass
 
+    async def _perception_recovery_watchdog() -> None:
+        """Recover only camera roles explicitly connected by the operator."""
+        while True:
+            await asyncio.sleep(1.5)
+            with suppress(OSError, RuntimeError, ValueError):
+                await asyncio.to_thread(bridge.perception_reconcile_connections)
+
     async def _on_startup() -> None:
-        nonlocal watchdog_task
+        nonlocal perception_recovery_task, watchdog_task
+        if keep_gazebo_on_exit():
+            import logging
+
+            logging.getLogger("ui.app").info(
+                "App startup: CAIS_KEEP_GAZEBO_ON_EXIT=1; preserving prior UI processes."
+            )
+        else:
+            await asyncio.to_thread(bridge.cleanup_previous_ui_processes)
         watchdog_task = asyncio.create_task(_ui_watchdog())
+        perception_recovery_task = asyncio.create_task(_perception_recovery_watchdog())
 
     async def _on_shutdown() -> None:
         """Clean up all background resources when the app exits."""
+        nonlocal perception_recovery_task, watchdog_task
         import logging
 
         log = logging.getLogger("ui.app")
         log.info("App shutdown: cleaning up resources...")
 
-        # Stop watchdog first.
-        nonlocal watchdog_task
-        if watchdog_task is not None:
-            watchdog_task.cancel()
+        # Stop watchdogs first.
+        background_tasks = (watchdog_task, perception_recovery_task)
+        for task in background_tasks:
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await watchdog_task
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception:
                 log.debug("App shutdown: watchdog cleanup skipped")
-            watchdog_task = None
+        watchdog_task = None
+        perception_recovery_task = None
 
         # 1) Stop SPADE agents (which also shuts down robot controllers).
         if bridge.system_running:
@@ -226,6 +321,7 @@ def create_app() -> None:
             log.info(
                 "App shutdown: CAIS_KEEP_GAZEBO_ON_EXIT=1; preserving Gazebo/MoveIt processes."
             )
+            bridge.release_ui_process_ownership()
         else:
             try:
                 bridge.ros2_stop_all(reason="app_shutdown")

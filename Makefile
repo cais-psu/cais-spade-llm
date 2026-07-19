@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install run headless bootstrap-gazebo check
+.PHONY: install run headless setup-perception-host bootstrap-gazebo check
 
 install:
 	poetry install
@@ -11,6 +11,9 @@ run:
 
 headless:
 	poetry run python -m cais_spade_llm.ui_main --headless
+
+setup-perception-host:
+	sudo bash scripts/setup_perception_host.sh
 
 bootstrap-gazebo:
 	bash scripts/bootstrap_gazebo_workspace.sh

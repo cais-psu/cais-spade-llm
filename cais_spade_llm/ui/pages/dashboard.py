@@ -734,40 +734,6 @@ def render(bridge: SystemBridge) -> None:
                             gazebo_launch_state["busy"] = False
                             _update_controls()
 
-                    async def _start_physical_perception():
-                        for process_name in ("realsense_camera", "physical_perception"):
-                            err = await asyncio.to_thread(bridge.ros2_start, process_name)
-                            if err and "already running" not in err:
-                                _set_action_banner("warning", err, auto_hide_s=10.0)
-                                return
-                        _set_action_banner(
-                            "success",
-                            "RealSense and physical perception started. Detection does not move a robot.",
-                            auto_hide_s=6.0,
-                        )
-
-                    async def _stop_physical_perception():
-                        for process_name in ("physical_perception", "realsense_camera"):
-                            await asyncio.to_thread(bridge.ros2_stop, process_name)
-                        _set_action_banner("success", "Physical perception stopped.", auto_hide_s=5.0)
-
-                    async def _test_physical_detection():
-                        perception_test_status.text = "Capturing and validating one detection..."
-                        perception_test_status.classes(replace="text-xs text-blue-700")
-                        result = await asyncio.to_thread(bridge.test_physical_detection)
-                        perception_detection_code.content = json.dumps(
-                            result.get("detections", []),
-                            indent=2,
-                        )
-                        perception_test_status.text = str(result.get("message") or "")
-                        perception_test_status.classes(
-                            replace=(
-                                "text-xs text-green-700"
-                                if result.get("success")
-                                else "text-xs text-red-700"
-                            )
-                        )
-
                     reset_scope_options = [
                         "Reset All",
                         "Reset Plan",
@@ -891,83 +857,32 @@ def render(bridge: SystemBridge) -> None:
                             "text-sm text-slate-600"
                         )
                         dry_run_result_code = ui.code("{}", language="json").classes("w-full")
-                    with ui.expansion(
-                        "RealSense + Roboflow Gear Perception",
-                        icon="photo_camera",
-                        value=False,
-                    ).classes("w-full mt-2"):
-                        perception_summary = ui.label("Waiting for perception status.").classes(
-                            "text-xs text-slate-600"
-                        )
-                        perception_calibration = ui.label("").classes("text-xs text-slate-600")
-                        perception_detections = ui.label("").classes("text-xs text-slate-600")
-                        perception_twin = ui.label("").classes("text-xs text-slate-600")
-                        ui.label("LG unavailable: model has no large_gear class").classes(
-                            "text-xs text-amber-700"
-                        )
-                        with ui.row().classes("items-center gap-2 flex-wrap"):
-                            ui.button(
-                                "Start Camera + Perception",
-                                on_click=_start_physical_perception,
-                                icon="play_arrow",
-                            ).props("dense color=primary")
-                            ui.button(
-                                "Test Detection",
-                                on_click=_test_physical_detection,
-                                icon="search",
-                            ).props("dense color=secondary")
-                            ui.button(
-                                "Stop Perception",
-                                on_click=_stop_physical_perception,
-                                icon="stop",
-                            ).props("dense flat")
-                        perception_test_status = ui.label(
-                            "Test Detection captures and validates poses without moving either robot."
+                    with ui.row().classes(
+                        "w-full mt-2 items-center gap-3 rounded border border-slate-200 p-3"
+                    ):
+                        ui.icon("photo_camera").classes("text-slate-600")
+                        dashboard_perception_status = ui.label(
+                            "Perception status: checking..."
                         ).classes("text-xs text-slate-600")
-                        perception_detection_code = ui.code("[]", language="json").classes(
-                            "w-full"
+                        ui.space()
+                        ui.link("Open Camera & Perception", target="/perception").classes(
+                            "text-sm font-medium"
                         )
 
-                        def _refresh_physical_perception_status() -> None:
-                            status = bridge.physical_perception_status()
-                            frame_age = status.get("frame_age_sec")
-                            age_text = "n/a" if frame_age is None else f"{float(frame_age):.2f} s"
-                            perception_summary.text = (
-                                "RealSense: "
-                                f"{'connected' if status.get('realsense_connected') else 'not connected'} "
-                                f"(frame age {age_text}) | Roboflow model: "
-                                f"{'ready' if status.get('roboflow_ready') else 'not ready'}"
-                            )
-                            calibration = status.get("calibration") or {}
-                            perception_calibration.text = (
-                                "Calibration: "
-                                f"{calibration.get('identity') or status.get('calibration_path')} | "
-                                f"reprojection={calibration.get('median_reprojection_error_px', 'n/a')} px | "
-                                f"translation RMS={calibration.get('fixed_board_translation_rms_m', 'n/a')} m | "
-                                f"rotation RMS={calibration.get('fixed_board_rotation_rms_deg', 'n/a')} deg"
-                            )
-                            rows = status.get("detections", [])
-                            detected = [
-                                f"{row.get('part_name')} ({row.get('model_name')})"
-                                for row in rows
-                                if isinstance(row, dict)
-                            ]
-                            perception_detections.text = (
-                                "Latest SG/MG detections: " + (", ".join(detected) or "none")
-                            )
-                            twin = status.get("twin") or {}
-                            perception_twin.text = (
-                                "Gazebo mirror: "
-                                f"{twin.get('state', 'not running')}"
-                                + (
-                                    f" ({twin.get('degraded_reason')})"
-                                    if twin.get("degraded_reason")
-                                    else ""
-                                )
-                            )
+                    def _refresh_dashboard_perception_status() -> None:
+                        status = bridge.physical_perception_status()
+                        frame_age = status.get("frame_age_sec")
+                        age_text = "n/a" if frame_age is None else f"{float(frame_age):.1f} s"
+                        dashboard_perception_status.text = (
+                            "UR5e camera: "
+                            f"{'connected' if status.get('realsense_connected') else 'not connected'} | "
+                            f"frame age={age_text} | Roboflow="
+                            f"{'ready' if status.get('roboflow_ready') else 'not ready'} | "
+                            f"mirror={(status.get('twin') or {}).get('state', 'not running')}"
+                        )
 
-                        _refresh_physical_perception_status()
-                        _managed_timer(1.0, _refresh_physical_perception_status)
+                    _refresh_dashboard_perception_status()
+                    _managed_timer(2.0, _refresh_dashboard_perception_status)
                     plan_safety_banner = ui.row().classes(
                         "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-red-700 bg-red-50"
                     )

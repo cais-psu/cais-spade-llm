@@ -370,12 +370,10 @@ def _build_moveit_params(urdf, srdf):
 
 
 def launch_setup(context, *args, **kwargs):
+    launch_move_group = _launch_arg_enabled(context, "launch_move_group", default="true")
     launch_rviz = _launch_arg_enabled(context, "launch_rviz", default="true")
 
     urdf = _build_urdf()
-    srdf = _build_srdf()
-    moveit_config = _build_moveit_params(urdf, srdf)
-
     rg2_robot_state_publisher = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -388,6 +386,12 @@ def launch_setup(context, *args, **kwargs):
             },
         ],
     )
+    launch_actions = [rg2_robot_state_publisher]
+    if not launch_move_group and not launch_rviz:
+        return launch_actions
+
+    srdf = _build_srdf()
+    moveit_config = _build_moveit_params(urdf, srdf)
 
     move_group = Node(
         package="moveit_ros_move_group",
@@ -395,6 +399,8 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
         parameters=[moveit_config, {"use_sim_time": False}],
     )
+    if launch_move_group:
+        launch_actions.append(move_group)
 
     rviz_config = PathJoinSubstitution([
         FindPackageShare("cais_lab_robotics"),
@@ -418,7 +424,6 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    launch_actions = [rg2_robot_state_publisher, move_group]
     if launch_rviz:
         launch_actions.append(rviz)
     return launch_actions
@@ -426,6 +431,11 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "launch_move_group",
+            default_value="true",
+            description="Launch MoveIt move_group alongside the UR5e state publisher.",
+        ),
         DeclareLaunchArgument(
             "launch_rviz",
             default_value="true",

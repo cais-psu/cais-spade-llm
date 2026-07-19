@@ -603,29 +603,51 @@ only in the ignored `.env` file, never in source:
 ROBOFLOW_API_KEY=...
 ROBOFLOW_API_URL=https://detect.roboflow.com
 ROBOFLOW_MODEL_ID=hrc-assembly-gph6m/5
-REALSENSE_SERIAL=
-REALSENSE_HAND_EYE_CONFIG=~/.config/cais-spade-llm/ur5e_realsense_hand_eye.yaml
 ```
 
 The runtime sends the synchronized RealSense color image directly to the
 published `hrc-assembly-gph6m/5` model. No Roboflow Workflow is required.
 
-Generate, print, and verify the 5×7 ChArUco board, then collect 25–30 stationary
-poses and solve the calibration:
+Provision Linux once. This installs the ROS RealSense packages and adds the
+operator to the `video` group; it does not store a sudo password or create a
+passwordless sudo rule:
 
 ```bash
-poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye board /tmp/ur5e_charuco.png
-poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye capture /tmp/ur5e_hand_eye_samples.json --poses 25
-poetry run python -m cais_spade_llm.resources.sensor.physical.calibrate_hand_eye solve /tmp/ur5e_hand_eye_samples.json
+make setup-perception-host
 ```
 
-Print the board at exactly 125 × 175 mm with scaling disabled and verify a
-square is 25 mm. Calibration is written only when median reprojection error is
-at most 1 px, fixed-board translation RMS is at most 5 mm, and rotation RMS is
-at most 1 degree.
+Under WSL, first install usbipd-win. In Administrator PowerShell, bind each
+RealSense once with `usbipd list` and `usbipd bind --busid <BUSID>`. After that,
+the normal-user **Perception** page can attach a previously bound camera to WSL.
+Attachment must be repeated after unplugging a camera or restarting WSL.
 
-The dashboard provides `Start Camera + Perception` and `Test Detection`. The
-test action calls `/detect_all` and never initiates robot motion.
+Open **Perception** at `/perception`. Assign connected serial numbers to the
+exact `ur5e`, `xarm6`, and `stationary` roles; assignments are stored only in
+`~/.config/cais-spade-llm/perception_cameras.yaml`. The page starts/stops each
+camera, provides embedded color/depth views, opens optional `rqt_image_view`,
+captures reviewed ChArUco samples, solves/activates/rolls back calibration, and
+runs role-specific Test Detection without robot motion.
+
+For `ur5e` and `xarm6`, save 25 varied reviewed poses with **Save Pose +
+Capture**. **Preview Automatic Calibration** first plans every reviewed pose
+without motion. Only after that preview succeeds can the operator explicitly
+confirm **Run Automatic Calibration**, the only calibration control that moves
+a robot. Replay rechecks each plan before execution and provides Pause, Resume,
+Skip, and Abort. The stationary camera uses a measured fixed ChArUco `world`
+pose. Its live view remains available until that pose is configured, but
+world-pose comparison stays blocked.
+
+Calibration activates only when median reprojection error is at most 1 px,
+fixed-board translation RMS is at most 5 mm, and rotation RMS is at most 1
+degree. The UR5e **Calibrate Table Plane** action collects 10 `/detect_all`
+results and rejects table-plane MAD above 2 mm or SG/MG median disagreement
+above 5 mm. Restart that perception instance and passive Gazebo after activating
+a calibration.
+
+UR5e retains canonical `/detect_all` and `/detect_part`. The diagnostic services
+are `/perception/ur5e/detect_all`, `/perception/xarm6/detect_all`, and
+`/perception/stationary/detect_all`, with corresponding `/detect_part` services.
+xArm6 and stationary never replace or average the executable UR5e world pose.
 
 | Mode | Pose authority | Gazebo gear behavior |
 | --- | --- | --- |
