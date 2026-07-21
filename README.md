@@ -503,6 +503,60 @@ poetry run python -m compileall -q cais_spade_llm ros2
 poetry run python -m cais_spade_llm.ui_main --help
 ```
 
+## Case 3 Recovery Dry-Run Prerequisites
+
+The Case 3 recovery debugger and its focused pytest suite are in
+`test/test_case3_recovery_dryrun.py`. Run them from the repository root after
+installing the Poetry environment.
+
+The test depends on the immutable verified bundle at this exact path:
+
+```text
+cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery/
+```
+
+The directory must contain `bundle_manifest.json` and every artifact referenced
+by the manifest, including the tools catalogue, requirements, plan, safety
+logic, and validation artifacts. The tracked runtime context at
+`test/fixtures/case3_recovery/runtime_context.json` intentionally uses the fixed
+`case3_llm_recovery` bundle name. Do not substitute or rename another bundle.
+
+Most generated verified bundles remain machine-local and Git-ignored. The
+`.gitignore` file makes a narrow exception for `case3_llm_recovery` because this
+bundle is a prerequisite for the tracked test. After generating and verifying
+the bundle on the school laptop, commit the entire directory:
+
+```bash
+git add \
+  cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery \
+  .gitignore README.md
+git status --short
+```
+
+Do not commit `.env`, API keys, credentials, logs, or other generated bundles.
+
+The module creates its shared OpenAI client during import, so
+`OPENAI_API_KEY` must be non-empty even while pytest uses mocked LLM response
+fixtures. CI can use a non-secret placeholder for this mocked suite:
+
+```bash
+OPENAI_API_KEY=ci-placeholder poetry run pytest -q test/test_case3_recovery_dryrun.py
+```
+
+Direct script execution is different: it performs live LLM requests and needs
+a real key in the ignored `.env` file or process environment:
+
+```bash
+poetry run python test/test_case3_recovery_dryrun.py --mode outline
+poetry run python test/test_case3_recovery_dryrun.py --mode primitive
+poetry run python test/test_case3_recovery_dryrun.py --mode safety
+poetry run python test/test_case3_recovery_dryrun.py --mode full
+```
+
+If `bundle_manifest.json` is missing after a clone, copy the complete
+`case3_llm_recovery` directory from the machine that generated it or retrieve it
+as a CI artifact. Creating only an empty manifest is not sufficient.
+
 ## Troubleshooting
 
 | Problem | Fix |

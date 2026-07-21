@@ -31,7 +31,11 @@ initialization/tools.json
 
 # User-local verified artifacts
 cais_spade_llm/user_verified/
-cais_spade_llm/user_verified_plan/
+cais_spade_llm/user_verified_plan/*
+!cais_spade_llm/user_verified_plan/bundles/
+cais_spade_llm/user_verified_plan/bundles/*
+!cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery/
+!cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery/**
 cais_spade_llm/user_verified_safety/
 
 # Generated intent previews
