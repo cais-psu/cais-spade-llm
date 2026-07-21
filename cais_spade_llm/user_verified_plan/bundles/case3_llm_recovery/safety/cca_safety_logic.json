@@ -1,0 +1,84 @@
+{
+  "preview_interpretation_summary": "- SAFE_1: Blocks any ur5e MCP place_approach to assembly_board-v1 until after the xarm6 completes its LG place_approach there; after that, ur5e is allowed.\n- SAFE_2: Prevents ur5e and xarm6 from being in the assembly_board-v1 zone at the same time by forbidding overlap of their place_approach, positioned, or placed states.",
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "LG by xarm6 must place_approach first before MCP by ur5e to the assembly station.",
+      "constraint_type": "ordering_place_approach_priority",
+      "process": "assembly",
+      "product": [
+        "LG",
+        "MCP"
+      ],
+      "resources": [
+        "xarm6",
+        "ur5e"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": "place_approach",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap004",
+          "full": "ap_event/assembly/mcp/ur5e/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap003",
+          "full": "ap_event/assembly/lg/xarm6/place_approach/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "(!(ap004) U ap003)",
+      "generated_interpretation": "Blocks any ur5e MCP place_approach to assembly_board-v1 until after the xarm6 completes its LG place_approach there; after that, ur5e is allowed."
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "ur5e and xarm6 must not both be in the assembly board destination area at the same time.",
+      "constraint_type": "mutual_exclusion_in_destination_area",
+      "process": null,
+      "product": [],
+      "resources": [
+        "ur5e",
+        "xarm6"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": null,
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/assembly/any/ur5e/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/assembly/any/ur5e/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/assembly/any/ur5e/placed/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/assembly/any/xarm6/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap008",
+          "full": "ap_state/assembly/any/xarm6/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap007",
+          "full": "ap_state/assembly/any/xarm6/placed/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "G (!(((ap001 | ap006 | ap005) & (ap002 | ap008 | ap007))))",
+      "generated_interpretation": "Prevents ur5e and xarm6 from being in the assembly_board-v1 zone at the same time by forbidding overlap of their place_approach, positioned, or placed states."
+    }
+  ]
+}

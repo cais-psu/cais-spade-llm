@@ -1,0 +1,30 @@
+{
+  "nodes": [
+    {
+      "id": "REQ_1",
+      "type": "requirement",
+      "raw_text": "ur5e assemble MCP from prusa-mk4-2 to the Assembly Station.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "MCP",
+      "context": {
+        "origin": "prusa-mk4-2",
+        "destination": "Assembly Station",
+        "robot_id": "ur5e"
+      }
+    },
+    {
+      "id": "REQ_2",
+      "type": "requirement",
+      "raw_text": "xarm6 Assemble LG from prusa-mk4-1 to the Assembly Station.",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "LG",
+      "context": {
+        "origin": "prusa-mk4-1",
+        "destination": "Assembly Station",
+        "robot_id": "xarm6"
+      }
+    }
+  ]
+}

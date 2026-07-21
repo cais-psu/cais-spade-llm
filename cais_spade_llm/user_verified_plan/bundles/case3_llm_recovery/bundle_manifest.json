@@ -1,0 +1,62 @@
+{
+  "bundle_id": "20260319T050038Z__case3_two_arm_llm_recovery__simulation__gazebo__0dbf776a",
+  "display_name": "assembly_board-v1 | simulation/gazebo | invalid | 20260319T050038Z",
+  "created_at_utc": "2026-03-19T05:01:03.802208+00:00",
+  "status": "verified",
+  "verified": true,
+  "product_spec_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/products/requirements/case3_two_arm_llm_bridge.txt",
+  "safety_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_case_llm_bridge.txt",
+  "product_name": "assembly_board-v1",
+  "execution_mode": "simulation",
+  "robot_env": "gazebo",
+  "llm_models": {
+    "planner_model": "gpt-5",
+    "safety_model": "gpt-5"
+  },
+  "source_hashes": {
+    "requirements_sha256": "e5cb7dc5b13e6bf64e695997863ed09a6e029ccc3fb999d1fcead9af792b125e",
+    "safety_sha256": "af1fab94022d625b907e9a00aa2c57b113cd9ac7f262811c7397f506dad31301",
+    "tools_sha256": "a15f542687f255ff037deec5ef427005afe4172edb9f5e31ebd43be4ee21259c",
+    "prompts_sha256": "27fa62d3c2de9cfaab641b86cab3d5dbe939b9139e128e57540e37304af1b7bf"
+  },
+  "replan_policy": {
+    "auto_replan_max_attempts": 5
+  },
+  "safety_source": {
+    "mode": "approved_preview",
+    "preview_id": "20260319T045933Z__safety_case_llm_bridge__af1fab94",
+    "preview_generated_at_utc": "2026-03-19T04:59:52.727503+00:00",
+    "safety_sha256": "af1fab94022d625b907e9a00aa2c57b113cd9ac7f262811c7397f506dad31301",
+    "tools_sha256": "a15f542687f255ff037deec5ef427005afe4172edb9f5e31ebd43be4ee21259c",
+    "prompts_sha256": "27fa62d3c2de9cfaab641b86cab3d5dbe939b9139e128e57540e37304af1b7bf"
+  },
+  "parent_bundle_id": "",
+  "refinement_feedback": "",
+  "artifacts": {
+    "tools_json": "catalog/tools.json",
+    "requirements_json": "plan/case3_two_arm_llm_recovery_requirements.json",
+    "plan_json": "plan/case3_two_arm_llm_recovery_plan.json",
+    "global_fsa_json": "plan/case3_two_arm_llm_recovery_global_fsa.json",
+    "safety_logic_json": "safety/cca_safety_logic.json",
+    "safety_dfa_dot_files": [
+      "safety/SAFE_1_dfa.dot",
+      "safety/SAFE_2_dfa.dot"
+    ],
+    "safety_dfa_png_files": [
+      "safety/SAFE_1_dfa.png",
+      "safety/SAFE_2_dfa.png"
+    ],
+    "plan_validation_json": "validation/plan_validation.json",
+    "offline_validation_json": "validation/plan_validation.json"
+  },
+  "validation_summary": {
+    "ok": false,
+    "violated_rules": [
+      "SAFE_2"
+    ],
+    "witness_count": 1,
+    "auto_replans_used": 3,
+    "stop_reason": "max_attempts_reached"
+  },
+  "verified_at_utc": "2026-03-19T05:01:07.417984+00:00"
+}
