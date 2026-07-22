@@ -14,7 +14,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes impo
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     PHYSICAL_FEASIBILITY,
-    RECOVERY_ADMISSION,
     SAFETY,
     SYNTAX_AND_GROUNDING_VALIDATION,
     TRANSITION_FEASIBILITY,
@@ -152,7 +151,7 @@ async def _handle_outline_single_pass(
         if grounded_action:
             turn_entry.setdefault("grounded_trace", []).append(deepcopy(grounded_action))
         committed_task = _shared._commit_selected_candidate_task(
-            task=working_surface,
+            task=validated_task,
             sequence_index=index,
         )
         derived_trace.append(deepcopy(committed_task))
@@ -228,7 +227,7 @@ async def _handle_outline_incremental(
     if grounded_action:
         turn_entry["grounded_action"] = deepcopy(grounded_action)
     next_transition = _shared._commit_selected_candidate_task(
-        task=surface_transition,
+        task=validated_task,
         sequence_index=sequence_index,
     )
 
@@ -253,7 +252,7 @@ async def _handle_outline_incremental(
         if suffix_findings or not validated_suffix:
             break
         committed_suffix = _shared._commit_selected_candidate_task(
-            task=surface_suffix,
+            task=validated_suffix,
             sequence_index=sequence_index + index,
         )
         transition_suffix.append(deepcopy(committed_suffix))
@@ -344,7 +343,7 @@ async def _handle_outline_incremental_validated(
         prepared_recovery_request=prepared_recovery_request,
     )
     next_transition = _shared._commit_selected_candidate_task(
-        task=surface_transition,
+        task=validated_task,
         sequence_index=sequence_index,
     )
     turn_entry["next_transition"] = deepcopy(next_transition)
@@ -1997,12 +1996,57 @@ def _candidate_effect_identifier(candidate: dict[str, Any]) -> str:
         {
             "resource_jid": str(row.get("resource_jid") or "").strip(),
             "part_name": str(row.get("part_name") or "").strip(),
-            "expected_start_state": deepcopy(row.get("expected_start_state") or {}),
             "expected_end_state": deepcopy(row.get("expected_end_state") or {}),
         }
         for row in surface_events
     ]
     return f"candidate_{recovery_validation_fingerprint(effects)[:16]}"
+
+
+def _candidate_authored_delta_fields(
+    candidate: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> list[str]:
+    """Return exact authored fields changed by one neurosymbolic candidate."""
+    surface_events = [
+        row
+        for row in (
+            evaluation.get("validated_events")
+            or candidate.get("surface_events")
+            or []
+        )
+        if isinstance(row, dict)
+    ]
+    if len(surface_events) != 1:
+        return []
+    task = surface_events[0]
+    start_state = dict(task.get("expected_start_state") or {})
+    end_state = dict(task.get("expected_end_state") or {})
+    return sorted(
+        field_name
+        for field_name, value in end_state.items()
+        if field_name not in start_state or start_state.get(field_name) != value
+    )
+
+
+def _classify_candidate_selection_progress(
+    *,
+    candidate: dict[str, Any],
+    evaluation: dict[str, Any],
+    progressing: bool,
+) -> tuple[bool, list[str]]:
+    """Classify no-op and label-only effects after model-based comparison."""
+    delta_fields = _candidate_authored_delta_fields(candidate, evaluation)
+    if not delta_fields:
+        return False, ["no_state_change"]
+    if progressing:
+        return True, []
+    if all(
+        field_name in {"resource_state", "current_state", "part_state"}
+        for field_name in delta_fields
+    ):
+        return False, ["label_only_state_change"]
+    return False, []
 
 
 def _candidate_projected_session(
@@ -2090,6 +2134,7 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
         candidate = candidate_by_index.get(candidate_index, {})
         candidate_id = _candidate_effect_identifier(candidate)
         evaluation["candidate_id"] = candidate_id
+        evaluation["selection_constraint_codes"] = []
         candidates_by_successor_class.setdefault(candidate_id, []).append(evaluation)
         if not bool(evaluation.get("valid")):
             evaluation["selection_status"] = "excluded_invalid"
@@ -2168,6 +2213,14 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
             and cca_goal_recovery_events_after
             == current_cca_goal_recovery_events
             and bool(newly_enabled_nominal_reentry_events)
+        )
+        (
+            progressing_candidate,
+            evaluation["selection_constraint_codes"],
+        ) = _classify_candidate_selection_progress(
+            candidate=candidate,
+            evaluation=evaluation,
+            progressing=progressing_candidate,
         )
         evidence = {
             "open_recovery_obligation_ids_before": sorted(current_unresolved),
@@ -2464,13 +2517,16 @@ def _selection_failure_fingerprint(
     for evaluation in candidate_evaluations:
         if not isinstance(evaluation, dict):
             continue
-        constraint_codes = sorted(
-            {
-                str(finding.get("constraint_code") or "").strip()
-                for finding in (evaluation.get("validation_findings") or [])
-                if isinstance(finding, dict)
-                and str(finding.get("constraint_code") or "").strip()
-            }
+        constraint_codes = {
+            str(finding.get("constraint_code") or "").strip()
+            for finding in (evaluation.get("validation_findings") or [])
+            if isinstance(finding, dict)
+            and str(finding.get("constraint_code") or "").strip()
+        }
+        constraint_codes.update(
+            str(code).strip()
+            for code in (evaluation.get("selection_constraint_codes") or [])
+            if str(code).strip()
         )
         rows.append(
             {
@@ -2479,7 +2535,7 @@ def _selection_failure_fingerprint(
                 "selection_status": str(
                     evaluation.get("selection_status") or ""
                 ).strip(),
-                "constraint_codes": constraint_codes,
+                "constraint_codes": sorted(constraint_codes),
             }
         )
     return recovery_validation_fingerprint(rows)
@@ -2594,6 +2650,11 @@ def _pa_candidate_revision_targets(
                 and str(finding.get("constraint_code") or "").strip()
             }
         )
+        if any(
+            code in {"expected_start_state_mismatch", "validation_state_stale"}
+            for code in constraint_codes
+        ):
+            continue
         targets.append(
             {
                 "candidate_id": str(evaluation.get("candidate_id") or "").strip(),
@@ -2838,13 +2899,7 @@ def _append_pa_validation_stages(
         deepcopy(row)
         for row in findings
         if str(row.get("validation_category") or "").strip()
-        not in {SYNTAX_AND_GROUNDING_VALIDATION, RECOVERY_ADMISSION}
-    ]
-    admission_findings = [
-        deepcopy(row)
-        for row in findings
-        if str(row.get("validation_category") or "").strip()
-        == RECOVERY_ADMISSION
+        != SYNTAX_AND_GROUNDING_VALIDATION
     ]
     stages.append(
         recovery_validation_stage(
@@ -2867,20 +2922,6 @@ def _append_pa_validation_stages(
                 else "rejected" if transition_findings else "passed"
             ),
             findings=transition_findings,
-            state_fingerprint=state_fingerprint,
-        )
-    )
-    stages.append(
-        recovery_validation_stage(
-            validation_category=RECOVERY_ADMISSION,
-            validator_role="PA",
-            validator_jid=product_jid,
-            status=(
-                "skipped"
-                if syntax_findings or transition_findings
-                else "rejected" if admission_findings else "passed"
-            ),
-            findings=admission_findings,
             state_fingerprint=state_fingerprint,
         )
     )
@@ -3118,23 +3159,6 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 failed_event_index=event_index,
             )
         evaluation["validated_task"] = deepcopy(validated_task)
-
-        pruned_row = _shared._matching_active_pruned_action(
-            task=validated_task,
-            session_state=working_session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if pruned_row is not None:
-            return reject_before_agent_validation(
-                findings=[
-                    _shared._retarget_candidate_finding_to_task(
-                    dict(pruned_row.get("guard") or {}),
-                    dict(validated_task or working_task),
-                    )
-                ],
-                task=validated_task,
-                failed_event_index=event_index,
-            )
 
         findings, grounded_action = _shared._validate_single_outline_task(
             planner=planner,
@@ -4069,6 +4093,9 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                             "candidate_id": str(row.get("candidate_id") or ""),
                             "selection_status": str(
                                 row.get("selection_status") or ""
+                            ),
+                            "selection_constraint_codes": deepcopy(
+                                row.get("selection_constraint_codes") or []
                             ),
                             "resource_jid": str(
                                 task.get("resource_jid") or ""

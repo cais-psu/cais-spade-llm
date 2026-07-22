@@ -116,7 +116,6 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "event_name": {"type": "string", "minLength": 1},
         "resource_jid": {"type": "string"},
         "part_name": {"type": "string"},
-        "expected_start_state": deepcopy(_OUTLINE_STATE_SCHEMA),
         "expected_end_state": deepcopy(_OUTLINE_STATE_SCHEMA),
         "rationale": {"type": "string"},
     },
@@ -124,7 +123,6 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "outline_id",
         "event_name",
         "resource_jid",
-        "expected_start_state",
         "expected_end_state",
         "rationale",
     ],
@@ -133,14 +131,6 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
             "if": {"required": ["part_name"]},
             "then": {
                 "properties": {
-                    "expected_start_state": {
-                        "required": [
-                            "resource_state",
-                            "held_part",
-                            "part_state",
-                            "part_location",
-                        ]
-                    },
                     "expected_end_state": {
                         "required": [
                             "resource_state",
@@ -194,7 +184,6 @@ def _outline_symbolic_event_schema(
             field_schema["minLength"] = 1
         state_schema["properties"][token] = field_schema
     event_schema = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
-    event_schema["properties"]["expected_start_state"] = deepcopy(state_schema)
     event_schema["properties"]["expected_end_state"] = deepcopy(state_schema)
     return event_schema
 
@@ -204,13 +193,8 @@ def _outline_candidate_schema_definitions(
 ) -> dict[str, dict[str, Any]]:
     """Return shared candidate schemas without repeating state declarations."""
     expanded_event = _outline_symbolic_event_schema(declared_state_variables)
-    state_schema = deepcopy(
-        expanded_event["properties"]["expected_start_state"]
-    )
+    state_schema = deepcopy(expanded_event["properties"]["expected_end_state"])
     event_schema = deepcopy(expanded_event)
-    event_schema["properties"]["expected_start_state"] = {
-        "$ref": "#/$defs/outline_state"
-    }
     event_schema["properties"]["expected_end_state"] = {
         "$ref": "#/$defs/outline_state"
     }
@@ -687,12 +671,19 @@ def _outline_rejection_history(session_state: dict[str, Any]) -> list[dict[str, 
 _PROMPT_FEEDBACK_RENDER_STYLES = {"des_event_diagnostic", "raw_code"}
 
 _PROMPT_PERSISTENT_FINDING_CODES = {
-    "part_relocation_without_carrier",
     "source_reference_unavailable",
     "unsatisfied_guard_predicate",
     "unknown_location_binding",
     "unknown_product_binding",
     "unknown_resource_binding",
+}
+
+_CUSTODY_CONSISTENCY_CODES = {
+    "held_part_location_mismatch",
+    "missing_acquisition_location",
+    "missing_release_destination",
+    "part_relocation_without_carrier",
+    "part_traceability_violation",
 }
 
 
@@ -946,37 +937,12 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             ),
         }
 
-    if constraint_code == "part_relocation_without_carrier":
+    if constraint_code in _CUSTODY_CONSISTENCY_CODES:
         return {
             "event_status": "disabled",
-            "diagnosis": "part_relocation_without_carrier",
-            "guard_or_condition": (
-                "candidate changes part location without showing that the acting resource "
-                "controls the part in this single-action row"
-            ),
-            "re_enablement": (
-                "split the recovery into separate acquire and place rows, or author "
-                "held_part/part_holder state that shows control of the moving part"
-            ),
-        }
-
-    if constraint_code in {
-        "held_part_location_mismatch",
-        "missing_acquisition_location",
-        "resource_unbound",
-        "part_unbound",
-        "missing_release_destination",
-    }:
-        return {
-            "event_status": "disabled",
-            "diagnosis": "event_not_enabled",
-            "guard_or_condition": (
-                "event preconditions are not enabled in the current projected state"
-            ),
-            "re_enablement": (
-                "first satisfy the missing precondition or establish the required "
-                "carrier/control relation"
-            ),
+            "diagnosis": "transition_feasibility_rejected",
+            "guard_or_condition": "resource and part custody facts disagree",
+            "re_enablement": "revise the symbolic expected_end_state",
         }
 
     if constraint_code in {
@@ -991,20 +957,6 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             ),
             "re_enablement": (
                 "author only the allowed state fields shown in Recovery Candidate Rules"
-            ),
-        }
-
-    if constraint_code == "expected_start_state_mismatch":
-        return {
-            "event_status": "disabled",
-            "diagnosis": "expected_start_state_mismatch",
-            "guard_or_condition": (
-                "exact authored expected_start_state does not match the current "
-                "projected outline state"
-            ),
-            "re_enablement": (
-                "match expected_start_state exactly to the authored state fields "
-                "shown in Current DES State"
             ),
         }
 
@@ -1088,16 +1040,11 @@ def _render_des_event_diagnostic(
     ).strip()
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
     normalized_constraint_code = constraint_code.lower()
-    evidence = dict(finding.get("evidence") or {})
-    if normalized_constraint_code == "part_relocation_without_carrier":
-        reason = (
-            "The part location cannot change while the acting resource does not "
-            "hold the part."
-        )
-    elif normalized_constraint_code == "held_part_location_mismatch":
-        reason = (
-            "The proposed held-part location does not match the responsible "
-            "resource's declared carried-part location."
+    if normalized_constraint_code in _CUSTODY_CONSISTENCY_CODES:
+        return (
+            f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
+            " | transition_feasibility: rejected"
+            " | reason=resource and part custody facts disagree"
         )
     line = (
         f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
@@ -1105,30 +1052,6 @@ def _render_des_event_diagnostic(
         f" | reason={reason}"
         f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
     )
-    carried_part_location = str(evidence.get("carried_part_location") or "").strip()
-    expected_carried_part_location = str(
-        evidence.get("expected_carried_part_location") or carried_part_location
-    ).strip()
-    part_name = str(_task_part_name(task) or finding.get("part_name") or "").strip()
-    if (
-        normalized_constraint_code == "part_relocation_without_carrier"
-        and carried_part_location
-        and part_name
-    ):
-        line += (
-            " | correction=First establish custody in a separate transition: "
-            f"held_part={part_name}; part_location={carried_part_location}"
-        )
-    if (
-        normalized_constraint_code
-        in {"held_part_location_mismatch", "missing_acquisition_location"}
-        and expected_carried_part_location
-        and part_name
-    ):
-        line += (
-            " | correction=While the responsible resource holds the part, use: "
-            f"held_part={part_name}; part_location={expected_carried_part_location}"
-        )
     if _finding_durable(finding):
         line += " | persistence=diagnosis persists until the relevant projected state facts change"
     return line
@@ -1147,14 +1070,9 @@ def _candidate_diagnostic_signature(
     collapse when they describe the same event/failure under the same state.
     """
     diagnostic = _des_diagnostic_fields(finding)
-    constraint_code = str(finding.get("constraint_code") or "").strip().lower()
     resource_jid = str(task.get("resource_jid") or finding.get("resource_jid") or "").strip()
     part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
-    target_ref = (
-        ""
-        if constraint_code == "part_relocation_without_carrier"
-        else _task_target_ref(task, finding=finding)
-    )
+    target_ref = _task_target_ref(task, finding=finding)
     evidence_text = _finding_state_evidence_text(
         task=task,
         finding=finding,
@@ -1212,6 +1130,12 @@ def _outline_validation_summary(
 
         label_parts = [item for item in (task_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "validation finding"
+        if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
+            lines.append(
+                f"- {label} [transition_feasibility: rejected]: "
+                "resource and part custody facts disagree"
+            )
+            continue
         code_label = constraint_code
         if stage:
             code_label = f"{stage}:{constraint_code}" if constraint_code else stage
@@ -1562,6 +1486,19 @@ def _candidate_rejection_learning_summary(  # noqa: C901
             constraint_code = str(finding.get("constraint_code") or "").strip()
             reason = str(finding.get("reason") or "").strip()
             if not constraint_code and not reason:
+                continue
+            if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
+                key = (
+                    resource_jid,
+                    part_name,
+                    target_ref,
+                    "transition_feasibility",
+                    "resource and part custody facts disagree",
+                )
+                line_by_key[key] = (
+                    f"- {label} [transition_feasibility: rejected]: "
+                    "resource and part custody facts disagree"
+                )
                 continue
             key = (resource_jid, part_name, target_ref, constraint_code, reason)
             sentence = f"- {label}"
@@ -2279,7 +2216,6 @@ def _candidate_grounding_facts_summary(
 
 _PRUNED_ACTION_DURABLE_CONSTRAINT_CODES = {
     "source_reference_unavailable",
-    "part_relocation_without_carrier",
     "safety_rule_violation",
     "blocker_open",
     "dependency_unsatisfied",
@@ -3077,7 +3013,17 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 else {}
             ),
             "expected_end_state": deepcopy(row.get("expected_end_state") or {}),
-            "constraint_codes": deepcopy(row.get("constraint_codes") or []),
+            **(
+                {
+                    "validation": "transition_feasibility: rejected",
+                    "reason": "resource and part custody facts disagree",
+                }
+                if any(
+                    str(code or "").strip().lower() in _CUSTODY_CONSISTENCY_CODES
+                    for code in (row.get("constraint_codes") or [])
+                )
+                else {"constraint_codes": deepcopy(row.get("constraint_codes") or [])}
+            ),
         }
         for row in (session_state.get("candidate_revision_targets") or [])
         if isinstance(row, dict)
@@ -3260,7 +3206,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 ),
                 (
                     "- Keep each target's resource_jid and part_name unchanged; "
-                    "change expected_end_state to address its constraint codes."
+                    "change expected_end_state to address its reported validation result."
                 ),
                 (
                     "- Changing only event_name, outline_id, or rationale does not "
@@ -3330,7 +3276,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         [
             "",
             "Current DES State",
-            "`Current DES State` is the authoritative exact propagated state after applying the accepted transition prefix; author the next row's `expected_start_state` to match it exactly on the fields you include.",
+            "`Current DES State` is the authoritative exact propagated state after applying the accepted transition prefix. Code binds each candidate to this state.",
             "Resources",
             _compact_json(prompt_projected_resources),
             "",
@@ -3391,17 +3337,16 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 *count_rules,
                 (
                     "- Each candidate is one physical action by one listed resource with "
-                    "`outline_id`, `event_name`, `resource_jid`, `expected_start_state`, "
-                    "`expected_end_state`, and `rationale`."
+                    "`outline_id`, `event_name`, `resource_jid`, `expected_end_state`, "
+                    "and `rationale`."
                 ),
                 (
                     "- Resource-only actions may include `resource_state`, "
-                    "`resource_location`, and `held_part`; match included start-state "
-                    "fields exactly."
+                    "`resource_location`, and `held_part` in `expected_end_state`."
                 ),
                 (
                     "- A candidate with `part_name` must include `held_part`, `part_state`, "
-                    "and `part_location` in both state objects. A custody-changing end state "
+                    "and `part_location` in `expected_end_state`. A custody-changing end state "
                     "must use an exact supplied, non-null `part_location`."
                 ),
                 (
@@ -3436,10 +3381,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "Output Constraints",
                 "- Use only the listed resources.",
                 "- Each transition is one symbolic recovery row by one resource.",
-                "- Each transition must include outline_id, event_name, resource_jid, expected_start_state, expected_end_state, and rationale.",
+                "- Each transition must include outline_id, event_name, resource_jid, expected_end_state, and rationale.",
                 "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
-                "- Author both expected_start_state and expected_end_state in outline mode.",
-                "- If part_name is present, include held_part, part_state, and part_location in both state objects; a custody-changing end state requires an exact supplied, non-null part_location.",
+                "- Author expected_end_state in outline mode; code binds the transition to Current DES State.",
+                "- If part_name is present, include held_part, part_state, and part_location in expected_end_state; a custody-changing end state requires an exact supplied, non-null part_location.",
                 "- If part_name is absent, do not emit part-specific state keys.",
                 "- Bind only entities and location tokens grounded in the current plant state.",
                 "- Rationale should explain enabledness or which recovery goal is advanced.",

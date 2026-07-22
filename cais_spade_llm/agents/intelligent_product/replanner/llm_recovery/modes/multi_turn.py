@@ -2324,51 +2324,120 @@ def _candidate_state_completeness_findings(
     *,
     candidate_task: dict[str, Any],
     part_name: str,
-    start_state: dict[str, Any],
     end_state: dict[str, Any],
     state_variables: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Require the LLM to emit every explicit predicate key.
+    """Require the LLM to emit every explicit end-state predicate key.
 
-    Because the recovery no longer fills in omitted state fields during
-    outline validation, missing keys would leave the symbolic contract
-    incomplete. Surface the omission as a schema finding so the LLM is
-    asked to emit the field directly.
+    Code binds the candidate to the projected current state. The LLM only
+    authors the complete symbolic successor.
     """
     findings: list[dict[str, Any]] = []
     required_keys = ["resource_state"]
     if part_name:
         required_keys.extend(("held_part", "part_state", "part_location"))
-    for side, state in (("expected_start_state", start_state), ("expected_end_state", end_state)):
-        missing = [key for key in required_keys if key not in state]
-        if missing:
+    missing = [key for key in required_keys if key not in end_state]
+    if missing:
+        findings.append(
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason=(
+                    "expected_end_state is missing required predicate key(s): "
+                    + ", ".join(missing)
+                ),
+                evidence={"field": "expected_end_state", "missing": missing},
+            )
+        )
+    if not part_name:
+        unexpected = [
+            key
+            for key in end_state
+            if str(dict(state_variables.get(key) or {}).get("scope") or "resource")
+            == "part"
+        ]
+        if unexpected:
             findings.append(
                 _candidate_schema_finding(
                     task=candidate_task,
-                    reason=(f"{side} is missing required predicate key(s): {', '.join(missing)}"),
-                    evidence={"field": side, "missing": missing},
+                    reason=(
+                        "expected_end_state includes part-specific predicate key(s) "
+                        f"without part_name: {', '.join(unexpected)}"
+                    ),
+                    evidence={"field": "expected_end_state", "unexpected": unexpected},
                 )
             )
-            continue
-        if not part_name:
-            unexpected = [
-                key
-                for key in state
-                if str(dict(state_variables.get(key) or {}).get("scope") or "resource")
-                == "part"
-            ]
-            if unexpected:
-                findings.append(
-                    _candidate_schema_finding(
-                        task=candidate_task,
-                        reason=(
-                            f"{side} includes part-specific predicate key(s) without "
-                            f"part_name: {', '.join(unexpected)}"
-                        ),
-                        evidence={"field": side, "unexpected": unexpected},
-                    )
-                )
     return findings
+
+
+def _projected_state_value(
+    *,
+    row: dict[str, Any],
+    field_name: str,
+    scope: str,
+) -> tuple[bool, Any]:
+    aliases = {
+        ("resource", "resource_state"): ("resource_state", "current_state", "state"),
+        ("resource", "resource_location"): (
+            "resource_location",
+            "current_location",
+            "location",
+        ),
+        ("resource", "held_part"): ("held_part",),
+        ("part", "part_state"): ("part_state", "current_state", "state"),
+        ("part", "part_location"): ("part_location", "current_location", "location"),
+    }
+    for key in aliases.get((scope, field_name), (field_name,)):
+        if key in row:
+            return True, deepcopy(row.get(key))
+    return False, None
+
+
+def _generated_candidate_start_state(
+    *,
+    candidate_task: dict[str, Any],
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+    part_name: str,
+    end_state: dict[str, Any],
+    state_variables: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Bind one LLM-authored successor to the exact projected current state."""
+    field_names = {"resource_state", *end_state}
+    if part_name:
+        field_names.update(("held_part", "part_state", "part_location"))
+
+    start_state: dict[str, Any] = {}
+    missing_fields: list[str] = []
+    for field_name in sorted(field_names):
+        declared_scope = str(
+            dict(state_variables.get(field_name) or {}).get("scope") or ""
+        ).strip()
+        scope = declared_scope or (
+            "part" if field_name in {"part_state", "part_location"} else "resource"
+        )
+        source_row = part_row if scope == "part" else resource_row
+        available, value = _projected_state_value(
+            row=source_row,
+            field_name=field_name,
+            scope=scope,
+        )
+        if not available:
+            missing_fields.append(field_name)
+            continue
+        start_state[field_name] = value
+
+    if not missing_fields:
+        return start_state, []
+    return {}, [
+        _candidate_schema_finding(
+            task=candidate_task,
+            reason=(
+                "current projected state is missing required value(s): "
+                + ", ".join(missing_fields)
+            ),
+            evidence={"missing_projected_state_fields": missing_fields},
+        )
+    ]
 
 
 def _candidate_state_consistency_findings(
@@ -2445,7 +2514,6 @@ def _derive_candidate_outline_task(
         "event_name",
         "resource_jid",
         "part_name",
-        "expected_start_state",
         "expected_end_state",
         "rationale",
     }
@@ -2532,25 +2600,15 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    if part_name:
-        if part_name not in parts_by_name:
-            return None, [
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason=f"candidate references unknown part '{part_name}'",
-                    evidence={"field": "part_name", "token": part_name},
-                )
-            ]
-
-    raw_start_state = candidate_task.get("expected_start_state")
-    if not isinstance(raw_start_state, dict):
+    if part_name and part_name not in parts_by_name:
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason="candidate must include expected_start_state object",
-                evidence={"field": "expected_start_state"},
+                reason=f"candidate references unknown part '{part_name}'",
+                evidence={"field": "part_name", "token": part_name},
             )
         ]
+
     raw_end_state = candidate_task.get("expected_end_state")
     if not isinstance(raw_end_state, dict):
         return None, [
@@ -2560,13 +2618,11 @@ def _derive_candidate_outline_task(
                 evidence={"field": "expected_end_state"},
             )
         ]
-    start_state: dict[str, Any] = deepcopy(raw_start_state)
     end_state: dict[str, Any] = deepcopy(raw_end_state)
 
     completeness_findings = _candidate_state_completeness_findings(
         candidate_task=candidate_task,
         part_name=part_name,
-        start_state=start_state,
         end_state=end_state,
         state_variables=state_variables,
     )
@@ -2588,6 +2644,17 @@ def _derive_candidate_outline_task(
     )
     if named_pose_location_findings:
         return None, named_pose_location_findings
+
+    start_state, start_state_findings = _generated_candidate_start_state(
+        candidate_task=candidate_task,
+        resource_row=dict(resources_by_jid.get(resource_jid) or {}),
+        part_row=dict(parts_by_name.get(part_name) or {}) if part_name else {},
+        part_name=part_name,
+        end_state=end_state,
+        state_variables=state_variables,
+    )
+    if start_state_findings:
+        return None, start_state_findings
 
     validated_task: dict[str, Any] = {
         "outline_id": outline_id,
@@ -3717,13 +3784,23 @@ def _compact_artifact_candidate_evaluations(  # noqa: C901
         ]
         if findings:
             summary["findings"] = findings
-            summary["constraint_codes"] = sorted(
-                {
-                    str(item.get("constraint_code") or "")
-                    for item in findings
-                    if str(item.get("constraint_code") or "").strip()
-                }
-            )
+        selection_constraint_codes = sorted(
+            {
+                str(code).strip()
+                for code in (row.get("selection_constraint_codes") or [])
+                if str(code).strip()
+            }
+        )
+        if selection_constraint_codes:
+            summary["selection_constraint_codes"] = selection_constraint_codes
+        constraint_codes = {
+            str(item.get("constraint_code") or "").strip()
+            for item in findings
+            if str(item.get("constraint_code") or "").strip()
+        }
+        constraint_codes.update(selection_constraint_codes)
+        if constraint_codes:
+            summary["constraint_codes"] = sorted(constraint_codes)
         validation_stages = [
             compact_stage
             for compact_stage in (

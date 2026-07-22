@@ -18,7 +18,6 @@ from cais_spade_llm.resources.resource_profile import (
 
 SYNTAX_AND_GROUNDING_VALIDATION = "syntax_and_grounding_validation"
 TRANSITION_FEASIBILITY = "transition_feasibility"
-RECOVERY_ADMISSION = "recovery_admission"
 PHYSICAL_FEASIBILITY = "physical_feasibility"
 SAFETY = "safety"
 
@@ -32,9 +31,7 @@ _OUTLINE_VALIDATION_CONTRACT = {
     ],
     "disallow_unknown_state_fields": True,
     "require_expected_start_match": True,
-    "require_meaningful_delta": True,
     "require_part_traceability": True,
-    "require_carrier_for_part_relocation": True,
 }
 
 _SYNTAX_AND_GROUNDING_CODES = {
@@ -77,11 +74,6 @@ _TRANSITION_FEASIBILITY_CODES = {
     "unsatisfied_guard_predicate",
 }
 
-_RECOVERY_ADMISSION_CODES = {
-    "label_only_state_change",
-    "no_state_change",
-}
-
 _PHYSICAL_FEASIBILITY_CODES = {
     "gripper_occupancy_conflict",
     "holder_conflict",
@@ -118,8 +110,6 @@ def validation_category_for_finding(
 
     if code_token == "safety_rule_violation" or family_token == "safety":
         return SAFETY
-    if code_token in _RECOVERY_ADMISSION_CODES:
-        return RECOVERY_ADMISSION
     if stage_token in {"event_enabledness", "plant_enabledness"}:
         return TRANSITION_FEASIBILITY
     if code_token in _TRANSITION_FEASIBILITY_CODES:
@@ -174,58 +164,6 @@ def _exact_mapping_value(mapping: dict[str, Any], field_name: str) -> Any:
 def _exact_domain_contains(domain: list[Any], value: Any) -> bool:
     """Return whether one exact value belongs to an RA-declared finite domain."""
     return any(type(item) is type(value) and item == value for item in domain)
-
-
-def _label_state_satisfied_condition_ids(
-    *,
-    task: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> list[str]:
-    """Return exact supplied conditions satisfied by end-state label values."""
-    resource_jid = _task_resource_jid(task)
-    part_name = _task_part_name(task)
-    end_state = dict(task.get("expected_end_state") or {})
-    raw_conditions = [
-        deepcopy(row)
-        for row in (
-            dict(prepared_recovery_request.get("llm_input") or {}).get(
-                "goal_conditions"
-            )
-            or []
-        )
-        if isinstance(row, dict)
-    ]
-
-    satisfied: list[str] = []
-    for condition in raw_conditions:
-        entity_kind = str(condition.get("entity_kind") or "").strip().lower()
-        entity = str(condition.get("entity") or "").strip()
-        field_name = str(condition.get("field") or "").strip()
-        state_field = ""
-        if (
-            entity_kind == "resource"
-            and entity == resource_jid
-            and field_name in {"state", "current_state", "resource_state"}
-        ):
-            state_field = "resource_state"
-        elif (
-            entity_kind == "part"
-            and entity == part_name
-            and field_name in {"state", "current_state", "part_state"}
-        ):
-            state_field = "part_state"
-        if not state_field or state_field not in end_state:
-            continue
-        if end_state.get(state_field) != condition.get("expected"):
-            continue
-        condition_id = str(
-            condition.get("condition_id") or condition.get("id") or ""
-        ).strip()
-        if not condition_id:
-            condition_id = f"{entity_kind}:{entity}:{field_name}"
-        if condition_id not in satisfied:
-            satisfied.append(condition_id)
-    return satisfied
 
 
 def _dedupe_tokens(values: list[str]) -> list[str]:
@@ -1183,35 +1121,7 @@ def _part_traceability_location_finding(
     part_name: str,
     end_held_part: str,
     explicit_end_location: str,
-    release_requested: bool,
-    acquisition_requested: bool,
 ) -> dict[str, Any] | None:
-    if release_requested and not explicit_end_location:
-        return _binding_finding(
-            task=task,
-            constraint_code="missing_release_destination",
-            resource_jid=resource_jid,
-            part_name=part_name,
-            reason=(
-                f"Task releases '{part_name}' without an explicit non-null "
-                "expected_end_state.part_location."
-            ),
-            evidence={"field": "expected_end_state.part_location", "value": None},
-            invariant_id="part_traceability",
-        )
-    if acquisition_requested and not explicit_end_location:
-        return _binding_finding(
-            task=task,
-            constraint_code="missing_acquisition_location",
-            resource_jid=resource_jid,
-            part_name=part_name,
-            reason=(
-                f"Task acquires '{part_name}' without an explicit non-null "
-                "expected_end_state.part_location."
-            ),
-            evidence={"field": "expected_end_state.part_location", "value": None},
-            invariant_id="part_traceability",
-        )
     if end_held_part != part_name:
         return None
     carried_part_location = str(contract.get("carried_part_location") or "").strip()
@@ -1427,54 +1337,6 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
                 evidence={"mismatches": deepcopy(mismatches)},
             )
 
-    if bool(contract.get("require_meaningful_delta")):
-        has_delta = False
-        delta_fields: list[str] = []
-        for field_name in sorted(end_state):
-            scope = state_field_scopes.get(
-                field_name,
-                "part" if field_name in {"part_state", "part_location"} else "resource",
-            )
-            source_row = part_row if scope == "part" else resource_row
-            before = _exact_mapping_value(source_row, field_name)
-            if before is _EXACT_STATE_UNAVAILABLE or before != end_state.get(field_name):
-                has_delta = True
-                delta_fields.append(field_name)
-        if not has_delta:
-            return _binding_finding(
-                task=task,
-                constraint_code="no_state_change",
-                resource_jid=resource_jid or None,
-                part_name=part_name or None,
-                reason="Task does not change the projected symbolic state.",
-                evidence={"field": "expected_end_state", "deltas": []},
-            )
-        physical_delta_fields = [
-            field_name
-            for field_name in delta_fields
-            if field_name not in {"resource_state", "current_state", "part_state"}
-        ]
-        label_condition_ids = [
-            str(item).strip()
-            for item in (contract.get("label_state_satisfied_condition_ids") or [])
-            if str(item).strip()
-        ]
-        if not physical_delta_fields and not label_condition_ids:
-            return _binding_finding(
-                task=task,
-                constraint_code="label_only_state_change",
-                resource_jid=resource_jid or None,
-                part_name=part_name or None,
-                reason=(
-                    "A new event_name or state label must also change another "
-                    "RA-declared state variable or an active recovery blocker fact."
-                ),
-                evidence={
-                    "expected_start_state": deepcopy(start_state),
-                    "expected_end_state": deepcopy(end_state),
-                },
-            )
-
     if bool(contract.get("require_part_traceability")) and resource_jid and part_name:
         current_holder = str(
             (
@@ -1488,9 +1350,6 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
         current_held_part = str(resource_row.get("held_part") or "").strip()
         start_held_part = str(start_state.get("held_part") or "").strip()
         end_held_part = str(end_state.get("held_part") or "").strip()
-        custody_changes = (
-            "held_part" in end_state and start_held_part != end_held_part
-        )
         explicit_end_location = str(end_state.get("part_location") or "").strip()
         release_requested = (
             "held_part" in end_state and end_state.get("held_part") in (None, "")
@@ -1499,7 +1358,6 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
             or current_holder == resource_jid
             or start_held_part == part_name
         )
-        acquisition_requested = custody_changes and end_held_part == part_name
         if held_part_location_finding := _part_traceability_location_finding(
             task=task,
             contract=contract,
@@ -1507,8 +1365,6 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
             part_name=part_name,
             end_held_part=end_held_part,
             explicit_end_location=explicit_end_location,
-            release_requested=release_requested,
-            acquisition_requested=acquisition_requested,
         ):
             return held_part_location_finding
         projected_resources = deepcopy(resources_by_jid)
@@ -1556,45 +1412,6 @@ def _outline_contract_finding(  # noqa: C901, PLR0912
                 },
                 invariant_id="part_traceability",
             )
-
-    if bool(contract.get("require_carrier_for_part_relocation")) and resource_jid and part_name:
-        changed_part_fields = [
-            field_name
-            for field_name, before in (
-                ("part_location", _exact_mapping_value(part_row, "part_location")),
-            )
-            if field_name in end_state
-            and (before is _EXACT_STATE_UNAVAILABLE or before != end_state.get(field_name))
-        ]
-        if changed_part_fields:
-            resource_controls_part = any(
-                str(value or "").strip() == part_name
-                for value in (
-                    resource_row.get("held_part"),
-                    start_state.get("held_part"),
-                    end_state.get("held_part"),
-                )
-            ) or any(
-                str(value or "").strip() == resource_jid
-                for value in (
-                    None
-                    if _exact_mapping_value(part_row, "part_holder_resource_jid")
-                    is _EXACT_STATE_UNAVAILABLE
-                    else _exact_mapping_value(part_row, "part_holder_resource_jid"),
-                )
-            )
-            if not resource_controls_part:
-                return _binding_finding(
-                    task=task,
-                    constraint_code="part_relocation_without_carrier",
-                    resource_jid=resource_jid,
-                    part_name=part_name,
-                    reason=(
-                        f"Task changes part '{part_name}' location/holder without the named "
-                        f"resource '{resource_jid}' carrying or holding it."
-                    ),
-                    evidence={"field": "part_motion", "changed_fields": changed_part_fields},
-                )
 
     return None
 
@@ -1828,29 +1645,6 @@ def compile_grounded_recovery_outline_task(
             "candidate_bindings": candidate_bindings,
             "finding": deepcopy(binding_token_findings[0]),
         }
-    if not operation_kind or not _task_is_projectable(task, task_kind=task_kind):
-        reason = (
-            f"task '{task_id}' does not specify enough target or effect information "
-            "to project one concrete recovery action"
-        )
-        return {
-            "status": "task_not_projectable",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": _binding_finding(
-                task=task,
-                constraint_code="task_not_projectable",
-                resource_jid=resource_jid,
-                part_name=effective_part_name or None,
-                reason=reason,
-                evidence={
-                    "task_kind": task_kind,
-                    "operation_kind": operation_kind or None,
-                    "action_target": deepcopy(_task_action_target(task)),
-                },
-            ),
-        }
-
     grounded_action = _grounded_action(
         task,
         resource_jid=resource_jid,
@@ -1860,35 +1654,6 @@ def compile_grounded_recovery_outline_task(
         task_kind=task_kind,
         operation_kind=operation_kind,
     )
-    preconditions = dict(grounded_action.get("preconditions") or {})
-    requires_acquisition = bool(dict(preconditions.get("part") or {}).get("requires_acquisition"))
-    if (
-        task_kind != "resource_only"
-        and requires_acquisition
-        and not dict(preconditions.get("source_ref") or {})
-    ):
-        reason = (
-            f"task '{task_id}' changes part '{effective_part_name}' but does not ground a "
-            "concrete current source reference for acquiring it first"
-        )
-        return {
-            "status": "task_not_projectable",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": _binding_finding(
-                task=task,
-                constraint_code="task_not_projectable",
-                resource_jid=resource_jid,
-                part_name=effective_part_name or None,
-                reason=reason,
-                evidence={
-                    "task_kind": task_kind,
-                    "operation_kind": grounded_action.get("operation_kind"),
-                    "action_target": deepcopy(_task_action_target(task)),
-                    "preconditions": deepcopy(preconditions),
-                },
-            ),
-        }
     return {
         "status": "grounded",
         "grounded_action": grounded_action,
@@ -2095,12 +1860,6 @@ def validate_recovery_outline_task(
         recovery_des_model=recovery_des_model,
         session_state=session_state,
     )
-    outline_contract["label_state_satisfied_condition_ids"] = (
-        _label_state_satisfied_condition_ids(
-            task=task,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-    )
     grounding_result = compile_grounded_recovery_outline_task(
         task,
         resources_by_jid=resources_by_jid,
@@ -2276,7 +2035,6 @@ def build_recovery_safety_validation_input(
 
 __all__ = [
     "PHYSICAL_FEASIBILITY",
-    "RECOVERY_ADMISSION",
     "SAFETY",
     "SYNTAX_AND_GROUNDING_VALIDATION",
     "TRANSITION_FEASIBILITY",

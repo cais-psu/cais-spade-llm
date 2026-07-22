@@ -67,10 +67,12 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (  # noqa: E402
     multi_turn as multi_turn_mode,
+    multi_turn_outline_generation,
     multi_turn_outline_state,
     multi_turn_prompts,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (  # noqa: E402
+    recovery_artifacts,
     recovery_validation_service,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (  # noqa: E402
@@ -2486,15 +2488,15 @@ def _load_response_fixture(filename: str) -> dict[str, Any]:
     return payload
 
 
-def _without_description_fields(value: Any) -> Any:
+def _without_llm_private_fields(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: _without_description_fields(item)
+            key: _without_llm_private_fields(item)
             for key, item in value.items()
-            if key != "description"
+            if key not in {"description", "expected_start_state"}
         }
     if isinstance(value, list):
-        return [_without_description_fields(item) for item in value]
+        return [_without_llm_private_fields(item) for item in value]
     return deepcopy(value)
 
 
@@ -2543,8 +2545,8 @@ def _fixture_outline_responses() -> list[dict[str, Any]]:
             model_response["candidate_events"] = [
                 deepcopy(candidate_events[selected_index])
             ]
-        responses.append(_without_description_fields(model_response))
-    return responses
+        responses.append(_without_llm_private_fields(model_response))
+    return [_without_llm_private_fields(response) for response in responses]
 
 
 def _with_three_mocked_candidate_events(response: dict[str, Any]) -> dict[str, Any]:
@@ -2587,10 +2589,6 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                     "outline_id": "novel_clear_xarm6",
                     "event_name": "evt_q7",
                     "resource_jid": "xarm6@localhost",
-                    "expected_start_state": {
-                        "resource_state": "failed",
-                        "resource_location": "assembly_board-v1",
-                    },
                     "expected_end_state": {
                         "resource_state": "xarm6_clear_state",
                         "resource_location": "home",
@@ -2608,12 +2606,6 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                     "event_name": "evt_z9",
                     "resource_jid": "ur5e@localhost",
                     "part_name": "MCP",
-                    "expected_start_state": {
-                        "resource_state": "picked",
-                        "held_part": "MCP",
-                        "part_state": "in_gripper",
-                        "part_location": "ur5e@localhost_gripper",
-                    },
                     "expected_end_state": {
                         "resource_state": "mcp_buffer_clear",
                         "held_part": None,
@@ -2633,12 +2625,6 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                     "event_name": "evt_n4",
                     "resource_jid": "ur5e@localhost",
                     "part_name": "LG",
-                    "expected_start_state": {
-                        "resource_state": "mcp_buffer_clear",
-                        "held_part": None,
-                        "part_state": "misplaced",
-                        "part_location": None,
-                    },
                     "expected_end_state": {
                         "resource_state": "lg_secured",
                         "held_part": "LG",
@@ -2658,12 +2644,6 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                     "event_name": "evt_v2",
                     "resource_jid": "ur5e@localhost",
                     "part_name": "LG",
-                    "expected_start_state": {
-                        "resource_state": "lg_secured",
-                        "held_part": "LG",
-                        "part_state": "lg_under_recovery_control",
-                        "part_location": "ur5e@localhost_gripper",
-                    },
                     "expected_end_state": {
                         "resource_state": "lg_recovery_complete",
                         "resource_location": "assembly_board-v1",
@@ -2687,7 +2667,7 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
         responses.extend(
             _with_three_mocked_candidate_events(response) for response in novel_responses
         )
-    return responses
+    return [_without_llm_private_fields(response) for response in responses]
 
 
 def _render_non_case3_candidate_prompt(
@@ -3185,15 +3165,13 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert [stage["validator_role"] for stage in stages] == [
             "PA",
             "PA",
-            "PA",
             "RA",
             "CCA",
         ]
         assert stages[0]["validation_category"] == "syntax_and_grounding_validation"
         assert stages[1]["validation_category"] == "transition_feasibility"
-        assert stages[2]["validation_category"] == "recovery_admission"
-        assert stages[3]["validation_category"] == "physical_feasibility"
-        assert stages[4]["validation_category"] == "safety"
+        assert stages[2]["validation_category"] == "physical_feasibility"
+        assert stages[3]["validation_category"] == "safety"
         assert all("mocked" not in stage for stage in stages)
         assert all("state_fingerprint" not in stage for stage in stages)
     audit_stages = first_outline_audit["candidate_evaluation_summary"][0][
@@ -3201,9 +3179,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     ]
     assert audit_stages[0]["mocked"] is False
     assert audit_stages[1]["mocked"] is False
-    assert audit_stages[2]["mocked"] is False
+    assert audit_stages[2]["mocked"] is True
     assert audit_stages[3]["mocked"] is True
-    assert audit_stages[4]["mocked"] is True
     first_selection_evidence = dict(
         first_outline_audit.get("selection_evidence") or {}
     )
@@ -3257,7 +3234,9 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
             '"candidate_comparison":',
         ):
             assert private_result_token not in serialized_result
+        assert '"recovery_admission"' not in serialized_result
         serialized_audit = json.dumps(outline_audit, sort_keys=True)
+        assert '"recovery_admission"' not in serialized_audit
         for audit_token in (
             '"llm_response":',
             '"validation_stages":',
@@ -3856,11 +3835,10 @@ def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
     findings = multi_turn_mode._candidate_state_completeness_findings(
         candidate_task=common,
         part_name="LCP",
-        start_state={"resource_state": "idle"},
         end_state={"resource_state": "ready"},
         state_variables=resource_only_states,
     )
-    assert len(findings) == 2
+    assert len(findings) == 1
     assert findings[0]["constraint_code"] == "candidate_schema_violation"
     assert findings[0]["evidence"]["missing"] == [
         "held_part",
@@ -3877,11 +3855,6 @@ def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
     findings = multi_turn_mode._candidate_state_completeness_findings(
         candidate_task=common,
         part_name="LCP",
-        start_state={
-            "resource_state": "idle",
-            "held_part": None,
-            "part_state": "available",
-        },
         end_state={
             "resource_state": "ready",
             "held_part": "LCP",
@@ -3901,12 +3874,7 @@ def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
     outline_event_schema = response_schema["schema"]["$defs"]["outline_event"]
     assert outline_event_schema["allOf"][0]["if"]["required"] == ["part_name"]
     required_part_fields = outline_event_schema["allOf"][0]["then"]["properties"]
-    assert required_part_fields["expected_start_state"]["required"] == [
-        "resource_state",
-        "held_part",
-        "part_state",
-        "part_location",
-    ]
+    assert "expected_start_state" not in outline_event_schema["properties"]
     assert required_part_fields["expected_end_state"]["required"] == [
         "resource_state",
         "held_part",
@@ -3972,6 +3940,7 @@ def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anch
     )
     assert "named poses" not in prompt
     assert "Outline Candidate Contract" not in prompt
+    assert "expected_start_state" not in prompt
 
 
 def test_production_cca_rejects_safe1_out_of_order_mcp_placement() -> None:
@@ -4051,12 +4020,6 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         "event_name": "evt_z9",
         "resource_jid": "ur5e@localhost",
         "part_name": "MCP",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "mcp_buffer_clear",
             "held_part": None,
@@ -4067,6 +4030,12 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
     }
     validated_stage, findings = _validate(stage_mcp)
     assert findings == []
+    assert validated_stage["expected_start_state"] == {
+        "held_part": "MCP",
+        "part_location": "ur5e@localhost_gripper",
+        "part_state": "in_gripper",
+        "resource_state": "picked",
+    }
     assert robot_profile._robot_event_family(validated_stage) == "place"
     assert robot_primitives._robot_event_family(validated_stage) == "place"
     multi_turn_mode._apply_task_effects_to_symbolic_state(validated_stage, session_state)
@@ -4087,12 +4056,6 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         "event_name": "evt_n4",
         "resource_jid": "ur5e@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "mcp_buffer_clear",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "lg_secured",
             "held_part": "LG",
@@ -4103,6 +4066,12 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
     }
     validated_acquire, findings = _validate(acquire_lg)
     assert findings == []
+    assert validated_acquire["expected_start_state"] == {
+        "held_part": None,
+        "part_location": None,
+        "part_state": "misplaced",
+        "resource_state": "mcp_buffer_clear",
+    }
     assert robot_profile._robot_event_family(validated_acquire) == "pick"
     assert robot_primitives._robot_event_family(validated_acquire) == "pick"
     multi_turn_mode._apply_task_effects_to_symbolic_state(validated_acquire, session_state)
@@ -4112,12 +4081,6 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         "event_name": "evt_v2",
         "resource_jid": "ur5e@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "lg_secured",
-            "held_part": "LG",
-            "part_state": "lg_under_recovery_control",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "lg_recovery_complete",
             "resource_location": "assembly_board-v1",
@@ -4145,11 +4108,6 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         "outline_id": "novel_clear_xarm6",
         "event_name": "evt_q7",
         "resource_jid": "xarm6@localhost",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "held_part": None,
-            "resource_location": "assembly_board-v1",
-        },
         "expected_end_state": {
             "resource_state": "xarm6_clear_state",
             "held_part": None,
@@ -4202,11 +4160,6 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
         "outline_id": "clear_xarm6_without_private_gripper_state",
         "event_name": "clear_board_home",
         "resource_jid": "xarm6@localhost",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "resource_location": "assembly_board-v1",
-            "held_part": None,
-        },
         "expected_end_state": {
             "resource_state": "home",
             "resource_location": "home",
@@ -4229,7 +4182,7 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
     assert [
         stage["status"]
         for stage in clear_turn["candidate_evaluations"][0]["validation_stages"]
-    ] == ["passed", "passed", "passed", "passed", "passed"]
+    ] == ["passed", "passed", "passed", "passed"]
 
     def _stage_candidate(location: str) -> dict[str, Any]:
         return {
@@ -4237,13 +4190,6 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
             "event_name": f"stage_mcp_at_{location}",
             "resource_jid": "ur5e@localhost",
             "part_name": "MCP",
-            "expected_start_state": {
-                "resource_state": "picked",
-                "resource_location": None,
-                "held_part": "MCP",
-                "part_state": "in_gripper",
-                "part_location": "ur5e@localhost_gripper",
-            },
             "expected_end_state": {
                 "resource_state": "idle",
                 "resource_location": location,
@@ -4330,8 +4276,14 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
     ] == "prusa-mk4-2"
 
     projection_seed = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    validated_stage, schema_findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=stage_prusa_mk4_2,
+        session_state=projection_seed,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert schema_findings == []
     safety_input = recovery_validation_service.build_recovery_safety_validation_input(
-        task=stage_prusa_mk4_2,
+        task=dict(validated_stage or {}),
         session_state=projection_seed,
         prepared_recovery_request=prepared_recovery_request,
     )
@@ -4379,13 +4331,6 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
         "event_name": "acquire_lg",
         "resource_jid": "xarm6@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "home",
-            "resource_location": "home",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "picked",
             "resource_location": None,
@@ -4400,13 +4345,6 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
         "event_name": "move_home_with_mcp",
         "resource_jid": "ur5e@localhost",
         "part_name": "MCP",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "resource_location": None,
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "home",
             "resource_location": "home",
@@ -4436,7 +4374,7 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
     assert decision == "need_revision"
 
 
-def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() -> None:
+def test_pa_allows_label_only_change_and_selection_rejects_no_progress() -> None:
     _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
         _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
@@ -4446,10 +4384,6 @@ def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() ->
         "outline_id": "label_only",
         "event_name": "evt_l1",
         "resource_jid": "xarm6@localhost",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "resource_location": "assembly_board-v1",
-        },
         "expected_end_state": {
             "resource_state": "new_label_only",
             "resource_location": "assembly_board-v1",
@@ -4468,8 +4402,36 @@ def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() ->
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    assert findings[0]["constraint_code"] == "label_only_state_change"
-    assert findings[0]["validation_category"] == "recovery_admission"
+    assert findings == []
+
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "test a state-label-only successor",
+                "candidate_events": [label_only],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    evaluation = turn_entry["candidate_evaluations"][0]
+    assert decision == "need_revision"
+    assert evaluation["valid"] is True
+    assert evaluation["validation_findings"] == []
+    assert evaluation["selection_status"] == "excluded_no_progress"
+    assert evaluation["selection_constraint_codes"] == [
+        "label_only_state_change"
+    ]
+    assert [
+        (stage["validation_category"], stage["status"])
+        for stage in evaluation["validation_stages"]
+    ] == [
+        ("syntax_and_grounding_validation", "passed"),
+        ("transition_feasibility", "passed"),
+        ("physical_feasibility", "passed"),
+        ("safety", "passed"),
+    ]
 
     clear = {
         **label_only,
@@ -4499,10 +4461,6 @@ def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() ->
         **label_only,
         "outline_id": "return_to_prior",
         "event_name": "evt_return",
-        "expected_start_state": {
-            "resource_state": "clear_state",
-            "resource_location": "home",
-        },
         "expected_end_state": {
             "resource_state": "returned_state",
             "resource_location": "assembly_board-v1",
@@ -4524,11 +4482,54 @@ def test_pa_rejects_label_only_change_but_allows_prior_physical_arrangement() ->
     assert "semantic_state_history" not in session_state
 
 
-def test_part_traceability_requires_explicit_custody_locations_and_unique_holder() -> None:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn_outline_generation,
+def test_exact_no_op_passes_validators_and_is_excluded_by_selection() -> None:
+    _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+    )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    no_op = {
+        "outline_id": "exact_no_op",
+        "event_name": "exact_no_op_symbol",
+        "resource_jid": "xarm6@localhost",
+        "expected_end_state": {
+            "resource_state": "failed",
+            "resource_location": "assembly_board-v1",
+            "held_part": None,
+        },
+        "rationale": "Exercise selection-level no-progress classification.",
+    }
+
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "test an exact no-op",
+                "candidate_events": [no_op],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
     )
 
+    evaluation = turn_entry["candidate_evaluations"][0]
+    assert decision == "need_revision"
+    assert evaluation["valid"] is True
+    assert evaluation["validation_findings"] == []
+    assert evaluation["selection_status"] == "excluded_no_progress"
+    assert evaluation["selection_constraint_codes"] == ["no_state_change"]
+    assert [
+        (stage["validation_category"], stage["status"])
+        for stage in evaluation["validation_stages"]
+    ] == [
+        ("syntax_and_grounding_validation", "passed"),
+        ("transition_feasibility", "passed"),
+        ("physical_feasibility", "passed"),
+        ("safety", "passed"),
+    ]
+    assert turn_entry["candidate_revision_targets"] == []
+
+
+def test_transition_feasibility_checks_only_successor_custody_consistency() -> None:
     _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
         _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
@@ -4560,12 +4561,6 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
         "event_name": "authored_release",
         "resource_jid": "ur5e@localhost",
         "part_name": "MCP",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "released_state",
             "held_part": None,
@@ -4574,10 +4569,7 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
         },
         "rationale": "Release the held part.",
     }
-    findings = _pa_findings(release)
-    assert findings[0]["constraint_code"] == "missing_release_destination"
-    assert findings[0]["validation_category"] == "transition_feasibility"
-    assert findings[0]["invariant_id"] == "part_traceability"
+    assert _pa_findings(release) == []
 
     release["expected_end_state"]["part_location"] = "prusa-mk4-2"
     assert _pa_findings(release) == []
@@ -4587,12 +4579,6 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
         "event_name": "authored_direct_relocation",
         "resource_jid": "xarm6@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "failed",
             "held_part": None,
@@ -4601,21 +4587,13 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
         },
         "rationale": "Relocate without declaring custody.",
     }
-    findings = _pa_findings(direct_relocation)
-    assert findings[0]["constraint_code"] == "part_relocation_without_carrier"
-    assert findings[0]["validation_category"] == "transition_feasibility"
+    assert _pa_findings(direct_relocation) == []
 
     acquire = {
         "outline_id": "acquire_with_explicit_successor",
         "event_name": "authored_acquisition",
         "resource_jid": "xarm6@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "controlled_state",
             "held_part": "LG",
@@ -4625,7 +4603,7 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
         "rationale": "Acquire the affected part.",
     }
     findings = _pa_findings(acquire)
-    assert findings[0]["constraint_code"] == "missing_acquisition_location"
+    assert findings[0]["constraint_code"] == "held_part_location_mismatch"
     assert findings[0]["validation_category"] == "transition_feasibility"
     assert findings[0]["invariant_id"] == "part_traceability"
 
@@ -4645,9 +4623,6 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
 
     held_transport = deepcopy(acquire)
     held_transport["outline_id"] = "transport_while_holding"
-    held_transport["expected_start_state"] = deepcopy(
-        acquire["expected_end_state"]
-    )
     held_transport["expected_end_state"] = {
         "resource_state": "approaching_destination",
         "resource_location": "prusa-mk4-1",
@@ -4684,10 +4659,6 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
     duplicate_holder = deepcopy(acquire)
     duplicate_holder["outline_id"] = "duplicate_mcp_holder"
     duplicate_holder["part_name"] = "MCP"
-    duplicate_holder["expected_start_state"]["part_state"] = "in_gripper"
-    duplicate_holder["expected_start_state"]["part_location"] = (
-        "ur5e@localhost_gripper"
-    )
     duplicate_holder["expected_end_state"]["held_part"] = "MCP"
     duplicate_holder["expected_end_state"]["part_location"] = (
         "xarm6@localhost_gripper"
@@ -4695,37 +4666,6 @@ def test_part_traceability_requires_explicit_custody_locations_and_unique_holder
     findings = _pa_findings(duplicate_holder)
     assert findings[0]["constraint_code"] == "part_traceability_violation"
     assert findings[0]["invariant_id"] == "part_traceability"
-
-    invalid_release = deepcopy(release)
-    invalid_release["expected_end_state"]["part_location"] = None
-    artifact_session = deepcopy(session_state)
-    artifact_session["recovery_selection_mode"] = "neurosymbolic"
-    decision, turn_entry = asyncio.run(
-        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
-            session_state=artifact_session,
-            parsed_response={
-                "thought": "validate the explicit successor",
-                "candidate_events": [invalid_release],
-            },
-            prepared_recovery_request=prepared_recovery_request,
-            planner=planner,
-        )
-    )
-    assert decision == "need_revision"
-    stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
-    transition_stage = next(
-        stage
-        for stage in stages
-        if stage["validation_category"] == "transition_feasibility"
-    )
-    assert transition_stage["status"] == "rejected"
-    assert transition_stage["findings"][0]["invariant_id"] == "part_traceability"
-    assert next(
-        stage for stage in stages if stage["validation_category"] == "physical_feasibility"
-    )["status"] == "skipped"
-    assert next(
-        stage for stage in stages if stage["validation_category"] == "safety"
-    )["status"] == "skipped"
 
 
 def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() -> None:
@@ -4745,12 +4685,6 @@ def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() 
         "event_name": "recover_pick",
         "resource_jid": "xarm6@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "controlled_state",
             "held_part": "LG",
@@ -4795,8 +4729,9 @@ def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() 
         prepared_recovery_request,
         mismatch_session,
     )
-    assert mismatch_prompt.count("held_part_location_mismatch") == 2
-    assert mismatch_prompt.count("xarm6@localhost_gripper") == 1
+    assert "held_part_location_mismatch" not in mismatch_prompt
+    assert "xarm6@localhost_gripper" not in mismatch_prompt
+    assert "resource and part custody facts disagree" in mismatch_prompt
     assert "recover_pick" not in mismatch_prompt
     assert "Candidate Revision Targets" in mismatch_prompt
     assert "one materially revised candidate for every listed target" in (
@@ -4814,7 +4749,6 @@ def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> No
         "outline_id": "unknown_resource",
         "event_name": "evt_u1",
         "resource_jid": "new_robot@localhost",
-        "expected_start_state": {"resource_state": "failed"},
         "expected_end_state": {
             "resource_state": "new_state",
             "resource_location": "home",
@@ -4833,11 +4767,6 @@ def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> No
         "event_name": "evt_u2",
         "resource_jid": "ur5e@localhost",
         "part_name": "NEW_PART",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-        },
         "expected_end_state": {
             "resource_state": "new_state",
             "held_part": None,
@@ -4858,12 +4787,6 @@ def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> No
         "event_name": "evt_u3",
         "resource_jid": "ur5e@localhost",
         "part_name": "MCP",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "new_state",
             "held_part": None,
@@ -4897,11 +4820,6 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         "outline_id": "resource_only_clear_xarm6",
         "event_name": "evt_resource_only_clear",
         "resource_jid": "xarm6@localhost",
-        "expected_start_state": {
-            "resource_state": "failed",
-            "held_part": None,
-            "resource_location": "assembly_board-v1",
-        },
         "expected_end_state": {
             "resource_state": "xarm6_clear_state",
             "held_part": None,
@@ -4938,12 +4856,6 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         "outline_id": "missing_part_name",
         "event_name": "evt_missing_part_name",
         "resource_jid": "ur5e@localhost",
-        "expected_start_state": {
-            "resource_state": "picked",
-            "held_part": "MCP",
-            "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
-        },
         "expected_end_state": {
             "resource_state": "mcp_buffer_clear",
             "held_part": None,
@@ -4969,12 +4881,6 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         "event_name": "evt_inconsistent_held_part",
         "resource_jid": "ur5e@localhost",
         "part_name": "LG",
-        "expected_start_state": {
-            "resource_state": "idle",
-            "held_part": None,
-            "part_state": "misplaced",
-            "part_location": None,
-        },
         "expected_end_state": {
             "resource_state": "invalid_hold",
             "held_part": "MCP",
@@ -5089,7 +4995,7 @@ def test_candidate_validation_feedback_is_rendered_once() -> None:
     assert "Disabled And Blocked Candidate Events" not in prompt
 
 
-def test_incomplete_release_feedback_preserves_the_exact_current_finding() -> None:
+def test_custody_feedback_hides_internal_constraint_details() -> None:
     reason = "Task releases 'LCP' without specifying a concrete grounded destination."
     prompt = _render_non_case3_candidate_prompt(
         candidate_rejection_feedback=[
@@ -5114,9 +5020,64 @@ def test_incomplete_release_feedback_preserves_the_exact_current_finding() -> No
         ]
     )
 
-    assert prompt.count("missing_release_destination") == 1
-    assert prompt.count(reason) == 1
+    assert "missing_release_destination" not in prompt
+    assert reason not in prompt
+    assert prompt.count("resource and part custody facts disagree") == 1
     assert "no_progressing_candidate" not in prompt
+
+
+def test_concise_result_hides_internal_custody_codes() -> None:
+    audit_payload = {
+        "turn_index": 3,
+        "phase": "outline",
+        "decision": "need_revision",
+        "candidate_evaluation_summary": [
+            {
+                "candidate_index": 0,
+                "valid": False,
+                "task": {
+                    "outline_id": "custody_mismatch",
+                    "event_name": "authored_event",
+                    "resource_jid": "xarm6@localhost",
+                    "part_name": "LG",
+                    "expected_end_state": {
+                        "resource_state": "picked",
+                        "held_part": "LG",
+                        "part_state": "in_gripper",
+                        "part_location": "prusa-mk4-1",
+                    },
+                },
+                "constraint_codes": ["held_part_location_mismatch"],
+                "validation_stages": [
+                    {
+                        "validation_category": "transition_feasibility",
+                        "validator_role": "PA",
+                        "status": "rejected",
+                        "findings": [
+                            {
+                                "constraint_code": "held_part_location_mismatch",
+                                "reason": "detailed internal reason",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = recovery_artifacts._outline_result_payload(audit_payload)
+
+    assert "held_part_location_mismatch" not in json.dumps(result)
+    stage = result["candidate_evaluation_summary"][0]["validation_stages"][0]
+    assert stage == {
+        "validation_category": "transition_feasibility",
+        "validator_role": "PA",
+        "status": "rejected",
+        "reason": "resource and part custody facts disagree",
+    }
+    assert audit_payload["candidate_evaluation_summary"][0]["constraint_codes"] == [
+        "held_part_location_mismatch"
+    ]
 
 
 def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path) -> None:

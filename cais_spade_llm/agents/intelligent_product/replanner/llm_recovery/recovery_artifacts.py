@@ -502,6 +502,26 @@ def _human_outline_task(task: Any) -> dict[str, Any]:
     return compact
 
 
+_CUSTODY_CONSISTENCY_CODES = {
+    "held_part_location_mismatch",
+    "missing_acquisition_location",
+    "missing_release_destination",
+    "part_relocation_without_carrier",
+    "part_traceability_violation",
+}
+
+
+def _human_constraint_codes(values: Any) -> list[str]:
+    return sorted(
+        {
+            str(value).strip()
+            for value in (values or [])
+            if str(value).strip()
+            and str(value).strip().lower() not in _CUSTODY_CONSISTENCY_CODES
+        }
+    )
+
+
 def _human_outline_validation_stages(stages: Any) -> list[dict[str, Any]]:
     compact_stages: list[dict[str, Any]] = []
     for stage in stages or []:
@@ -516,16 +536,24 @@ def _human_outline_validation_stages(stages: Any) -> list[dict[str, Any]]:
             )
             if stage.get(key) not in (None, "", [], {})
         }
-        constraint_codes = sorted(
-            {
-                str(finding.get("constraint_code") or "").strip()
-                for finding in (stage.get("findings") or [])
-                if isinstance(finding, dict)
-                and str(finding.get("constraint_code") or "").strip()
-            }
+        finding_codes = [
+            str(finding.get("constraint_code") or "").strip()
+            for finding in (stage.get("findings") or [])
+            if isinstance(finding, dict)
+            and str(finding.get("constraint_code") or "").strip()
+        ]
+        constraint_codes = _human_constraint_codes(finding_codes)
+        custody_rejected = any(
+            code.lower() in _CUSTODY_CONSISTENCY_CODES for code in finding_codes
         )
         if constraint_codes:
             compact_stage["constraint_codes"] = constraint_codes
+        if (
+            custody_rejected
+            and compact_stage.get("validation_category") == "transition_feasibility"
+            and compact_stage.get("status") == "rejected"
+        ):
+            compact_stage["reason"] = "resource and part custody facts disagree"
         if compact_stage:
             compact_stages.append(compact_stage)
     return compact_stages
@@ -547,13 +575,7 @@ def _human_outline_candidate_rows(rows: Any) -> list[dict[str, Any]]:
             compact_row["selection_status"] = deepcopy(
                 row.get("selection_status")
             )
-        constraint_codes = sorted(
-            {
-                str(code).strip()
-                for code in (row.get("constraint_codes") or [])
-                if str(code).strip()
-            }
-        )
+        constraint_codes = _human_constraint_codes(row.get("constraint_codes"))
         if constraint_codes:
             compact_row["constraint_codes"] = constraint_codes
         validation_stages = _human_outline_validation_stages(
@@ -599,7 +621,7 @@ def _outline_constraint_codes(audit_payload: dict[str, Any]) -> list[str]:
         if isinstance(finding, dict)
         and str(finding.get("constraint_code") or "").strip()
     )
-    return sorted(codes)
+    return _human_constraint_codes(codes)
 
 
 def _outline_result_payload(audit_payload: dict[str, Any]) -> dict[str, Any]:
@@ -795,13 +817,23 @@ def _compact_artifact_candidate_evaluations(rows: Any) -> list[dict[str, Any]]:
         ]
         if findings:
             summary["findings"] = findings
-            summary["constraint_codes"] = sorted(
-                {
-                    str(item.get("constraint_code") or "")
-                    for item in findings
-                    if str(item.get("constraint_code") or "").strip()
-                }
-            )
+        selection_constraint_codes = sorted(
+            {
+                str(code).strip()
+                for code in (row.get("selection_constraint_codes") or [])
+                if str(code).strip()
+            }
+        )
+        if selection_constraint_codes:
+            summary["selection_constraint_codes"] = selection_constraint_codes
+        constraint_codes = {
+            str(item.get("constraint_code") or "").strip()
+            for item in findings
+            if str(item.get("constraint_code") or "").strip()
+        }
+        constraint_codes.update(selection_constraint_codes)
+        if constraint_codes:
+            summary["constraint_codes"] = sorted(constraint_codes)
         progress_detail = row.get("progress_detail")
         if isinstance(progress_detail, dict) and progress_detail:
             summary["progress_detail"] = deepcopy(progress_detail)

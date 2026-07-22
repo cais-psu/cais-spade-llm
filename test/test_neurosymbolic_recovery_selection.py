@@ -12,6 +12,7 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
     validate_outline_macro_recovery_safety,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
+    recovery_artifacts,
     recovery_validation_service,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
@@ -601,6 +602,7 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         schema["$defs"]["outline_event"]["properties"]["event_name"]["minLength"]
         == 1
     )
+    assert "expected_start_state" not in schema["$defs"]["outline_event"]["properties"]
 
     prepared = {
         "llm_input": {
@@ -636,19 +638,26 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         },
         "symbolic_parts": {},
     }
-    valid_task = {
+    llm_task = {
         "outline_id": "printer_pause",
         "event_name": "authored_event",
         "resource_jid": "printer@localhost",
-        "expected_start_state": {
-            "resource_state": "printing",
-            "job_state": "printing",
-        },
         "expected_end_state": {
             "resource_state": "paused",
             "job_state": "paused",
         },
         "rationale": "exact declared variables",
+    }
+    valid_task, schema_findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=llm_task,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    assert schema_findings == []
+    assert valid_task is not None
+    assert valid_task["expected_start_state"] == {
+        "job_state": "printing",
+        "resource_state": "printing",
     }
     findings, _grounded = multi_turn.validate_recovery_outline_task(
         planner=object(),
@@ -657,6 +666,27 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         prepared_recovery_request=prepared,
     )
     assert findings == []
+
+    sequential_state = deepcopy(session_state)
+    multi_turn._apply_task_effects_to_symbolic_state(valid_task, sequential_state)
+    resume_task, schema_findings = multi_turn._derive_candidate_outline_task(
+        candidate_task={
+            **llm_task,
+            "outline_id": "printer_resume",
+            "expected_end_state": {
+                "resource_state": "printing",
+                "job_state": "printing",
+            },
+        },
+        session_state=sequential_state,
+        prepared_recovery_request=prepared,
+    )
+    assert schema_findings == []
+    assert resume_task is not None
+    assert resume_task["expected_start_state"] == {
+        "job_state": "paused",
+        "resource_state": "paused",
+    }
 
     outside_domain = deepcopy(valid_task)
     outside_domain["expected_end_state"]["job_state"] = "maintenance"
@@ -1143,6 +1173,111 @@ def test_unique_condition_clearing_candidate_is_selected_independent_of_names_an
     assert len(forward) == 1
     assert reverse == forward
     assert select([renamed, no_progress]) == forward
+
+
+def test_selection_codes_distinguish_no_op_and_nonprogressing_label_effects() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    no_op = _event(
+        "no_op_symbol",
+        part_name="P",
+        start_state="faulted",
+        end_state="faulted",
+    )
+    restoring = _event(
+        "restoring_symbol",
+        part_name="P",
+        start_state="faulted",
+        end_state="restored",
+    )
+    other_label = _event(
+        "other_label_symbol",
+        part_name="P",
+        start_state="faulted",
+        end_state="other_state",
+    )
+    events = (no_op, restoring, other_label)
+    evaluations = [
+        _evaluation(
+            index,
+            session_state=session_state,
+            part_name="P",
+            end_state=str(event["expected_end_state"]["part_state"]),
+        )
+        for index, event in enumerate(events)
+    ]
+
+    selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[
+            {"candidate_index": index, "surface_events": [deepcopy(event)]}
+            for index, event in enumerate(events)
+        ],
+        candidate_evaluations=evaluations,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert selected == [evaluations[1]["candidate_id"]]
+    assert evaluations[0]["valid"] is True
+    assert evaluations[0]["validation_findings"] == []
+    assert evaluations[0]["selection_status"] == "excluded_no_progress"
+    assert evaluations[0]["selection_constraint_codes"] == ["no_state_change"]
+    assert evaluations[1]["selection_constraint_codes"] == []
+    assert evaluations[2]["selection_status"] == "excluded_no_progress"
+    assert evaluations[2]["selection_constraint_codes"] == [
+        "label_only_state_change"
+    ]
+
+    audit_rows = multi_turn._compact_artifact_candidate_evaluations(
+        [evaluations[0]]
+    )
+    assert audit_rows[0]["selection_constraint_codes"] == ["no_state_change"]
+    assert audit_rows[0]["constraint_codes"] == ["no_state_change"]
+    assert "findings" not in audit_rows[0]
+    concise = recovery_artifacts._outline_result_payload(
+        {
+            "turn_index": 1,
+            "phase": "outline",
+            "decision": "need_revision",
+            "candidate_evaluation_summary": audit_rows,
+            "artifact_paths": {},
+        }
+    )
+    assert concise["constraint_codes"] == ["no_state_change"]
+    assert concise["candidate_evaluation_summary"][0]["constraint_codes"] == [
+        "no_state_change"
+    ]
+    assert "selection_constraint_codes" not in concise[
+        "candidate_evaluation_summary"
+    ][0]
+    assert all(
+        "constraint_codes" not in stage
+        for stage in concise["candidate_evaluation_summary"][0][
+            "validation_stages"
+        ]
+    )
+
+
+def test_incomplete_primitive_program_cannot_build_executable_proposal() -> None:
+    result = multi_turn.build_multi_turn_recovery_proposal(
+        final_output_payload={
+            "final_output_stage": "ready_for_primitive_generation",
+            "transition_trace": [
+                {
+                    "outline_id": "recovery_1",
+                    "resource_jid": "resource@localhost",
+                    "event_name": "authored_symbol",
+                }
+            ],
+            "accepted_primitive_program": [],
+            "primitive_program_complete": False,
+        },
+        prepared_recovery_request={"llm_input": {}},
+    )
+
+    assert result["accepted"] is False
+    assert result["recovery_proposal"] is None
+    assert result["reason"] == "final output did not include accepted_primitive_program"
 
 
 def test_ra_declared_guard_enabling_candidate_progresses() -> None:
@@ -2295,7 +2430,6 @@ def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
     ] == [
         ("PA", "rejected"),
         ("PA", "skipped"),
-        ("PA", "skipped"),
         ("RA", "skipped"),
         ("CCA", "skipped"),
     ]
@@ -2501,10 +2635,10 @@ def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
         resources_by_jid=deepcopy(session_state["symbolic_resources"]),
         parts_by_name=deepcopy(session_state["symbolic_parts"]),
     )
-    assert summary.count("part_relocation_without_carrier") == 1
-    assert summary.count(carried_location) == 1
+    assert "part_relocation_without_carrier" not in summary
+    assert carried_location not in summary
+    assert summary.count("resource and part custody facts disagree") == 1
     assert "xarm6@localhost_gripper" not in summary
-    assert "First establish custody in a separate transition" in summary
     assert "rejected_event_" not in summary
     assert "rejected rationale" not in summary
 
