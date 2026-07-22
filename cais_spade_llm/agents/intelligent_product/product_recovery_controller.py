@@ -43,6 +43,54 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _private_pending_nominal_tasks(
+    prepared_recovery_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    pending_tasks: list[dict[str, Any]] = []
+    for resource_jid in sorted(
+        dict(prepared_recovery_request.get("recovery_resources") or {})
+    ):
+        resource_entry = dict(
+            dict(prepared_recovery_request.get("recovery_resources") or {}).get(
+                resource_jid
+            )
+            or {}
+        )
+        for raw_task in resource_entry.get("pending_tasks") or []:
+            if not isinstance(raw_task, dict):
+                continue
+            task_id = str(raw_task.get("id") or "").strip()
+            if not task_id:
+                continue
+            pending_tasks.append(
+                {
+                    "id": task_id,
+                    "function": str(raw_task.get("function_name") or "").strip(),
+                    "part": str(
+                        dict(raw_task.get("params") or {}).get("part_name") or ""
+                    ).strip()
+                    or None,
+                    "resource": str(resource_jid),
+                }
+            )
+    return pending_tasks
+
+
+def _private_continuation_requirements(
+    prepared_recovery_request: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        deepcopy(row)
+        for row in (
+            dict(prepared_recovery_request.get("marked_reentry_context") or {}).get(
+                "marked_reentry_conditions"
+            )
+            or []
+        )
+        if isinstance(row, dict)
+    ]
+
+
 class ProductRecoveryController:
     EXPORTED_METHODS = (
         "_build_plan_safety_alert",
@@ -1876,26 +1924,13 @@ class ProductRecoveryController:
             projected_outline_state = deepcopy(
                 dict(session_state.get("final_output") or {}).get("projected_outline_state") or {}
             )
-        llm_input = dict(prepared_recovery_request.get("llm_input") or {})
-        modeled_continuation_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-        pending_nominal_tasks = [
-            deepcopy(row)
-            for row in (modeled_continuation_gap.get("pending_nominal_tasks") or [])
-            if isinstance(row, dict)
-        ]
+        pending_nominal_tasks = _private_pending_nominal_tasks(
+            prepared_recovery_request
+        )
         pending_nominal_task_ids = [
-            str(task_id).strip()
-            for task_id in (
-                modeled_continuation_gap.get("pending_nominal_task_ids")
-                or (
-                    dict(prepared_recovery_request.get("context_summary") or {}).get(
-                        "modeled_continuation_gap"
-                    )
-                    or {}
-                ).get("pending_nominal_task_ids")
-                or [row.get("task_id") or row.get("id") for row in pending_nominal_tasks]
-            )
-            if str(task_id).strip()
+            str(row.get("id") or "").strip()
+            for row in pending_nominal_tasks
+            if str(row.get("id") or "").strip()
         ]
         nominal_candidate_tasks = _nominal_candidate_tasks(
             pending_nominal_tasks=pending_nominal_tasks,
@@ -2962,12 +2997,14 @@ class ProductRecoveryController:
         prepared_recovery_request = dict(
             self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        modeled_gap = dict(
-            dict(prepared_recovery_request.get("context_summary") or {}).get(
-                "modeled_continuation_gap"
-            )
-            or {}
+        continuation_requirements = _private_continuation_requirements(
+            prepared_recovery_request
         )
+        pending_nominal_task_ids = [
+            str(row.get("id") or "").strip()
+            for row in _private_pending_nominal_tasks(prepared_recovery_request)
+            if str(row.get("id") or "").strip()
+        ]
         archive_replay = dict(recovery_debug.get("archive_replay") or {})
         execution_policy = dict(recovery_debug.get("execution_policy") or {})
         if not bool(execution_policy.get("verification_only")):
@@ -3028,10 +3065,10 @@ class ProductRecoveryController:
             ),
             "continuation_requirements": deepcopy(
                 self._strip_continuation_requirement_actuals(
-                    modeled_gap.get("continuation_requirements") or []
+                    continuation_requirements
                 )
             ),
-            "pending_nominal_task_ids": deepcopy(modeled_gap.get("pending_nominal_task_ids") or []),
+            "pending_nominal_task_ids": deepcopy(pending_nominal_task_ids),
             "continuation_repair_attempts": 0,
             "source_mode": str(
                 recovery_debug.get("recovery_mode")
@@ -8441,12 +8478,14 @@ class ProductRecoveryController:
         prepared_recovery_request = dict(
             self._runtime_recovery_context.get("prepared_recovery_request") or {}
         )
-        modeled_gap = dict(
-            dict(prepared_recovery_request.get("context_summary") or {}).get(
-                "modeled_continuation_gap"
-            )
-            or {}
+        continuation_requirements = _private_continuation_requirements(
+            prepared_recovery_request
         )
+        pending_nominal_task_ids = [
+            str(row.get("id") or "").strip()
+            for row in _private_pending_nominal_tasks(prepared_recovery_request)
+            if str(row.get("id") or "").strip()
+        ]
         resumable_task_ids = []
         resumable_task_ids_by_resource: dict[str, list[str]] = {}
         splice_before_task_ids_by_resource: dict[str, str] = {}
@@ -8675,12 +8714,10 @@ class ProductRecoveryController:
                 "last_completed_task_id": "",
                 "continuation_requirements": deepcopy(
                     self._strip_continuation_requirement_actuals(
-                        modeled_gap.get("continuation_requirements") or []
+                        continuation_requirements
                     )
                 ),
-                "pending_nominal_task_ids": deepcopy(
-                    modeled_gap.get("pending_nominal_task_ids") or []
-                ),
+                "pending_nominal_task_ids": deepcopy(pending_nominal_task_ids),
                 "continuation_repair_attempts": 0,
                 "source_mode": self._runtime_recovery_session_mode(),
                 "validation_policy": self._runtime_recovery_session_validation_policy(),

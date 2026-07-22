@@ -524,13 +524,14 @@ def _outline_task_requirement_id(
     return ""
 
 
-def _modeled_gap_pending_nominal_tasks(llm_input: dict[str, Any] | None) -> list[dict[str, Any]]:
-    modeled_gap = dict((llm_input or {}).get("modeled_continuation_gap") or {})
-    return [
-        dict(row)
-        for row in (modeled_gap.get("pending_nominal_tasks") or [])
+def _recovery_goal_part_names(llm_input: dict[str, Any] | None) -> set[str]:
+    return {
+        str(row.get("entity") or "").strip()
+        for row in ((llm_input or {}).get("goal_conditions") or [])
         if isinstance(row, dict)
-    ]
+        and str(row.get("entity_kind") or "").strip() == "part"
+        and str(row.get("entity") or "").strip()
+    }
 
 
 def _outline_task_target_locations(task: dict[str, Any]) -> list[str]:
@@ -579,13 +580,7 @@ def _outline_task_matches_pending_nominal_suffix(
         .strip()
         .lower()
     )
-    for pending_task in _modeled_gap_pending_nominal_tasks(llm_input):
-        pending_part = str(pending_task.get("part") or "").strip()
-        pending_resource = str(pending_task.get("resource") or "").strip()
-        if not pending_part:
-            continue
-        if pending_resource and pending_resource != resource_jid:
-            continue
+    for pending_part in sorted(_recovery_goal_part_names(llm_input)):
         if pending_part not in candidate_parts:
             continue
         part_row = dict(parts_by_name.get(pending_part) or {})

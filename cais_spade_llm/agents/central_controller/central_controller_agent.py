@@ -2253,7 +2253,6 @@ class CentralControllerAgent(LlmAgent):
                                 "reason": str(exc),
                             }
                         ],
-                        "cleared_condition_ids": [],
                         "safety_ctx": {"rule_ids": rule_ids},
                     }
                 findings = [
@@ -2263,21 +2262,6 @@ class CentralControllerAgent(LlmAgent):
                 ]
                 for finding in findings:
                     finding.setdefault("validation_category", "safety")
-                cleared_condition_ids = [
-                    str(item).strip()
-                    for item in (result.get("cleared_condition_ids") or [])
-                    if str(item).strip()
-                ]
-                active_condition_ids = [
-                    str(item).strip()
-                    for item in (candidate.get("active_safety_condition_ids") or [])
-                    if str(item).strip()
-                ]
-                remaining_condition_ids = [
-                    condition_id
-                    for condition_id in active_condition_ids
-                    if condition_id not in set(cleared_condition_ids)
-                ]
                 results.append(
                     {
                         "candidate_index": candidate_index,
@@ -2285,14 +2269,28 @@ class CentralControllerAgent(LlmAgent):
                         "is_safe": bool(result.get("is_safe") is True),
                         "findings": findings,
                         "active_rule_identifiers": deepcopy(rule_ids),
-                        "cleared_safety_condition_identifiers": cleared_condition_ids,
-                        "remaining_safety_condition_identifiers": remaining_condition_ids,
                         "safety_context": deepcopy(result.get("safety_ctx") or {}),
                         "safety_dfa_states_before": deepcopy(
                             result.get("safety_dfa_states_before") or {}
                         ),
                         "safety_dfa_states_after": deepcopy(
                             result.get("safety_dfa_states_after") or {}
+                        ),
+                        "cca_admissible_goal_recovery_event_ids": deepcopy(
+                            result.get("cca_admissible_goal_recovery_event_ids")
+                            or []
+                        ),
+                        "cca_admissible_goal_recovery_event_ids_before": deepcopy(
+                            result.get(
+                                "cca_admissible_goal_recovery_event_ids_before"
+                            )
+                            or []
+                        ),
+                        "cca_admissible_goal_recovery_event_ids_after": deepcopy(
+                            result.get(
+                                "cca_admissible_goal_recovery_event_ids_after"
+                            )
+                            or []
                         ),
                         "admissible_nominal_reentry_event_ids": deepcopy(
                             result.get("admissible_nominal_reentry_event_ids") or []

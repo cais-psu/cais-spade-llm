@@ -57,6 +57,9 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (  # n
     validate_outline_macro_recovery_safety,
 )
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner  # noqa: E402
+from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (  # noqa: E402
+    _private_pending_nominal_tasks,
+)
 from cais_spade_llm.agents.intelligent_product.replanner.failure_context import (  # noqa: E402
     build_failure_event,
     failure_context_from_scenario_config,
@@ -542,16 +545,6 @@ class FakeProductAgent:
                 llm_input=llm_input,
                 safety_dfa_states_before=deepcopy(projected_dfa_states),
             )
-            cleared = [
-                str(item).strip()
-                for item in (result.get("cleared_condition_ids") or [])
-                if str(item).strip()
-            ]
-            active = [
-                str(item).strip()
-                for item in (candidate.get("active_safety_condition_ids") or [])
-                if str(item).strip()
-            ]
             results.append(
                 {
                     "candidate_index": int(candidate.get("candidate_index") or 0),
@@ -563,18 +556,23 @@ class FakeProductAgent:
                         for rule in rules
                         if str(rule.get("id") or "").strip()
                     ],
-                    "cleared_safety_condition_identifiers": cleared,
-                    "remaining_safety_condition_identifiers": [
-                        condition_id
-                        for condition_id in active
-                        if condition_id not in set(cleared)
-                    ],
                     "safety_context": deepcopy(result.get("safety_ctx") or {}),
                     "safety_dfa_states_before": deepcopy(
                         result.get("safety_dfa_states_before") or {}
                     ),
                     "safety_dfa_states_after": deepcopy(
                         result.get("safety_dfa_states_after") or {}
+                    ),
+                    "cca_admissible_goal_recovery_event_ids": deepcopy(
+                        result.get("cca_admissible_goal_recovery_event_ids") or []
+                    ),
+                    "cca_admissible_goal_recovery_event_ids_before": deepcopy(
+                        result.get("cca_admissible_goal_recovery_event_ids_before")
+                        or []
+                    ),
+                    "cca_admissible_goal_recovery_event_ids_after": deepcopy(
+                        result.get("cca_admissible_goal_recovery_event_ids_after")
+                        or []
                     ),
                     "admissible_nominal_reentry_event_ids": deepcopy(
                         result.get("admissible_nominal_reentry_event_ids") or []
@@ -1911,20 +1909,13 @@ def _build_recovery_safety_payload(
         or session_state.get("projected_outline_state")
         or {}
     )
-    llm_input = dict(prepared_recovery_request.get("llm_input") or {})
-    modeled_continuation_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    pending_nominal_tasks = [
-        deepcopy(row)
-        for row in (modeled_continuation_gap.get("pending_nominal_tasks") or [])
-        if isinstance(row, dict)
-    ]
+    pending_nominal_tasks = _private_pending_nominal_tasks(
+        prepared_recovery_request
+    )
     pending_nominal_task_ids = [
-        str(task_id).strip()
-        for task_id in (
-            modeled_continuation_gap.get("pending_nominal_task_ids")
-            or [row.get("task_id") or row.get("id") for row in pending_nominal_tasks]
-        )
-        if str(task_id).strip()
+        str(row.get("id") or "").strip()
+        for row in pending_nominal_tasks
+        if str(row.get("id") or "").strip()
     ]
     nominal_candidate_tasks = _nominal_candidate_tasks(
         pending_nominal_tasks=pending_nominal_tasks,
@@ -2677,7 +2668,7 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                         "resource_state": "lg_recovery_complete",
                         "resource_location": "assembly_board-v1",
                         "held_part": None,
-                        "part_state": "lg_restored_state",
+                        "part_state": "assembled",
                         "part_location": "assembly_board-v1",
                     },
                     "rationale": "Release LG at assembly_board-v1 after occupancy clears.",
@@ -2779,6 +2770,26 @@ def _render_non_case3_candidate_prompt(
                 "summary": "xarm6@localhost place_approach LCP to station",
             }
         ],
+        "goal_conditions": [
+            {
+                "condition_id": "goal_lcp_state",
+                "kind": "goal_part_state",
+                "condition_family": "goal",
+                "entity_kind": "part",
+                "entity": "LCP",
+                "field": "state",
+                "expected": "assembled",
+            },
+            {
+                "condition_id": "goal_lcp_location",
+                "kind": "goal_part_location",
+                "condition_family": "goal",
+                "entity_kind": "part",
+                "entity": "LCP",
+                "field": "location",
+                "expected": "station",
+            },
+        ],
         "loaded_safety_rules": [
             {
                 "id": "SAFE_1",
@@ -2812,9 +2823,7 @@ def _render_non_case3_candidate_prompt(
         llm_input=llm_input,
         session_state=session_state,
         recovery_resources=recovery_resources,
-        current_recovery_blockers=[
-            {"summary": "REQ_1_T3 is blocked for LCP at station"}
-        ],
+        current_recovery_blockers=deepcopy(llm_input["goal_conditions"]),
     )
     return multi_turn_prompts.render_multi_turn_phase_prompt(prompt_input)
 
@@ -3061,6 +3070,11 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
             "multi_turn_turn*_outline_result_*.json"
         )
     )
+    outline_audit_paths = sorted(
+        (tmp_path / "recovery_outline").glob(
+            "multi_turn_turn*_outline_audit_*.json"
+        )
+    )
     outline_stack_paths = sorted(
         (tmp_path / "recovery_outline").glob(
             "multi_turn_turn*_outline_stack_*.json"
@@ -3074,6 +3088,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     ]
     assert len(outline_request_paths) == len(outline_turns)
     assert len(outline_result_paths) == len(outline_turns)
+    assert len(outline_audit_paths) == len(outline_turns)
     assert len(outline_stack_paths) == len(outline_turns)
     assert not list(
         (tmp_path / "recovery_outline").glob(
@@ -3104,9 +3119,11 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         "detect_parts",
         "compute_pick_targets",
         "get_current_pose",
-        "move_relative",
-        "gripper_state",
-    ):
+            "move_relative",
+            "gripper_state",
+            "goal_recovery_events",
+            "cca_admissible_goal_recovery_event_ids",
+        ):
         assert private_model_token not in outline_message_text
     assert "gripper_state" not in first_outline_request
     assert '"held_part_location": "xarm6@localhost_gripper"' not in outline_message_text
@@ -3119,13 +3136,13 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         line
         for line in outline_message_text.splitlines()
         if "ur5e@localhost" in line
-        and ("reachable locations" in line or "grounded_target_refs=" in line)
+        and ("known resource locations" in line or "grounded_target_refs=" in line)
     ]
     xarm6_capability_lines = [
         line
         for line in outline_message_text.splitlines()
         if "xarm6@localhost" in line
-        and ("reachable locations" in line or "grounded_target_refs=" in line)
+        and ("known resource locations" in line or "grounded_target_refs=" in line)
     ]
     assert ur5e_capability_lines
     assert all("prusa-mk4-2" in line for line in ur5e_capability_lines)
@@ -3133,16 +3150,29 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert xarm6_capability_lines
     assert all("prusa-mk4-1" in line for line in xarm6_capability_lines)
     assert all("prusa-mk4-2" not in line for line in xarm6_capability_lines)
+    assert (
+        "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
+        in outline_message_text
+    )
+    assert "Location order is lexical and does not express a preference." in (
+        outline_message_text
+    )
+    assert "named poses" not in outline_message_text
 
     first_outline_result = json.loads(
         outline_result_paths[0].read_text(encoding="utf-8")
     )
-    llm_response = first_outline_result["llm_response"]
+    first_outline_audit = json.loads(
+        outline_audit_paths[0].read_text(encoding="utf-8")
+    )
+    llm_response = first_outline_audit["llm_response"]
     assert set(llm_response) == {"thought", "candidate_events"}
     assert len(llm_response["candidate_events"]) == 1
     assert "candidate_evaluation_summary" not in llm_response
     assert len(first_outline_result["candidate_evaluation_summary"]) == 1
+    assert len(first_outline_audit["candidate_evaluation_summary"]) == 1
     assert "private_recovery_des_models" not in first_outline_result
+    assert "llm_response" not in first_outline_result
     assert "thought" not in first_outline_result
     assert "candidate_events" not in first_outline_result
     assert "transition_trace" not in first_outline_result
@@ -3164,38 +3194,146 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert stages[2]["validation_category"] == "recovery_admission"
         assert stages[3]["validation_category"] == "physical_feasibility"
         assert stages[4]["validation_category"] == "safety"
-        assert stages[0]["mocked"] is False
-        assert stages[1]["mocked"] is False
-        assert stages[2]["mocked"] is False
-        assert stages[3]["mocked"] is True
-        assert stages[4]["mocked"] is True
+        assert all("mocked" not in stage for stage in stages)
+        assert all("state_fingerprint" not in stage for stage in stages)
+    audit_stages = first_outline_audit["candidate_evaluation_summary"][0][
+        "validation_stages"
+    ]
+    assert audit_stages[0]["mocked"] is False
+    assert audit_stages[1]["mocked"] is False
+    assert audit_stages[2]["mocked"] is False
+    assert audit_stages[3]["mocked"] is True
+    assert audit_stages[4]["mocked"] is True
+    first_selection_evidence = dict(
+        first_outline_audit.get("selection_evidence") or {}
+    )
+    assert first_selection_evidence["cleared_recovery_obligation_ids"] == []
+    assert any(
+        '"event_name":"place_insert"' in event_id
+        and '"part_name":"LG"' in event_id
+        and '"resource_jid":"ur5e@localhost"' in event_id
+        for event_id in (
+            first_selection_evidence.get(
+                "newly_cca_admissible_goal_recovery_event_ids"
+            )
+            or []
+        )
+    )
     assert "selected_transition" in first_outline_result
-    for result_path in outline_result_paths:
+    for result_path, audit_path in zip(
+        outline_result_paths,
+        outline_audit_paths,
+        strict=True,
+    ):
         outline_result = json.loads(result_path.read_text(encoding="utf-8"))
+        outline_audit = json.loads(audit_path.read_text(encoding="utf-8"))
         result_artifact_paths = outline_result["artifact_paths"]
         assert result_artifact_paths["outline_result_artifact_path"] == str(result_path)
         assert result_artifact_paths["response_artifact_path"] == str(result_path)
+        assert result_artifact_paths["outline_audit_artifact_path"] == str(audit_path)
         assert result_artifact_paths["request_artifact_path"] == (
             result_artifact_paths["prompt_artifact_path"]
         )
+        assert Path(result_artifact_paths["outline_audit_artifact_path"]).exists()
         assert Path(result_artifact_paths["outline_stack_artifact_path"]).exists()
         serialized_result = json.dumps(outline_result, sort_keys=True)
-        assert '"snapshot":' not in serialized_result
-        assert '"recovery_des_model":' not in serialized_result
-        assert '"projected_symbolic_resources":' not in serialized_result
-        assert '"projected_symbolic_parts":' not in serialized_result
+        for private_result_token in (
+            '"llm_response":',
+            '"snapshot":',
+            '"fingerprint":',
+            '"event_id":',
+            '"safety_dfa_states_before":',
+            '"safety_dfa_states_after":',
+            '"recovery_des_model":',
+            '"projected_symbolic_resources":',
+            '"projected_symbolic_parts":',
+            '"selection_evidence":',
+            '"recovery_enabledness_validation_after":',
+            '"candidate_id":',
+            '"mocked":',
+            '"reason":',
+            '"rationale":',
+            '"findings":',
+            '"candidate_comparison":',
+        ):
+            assert private_result_token not in serialized_result
+        serialized_audit = json.dumps(outline_audit, sort_keys=True)
+        for audit_token in (
+            '"llm_response":',
+            '"validation_stages":',
+            '"state_fingerprint":',
+            '"recovery_enabledness_validation_after":',
+            '"selection_evidence":',
+        ):
+            assert audit_token in serialized_audit
+        assert set(outline_result).issubset(
+            {
+                "turn_index",
+                "phase",
+                "decision",
+                "next_phase",
+                "accepted_trace_length",
+                "remaining_blocked_issue_count",
+                "selected_by",
+                "selection_status",
+                "constraint_codes",
+                "selected_transition",
+                "candidate_evaluation_summary",
+                "artifact_paths",
+            }
+        )
+        assert set(outline_result["selected_transition"]).issubset(
+            {
+                "outline_id",
+                "llm_outline_id",
+                "event_name",
+                "resource_jid",
+                "part_name",
+                "expected_end_state",
+            }
+        )
+        for candidate_row in outline_result["candidate_evaluation_summary"]:
+            assert set(candidate_row).issubset(
+                {
+                    "candidate_index",
+                    "valid",
+                    "task",
+                    "selection_status",
+                    "constraint_codes",
+                    "validation_stages",
+                }
+            )
+            assert set(candidate_row.get("task") or {}).issubset(
+                {
+                    "outline_id",
+                    "llm_outline_id",
+                    "event_name",
+                    "resource_jid",
+                    "part_name",
+                    "expected_end_state",
+                }
+            )
+            for stage in candidate_row.get("validation_stages") or []:
+                assert set(stage).issubset(
+                    {
+                        "validation_category",
+                        "validator_role",
+                        "status",
+                        "constraint_codes",
+                    }
+                )
     assert [
         json.loads(path.read_text(encoding="utf-8"))[
             "remaining_blocked_issue_count"
         ]
         for path in outline_result_paths
-    ] == [1, 1, 1, 0]
-    mcp_release_result = json.loads(
-        outline_result_paths[1].read_text(encoding="utf-8")
+    ] == [2, 2, 2, 0]
+    mcp_release_audit = json.loads(
+        outline_audit_paths[1].read_text(encoding="utf-8")
     )
     selected_release_evaluation = next(
         row
-        for row in mcp_release_result["candidate_evaluation_summary"]
+        for row in mcp_release_audit["candidate_evaluation_summary"]
         if row.get("selection_status") == "nondominated"
     )
     enabledness_after = selected_release_evaluation[
@@ -3243,6 +3381,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert latest_outline_turn["outline_result_artifact_path"] == (
         latest_outline_turn["response_artifact_path"]
     )
+    assert Path(latest_outline_turn["outline_audit_artifact_path"]).exists()
     assert "llm_response_artifact_path" not in latest_outline_turn
     assert Path(latest_outline_turn["outline_stack_artifact_path"]).exists()
     assert "turn_index_artifact_path" not in latest_outline_turn
@@ -3300,7 +3439,7 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     assert trace[0]["expected_end_state"]["resource_state"] == "xarm6_clear_state"
     assert trace[1]["expected_end_state"]["part_state"] == "mcp_waiting_recovery"
     assert trace[2]["expected_end_state"]["resource_state"] == "lg_secured"
-    assert trace[3]["expected_end_state"]["part_state"] == "lg_restored_state"
+    assert trace[3]["expected_end_state"]["part_state"] == "assembled"
     assert "semantic_state_history" not in session_state
     assert session_state["status"] == "ready_for_primitive_generation"
     assert result["llm_response_source"] == "mocked_scripted_fixture"
@@ -3364,16 +3503,22 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         for condition in (marked_reentry_context.get("marked_reentry_conditions") or [])
         if isinstance(condition, dict)
     )
-    continuation_conditions = list(
-        dict(prepared_recovery_request.get("llm_input") or {})
-        .get("modeled_continuation_gap", {})
-        .get("unmet_continuation_conditions", [])
+    goal_conditions = list(
+        dict(prepared_recovery_request.get("llm_input") or {}).get(
+            "goal_conditions", []
+        )
     )
-    assert all(
-        str(condition.get("kind") or "") != "focused_resource_terminal_state"
-        for condition in continuation_conditions
-        if isinstance(condition, dict)
-    )
+    assert {str(condition.get("entity") or "") for condition in goal_conditions} == {
+        "LG"
+    }
+    assert {str(condition.get("kind") or "") for condition in goal_conditions} == {
+        "goal_part_state",
+        "goal_part_location",
+    }
+    serialized_prepared = json.dumps(prepared_recovery_request, sort_keys=True)
+    assert "Modeled Continuation Gap" not in serialized_prepared
+    assert "safety_blocked_suffix_task" not in serialized_prepared
+    assert "safety_destination_occupancy" not in serialized_prepared
 
     context_resources = {
         str(row.get("resource_jid") or ""): row
@@ -3439,21 +3584,15 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         prepared_recovery_request,
         session_state,
     )
-    occupancy_blockers = [
-        blocker
+    assert {
+        str(blocker.get("kind") or "")
         for blocker in (outline_prompt_input.get("current_recovery_blockers") or [])
-        if str(blocker.get("kind") or "") == "safety_destination_occupancy"
-    ]
-    assert occupancy_blockers
-    assert any(
-        str(blocker.get("summary") or "")
-        == "xarm6@localhost currently occupies assembly_board-v1 under SAFE_2"
-        for blocker in occupancy_blockers
-    )
+    } == {"goal_part_state", "goal_part_location"}
     assert (
         "xarm6@localhost currently occupies assembly_board-v1 under SAFE_2"
         not in outline_prompt
     )
+    assert "Modeled Continuation Gap" not in outline_prompt
     assert '"resource_location": "assembly_board-v1"' in outline_prompt
     assert (
         "SAFE_2: ur5e and xarm6 must not both be in the assembly board destination "
@@ -3462,7 +3601,14 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
     )
     assert "restore LG to assembly_board-v1" in outline_prompt
     assert '"origin_location"' not in outline_prompt
-    assert "named poses home" in outline_prompt
+    assert (
+        "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
+        in outline_prompt
+    )
+    assert "Location order is lexical and does not express a preference." in (
+        outline_prompt
+    )
+    assert "named poses" not in outline_prompt
 
     session_state["symbolic_parts"]["LG"].update(
         {
@@ -3479,50 +3625,14 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         prepared_recovery_request=prepared_recovery_request,
     )
     assert remaining_findings == 0
-    assert remaining_conditions == 2
-    assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == "failed"
-
-    multi_turn_mode._apply_task_effects_to_symbolic_state(
-        {
-            "outline_id": "novel_xarm6_clear",
-            "event_name": "evt_q7",
-            "resource_jid": "xarm6@localhost",
-            "expected_end_state": {
-                "resource_state": "xarm6_clear_state",
-                "resource_location": "home",
-            },
-        },
-        session_state,
-    )
-    remaining_findings, remaining_conditions = multi_turn_mode._remaining_blocked_issue_counts(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    assert remaining_findings == 0
-    assert remaining_conditions == 1
-    assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == (
-        "xarm6_clear_state"
-    )
-
-    session_state["symbolic_parts"]["LG"].update(
-        {
-            "current_holder_resource_jid": None,
-            "part_holder_resource_jid": None,
-        }
-    )
-    remaining_findings, remaining_conditions = multi_turn_mode._remaining_blocked_issue_counts(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    assert remaining_findings == 0
     assert remaining_conditions == 0
+    assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == "failed"
 
 
 def test_non_case3_prompt_contains_only_supplied_runtime_facts() -> None:
     prompt = _render_non_case3_candidate_prompt()
 
     for supplied_token in (
-        "REQ_1_T3",
         "ur5e@localhost",
         "xarm6@localhost",
         "LCP",
@@ -3856,7 +3966,11 @@ def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anch
     assert "A new state name has no meaning by itself" in prompt
     assert "must accompany a concrete state effect" in prompt
     assert '"resource_location": "station"' in prompt
-    assert "Use only supplied resources, parts, locations, named poses, predicates" in prompt
+    assert (
+        "Use only supplied resources, parts, known resource locations, predicates"
+        in prompt
+    )
+    assert "named poses" not in prompt
     assert "Outline Candidate Contract" not in prompt
 
 
@@ -4008,7 +4122,7 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
             "resource_state": "lg_recovery_complete",
             "resource_location": "assembly_board-v1",
             "held_part": None,
-            "part_state": "lg_restored_state",
+            "part_state": "assembled",
             "part_location": "assembly_board-v1",
         },
         "rationale": "Restore the held part to its supplied goal location.",
@@ -4067,7 +4181,7 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
     assert session_state["symbolic_resources"]["xarm6@localhost"]["current_state"] == (
         "xarm6_clear_state"
     )
-    assert session_state["symbolic_parts"]["LG"]["current_state"] == "lg_restored_state"
+    assert session_state["symbolic_parts"]["LG"]["current_state"] == "assembled"
 
     assert "semantic_state_history" not in session_state
 
@@ -4681,9 +4795,13 @@ def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() 
         prepared_recovery_request,
         mismatch_session,
     )
-    assert mismatch_prompt.count("held_part_location_mismatch") == 1
+    assert mismatch_prompt.count("held_part_location_mismatch") == 2
     assert mismatch_prompt.count("xarm6@localhost_gripper") == 1
     assert "recover_pick" not in mismatch_prompt
+    assert "Candidate Revision Targets" in mismatch_prompt
+    assert "one materially revised candidate for every listed target" in (
+        mismatch_prompt
+    )
 
 
 def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> None:
@@ -5069,9 +5187,11 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
 
     request_artifact = Path(artifact_paths["request_artifact_path"])
     result_artifact = Path(artifact_paths["outline_result_artifact_path"])
+    audit_artifact = Path(artifact_paths["outline_audit_artifact_path"])
     stack_artifact = Path(artifact_paths["outline_stack_artifact_path"])
     assert request_artifact.name.startswith("multi_turn_turn03_outline_request_")
     assert result_artifact.name.startswith("multi_turn_turn03_outline_result_")
+    assert audit_artifact.name.startswith("multi_turn_turn03_outline_audit_")
     assert stack_artifact.name.startswith("multi_turn_turn03_outline_stack_")
     assert artifact_paths["prompt_artifact_path"] == str(request_artifact)
     assert artifact_paths["response_artifact_path"] == str(result_artifact)
@@ -5080,6 +5200,7 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
     assert {path.name for path in (tmp_path / "recovery_outline").iterdir()} == {
         request_artifact.name,
         result_artifact.name,
+        audit_artifact.name,
         stack_artifact.name,
     }
 
@@ -5089,26 +5210,97 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
     assert "candidate prompt" in request_text
 
     result_payload = json.loads(result_artifact.read_text(encoding="utf-8"))
-    assert result_payload["llm_response"] == llm_raw_response
+    audit_payload = json.loads(audit_artifact.read_text(encoding="utf-8"))
+    assert "llm_response" not in result_payload
+    assert audit_payload["llm_response"] == llm_raw_response
     assert len(result_payload["candidate_evaluation_summary"]) == 3
-    assert result_payload["selected_transition"] == transition_trace[0]
+    assert len(audit_payload["candidate_evaluation_summary"]) == 3
+    assert result_payload["selected_transition"] == {
+        "outline_id": "RECOVERY_SEQ1",
+        "event_name": "better_score",
+        "resource_jid": "xarm6@localhost",
+        "part_name": "LG",
+        "expected_end_state": {
+            "resource_state": "picked",
+            "held_part": "LG",
+        },
+    }
+    assert audit_payload["selected_transition"] == transition_trace[0]
     assert "transition_trace" not in result_payload
     assert result_payload["turn_index"] == 3
     assert result_payload["phase"] == "outline"
     assert result_payload["decision"] == "need_next_task"
-    assert result_payload["selected_candidate_index"] == 1
-    assert result_payload["selected_transition_outline_id"] == "RECOVERY_SEQ1"
+    assert "selected_candidate_index" not in result_payload
+    assert "selected_transition_outline_id" not in result_payload
+    assert audit_payload["selected_candidate_index"] == 1
+    assert audit_payload["selected_transition_outline_id"] == "RECOVERY_SEQ1"
     assert result_payload["accepted_trace_length"] == 1
     assert result_payload["remaining_blocked_issue_count"] == 0
     assert result_payload["artifact_paths"] == {
         "request_artifact_path": str(request_artifact),
         "outline_result_artifact_path": str(result_artifact),
+        "outline_audit_artifact_path": str(audit_artifact),
         "outline_stack_artifact_path": str(stack_artifact),
         "prompt_artifact_path": str(request_artifact),
         "response_artifact_path": str(result_artifact),
     }
+    assert audit_payload["artifact_paths"] == result_payload["artifact_paths"]
     stack_payload = json.loads(stack_artifact.read_text(encoding="utf-8"))
     assert stack_payload == transition_trace
+
+
+def test_outline_latest_paths_link_concise_result_and_detailed_audit(
+    tmp_path: Path,
+) -> None:
+    transition = _candidate_event("selected", outline_id="RECOVERY_SEQ1")
+    turn = {
+        "turn_index": 3,
+        "phase": "outline",
+        "decision": "outline_ready",
+        "prompt_text": "candidate prompt",
+        "llm_raw_response": {
+            "thought": "select candidate",
+            "selected_candidate_index": 0,
+            "candidate_events": [deepcopy(transition)],
+        },
+        "raw_response": {
+            "selected_transition": deepcopy(transition),
+            "selected_candidate_index": 0,
+            "transition_trace": [deepcopy(transition)],
+        },
+        "selected_transition": deepcopy(transition),
+        "transition_trace": [deepcopy(transition)],
+    }
+
+    artifact_paths = write_recovery_artifacts(
+        {
+            "reasoning_mode": "multi_turn",
+            "multi_turn_current_turn": deepcopy(turn),
+            "recovery_debug": {
+                "multi_turn_session": {
+                    "session_id": "latest_artifact_test",
+                    "turn_index": 3,
+                    "turns": [deepcopy(turn)],
+                }
+            },
+        },
+        phase_label="multi_turn",
+        debug_dir=tmp_path,
+        write_latest=True,
+    )
+
+    latest_result = Path(artifact_paths["latest_response_artifact_path"])
+    latest_audit = Path(artifact_paths["latest_outline_audit_artifact_path"])
+    latest_result_payload = json.loads(latest_result.read_text(encoding="utf-8"))
+    latest_audit_payload = json.loads(latest_audit.read_text(encoding="utf-8"))
+
+    assert latest_result.name == "multi_turn_turn03_outline_result_latest.json"
+    assert latest_audit.name == "multi_turn_turn03_outline_audit_latest.json"
+    assert "llm_response" not in latest_result_payload
+    assert latest_audit_payload["llm_response"]["thought"] == "select candidate"
+    assert latest_result_payload["artifact_paths"][
+        "latest_outline_audit_artifact_path"
+    ] == str(latest_audit)
 
 
 def test_rejected_outline_stack_preserves_only_the_accepted_trace(

@@ -305,9 +305,14 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "candidate_rejection_feedback": [],
         "selection_revision_count": 0,
         "selection_revision_fingerprint": "",
-        "selection_revision_limit": 3,
+        "selection_revision_limit": 6,
+        "selection_repeated_failure_count": 0,
+        "selection_repeated_failure_fingerprint": "",
+        "selection_repeated_failure_limit": 3,
         "selection_revision_safety_rule_fingerprints": [],
         "selection_revision_live_dfa_fingerprints": [],
+        "candidate_revision_targets": [],
+        "candidate_revision_state_fingerprint": "",
         "active_selection_ambiguity_feedback": {},
         "active_selection_ambiguity_fingerprint": "",
         "candidate_prune_history": {},
@@ -1420,13 +1425,11 @@ def _active_continuation_conditions(
     prepared_recovery_request: dict[str, Any],
 ) -> list[dict[str, Any]]:
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
-    modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    raw_conditions = (
-        modeled_gap.get("unmet_continuation_conditions")
-        or modeled_gap.get("unsatisfied_conditions")
-        or []
-    )
-    return [deepcopy(row) for row in raw_conditions if isinstance(row, dict)]
+    return [
+        deepcopy(row)
+        for row in (llm_input.get("goal_conditions") or [])
+        if isinstance(row, dict)
+    ]
 
 
 def _normalized_blocker_kind(condition: dict[str, Any]) -> str:
@@ -1434,57 +1437,6 @@ def _normalized_blocker_kind(condition: dict[str, Any]) -> str:
     if kind == "focused_resource_terminal_state":
         return "resource_terminal_state"
     return kind
-
-
-def _fault_event_fallback_parts(
-    prepared_recovery_request: dict[str, Any],
-) -> list[str]:
-    llm_input = dict(prepared_recovery_request.get("llm_input") or {})
-    fault_event = dict(llm_input.get("fault_event") or {})
-    return [
-        str(item).strip()
-        for item in (fault_event.get("affected_part_names") or [])
-        if str(item).strip()
-    ]
-
-
-def _extract_blocker_part_names(
-    *,
-    blocking_reason: str,
-    parts_by_name: dict[str, dict[str, Any]],
-    fallback_parts: list[str],
-) -> list[str]:
-    blocker_text = str(blocking_reason or "").strip().lower()
-    blocker_parts = [
-        part_name for part_name in parts_by_name if part_name and part_name.lower() in blocker_text
-    ]
-    if blocker_parts:
-        return blocker_parts
-    return [str(part_name).strip() for part_name in fallback_parts if str(part_name).strip()]
-
-
-def _extract_safety_blocker_part_names(
-    *,
-    blocking_reason: str,
-    parts_by_name: dict[str, dict[str, Any]],
-    fallback_parts: list[str],
-) -> list[str]:
-    blocker_text = str(blocking_reason or "").strip()
-    lowered = blocker_text.lower()
-    if " before " in lowered:
-        prefix = blocker_text[: lowered.index(" before ")].strip()
-        blocker_parts = _extract_blocker_part_names(
-            blocking_reason=prefix,
-            parts_by_name=parts_by_name,
-            fallback_parts=[],
-        )
-        if blocker_parts:
-            return blocker_parts
-    return _extract_blocker_part_names(
-        blocking_reason=blocking_reason,
-        parts_by_name=parts_by_name,
-        fallback_parts=fallback_parts,
-    )
 
 
 def _condition_expected_matches(actual: Any, expected: Any) -> bool:
@@ -1593,57 +1545,7 @@ def _continuation_condition_satisfied(  # noqa: C901, PLR0912
             )
         return False
 
-    if kind == "safety_destination_occupancy" and entity_kind == "resource" and entity:
-        row = dict(resources_by_jid.get(entity) or {})
-        if not row:
-            return False
-        expected_not = (
-            str(dict(expected).get("not") or "").strip()
-            if isinstance(expected, dict)
-            else ""
-        )
-        if not expected_not:
-            return False
-        current_location = str(
-            row.get("current_location")
-            or row.get("resource_location")
-            or dict(row.get("occupancy") or {}).get("location")
-            or ""
-        ).strip()
-        return current_location != expected_not
-
-    if kind != "safety_blocked_suffix_task":
-        return False
-
-    blocker_parts = _extract_safety_blocker_part_names(
-        blocking_reason=str(condition.get("blocking_reason") or "").strip(),
-        parts_by_name=parts_by_name,
-        fallback_parts=_fault_event_fallback_parts(prepared_recovery_request),
-    )
-    if not blocker_parts:
-        return False
-    for blocker_part in blocker_parts:
-        part_row = dict(parts_by_name.get(blocker_part) or {})
-        goal_location = str(part_row.get("goal_location") or "").strip()
-        current_location = str(
-            part_row.get("current_location") or part_row.get("location") or ""
-        ).strip()
-        current_holder = str(
-            part_row.get("current_holder_resource_jid")
-            or part_row.get("part_holder_resource_jid")
-            or ""
-        ).strip()
-        resource_holders = {
-            resource_jid
-            for resource_jid, resource_row in resources_by_jid.items()
-            if str(dict(resource_row or {}).get("held_part") or "").strip()
-            == blocker_part
-        }
-        if not goal_location or current_location != goal_location:
-            return False
-        if current_holder or resource_holders:
-            return False
-    return True
+    return False
 
 
 def _candidate_recovery_blocker_key(
@@ -1661,9 +1563,6 @@ def _candidate_recovery_blocker_key(
 
 def _candidate_recovery_blocker_summary(
     blocker: dict[str, Any],
-    *,
-    prepared_recovery_request: dict[str, Any],
-    parts_by_name: dict[str, dict[str, Any]],
 ) -> str:
     kind = _normalized_blocker_kind(blocker)
     if kind == "resource_terminal_state":
@@ -1676,41 +1575,12 @@ def _candidate_recovery_blocker_summary(
             return f"{entity} {field} must reach {expected}"
         return f"{entity or 'resource'} blocker remains"
 
-    if kind == "safety_blocked_suffix_task":
-        blocking_reason = str(blocker.get("blocking_reason") or "").strip()
-        if blocking_reason:
-            return blocking_reason
-        blocker_parts = _extract_safety_blocker_part_names(
-            blocking_reason=blocking_reason,
-            parts_by_name=parts_by_name,
-            fallback_parts=_fault_event_fallback_parts(prepared_recovery_request),
-        )
-        if blocker_parts:
-            blocker_part = blocker_parts[0]
-            goal_location = str(
-                dict(parts_by_name.get(blocker_part) or {}).get("goal_location") or ""
-            ).strip()
-            if goal_location:
-                return f"{blocker_part} must be at {goal_location} before blocked suffix can resume"
-            return f"{blocker_part} must be restored before blocked suffix can resume"
-        return "Blocked suffix must be cleared before continuation can resume"
-
-    if kind == "safety_destination_occupancy":
-        blocking_reason = str(blocker.get("blocking_reason") or "").strip()
-        if blocking_reason:
-            return blocking_reason
-        entity = str(blocker.get("entity") or "").strip()
-        expected = blocker.get("expected")
-        destination = (
-            str(dict(expected).get("not") or "").strip()
-            if isinstance(expected, dict)
-            else ""
-        )
-        if entity and destination:
-            return f"{entity} currently occupies {destination}"
-        return "A protected destination remains occupied"
-
-    return "Recovery blocker remains"
+    entity = str(blocker.get("entity") or "").strip()
+    field = str(blocker.get("field") or "").strip()
+    expected = blocker.get("expected")
+    if entity and field and expected not in (None, ""):
+        return f"{entity} {field} must reach {expected}"
+    return "Recovery goal remains"
 
 
 def _active_candidate_recovery_blockers(
@@ -1718,19 +1588,14 @@ def _active_candidate_recovery_blockers(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    resources_by_jid, parts_by_name = _projected_outline_validation_context(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
     blockers: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     for condition in _active_continuation_conditions(prepared_recovery_request):
         if not isinstance(condition, dict):
             continue
         kind = _normalized_blocker_kind(condition)
-        if kind not in {
-            "resource_terminal_state",
-            "safety_blocked_suffix_task",
-            "safety_destination_occupancy",
+        if str(condition.get("entity_kind") or "").strip().lower() not in {
+            "part",
+            "resource",
         }:
             continue
         if _continuation_condition_satisfied(
@@ -1741,11 +1606,7 @@ def _active_candidate_recovery_blockers(
             continue
         blocker = deepcopy(condition)
         blocker["kind"] = kind
-        blocker["summary"] = _candidate_recovery_blocker_summary(
-            blocker,
-            prepared_recovery_request=prepared_recovery_request,
-            parts_by_name=parts_by_name,
-        )
+        blocker["summary"] = _candidate_recovery_blocker_summary(blocker)
         blockers[_candidate_recovery_blocker_key(blocker)] = blocker
     return list(blockers.values())
 
@@ -5059,6 +4920,8 @@ def _write_per_turn_artifact(
                 "request_artifact_path",
                 "grounding_result_artifact_path",
                 "outline_result_artifact_path",
+                "outline_audit_artifact_path",
+                "latest_outline_audit_artifact_path",
                 "prompt_artifact_path",
                 "llm_response_artifact_path",
                 "response_artifact_path",

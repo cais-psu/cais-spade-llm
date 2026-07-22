@@ -24,116 +24,6 @@ def _dedupe_tokens(values: list[str]) -> list[str]:
     return out
 
 
-def _modeled_gap_pending_tasks_by_id(llm_input: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    tasks_by_id: dict[str, dict[str, Any]] = {}
-    for raw_task in modeled_gap.get("pending_nominal_tasks") or []:
-        if not isinstance(raw_task, dict):
-            continue
-        task_id = str(raw_task.get("id") or "").strip()
-        if task_id:
-            tasks_by_id[task_id] = deepcopy(raw_task)
-    return tasks_by_id
-
-
-def _modeled_gap_unmet_conditions_by_id(llm_input: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    modeled_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    conditions_by_id: dict[str, dict[str, Any]] = {}
-    for raw_condition in modeled_gap.get("unmet_continuation_conditions") or []:
-        if not isinstance(raw_condition, dict):
-            continue
-        condition_id = str(raw_condition.get("condition_id") or "").strip()
-        if condition_id:
-            conditions_by_id[condition_id] = deepcopy(raw_condition)
-    return conditions_by_id
-
-
-def _fault_event_fallback_parts(llm_input: dict[str, Any]) -> list[str]:
-    fault_event = dict(llm_input.get("fault_event") or {})
-    return [
-        str(item).strip()
-        for item in (fault_event.get("affected_part_names") or [])
-        if str(item).strip()
-    ]
-
-
-def _extract_blocker_part_names(
-    *,
-    blocking_reason: str,
-    parts_by_name: dict[str, dict[str, Any]],
-    fallback_parts: list[str],
-) -> list[str]:
-    preferred_fallback = [
-        str(part_name).strip() for part_name in fallback_parts if str(part_name).strip()
-    ]
-    if preferred_fallback:
-        return preferred_fallback
-    blocker_text = str(blocking_reason or "").strip().lower()
-    blocker_parts = [
-        part_name for part_name in parts_by_name if part_name and part_name.lower() in blocker_text
-    ]
-    return blocker_parts or preferred_fallback
-
-
-def _continuation_condition_cleared(
-    condition: dict[str, Any],
-    *,
-    resources_by_jid: dict[str, dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
-    fallback_parts: list[str],
-) -> bool:
-    kind = str(condition.get("kind") or "").strip()
-    entity_kind = str(condition.get("entity_kind") or "").strip().lower()
-    entity = str(condition.get("entity") or "").strip()
-    field = str(condition.get("field") or "").strip()
-    expected = condition.get("expected")
-    if kind in {"focused_resource_terminal_state", "resource_terminal_state"}:
-        resource_jid = str(condition.get("entity") or "").strip()
-        expected_state = str(condition.get("expected") or "").strip()
-        if entity_kind == "part":
-            row = dict(parts_by_name.get(entity) or {})
-        else:
-            row = dict(resources_by_jid.get(resource_jid) or {})
-        if field:
-            return row.get(field) == expected
-        current_state = str(row.get("current_state") or "").strip()
-        return bool(expected_state and current_state == expected_state)
-    if kind == "safety_destination_occupancy" and entity_kind == "resource":
-        row = dict(resources_by_jid.get(entity) or {})
-        expected_not = (
-            str(dict(expected).get("not") or "").strip()
-            if isinstance(expected, dict)
-            else ""
-        )
-        current_location = str(
-            row.get("current_location")
-            or row.get("resource_location")
-            or dict(row.get("occupancy") or {}).get("location")
-            or ""
-        ).strip()
-        return bool(expected_not and current_location != expected_not)
-    if kind != "safety_blocked_suffix_task":
-        return False
-    blocker_parts = _extract_blocker_part_names(
-        blocking_reason=str(condition.get("blocking_reason") or "").strip(),
-        parts_by_name=parts_by_name,
-        fallback_parts=fallback_parts,
-    )
-    if not blocker_parts:
-        return False
-    for blocker_part in blocker_parts:
-        part_row = dict(parts_by_name.get(blocker_part) or {})
-        goal_location = str(part_row.get("goal_location") or "").strip()
-        current_state = str(part_row.get("current_state") or "").strip().lower()
-        current_location = _part_location(part_row)
-        if current_state in {"placed", "assembled"}:
-            continue
-        if goal_location and current_location == goal_location:
-            continue
-        return False
-    return True
-
-
 def _effective_task_part_name(task: dict[str, Any], signature: dict[str, Any]) -> str:
     return str(task.get("part_name") or signature.get("inferable_primary_part") or "").strip()
 
@@ -523,127 +413,18 @@ def _safety_violation_reason(rule: dict[str, Any]) -> str:
     ).strip()
 
 
-def _claimed_safety_condition_ids_for_rule(
+def _admissible_projected_event_ids(
     *,
-    claimed_condition_ids: list[str],
-    conditions_by_id: dict[str, dict[str, Any]],
-    rule_id: str,
-) -> list[str]:
-    matched: list[str] = []
-    for condition_id in claimed_condition_ids:
-        condition = dict(conditions_by_id.get(condition_id) or {})
-        if str(condition.get("kind") or "").strip() != "safety_blocked_suffix_task":
-            continue
-        blocking_rule_id = str(condition.get("blocking_rule_id") or "").strip()
-        if blocking_rule_id and blocking_rule_id == rule_id:
-            matched.append(condition_id)
-    return matched
-
-
-def _blocked_suffix_proxy_task(
-    *,
-    condition: dict[str, Any],
-    blocked_task: dict[str, Any],
-    rule: dict[str, Any],
-) -> dict[str, Any]:
-    destination = str((rule.get("context") or {}).get("destination") or "").strip()
-    return {
-        "outline_id": str(blocked_task.get("id") or condition.get("entity") or "").strip(),
-        "resource_jid": str(
-            blocked_task.get("resource") or condition.get("blocked_resource_jid") or ""
-        ).strip(),
-        "part_name": str(
-            blocked_task.get("part") or condition.get("blocked_part_name") or ""
-        ).strip(),
-        "action_target": {
-            "target_location": destination,
-        },
-        "expected_end_state": {
-            "location": destination,
-        },
-    }
-
-
-def _safe_next_task_ids_after_projection(
-    *,
-    rules: list[dict[str, Any]],
-    conditions_by_id: dict[str, dict[str, Any]],
-    pending_tasks_by_id: dict[str, dict[str, Any]],
-    claimed_condition_ids: list[str],
-    projected_resources: dict[str, dict[str, Any]],
-    projected_parts: dict[str, dict[str, Any]],
-    llm_input: dict[str, Any],
-    safety_dfa_states: dict[str, str],
-) -> tuple[list[str], list[str]]:
-    rule_lookup = _recovery_rule_lookup(rules)
-    safe_next_task_ids: list[str] = []
-    cleared_condition_ids: list[str] = []
-    for condition_id in claimed_condition_ids:
-        condition = dict(conditions_by_id.get(condition_id) or {})
-        if str(condition.get("kind") or "").strip() != "safety_blocked_suffix_task":
-            continue
-        blocked_task_id = str(
-            condition.get("source_task_id") or condition.get("entity") or ""
-        ).strip()
-        blocking_rule_id = str(condition.get("blocking_rule_id") or "").strip()
-        blocked_task = dict(pending_tasks_by_id.get(blocked_task_id) or {})
-        rule = dict(rule_lookup.get(blocking_rule_id) or {})
-        if not blocked_task_id or not blocked_task or not rule:
-            continue
-        proxy_task = _blocked_suffix_proxy_task(
-            condition=condition,
-            blocked_task=blocked_task,
-            rule=rule,
-        )
-        proxy_signature = {
-            "inferable_primary_part": str(proxy_task.get("part_name") or "").strip(),
-            "task_kind": "part_handling",
-            "changes_part_world": True,
-        }
-        projection = project_outline_macro_recovery_aps(
-            task=proxy_task,
-            signature=proxy_signature,
-            pre_resources=projected_resources,
-            pre_parts=projected_parts,
-            projected_resources=projected_resources,
-            projected_parts=projected_parts,
-            llm_input={
-                "loaded_safety_rules": [rule],
-                "recovery_safety_context": llm_input.get("recovery_safety_context") or {},
-            },
-        )
-        monitor = _build_recovery_safety_monitor(
-            rules=[rule],
-            state_aps=list(projection.get("current_state_aps") or []),
-            llm_input=llm_input,
-        )
-        projected_rule_state = str(
-            safety_dfa_states.get(blocking_rule_id) or ""
-        ).strip()
-        if projected_rule_state and blocking_rule_id in monitor.current_states:
-            monitor.current_states[blocking_rule_id] = projected_rule_state
-        allowed, _ = monitor.online_safety_validation(
-            list(projection.get("candidate_aps") or []),
-            predicted_state_aps=list(projection.get("predicted_state_aps") or []),
-        )
-        if allowed:
-            safe_next_task_ids.append(blocked_task_id)
-            cleared_condition_ids.append(condition_id)
-    return _dedupe_tokens(safe_next_task_ids), _dedupe_tokens(cleared_condition_ids)
-
-
-def _admissible_nominal_reentry_event_ids(
-    *,
+    event_field: str,
     rules: list[dict[str, Any]],
     projected_resources: dict[str, dict[str, Any]],
     projected_parts: dict[str, dict[str, Any]],
     llm_input: dict[str, Any],
     safety_dfa_states: dict[str, str],
 ) -> list[str]:
-    """Evaluate private nominal-reentry event admissibility without mutating CCA state."""
     raw_events = [
         deepcopy(row)
-        for row in (llm_input.get("nominal_reentry_events") or [])
+        for row in (llm_input.get(event_field) or [])
         if isinstance(row, dict) and str(row.get("event_id") or "").strip()
     ]
     if not rules:
@@ -680,6 +461,44 @@ def _admissible_nominal_reentry_event_ids(
     return sorted(set(admissible))
 
 
+def _admissible_nominal_reentry_event_ids(
+    *,
+    rules: list[dict[str, Any]],
+    projected_resources: dict[str, dict[str, Any]],
+    projected_parts: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
+    safety_dfa_states: dict[str, str],
+) -> list[str]:
+    """Evaluate private nominal-reentry event admissibility without mutating CCA state."""
+    return _admissible_projected_event_ids(
+        event_field="nominal_reentry_events",
+        rules=rules,
+        projected_resources=projected_resources,
+        projected_parts=projected_parts,
+        llm_input=llm_input,
+        safety_dfa_states=safety_dfa_states,
+    )
+
+
+def _cca_admissible_goal_recovery_event_ids(
+    *,
+    rules: list[dict[str, Any]],
+    projected_resources: dict[str, dict[str, Any]],
+    projected_parts: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
+    safety_dfa_states: dict[str, str],
+) -> list[str]:
+    """Evaluate private goal-relevant recovery events against CCA rules only."""
+    return _admissible_projected_event_ids(
+        event_field="goal_recovery_events",
+        rules=rules,
+        projected_resources=projected_resources,
+        projected_parts=projected_parts,
+        llm_input=llm_input,
+        safety_dfa_states=safety_dfa_states,
+    )
+
+
 def validate_outline_macro_recovery_safety(
     *,
     task: dict[str, Any],
@@ -701,15 +520,6 @@ def validate_outline_macro_recovery_safety(
         projected_parts=projected_parts,
         llm_input=llm_input,
     )
-    conditions_by_id = _modeled_gap_unmet_conditions_by_id(llm_input)
-    active_safety_condition_ids = [
-        condition_id
-        for condition_id, condition in conditions_by_id.items()
-        if str(condition.get("blocking_rule_id") or "").strip()
-        or str(condition.get("kind") or "").strip().startswith("safety_")
-    ]
-    pending_tasks_by_id = _modeled_gap_pending_tasks_by_id(llm_input)
-
     if not rules:
         if safety_dfa_states_before:
             raise ValueError(
@@ -727,10 +537,35 @@ def validate_outline_macro_recovery_safety(
                 "reason": "",
             },
             "findings": [],
-            "handled_condition_ids": [],
-            "cleared_condition_ids": [],
             "safety_dfa_states_before": {},
             "safety_dfa_states_after": {},
+            "cca_admissible_goal_recovery_event_ids_before": (
+                _cca_admissible_goal_recovery_event_ids(
+                    rules=[],
+                    projected_resources=pre_resources,
+                    projected_parts=pre_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
+            "cca_admissible_goal_recovery_event_ids_after": (
+                _cca_admissible_goal_recovery_event_ids(
+                    rules=[],
+                    projected_resources=projected_resources,
+                    projected_parts=projected_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
+            "cca_admissible_goal_recovery_event_ids": (
+                _cca_admissible_goal_recovery_event_ids(
+                    rules=[],
+                    projected_resources=projected_resources,
+                    projected_parts=projected_parts,
+                    llm_input=llm_input,
+                    safety_dfa_states={},
+                )
+            ),
             "admissible_nominal_reentry_event_ids_before": (
                 _admissible_nominal_reentry_event_ids(
                     rules=[],
@@ -808,41 +643,6 @@ def validate_outline_macro_recovery_safety(
     rule_lookup = _recovery_rule_lookup(rules)
     violated_rule_id = str(info.get("violated_rule") or "").strip()
     violated_rule = dict(rule_lookup.get(violated_rule_id) or {})
-    related_condition_ids = _claimed_safety_condition_ids_for_rule(
-        claimed_condition_ids=active_safety_condition_ids,
-        conditions_by_id=conditions_by_id,
-        rule_id=violated_rule_id,
-    )
-    safe_next_task_ids: list[str] = []
-    cleared_condition_ids: list[str] = []
-    if allowed:
-        safe_next_task_ids, cleared_condition_ids = _safe_next_task_ids_after_projection(
-            rules=rules,
-            conditions_by_id=conditions_by_id,
-            pending_tasks_by_id=pending_tasks_by_id,
-            claimed_condition_ids=active_safety_condition_ids,
-            projected_resources=projected_resources,
-            projected_parts=projected_parts,
-            llm_input=llm_input,
-            safety_dfa_states=candidate_dfa_states_after,
-        )
-        cleared_condition_ids = _dedupe_tokens(
-            cleared_condition_ids
-            + [
-                condition_id
-                for condition_id, condition in conditions_by_id.items()
-                if (
-                    str(condition.get("blocking_rule_id") or "").strip()
-                    or str(condition.get("kind") or "").strip().startswith("safety_")
-                )
-                and _continuation_condition_cleared(
-                    condition,
-                    resources_by_jid=projected_resources,
-                    parts_by_name=projected_parts,
-                    fallback_parts=_fault_event_fallback_parts(llm_input),
-                )
-            ]
-        )
 
     safety_ctx = {
         "rule_ids": [violated_rule_id] if violated_rule_id else [],
@@ -854,7 +654,7 @@ def validate_outline_macro_recovery_safety(
         "predicted_state_aps": list(
             info.get("predicted_state_aps") or projection.get("predicted_state_aps") or []
         ),
-        "safe_next_task_ids": safe_next_task_ids,
+        "safe_next_task_ids": [],
         "status": "violated" if not allowed else "safe",
         "reason": _safety_violation_reason(violated_rule) if violated_rule else "",
         "safety_rules": [deepcopy(violated_rule)] if violated_rule else [],
@@ -874,7 +674,6 @@ def validate_outline_macro_recovery_safety(
                 "constraint_owner": "cca",
                 "constraint_family": "safety",
                 "constraint_code": "safety_rule_violation",
-                "claimed_condition_ids": deepcopy(related_condition_ids),
                 "rule_id": violated_rule_id,
                 "candidate_aps": deepcopy(safety_ctx.get("candidate_aps") or []),
                 "predicted_state_aps": deepcopy(safety_ctx.get("predicted_state_aps") or []),
@@ -891,12 +690,33 @@ def validate_outline_macro_recovery_safety(
                     "violated_from": deepcopy(info.get("violated_from")),
                     "violated_to": deepcopy(info.get("violated_to")),
                 },
-                "safe_next_task_ids": deepcopy(safe_next_task_ids),
+                "safe_next_task_ids": [],
             }
         )
 
-    handled_condition_ids = _dedupe_tokens(related_condition_ids + cleared_condition_ids)
     dfa_states_after = candidate_dfa_states_after
+    cca_admissible_goal_recovery_event_ids_before = (
+        _cca_admissible_goal_recovery_event_ids(
+            rules=rules,
+            projected_resources=pre_resources,
+            projected_parts=pre_parts,
+            llm_input=llm_input,
+            safety_dfa_states=dfa_states_before,
+        )
+        if allowed
+        else []
+    )
+    cca_admissible_goal_recovery_event_ids_after = (
+        _cca_admissible_goal_recovery_event_ids(
+            rules=rules,
+            projected_resources=projected_resources,
+            projected_parts=projected_parts,
+            llm_input=llm_input,
+            safety_dfa_states=dfa_states_after,
+        )
+        if allowed
+        else []
+    )
     admissible_nominal_reentry_event_ids_before = (
         _admissible_nominal_reentry_event_ids(
             rules=rules,
@@ -923,10 +743,17 @@ def validate_outline_macro_recovery_safety(
         "is_safe": bool(allowed),
         "safety_ctx": safety_ctx,
         "findings": findings,
-        "handled_condition_ids": handled_condition_ids,
-        "cleared_condition_ids": cleared_condition_ids,
         "safety_dfa_states_before": dfa_states_before,
         "safety_dfa_states_after": dfa_states_after,
+        "cca_admissible_goal_recovery_event_ids_before": (
+            cca_admissible_goal_recovery_event_ids_before
+        ),
+        "cca_admissible_goal_recovery_event_ids_after": (
+            cca_admissible_goal_recovery_event_ids_after
+        ),
+        "cca_admissible_goal_recovery_event_ids": (
+            cca_admissible_goal_recovery_event_ids_after
+        ),
         "admissible_nominal_reentry_event_ids_before": (
             admissible_nominal_reentry_event_ids_before
         ),

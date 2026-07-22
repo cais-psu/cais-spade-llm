@@ -881,6 +881,40 @@ class RecoverySessionMixin:
         return f"cond_{digest}"
 
     @staticmethod
+    def _recovery_goal_part_names(
+        prepared_recovery_request: dict[str, Any],
+    ) -> list[str]:
+        part_names: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw_value: Any) -> None:
+            part_name = str(raw_value or "").strip()
+            if not part_name or part_name in seen:
+                return
+            seen.add(part_name)
+            part_names.append(part_name)
+
+        failure_anchor = dict(prepared_recovery_request.get("failure_anchor") or {})
+        for raw_part in failure_anchor.get("affected_parts") or []:
+            if isinstance(raw_part, dict):
+                _add(raw_part.get("part_name") or raw_part.get("entity_id"))
+            else:
+                _add(raw_part)
+
+        for raw_target in prepared_recovery_request.get("obligation_targets") or []:
+            if not isinstance(raw_target, dict):
+                continue
+            _add(raw_target.get("part_name") or raw_target.get("product"))
+            for raw_part_name in raw_target.get("affected_part_names") or []:
+                _add(raw_part_name)
+
+        if not part_names:
+            raise ValueError(
+                "recovery request has no affected part or explicit recovery obligation target"
+            )
+        return part_names
+
+    @staticmethod
     def _ordered_resource_jids(
         *,
         focused_resource_jid: str,
@@ -1824,7 +1858,7 @@ class RecoverySessionMixin:
         relevant_assembly_requirements = list(
             context_summary.get("relevant_assembly_requirements") or []
         )
-        modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
+        recovery_goals = dict(context_summary.get("recovery_goals") or {})
         resources = list(current_product_state.get("resources") or [])
         parts = list(current_product_state.get("parts") or [])
         active_safety_diagnosis = dict(current_product_state.get("active_safety_diagnosis") or {})
@@ -1836,13 +1870,6 @@ class RecoverySessionMixin:
             or str(active_safety_diagnosis.get("status") or "").strip()
             or str(active_safety_diagnosis.get("reason") or "").strip()
         )
-
-        def _derived_from(entry: dict[str, Any]) -> str:
-            task_id = str(entry.get("source_task_id") or "").strip()
-            function_name = str(entry.get("source_function_name") or "").strip()
-            if not task_id and not function_name:
-                return "-"
-            return f"{task_id or '-'}" + (f"/{function_name}" if function_name else "")
 
         lines = [
             "",
@@ -1948,36 +1975,22 @@ class RecoverySessionMixin:
         lines.extend(
             [
                 "",
-                "Modeled Continuation Gap",
-                f"  goal_state:               {modeled_continuation_gap.get('goal_state') or '-'}",
-                f"  pending_nominal_task_ids: {modeled_continuation_gap.get('pending_nominal_task_ids') or []}",
-                f"  resume_ready:             {modeled_continuation_gap.get('resume_ready')}",
+                "Recovery Goals",
+                f"  goal_state:   {recovery_goals.get('goal_state') or '-'}",
+                f"  resume_ready: {recovery_goals.get('resume_ready')}",
             ]
         )
-        for entry in (modeled_continuation_gap.get("unsatisfied_conditions") or [])[:8]:
+        for entry in (recovery_goals.get("unsatisfied_goal_conditions") or [])[:8]:
             if not isinstance(entry, dict):
                 continue
-            condition_family = str(entry.get("condition_family") or "").strip()
-            if condition_family == "goal":
-                lines.append(
-                    "  unmet goal: {entity}.{field} expected={expected!r} actual={actual!r}".format(
-                        entity=entry.get("entity") or "?",
-                        field=entry.get("field") or "?",
-                        expected=entry.get("expected"),
-                        actual=entry.get("actual"),
-                    )
+            lines.append(
+                "  unmet goal: {entity}.{field} expected={expected!r} actual={actual!r}".format(
+                    entity=entry.get("entity") or "?",
+                    field=entry.get("field") or "?",
+                    expected=entry.get("expected"),
+                    actual=entry.get("actual"),
                 )
-            else:
-                lines.append(
-                    "  unmet continuation: {entity}.{field} expected={expected!r} actual={actual!r} "
-                    "derived_from={derived_from}".format(
-                        entity=entry.get("entity") or "?",
-                        field=entry.get("field") or "?",
-                        expected=entry.get("expected"),
-                        actual=entry.get("actual"),
-                        derived_from=_derived_from(entry),
-                    )
-                )
+            )
         return lines
 
     def emit_prepare_trace_summary(self, prepared_recovery_request: dict[str, Any]) -> None:
@@ -2096,8 +2109,6 @@ class RecoverySessionMixin:
     def _build_context_summary(
         self,
         prepared_recovery_request: dict[str, Any],
-        *,
-        input_recovery_safety_context: dict[str, Any],
     ) -> dict[str, Any]:
         failure_anchor = dict(prepared_recovery_request.get("failure_anchor") or {})
         focused_resource_jid = str(
@@ -2105,7 +2116,6 @@ class RecoverySessionMixin:
         ).strip()
         recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
         grounding_context = dict(prepared_recovery_request.get("grounding_context") or {})
-        marked_reentry_context = dict(prepared_recovery_request.get("marked_reentry_context") or {})
         recovery_safety_context = dict(prepared_recovery_request.get("recovery_safety_context") or {})
         blocked_task_id = str(failure_anchor.get("failed_task_id") or "").strip()
         blocked_function_name = str(failure_anchor.get("failed_function_name") or "").strip()
@@ -2210,24 +2220,11 @@ class RecoverySessionMixin:
             for row in parts
             if isinstance(row, dict) and str(row.get("part_name") or "").strip()
         }
-        continuation_requirements = [
-            self._brief_condition(entry, condition_family="continuation")
-            for entry in (marked_reentry_context.get("marked_reentry_conditions") or [])
-            if isinstance(entry, dict)
-        ]
-        unmet_continuation_conditions = [
-            self._brief_condition(entry, condition_family="continuation")
-            for entry in (marked_reentry_context.get("unmet_reentry_conditions") or [])
-            if isinstance(entry, dict)
-        ]
+        goal_part_names = self._recovery_goal_part_names(prepared_recovery_request)
         goal_state = str(prepared_recovery_request.get("goal_state") or "").strip()
         goal_conditions: list[dict[str, Any]] = []
         unsatisfied_goal_conditions: list[dict[str, Any]] = []
-        for part_name in [
-            str(name or "").strip()
-            for name in (prepared_recovery_request.get("P_id") or [])
-            if str(name or "").strip()
-        ]:
+        for part_name in goal_part_names:
             part_row = dict(parts_by_name.get(part_name) or {})
             if goal_state:
                 state_condition = {
@@ -2261,126 +2258,9 @@ class RecoverySessionMixin:
                     unsatisfied_entry["actual"] = deepcopy(actual_location)
                     unsatisfied_goal_conditions.append(unsatisfied_entry)
 
-        # Detect pending suffix tasks blocked by safety ordering rules.
-        # For each "ordering_place_approach_priority" rule, if the gateway part
-        # has not yet been assembled, find pending place_approach tasks for the
-        # blocked part and inject them as continuation conditions.  This ensures
-        # the LLM sees the full scope of the deadlock, not just the xarm6 state gap.
-        for _rule in prepared_recovery_request.get("loaded_safety_rules") or []:
-            if not isinstance(_rule, dict):
-                continue
-            if (
-                str(_rule.get("constraint_type") or "").strip()
-                != "ordering_place_approach_priority"
-            ):
-                continue
-            _rule_id = str(_rule.get("id") or _rule.get("rule_id") or "").strip()
-            _products = [str(p or "").lower().strip() for p in (_rule.get("product") or [])]
-            if len(_products) < 2:
-                continue
-            _gateway_lower = _products[0]
-            _blocked_lower = _products[1]
-            _dest = str((_rule.get("context") or {}).get("destination") or "").strip()
-            _gw_row = next(
-                (row for name, row in parts_by_name.items() if name.lower() == _gateway_lower),
-                {},
-            )
-            _gw_state = _gw_row.get("state")
-            _gw_location = _gw_row.get("location")
-            _gateway_satisfied = (
-                bool(goal_state)
-                and _gw_state == goal_state
-                and (not _dest or _gw_location == _dest)
-            )
-            if _gateway_satisfied:
-                continue
-            # The blocked event type comes from the rule itself (e.g. "place_approach"),
-            # so detection generalises to any ordering constraint the rule specifies.
-            _blocked_event = str(_rule.get("event") or "").strip()
-            for _raw_entry in recovery_resources.values():
-                if not isinstance(_raw_entry, dict):
-                    continue
-                for _task in _raw_entry.get("pending_tasks") or []:
-                    if not isinstance(_task, dict):
-                        continue
-                    _fn = str(_task.get("function_name") or "").strip()
-                    _task_part = (
-                        str((_task.get("params") or {}).get("part_name") or "").lower().strip()
-                    )
-                    _task_id = str(_task.get("id") or "").strip()
-                    if (
-                        _task_id
-                        and _task_part == _blocked_lower
-                        and (_blocked_event and _fn == _blocked_event)
-                    ):
-                        unmet_continuation_conditions.append(
-                            {
-                                "kind": "safety_blocked_suffix_task",
-                                "condition_family": "continuation",
-                                "entity_kind": "task",
-                                "entity": _task_id,
-                                "field": "safety_gate",
-                                "expected": "unblocked",
-                                "actual": f"blocked_by_{_rule_id}",
-                                "blocking_rule_id": _rule_id,
-                                "blocking_reason": (
-                                    f"{_gateway_lower.upper()} must be placed at {_dest!r} "
-                                    f"before {_blocked_lower.upper()} place_approach"
-                                ),
-                            }
-                        )
-
-        # Explicit destination occupancy is a live safety condition, not a
-        # nominal-task obligation. A recovery transition may clear it using
-        # any physically validated end state outside the supplied destination.
-        for rule in prepared_recovery_request.get("loaded_safety_rules") or []:
-            if not isinstance(rule, dict):
-                continue
-            if (
-                str(rule.get("constraint_type") or "").strip()
-                != "mutual_exclusion_in_destination_area"
-            ):
-                continue
-            destination = str((rule.get("context") or {}).get("destination") or "").strip()
-            if not destination:
-                continue
-            rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
-            resource_tokens = {
-                self._normalize_resource_token(resource)
-                for resource in (rule.get("resources") or [])
-                if self._normalize_resource_token(resource)
-            }
-            for resource in resources:
-                if not isinstance(resource, dict):
-                    continue
-                resource_jid = str(resource.get("resource_jid") or "").strip()
-                current_location = str(resource.get("current_location") or "").strip()
-                if not resource_jid or current_location != destination:
-                    continue
-                if (
-                    resource_tokens
-                    and self._normalize_resource_token(resource_jid) not in resource_tokens
-                ):
-                    continue
-                unmet_continuation_conditions.append(
-                    {
-                        "kind": "safety_destination_occupancy",
-                        "condition_family": "continuation",
-                        "entity_kind": "resource",
-                        "entity": resource_jid,
-                        "field": "current_location",
-                        "expected": {"not": destination},
-                        "actual": current_location,
-                        "blocking_rule_id": rule_id,
-                        "blocking_reason": (
-                            f"{resource_jid} currently occupies {destination} under {rule_id}"
-                        ),
-                    }
-                )
-
         unsatisfied_conditions: list[dict[str, Any]] = []
         seen_unsatisfied_signatures: set[tuple[str, str, str, str, str]] = set()
-        for entry in unsatisfied_goal_conditions + unmet_continuation_conditions:
+        for entry in unsatisfied_goal_conditions:
             signature = self._condition_signature(entry)
             if signature in seen_unsatisfied_signatures:
                 continue
@@ -2417,8 +2297,7 @@ class RecoverySessionMixin:
             active_rule_ids=active_rule_ids,
             relevant_parts=[
                 str(name or "").strip()
-                for name in (prepared_recovery_request.get("P_id") or [])
-                if str(name or "").strip()
+                for name in goal_part_names
             ],
             relevant_resource_jids=list(recovery_resources),
             relevant_locations=[
@@ -2432,31 +2311,11 @@ class RecoverySessionMixin:
             recovery_resources=recovery_resources,
             failure_anchor=failure_anchor,
         )
-        modeled_continuation_gap = {
-            "basis": "remaining modeled suffix requirements",
+        recovery_goals = {
             "goal_state": deepcopy(prepared_recovery_request.get("goal_state")),
-            "remaining_suffixes": deepcopy(
-                marked_reentry_context.get("pending_suffix_summary") or []
-            ),
-            "pending_nominal_task_ids": [
-                str(task.get("id") or "").strip()
-                for raw_entry in recovery_resources.values()
-                for task in (raw_entry.get("pending_tasks") or [])
-                if isinstance(raw_entry, dict)
-                and isinstance(task, dict)
-                and str(task.get("id") or "").strip()
-            ],
-            "pending_resource_jids": [
-                str(resource_jid)
-                for resource_jid, raw_entry in recovery_resources.items()
-                if isinstance(raw_entry, dict) and list(raw_entry.get("pending_tasks") or [])
-            ],
             "goal_conditions": deepcopy(goal_conditions),
-            "continuation_requirements": deepcopy(continuation_requirements),
             "unsatisfied_goal_conditions": deepcopy(unsatisfied_goal_conditions),
-            "unsatisfied_conditions": deepcopy(unsatisfied_conditions),
             "resume_ready": not unsatisfied_conditions,
-            "blocking_reasons": deepcopy(unsatisfied_conditions),
         }
 
         return {
@@ -2489,7 +2348,7 @@ class RecoverySessionMixin:
                 "formal_state": deepcopy(prepared_recovery_request.get("des_monitor") or {}),
             },
             "relevant_assembly_requirements": relevant_assembly_requirements,
-            "modeled_continuation_gap": modeled_continuation_gap,
+            "recovery_goals": recovery_goals,
             "data_flow_trace": {
                 "fault_event": ["runtime failure inputs", "failure_context_raw", "stuck_state"],
                 "current_product_state": [
@@ -2513,12 +2372,11 @@ class RecoverySessionMixin:
                     "requirements_status",
                     "remaining pending tasks",
                 ],
-                "modeled_continuation_gap": [
+                "recovery_goals": [
                     "goal_state",
-                    "remaining goal parts",
-                    "pending tasks",
-                    "tool metadata",
-                    "derived reentry context",
+                    "affected parts",
+                    "part_tracker",
+                    "grounding_context",
                 ],
             },
         }
@@ -2538,7 +2396,7 @@ class RecoverySessionMixin:
             for entry in (context_summary.get("relevant_assembly_requirements") or [])
             if isinstance(entry, dict)
         ]
-        modeled_continuation_gap = dict(context_summary.get("modeled_continuation_gap") or {})
+        recovery_goals = dict(context_summary.get("recovery_goals") or {})
         recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
         current_resources = [
             dict(row)
@@ -2616,62 +2474,13 @@ class RecoverySessionMixin:
             if held_part:
                 held_part_to_resource.setdefault(held_part, resource_jid)
 
-        raw_unmet_continuation_conditions = [
+        goal_conditions = [
             deepcopy(entry)
-            for entry in (modeled_continuation_gap.get("unsatisfied_conditions") or [])
+            for entry in (recovery_goals.get("goal_conditions") or [])
             if isinstance(entry, dict)
-            and str(entry.get("condition_family") or "").strip() == "continuation"
         ]
-        unmet_continuation_conditions: list[dict[str, Any]] = []
-        condition_ids_by_task_id: dict[str, list[str]] = {}
-        for entry in raw_unmet_continuation_conditions:
-            enriched_entry = deepcopy(entry)
-            condition_id = self._condition_id(enriched_entry)
-            enriched_entry["condition_id"] = condition_id
-            unmet_continuation_conditions.append(enriched_entry)
-
-            task_refs: set[str] = set()
-            source_task_id = str(enriched_entry.get("source_task_id") or "").strip()
-            if source_task_id:
-                task_refs.add(source_task_id)
-            if str(enriched_entry.get("entity_kind") or "").strip() == "task":
-                entity_task_id = str(enriched_entry.get("entity") or "").strip()
-                if entity_task_id:
-                    task_refs.add(entity_task_id)
-            task_refs.update(
-                str(task_id or "").strip()
-                for task_id in (enriched_entry.get("source_task_ids") or [])
-                if str(task_id or "").strip()
-            )
-            for task_id in task_refs:
-                bucket = condition_ids_by_task_id.setdefault(task_id, [])
-                if condition_id not in bucket:
-                    bucket.append(condition_id)
-
-        pending_tasks_detail: list[dict[str, Any]] = []
-        pending_task_ids_by_part: dict[str, list[str]] = {}
-        for resource_jid in sorted(recovery_resources):
-            raw_entry = dict(recovery_resources.get(resource_jid) or {})
-            for task in raw_entry.get("pending_tasks") or []:
-                if not isinstance(task, dict):
-                    continue
-                task_id = str(task.get("id") or "").strip()
-                if not task_id:
-                    continue
-                task_part = str((task.get("params") or {}).get("part_name") or "").strip() or None
-                pending_tasks_detail.append(
-                    {
-                        "id": task_id,
-                        "function": str(task.get("function_name") or "").strip(),
-                        "part": task_part,
-                        "resource": resource_jid,
-                        "blocked_by_condition_ids": deepcopy(
-                            condition_ids_by_task_id.get(task_id) or []
-                        ),
-                    }
-                )
-                if task_part:
-                    pending_task_ids_by_part.setdefault(task_part, []).append(task_id)
+        for goal_condition in goal_conditions:
+            goal_condition["condition_id"] = self._condition_id(goal_condition)
 
         requirements_by_product: dict[str, list[dict[str, Any]]] = {}
         for requirement_entry in relevant_assembly_requirements:
@@ -2739,9 +2548,6 @@ class RecoverySessionMixin:
                     "nominal_requirement_resource_jid": (
                         str(requirement_entry.get("resource_jid") or "").strip() or None
                     ),
-                    "pending_nominal_task_ids": deepcopy(
-                        pending_task_ids_by_part.get(part_name) or []
-                    ),
                 }
             )
 
@@ -2793,11 +2599,7 @@ class RecoverySessionMixin:
                 if isinstance(target, dict)
             ],
             "relevant_assembly_requirements": relevant_assembly_requirements,
-            "modeled_continuation_gap": {
-                "pending_nominal_tasks": pending_tasks_detail,
-                "unmet_continuation_conditions": unmet_continuation_conditions,
-                "resume_ready": deepcopy(modeled_continuation_gap.get("resume_ready")),
-            },
+            "goal_conditions": goal_conditions,
             "allowed_execution_surface": self._build_allowed_execution_surface(
                 prepared_recovery_request
             ),
@@ -3146,8 +2948,7 @@ class RecoverySessionMixin:
             marked_reentry_context=marked_reentry_context,
         )
         prepared_recovery_request["context_summary"] = self._build_context_summary(
-            prepared_recovery_request,
-            input_recovery_safety_context=input_recovery_safety_context,
+            prepared_recovery_request
         )
         prepared_recovery_request["llm_input"] = self._build_llm_input(
             prepared_recovery_request,

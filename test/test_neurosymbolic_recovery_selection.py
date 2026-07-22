@@ -51,10 +51,7 @@ def _condition(
 def _prepared(*conditions: dict[str, Any]) -> dict[str, Any]:
     return {
         "llm_input": {
-            "modeled_continuation_gap": {
-                "unmet_continuation_conditions": [deepcopy(row) for row in conditions],
-                "continuation_requirements": [deepcopy(row) for row in conditions],
-            }
+            "goal_conditions": [deepcopy(row) for row in conditions],
         },
         "tools_catalog": [],
         "recovery_resources": {},
@@ -107,8 +104,16 @@ def _session(*, parts: dict[str, str], candidate_bound: int = 5) -> dict[str, An
         "accepted_outline_prefix": [],
         "candidate_rejection_feedback": [],
         "candidate_prune_history": {},
+        "candidate_revision_targets": [],
+        "candidate_revision_state_fingerprint": "",
         "outline_validation_findings": [],
         "pruned_actions": [],
+        "selection_revision_count": 0,
+        "selection_revision_fingerprint": "",
+        "selection_revision_limit": 6,
+        "selection_repeated_failure_count": 0,
+        "selection_repeated_failure_fingerprint": "",
+        "selection_repeated_failure_limit": 3,
         "symbolic_resources": {
             "resource@localhost": {
                 "resource_jid": "resource@localhost",
@@ -130,7 +135,6 @@ def _session(*, parts: dict[str, str], candidate_bound: int = 5) -> dict[str, An
             for part_name, state in parts.items()
         },
         "projected_safety_dfa_states": {},
-        "projected_safety_condition_identifiers": [],
     }
 
 
@@ -186,7 +190,6 @@ def _evaluation(
             session_state["symbolic_resources"]
         ),
         "projected_symbolic_parts": projected_parts,
-        "remaining_safety_condition_identifiers": [],
         "safety_dfa_states_before": {},
         "safety_dfa_states_after": {},
     }
@@ -416,7 +419,6 @@ def test_printer_transition_enables_ra_declared_continuation_event() -> None:
         "valid": True,
         "projected_symbolic_resources": deepcopy(projected["symbolic_resources"]),
         "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
-        "remaining_safety_condition_identifiers": [],
         "safety_dfa_states_before": {},
         "safety_dfa_states_after": {},
     }
@@ -543,7 +545,6 @@ def test_strict_nominal_reentry_expansion_counts_as_progress(
         "valid": True,
         "projected_symbolic_resources": deepcopy(projected["symbolic_resources"]),
         "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
-        "remaining_safety_condition_identifiers": [],
         "safety_dfa_states_before": {},
         "safety_dfa_states_after": {},
         "agent_filtered_enabledness": True,
@@ -858,7 +859,7 @@ def test_neurosymbolic_prompt_assigns_only_candidate_generation_to_llm() -> None
             llm_input={
                 "observed_runtime_state": {"resources": []},
                 "part_facts": [],
-                "modeled_continuation_gap": {},
+                "goal_conditions": [],
                 "loaded_safety_rules": [],
             },
             session_state=_session(parts={}),
@@ -869,6 +870,233 @@ def test_neurosymbolic_prompt_assigns_only_candidate_generation_to_llm() -> None
     assert "do not return `selected_candidate_index`" in prompt
     assert "do not pad the list" in prompt
     assert "You must choose the best candidate" not in prompt
+
+
+def test_no_progress_feedback_preserves_declared_effects_without_event_names() -> None:
+    selection_evidence = {
+        "open_recovery_obligation_ids_before": ["condition_open"],
+        "cleared_recovery_obligation_ids": [],
+        "open_recovery_obligation_ids_after": ["condition_open"],
+        "introduced_recovery_obligation_ids": [],
+        "newly_enabled_recovery_event_ids": ["private_new_recovery_event"],
+        "newly_enabled_nominal_reentry_event_ids": ["private_new_nominal_event"],
+        "safety_dfa_states_before": {"SAFE_1": "1"},
+        "safety_dfa_states_after": {"SAFE_1": "1"},
+        "admissible_recovery_enabled_event_ids_before": ["private_event"],
+        "admissible_recovery_enabled_event_ids_after": ["private_event"],
+        "cca_admissible_goal_recovery_event_ids_before": [
+            "private_goal_event"
+        ],
+        "cca_admissible_goal_recovery_event_ids_after": [
+            "private_goal_event"
+        ],
+    }
+    finding = {
+        "constraint_code": "no_progressing_candidate",
+        "evidence": {
+            "candidate_comparison": [
+                {
+                    "candidate_id": "candidate_part",
+                    "selection_status": "excluded_no_progress",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "event_name": "place_insert",
+                    "rationale": "recommended transition",
+                    "expected_end_state": {
+                        "resource_state": "acquired",
+                        "held_part": "LG",
+                        "part_state": "misplaced",
+                        "part_location": "ur5e@localhost_gripper",
+                    },
+                    "selection_evidence": deepcopy(selection_evidence),
+                },
+                {
+                    "candidate_id": "candidate_resource",
+                    "selection_status": "excluded_no_progress",
+                    "resource_jid": "xarm6@localhost",
+                    "expected_end_state": {
+                        "resource_state": "failed",
+                        "resource_location": "assembly_board-v1",
+                    },
+                    "selection_evidence": deepcopy(selection_evidence),
+                },
+                {
+                    "candidate_id": "candidate_declared_fields",
+                    "selection_status": "excluded_no_progress",
+                    "resource_jid": "printer@localhost",
+                    "part_name": "P",
+                    "expected_end_state": {
+                        "resource_state": "paused",
+                        "job_state": "paused",
+                        "part_quality": "unknown",
+                    },
+                    "selection_evidence": deepcopy(selection_evidence),
+                },
+            ]
+        },
+    }
+
+    compact = multi_turn_prompts._compact_selection_feedback_evidence(finding)
+    rows = compact["candidate_comparison"]
+
+    assert rows[0]["expected_end_state"]["held_part"] == "LG"
+    assert rows[0]["expected_end_state"]["part_location"] == (
+        "ur5e@localhost_gripper"
+    )
+    assert "part_name" not in rows[1]
+    assert rows[1]["expected_end_state"]["resource_state"] == "failed"
+    assert rows[2]["expected_end_state"]["job_state"] == "paused"
+    assert rows[2]["expected_end_state"]["part_quality"] == "unknown"
+    assert rows[0]["safety_dfa_states_before"] == {"SAFE_1": "1"}
+    assert rows[0]["safety_dfa_states_after"] == {"SAFE_1": "1"}
+    assert rows[0]["open_recovery_obligation_ids_before"] == ["condition_open"]
+    assert rows[0]["open_recovery_obligation_ids_after"] == ["condition_open"]
+    assert "place_insert" not in str(compact)
+    assert "recommended transition" not in str(compact)
+    assert "admissible_recovery_enabled_event_ids" not in str(compact)
+    assert "cca_admissible_goal_recovery_event_ids" not in str(compact)
+    assert "private_goal_event" not in str(compact)
+    assert "private_new_recovery_event" not in str(compact)
+    assert "private_new_nominal_event" not in str(compact)
+
+    ambiguous = deepcopy(finding)
+    ambiguous["constraint_code"] = "selection_ambiguous"
+    ambiguous_row = multi_turn_prompts._compact_selection_feedback_evidence(
+        ambiguous
+    )["candidate_comparison"][0]
+    assert "resource_jid" not in ambiguous_row
+    assert "part_name" not in ambiguous_row
+    assert "expected_end_state" not in ambiguous_row
+    assert "safety_dfa_states_before" not in ambiguous_row
+
+
+def test_no_progress_prompt_renders_goal_and_material_effect_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource_jid = "ur5e@localhost"
+    part_name = "LG"
+    carried_location = f"{resource_jid}_gripper"
+    session_state = _session(parts={part_name: "misplaced"})
+    session_state["symbolic_resources"] = {
+        resource_jid: {
+            "resource_jid": resource_jid,
+            "resource_state": "acquired",
+            "current_state": "acquired",
+            "resource_location": "prusa-mk4-2",
+            "current_location": "prusa-mk4-2",
+            "held_part": part_name,
+            "held_part_location": carried_location,
+        }
+    }
+    session_state["symbolic_parts"][part_name].update(
+        {
+            "part_location": carried_location,
+            "current_location": carried_location,
+            "part_holder_resource_jid": resource_jid,
+            "current_holder_resource_jid": resource_jid,
+            "goal_location": "assembly_board-v1",
+        }
+    )
+    session_state["projected_safety_dfa_states"] = {"SAFE_1": "1"}
+    condition = {
+        "condition_id": "goal_lg_location",
+        "kind": "goal_part_location",
+        "condition_family": "goal",
+        "entity_kind": "part",
+        "entity": part_name,
+        "field": "location",
+        "expected": "assembly_board-v1",
+        "actual": carried_location,
+    }
+    prepared = _prepared(condition)
+    event = {
+        "outline_id": "candidate_move_lg",
+        "event_name": "move_with_part_to_assembly_board-v1",
+        "resource_jid": resource_jid,
+        "part_name": part_name,
+        "expected_start_state": {
+            "resource_state": "acquired",
+            "resource_location": "prusa-mk4-2",
+            "held_part": part_name,
+            "part_state": "misplaced",
+            "part_location": carried_location,
+        },
+        "expected_end_state": {
+            "resource_state": "acquired",
+            "resource_location": "assembly_board-v1",
+            "held_part": part_name,
+            "part_state": "misplaced",
+            "part_location": carried_location,
+        },
+        "rationale": "old candidate rationale",
+    }
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        evaluation = _evaluation(
+            0,
+            session_state=session_state,
+            part_name=part_name,
+            end_state="misplaced",
+        )
+        evaluation.update(
+            {
+                "task": deepcopy(event),
+                "validated_task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "safety_dfa_states_before": {"SAFE_1": "1"},
+                "safety_dfa_states_after": {"SAFE_1": "1"},
+            }
+        )
+        return evaluation
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validate_candidate,
+    )
+
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={"thought": "move while holding", "candidate_events": [event]},
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+
+    assert decision == "need_revision"
+    model_finding = next(
+        row
+        for row in turn_entry["candidate_rejection_feedback"]
+        if row.get("constraint_code") == "no_progressing_candidate"
+    )
+    comparison = model_finding["evidence"]["candidate_comparison"][0]
+    assert comparison["resource_jid"] == resource_jid
+    assert comparison["part_name"] == part_name
+    assert comparison["expected_end_state"] == event["expected_end_state"]
+
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input=deepcopy(prepared["llm_input"]),
+            session_state=session_state,
+            recovery_resources={},
+            current_recovery_blockers=[deepcopy(condition)],
+        )
+    )
+
+    assert "Modeled Continuation Gap" not in prompt
+    assert "Recovery Goals" in prompt
+    assert "restore LG to assembly_board-v1" in prompt
+    assert '"expected_end_state"' in prompt
+    assert f'"part_location": "{carried_location}"' in prompt
+    assert "revise its symbolic expected_end_state" in prompt
+    assert "Changing only event_name, outline_id, or rationale" in prompt
+    assert "move_with_part_to_assembly_board-v1" not in prompt
+    assert "old candidate rationale" not in prompt
+    assert "place_insert" not in prompt
+    assert "admissible_recovery_enabled_event_ids" not in prompt
+    assert "recovery_des_model" not in prompt
 
 
 def test_unique_condition_clearing_candidate_is_selected_independent_of_names_and_order() -> None:
@@ -957,7 +1185,6 @@ def test_ra_declared_guard_enabling_candidate_progresses() -> None:
         "valid": True,
         "projected_symbolic_resources": deepcopy(projected["symbolic_resources"]),
         "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
-        "remaining_safety_condition_identifiers": [],
         "safety_dfa_states_before": {},
         "safety_dfa_states_after": {},
     }
@@ -990,7 +1217,6 @@ def test_ra_declared_guard_enabling_candidate_progresses() -> None:
             renamed_projected["symbolic_resources"]
         ),
         "projected_symbolic_parts": deepcopy(renamed_projected["symbolic_parts"]),
-        "remaining_safety_condition_identifiers": [],
         "safety_dfa_states_before": {},
         "safety_dfa_states_after": {},
     }
@@ -1105,17 +1331,9 @@ def test_equivalent_exact_successors_select_one_reproducible_representative() ->
     ].count("stable_representative_not_selected") == 1
 
 
-def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() -> None:
-    occupancy_condition = {
-        "condition_id": "occupancy_clear",
-        "kind": "safety_destination_occupancy",
-        "entity_kind": "resource",
-        "entity": "blocker@localhost",
-        "field": "current_location",
-        "expected": {"not": "station"},
-    }
+def test_general_mocked_sequence_uses_cca_admissibility_then_converges() -> None:
     goal_condition = _condition("affected_part_goal", part_name="P", expected="restored")
-    prepared = _prepared(occupancy_condition, goal_condition)
+    prepared = _prepared(goal_condition)
     session_state = _session(parts={"P": "faulted", "AUX": "in_gripper"})
     session_state["symbolic_resources"] = {
         "blocker@localhost": {
@@ -1220,7 +1438,7 @@ def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() 
     ]
 
     evidence_rows: list[dict[str, Any]] = []
-    for event in events:
+    for event_index, event in enumerate(events):
         projected = deepcopy(session_state)
         multi_turn._apply_task_effects_to_symbolic_state(event, projected)
         evaluation = {
@@ -1230,9 +1448,14 @@ def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() 
                 projected["symbolic_resources"]
             ),
             "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
-            "remaining_safety_condition_identifiers": [],
             "safety_dfa_states_before": {},
             "safety_dfa_states_after": {},
+            "cca_admissible_goal_recovery_event_ids_before": (
+                [] if event_index == 0 else ["private_goal_event"]
+            ),
+            "cca_admissible_goal_recovery_event_ids_after": [
+                "private_goal_event"
+            ],
         }
         selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
             candidate_sequences=[
@@ -1246,7 +1469,10 @@ def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() 
         evidence_rows.append(deepcopy(evaluation["selection_evidence"]))
         multi_turn._apply_task_effects_to_symbolic_state(event, session_state)
 
-    assert evidence_rows[0]["cleared_recovery_obligation_ids"] == ["occupancy_clear"]
+    assert evidence_rows[0]["cleared_recovery_obligation_ids"] == []
+    assert evidence_rows[0]["newly_cca_admissible_goal_recovery_event_ids"] == [
+        "private_goal_event"
+    ]
     assert evidence_rows[1]["cleared_recovery_obligation_ids"] == []
     assert evidence_rows[1]["newly_enabled_recovery_event_ids"]
     assert evidence_rows[2]["cleared_recovery_obligation_ids"] == ["affected_part_goal"]
@@ -1254,6 +1480,85 @@ def test_general_mocked_sequence_clears_occupancy_enables_guard_and_converges() 
         session_state=session_state,
         prepared_recovery_request=prepared,
     )
+
+
+def test_cca_admissibility_does_not_prefer_home_over_another_clear_location() -> None:
+    prepared = _prepared(
+        _condition("affected_part_goal", part_name="P", expected="restored")
+    )
+    session_state = _session(parts={"P": "faulted"})
+    session_state["symbolic_resources"] = {
+        "blocker@localhost": {
+            "resource_jid": "blocker@localhost",
+            "resource_state": "occupied",
+            "current_state": "occupied",
+            "resource_location": "station",
+            "current_location": "station",
+            "held_part": None,
+        }
+    }
+    events = [
+        {
+            "outline_id": f"clear_to_{location}",
+            "event_name": f"authored_{location}",
+            "resource_jid": "blocker@localhost",
+            "expected_start_state": {
+                "resource_state": "occupied",
+                "resource_location": "station",
+                "held_part": None,
+            },
+            "expected_end_state": {
+                "resource_state": "clear",
+                "resource_location": location,
+                "held_part": None,
+            },
+            "rationale": "declare a clear successor",
+        }
+        for location in ("home", "buffer")
+    ]
+    evaluations: list[dict[str, Any]] = []
+    for candidate_index, event in enumerate(events):
+        projected = deepcopy(session_state)
+        multi_turn._apply_task_effects_to_symbolic_state(event, projected)
+        evaluations.append(
+            {
+                "candidate_index": candidate_index,
+                "valid": True,
+                "projected_symbolic_resources": deepcopy(
+                    projected["symbolic_resources"]
+                ),
+                "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
+                "safety_dfa_states_before": {},
+                "safety_dfa_states_after": {},
+                "cca_admissible_goal_recovery_event_ids_before": [],
+                "cca_admissible_goal_recovery_event_ids_after": [
+                    "private_goal_event"
+                ],
+            }
+        )
+
+    nondominated = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[
+            {"candidate_index": index, "surface_events": [deepcopy(event)]}
+            for index, event in enumerate(events)
+        ],
+        candidate_evaluations=evaluations,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert len(nondominated) == 1
+    assert {row["selection_status"] for row in evaluations} == {
+        "nondominated",
+        "stable_representative_not_selected",
+    }
+    selected = next(
+        row for row in evaluations if row["selection_status"] == "nondominated"
+    )
+    tie_evidence = selected["tie_representative_evidence"]
+    assert tie_evidence["used"] is True
+    assert tie_evidence["operational_superiority_claimed"] is False
+    assert len(tie_evidence["symbolically_tied_candidate_ids"]) == 2
 
 
 def test_empty_and_budget_overflow_generation_fail_before_agent_validation() -> None:
@@ -1319,6 +1624,16 @@ def test_neurosymbolic_handler_commits_unique_successor_without_selected_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_state = _session(parts={"P": "faulted"})
+    session_state.update(
+        {
+            "selection_revision_count": 4,
+            "selection_revision_fingerprint": "old-state",
+            "selection_repeated_failure_count": 2,
+            "selection_repeated_failure_fingerprint": "old-failure",
+            "candidate_revision_targets": [{"candidate_id": "old-candidate"}],
+            "candidate_revision_state_fingerprint": "old-state",
+        }
+    )
     prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
     event = _event(
         "authored_transition",
@@ -1395,6 +1710,12 @@ def test_neurosymbolic_handler_commits_unique_successor_without_selected_index(
     assert "projected_successor" not in artifact["candidate_evaluation_summary"][0]
     assert len(session_state["accepted_outline_prefix"]) == 1
     assert session_state["symbolic_parts"]["P"]["current_state"] == "restored"
+    assert session_state["selection_revision_count"] == 0
+    assert session_state["selection_revision_fingerprint"] == ""
+    assert session_state["selection_repeated_failure_count"] == 0
+    assert session_state["selection_repeated_failure_fingerprint"] == ""
+    assert session_state["candidate_revision_targets"] == []
+    assert session_state["candidate_revision_state_fingerprint"] == ""
     roles = {
         stage["validator_role"]
         for stage in turn_entry["candidate_evaluations"][0]["validation_stages"]
@@ -1567,7 +1888,7 @@ def test_repeated_invalid_candidates_terminate_as_selection_unresolved(
     decision, turn_entry = asyncio.run(
         multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
             session_state=session_state,
-            parsed_response={"thought": "revise", "candidate_events": [events[0]]},
+            parsed_response={"thought": "revise", "candidate_events": events},
             prepared_recovery_request=prepared,
             planner=object(),
         )
@@ -1598,7 +1919,7 @@ def test_repeated_invalid_candidates_terminate_as_selection_unresolved(
     decision, turn_entry = asyncio.run(
         multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
             session_state=session_state,
-            parsed_response={"thought": "revise", "candidate_events": [events[0]]},
+            parsed_response={"thought": "revise", "candidate_events": events},
             prepared_recovery_request=prepared,
             planner=object(),
         )
@@ -1606,7 +1927,428 @@ def test_repeated_invalid_candidates_terminate_as_selection_unresolved(
     assert decision == "selection_unresolved"
     assert turn_entry["selection_status"] == "selection_unresolved"
     assert session_state["selection_revision_count"] == 3
+    assert session_state["selection_revision_limit"] == 6
+    assert session_state["selection_repeated_failure_count"] == 3
+    assert session_state["selection_repeated_failure_limit"] == 3
     assert session_state["accepted_outline_prefix"] == []
+
+
+def test_materially_different_failures_reach_the_total_revision_limit() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+
+    for attempt_index in range(6):
+        (
+            _state_fingerprint,
+            total_count,
+            total_limit,
+            repeated_count,
+            repeated_limit,
+        ) = multi_turn_outline_generation._register_selection_revision(
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+            candidate_evaluations=[
+                {
+                    "candidate_id": f"candidate_effect_{attempt_index}",
+                    "valid": False,
+                    "selection_status": "excluded_invalid",
+                    "validation_findings": [
+                        {"constraint_code": "candidate_schema_violation"}
+                    ],
+                }
+            ],
+        )
+
+        assert total_count == attempt_index + 1
+        assert total_limit == 6
+        assert repeated_count == 1
+        assert repeated_limit == 3
+
+    assert session_state["selection_revision_count"] == 6
+    assert session_state["selection_repeated_failure_count"] == 1
+
+
+def test_six_materially_different_handler_attempts_are_selection_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        candidate = dict(kwargs["candidate"])
+        candidate_index = int(candidate.get("candidate_index") or 0)
+        event = dict(candidate["surface_events"][0])
+        evaluation = _evaluation(
+            candidate_index,
+            session_state=session_state,
+            part_name="P",
+            end_state="faulted",
+        )
+        evaluation.update(
+            {
+                "task": deepcopy(event),
+                "validated_task": deepcopy(event),
+                "surface_events": [deepcopy(event)],
+                "pa_state_fingerprint": (
+                    multi_turn_outline_generation._pa_state_fingerprint(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared,
+                    )
+                ),
+            }
+        )
+        return evaluation
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validate_candidate,
+    )
+
+    decisions: list[str] = []
+    for attempt_index in range(6):
+        event = _event(
+            f"attempt_{attempt_index}",
+            part_name="P",
+            start_state="faulted",
+            end_state="faulted",
+        )
+        event["expected_end_state"]["attempt_marker"] = attempt_index
+        decision, _turn_entry = asyncio.run(
+            multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+                session_state=session_state,
+                parsed_response={
+                    "thought": "try another material effect",
+                    "candidate_events": [event],
+                },
+                prepared_recovery_request=prepared,
+                planner=object(),
+            )
+        )
+        decisions.append(decision)
+
+    assert decisions == ["need_revision"] * 5 + ["selection_unresolved"]
+    assert session_state["selection_revision_count"] == 6
+    assert session_state["selection_repeated_failure_count"] == 1
+
+
+def test_pa_revision_targets_exclude_ra_cca_and_no_progress_candidates() -> None:
+    def _evaluation_row(
+        *,
+        candidate_index: int,
+        validator_role: str,
+        valid: bool = False,
+        selection_status: str = "excluded_invalid",
+    ) -> dict[str, Any]:
+        return {
+            "candidate_index": candidate_index,
+            "candidate_id": f"candidate_{candidate_index}",
+            "valid": valid,
+            "selection_status": selection_status,
+            "task": {
+                "resource_jid": "resource@localhost",
+                "part_name": f"P{candidate_index}",
+                "expected_end_state": {
+                    "resource_state": "idle",
+                    "held_part": f"P{candidate_index}",
+                    "part_state": "in_gripper",
+                    "part_location": "resource@localhost_gripper",
+                },
+            },
+            "validation_findings": [
+                {"constraint_code": f"constraint_{candidate_index}"}
+            ],
+            "validation_stages": [
+                {
+                    "validator_role": validator_role,
+                    "status": "rejected",
+                }
+            ],
+        }
+
+    evaluations = [
+        _evaluation_row(candidate_index=0, validator_role="PA"),
+        _evaluation_row(candidate_index=1, validator_role="RA"),
+        _evaluation_row(candidate_index=2, validator_role="CCA"),
+        _evaluation_row(
+            candidate_index=3,
+            validator_role="PA",
+            valid=True,
+            selection_status="excluded_no_progress",
+        ),
+    ]
+
+    targets = multi_turn_outline_generation._pa_candidate_revision_targets(
+        candidate_evaluations=evaluations,
+        candidate_bound=5,
+    )
+
+    assert targets == [
+        {
+            "candidate_id": "candidate_0",
+            "candidate_index": 0,
+            "resource_jid": "resource@localhost",
+            "part_name": "P0",
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": "P0",
+                "part_state": "in_gripper",
+                "part_location": "resource@localhost_gripper",
+            },
+            "constraint_codes": ["constraint_0"],
+        }
+    ]
+
+
+def test_plant_state_change_clears_revision_targets_and_both_counters() -> None:
+    session_state = _session(parts={"P": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    session_state.update(
+        {
+            "candidate_revision_targets": [
+                {
+                    "candidate_id": "candidate_p",
+                    "resource_jid": "resource@localhost",
+                    "part_name": "P",
+                    "expected_end_state": {"part_state": "restored"},
+                    "constraint_codes": ["expected_start_state_mismatch"],
+                }
+            ],
+            "candidate_revision_state_fingerprint": (
+                multi_turn_outline_generation._pa_state_fingerprint(
+                    session_state=session_state,
+                    prepared_recovery_request=prepared,
+                )
+            ),
+            "selection_revision_count": 4,
+            "selection_revision_fingerprint": "old-state",
+            "selection_repeated_failure_count": 2,
+            "selection_repeated_failure_fingerprint": "old-failure",
+        }
+    )
+    session_state["symbolic_parts"]["P"].update(
+        {"part_state": "observed_elsewhere", "current_state": "observed_elsewhere"}
+    )
+
+    targets = multi_turn_outline_generation._active_candidate_revision_targets(
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert targets == []
+    assert session_state["candidate_revision_targets"] == []
+    assert session_state["candidate_revision_state_fingerprint"] == ""
+    assert session_state["selection_revision_count"] == 0
+    assert session_state["selection_revision_fingerprint"] == ""
+    assert session_state["selection_repeated_failure_count"] == 0
+    assert session_state["selection_repeated_failure_fingerprint"] == ""
+
+
+def test_pa_revision_targets_require_changed_effects_for_each_identity() -> None:
+    targets = [
+        {
+            "candidate_id": "candidate_lg",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "LG",
+            "expected_end_state": {
+                "held_part": "LG",
+                "part_state": "in_gripper",
+                "part_location": "prusa-mk4-2",
+            },
+            "constraint_codes": ["held_part_location_mismatch"],
+        },
+        {
+            "candidate_id": "candidate_mcp",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "expected_end_state": {
+                "held_part": None,
+                "part_state": "placed",
+                "part_location": "prusa-mk4-2",
+            },
+            "constraint_codes": ["held_part_location_mismatch"],
+        },
+    ]
+    candidate_sequences = [
+        {
+            "candidate_index": 0,
+            "surface_events": [
+                {
+                    "outline_id": "renamed_mcp",
+                    "event_name": "renamed_mcp_event",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "MCP",
+                    "expected_end_state": {
+                        "held_part": None,
+                        "part_state": "waiting",
+                        "part_location": "prusa-mk4-2",
+                    },
+                }
+            ],
+        }
+    ]
+
+    findings = (
+        multi_turn_outline_generation._candidate_revision_requirement_findings(
+            candidate_sequences=candidate_sequences,
+            revision_targets=targets,
+        )
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["constraint_code"] == "candidate_schema_violation"
+    assert findings[0]["resource_jid"] == "ur5e@localhost"
+    assert findings[0]["part_name"] == "LG"
+    assert findings[0]["evidence"]["candidate_id"] == "candidate_lg"
+
+    corrected_sequences = [
+        *candidate_sequences,
+        {
+            "candidate_index": 1,
+            "surface_events": [
+                {
+                    "outline_id": "corrected_lg",
+                    "event_name": "corrected_lg_event",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "expected_end_state": {
+                        "held_part": "LG",
+                        "part_state": "in_gripper",
+                        "part_location": "ur5e@localhost_gripper",
+                    },
+                }
+            ],
+        },
+    ]
+    assert (
+        multi_turn_outline_generation._candidate_revision_requirement_findings(
+            candidate_sequences=corrected_sequences,
+            revision_targets=targets,
+        )
+        == []
+    )
+
+
+def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"P": "faulted", "Q": "faulted"})
+    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
+    session_state["candidate_revision_targets"] = [
+        {
+            "candidate_id": "candidate_p",
+            "resource_jid": "resource@localhost",
+            "part_name": "P",
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+                "part_state": "restored",
+                "part_location": "station",
+            },
+            "constraint_codes": ["expected_start_state_mismatch"],
+        }
+    ]
+    session_state["candidate_revision_state_fingerprint"] = (
+        multi_turn_outline_generation._pa_state_fingerprint(
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+        )
+    )
+
+    async def validation_must_not_run(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("candidate validation ran before revision continuity")
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_validate_candidate_sequence",
+        validation_must_not_run,
+    )
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "omit the required P correction",
+                "candidate_events": [
+                    _event(
+                        "restore_Q",
+                        part_name="Q",
+                        start_state="faulted",
+                        end_state="restored",
+                    )
+                ],
+            },
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+
+    assert decision == "need_revision"
+    evaluation = turn_entry["candidate_evaluations"][0]
+    assert evaluation["valid"] is False
+    assert {
+        finding["constraint_code"]
+        for finding in evaluation["validation_findings"]
+    } == {"candidate_schema_violation"}
+    assert [
+        (stage["validator_role"], stage["status"])
+        for stage in evaluation["validation_stages"]
+    ] == [
+        ("PA", "rejected"),
+        ("PA", "skipped"),
+        ("PA", "skipped"),
+        ("RA", "skipped"),
+        ("CCA", "skipped"),
+    ]
+    assert session_state["candidate_revision_targets"][0]["part_name"] == "P"
+
+
+def test_candidate_prompt_requires_pa_revision_targets_without_action_hints() -> None:
+    session_state = _session(parts={"LG": "misplaced", "MCP": "in_gripper"})
+    session_state["candidate_revision_targets"] = [
+        {
+            "candidate_id": "candidate_lg",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "LG",
+            "expected_end_state": {
+                "held_part": "LG",
+                "part_state": "in_gripper",
+                "part_location": "prusa-mk4-2",
+            },
+            "constraint_codes": ["held_part_location_mismatch"],
+        },
+        {
+            "candidate_id": "candidate_mcp",
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "expected_end_state": {
+                "held_part": None,
+                "part_state": "placed",
+                "part_location": "prusa-mk4-2",
+            },
+            "constraint_codes": ["held_part_location_mismatch"],
+        },
+    ]
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input={
+                "observed_runtime_state": {"resources": []},
+                "part_facts": [],
+                "goal_conditions": [],
+                "loaded_safety_rules": [],
+            },
+            session_state=session_state,
+            recovery_resources={},
+        )
+    )
+
+    assert "Candidate Revision Targets" in prompt
+    assert "candidate_lg" in prompt
+    assert "candidate_mcp" in prompt
+    assert "one materially revised candidate for every listed target" in prompt
+    assert "Changing only event_name, outline_id, or rationale" in prompt
+    assert "place_insert" not in prompt
+    assert "move_home" not in prompt
 
 
 def _carrier_rejection(

@@ -442,7 +442,7 @@ def _extract_remaining_blocked_issue_count(payload: dict[str, Any]) -> int | Non
     return 0 if decision == "outline_ready" else None
 
 
-def _outline_result_payload(
+def _outline_audit_payload(
     *,
     payload: dict[str, Any],
     artifact_paths: dict[str, str],
@@ -483,11 +483,163 @@ def _outline_result_payload(
     return result_payload
 
 
+def _human_outline_task(task: Any) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in (
+        "outline_id",
+        "llm_outline_id",
+        "event_name",
+        "resource_jid",
+        "part_name",
+        "expected_end_state",
+    ):
+        value = task.get(key)
+        if value in (None, "", [], {}):
+            continue
+        compact[key] = deepcopy(value)
+    return compact
+
+
+def _human_outline_validation_stages(stages: Any) -> list[dict[str, Any]]:
+    compact_stages: list[dict[str, Any]] = []
+    for stage in stages or []:
+        if not isinstance(stage, dict):
+            continue
+        compact_stage = {
+            key: deepcopy(stage.get(key))
+            for key in (
+                "validation_category",
+                "validator_role",
+                "status",
+            )
+            if stage.get(key) not in (None, "", [], {})
+        }
+        constraint_codes = sorted(
+            {
+                str(finding.get("constraint_code") or "").strip()
+                for finding in (stage.get("findings") or [])
+                if isinstance(finding, dict)
+                and str(finding.get("constraint_code") or "").strip()
+            }
+        )
+        if constraint_codes:
+            compact_stage["constraint_codes"] = constraint_codes
+        if compact_stage:
+            compact_stages.append(compact_stage)
+    return compact_stages
+
+
+def _human_outline_candidate_rows(rows: Any) -> list[dict[str, Any]]:
+    compact_rows: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        compact_row: dict[str, Any] = {
+            "candidate_index": int(row.get("candidate_index") or 0),
+            "valid": bool(row.get("valid")),
+        }
+        task = _human_outline_task(row.get("task"))
+        if task:
+            compact_row["task"] = task
+        if row.get("selection_status") not in (None, "", [], {}):
+            compact_row["selection_status"] = deepcopy(
+                row.get("selection_status")
+            )
+        constraint_codes = sorted(
+            {
+                str(code).strip()
+                for code in (row.get("constraint_codes") or [])
+                if str(code).strip()
+            }
+        )
+        if constraint_codes:
+            compact_row["constraint_codes"] = constraint_codes
+        validation_stages = _human_outline_validation_stages(
+            row.get("validation_stages")
+        )
+        if validation_stages:
+            compact_row["validation_stages"] = validation_stages
+        compact_rows.append(compact_row)
+    return compact_rows
+
+
+def _outline_constraint_codes(audit_payload: dict[str, Any]) -> list[str]:
+    codes: set[str] = set()
+    for row in audit_payload.get("candidate_evaluation_summary") or []:
+        if not isinstance(row, dict):
+            continue
+        codes.update(
+            str(code).strip()
+            for code in (row.get("constraint_codes") or [])
+            if str(code).strip()
+        )
+    for row in audit_payload.get("candidate_rejection_feedback") or []:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("constraint_code") or "").strip()
+        if code:
+            codes.add(code)
+        codes.update(
+            str(code).strip()
+            for code in (row.get("constraint_codes") or [])
+            if str(code).strip()
+        )
+        codes.update(
+            str(finding.get("constraint_code") or "").strip()
+            for finding in (row.get("findings") or [])
+            if isinstance(finding, dict)
+            and str(finding.get("constraint_code") or "").strip()
+        )
+    transition_validation = dict(audit_payload.get("transition_validation") or {})
+    codes.update(
+        str(finding.get("constraint_code") or "").strip()
+        for finding in (transition_validation.get("findings") or [])
+        if isinstance(finding, dict)
+        and str(finding.get("constraint_code") or "").strip()
+    )
+    return sorted(codes)
+
+
+def _outline_result_payload(audit_payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the concise researcher/operator outline result."""
+    result: dict[str, Any] = {}
+    for key in (
+        "turn_index",
+        "phase",
+        "decision",
+        "next_phase",
+        "accepted_trace_length",
+        "remaining_blocked_issue_count",
+        "selected_by",
+        "selection_status",
+    ):
+        value = audit_payload.get(key)
+        if value in (None, "", [], {}):
+            continue
+        result[key] = deepcopy(value)
+    constraint_codes = _outline_constraint_codes(audit_payload)
+    if constraint_codes:
+        result["constraint_codes"] = constraint_codes
+    selected_transition = _human_outline_task(
+        audit_payload.get("selected_transition")
+    )
+    result["selected_transition"] = selected_transition
+    result["candidate_evaluation_summary"] = _human_outline_candidate_rows(
+        audit_payload.get("candidate_evaluation_summary")
+    )
+    result["artifact_paths"] = deepcopy(audit_payload.get("artifact_paths") or {})
+    return result
+
+
 def _outline_artifact_paths(
     *,
     request_artifact_path: Path,
     result_artifact_path: Path,
+    audit_artifact_path: Path,
     stack_artifact_path: Path,
+    latest_audit_artifact_path: Path | None = None,
 ) -> dict[str, str]:
     """Return canonical outline paths together with compatibility aliases."""
     request_path = str(request_artifact_path)
@@ -495,9 +647,19 @@ def _outline_artifact_paths(
     return {
         "request_artifact_path": request_path,
         "outline_result_artifact_path": result_path,
+        "outline_audit_artifact_path": str(audit_artifact_path),
         "outline_stack_artifact_path": str(stack_artifact_path),
         "prompt_artifact_path": request_path,
         "response_artifact_path": result_path,
+        **(
+            {
+                "latest_outline_audit_artifact_path": str(
+                    latest_audit_artifact_path
+                )
+            }
+            if latest_audit_artifact_path is not None
+            else {}
+        ),
     }
 
 
@@ -601,7 +763,7 @@ def _compact_artifact_feedback_rows(rows: Any) -> list[dict[str, Any]]:
             if isinstance(item, dict)
         ]
         if validation_stages:
-            summary["validation_stages"] = validation_stages
+            compact_row["validation_stages"] = validation_stages
         compact_rows.append(compact_row)
     return compact_rows
 
@@ -780,6 +942,8 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "request_artifact_path",
         "grounding_result_artifact_path",
         "outline_result_artifact_path",
+        "outline_audit_artifact_path",
+        "latest_outline_audit_artifact_path",
         "prompt_artifact_path",
         "llm_response_artifact_path",
         "response_artifact_path",
@@ -1152,7 +1316,7 @@ def write_recovery_artifacts(
     reasoning_mode = _resolve_reasoning_mode(normalized_payload)
     if write_session_transcript is None:
         write_session_transcript = reasoning_mode != "multi_turn"
-    write_latest = bool(write_latest) and reasoning_mode != "multi_turn"
+    write_latest = bool(write_latest)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     if reasoning_mode == "multi_turn":
         multi_turn_ctx = _multi_turn_artifact_context(normalized_payload)
@@ -1249,6 +1413,19 @@ def write_recovery_artifacts(
         f"outline_stack_{timestamp}.json"
         if reasoning_mode == "multi_turn"
         and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+        else ""
+    )
+    outline_audit_artifact_name = (
+        f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+        f"outline_audit_{timestamp}.json"
+        if reasoning_mode == "multi_turn"
+        and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
+        else ""
+    )
+    latest_outline_audit_artifact_name = (
+        f"multi_turn_turn{int(multi_turn_ctx['turn_index']):02d}_"
+        "outline_audit_latest.json"
+        if outline_audit_artifact_name
         else ""
     )
 
@@ -1367,6 +1544,7 @@ def write_recovery_artifacts(
     result_text = _extract_phase_result(normalized_payload) if is_report_artifact else ""
     raw_response = "" if is_report_artifact else _extract_raw_response(normalized_payload)
     secondary_text = result_text or raw_response
+    outline_audit_text = ""
     secondary_artifact_name = (
         response_artifact_name.replace("_response_", "_result_").replace(".txt", ".json")
         if is_report_artifact
@@ -1380,19 +1558,30 @@ def write_recovery_artifacts(
     if is_outline_artifact and not is_report_artifact:
         request_artifact_path = target_dir / primary_artifact_name
         outline_result_artifact_path = target_dir / secondary_artifact_name
+        outline_audit_artifact_path = target_dir / outline_audit_artifact_name
         outline_stack_artifact_path = target_dir / outline_stack_artifact_name
         outline_paths = _outline_artifact_paths(
             request_artifact_path=request_artifact_path,
             result_artifact_path=outline_result_artifact_path,
+            audit_artifact_path=outline_audit_artifact_path,
             stack_artifact_path=outline_stack_artifact_path,
+            latest_audit_artifact_path=(
+                target_dir / latest_outline_audit_artifact_name
+                if write_latest and latest_outline_audit_artifact_name
+                else None
+            ),
+        )
+        audit_payload = _outline_audit_payload(
+            payload=normalized_payload,
+            artifact_paths=outline_paths,
         )
         secondary_text = json.dumps(
-            _json_safe_resume_value(
-                _outline_result_payload(
-                    payload=normalized_payload,
-                    artifact_paths=outline_paths,
-                )
-            ),
+            _json_safe_resume_value(_outline_result_payload(audit_payload)),
+            indent=2,
+            ensure_ascii=True,
+        )
+        outline_audit_text = json.dumps(
+            _json_safe_resume_value(audit_payload),
             indent=2,
             ensure_ascii=True,
         )
@@ -1415,9 +1604,31 @@ def write_recovery_artifacts(
                     _outline_artifact_paths(
                         request_artifact_path=target_dir / primary_artifact_name,
                         result_artifact_path=secondary_artifact_path,
+                        audit_artifact_path=(
+                            target_dir / outline_audit_artifact_name
+                        ),
                         stack_artifact_path=target_dir / outline_stack_artifact_name,
+                        latest_audit_artifact_path=(
+                            target_dir / latest_outline_audit_artifact_name
+                            if write_latest and latest_outline_audit_artifact_name
+                            else None
+                        ),
                     )
                 )
+    if (
+        write_phase_prompt_response
+        and not suppress_phase_prompt_response
+        and is_outline_artifact
+        and outline_audit_text
+    ):
+        outline_audit_artifact_path = target_dir / outline_audit_artifact_name
+        outline_audit_artifact_path.write_text(
+            outline_audit_text,
+            encoding="utf-8",
+        )
+        artifact_paths["outline_audit_artifact_path"] = str(
+            outline_audit_artifact_path
+        )
     if (
         write_phase_prompt_response
         and not suppress_phase_prompt_response
@@ -1491,6 +1702,23 @@ def write_recovery_artifacts(
                     artifact_paths["latest_grounding_result_artifact_path"] = str(
                         latest_secondary_artifact_path
                     )
+        if (
+            write_phase_prompt_response
+            and not suppress_phase_prompt_response
+            and is_outline_artifact
+            and outline_audit_text
+            and latest_outline_audit_artifact_name
+        ):
+            latest_outline_audit_artifact_path = (
+                target_dir / latest_outline_audit_artifact_name
+            )
+            latest_outline_audit_artifact_path.write_text(
+                outline_audit_text,
+                encoding="utf-8",
+            )
+            artifact_paths["latest_outline_audit_artifact_path"] = str(
+                latest_outline_audit_artifact_path
+            )
         if write_session_transcript and session_transcript:
             latest_session_transcript_artifact_path = (
                 target_dir / latest_session_transcript_artifact_name

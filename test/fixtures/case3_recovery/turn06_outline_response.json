@@ -17,7 +17,7 @@
       "expected_end_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "restored",
+        "part_state": "assembled",
         "part_location": "assembly_board-v1"
       },
       "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
@@ -37,7 +37,7 @@
       "expected_end_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "restored",
+        "part_state": "assembled",
         "part_location": "assembly_board-v1"
       },
       "description": "Release LG at the same supplied goal location as an alternative authored transition."
@@ -57,7 +57,7 @@
       "expected_end_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "restored",
+        "part_state": "assembled",
         "part_location": "assembly_board-v1"
       },
       "description": "Settle LG at assembly_board-v1 using the same declared physical effect as another candidate."
@@ -81,7 +81,7 @@
         "expected_end_state": {
           "resource_state": "idle",
           "held_part": null,
-          "part_state": "restored",
+          "part_state": "assembled",
           "part_location": "assembly_board-v1"
         },
         "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
@@ -103,7 +103,7 @@
     "expected_end_state": {
       "resource_state": "idle",
       "held_part": null,
-      "part_state": "restored",
+      "part_state": "assembled",
       "part_location": "assembly_board-v1"
     },
     "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
@@ -122,7 +122,7 @@
     "expected_end_state": {
       "resource_state": "idle",
       "held_part": null,
-      "part_state": "restored",
+      "part_state": "assembled",
       "part_location": "assembly_board-v1"
     },
     "description": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station."
@@ -190,7 +190,7 @@
       "expected_end_state": {
         "resource_state": "idle",
         "held_part": null,
-        "part_state": "restored",
+        "part_state": "assembled",
         "part_location": "assembly_board-v1"
       },
       "rationale": "Enabled because ur5e@localhost is currently idle and holding LG, and assembly_board-v1 is a grounded reachable location for ur5e. This action directly satisfies the required LG-first guard and advances REQ_2, which must be completed before MCP can safely proceed to the assembly station.",

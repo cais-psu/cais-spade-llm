@@ -185,23 +185,16 @@ def _label_state_satisfied_condition_ids(
     resource_jid = _task_resource_jid(task)
     part_name = _task_part_name(task)
     end_state = dict(task.get("expected_end_state") or {})
-    modeled_gap = dict(
-        dict(prepared_recovery_request.get("llm_input") or {}).get(
-            "modeled_continuation_gap"
+    raw_conditions = [
+        deepcopy(row)
+        for row in (
+            dict(prepared_recovery_request.get("llm_input") or {}).get(
+                "goal_conditions"
+            )
+            or []
         )
-        or {}
-    )
-    raw_conditions: list[dict[str, Any]] = []
-    for field_name in (
-        "unsatisfied_conditions",
-        "unsatisfied_goal_conditions",
-        "unmet_continuation_conditions",
-    ):
-        raw_conditions.extend(
-            deepcopy(row)
-            for row in (modeled_gap.get(field_name) or [])
-            if isinstance(row, dict)
-        )
+        if isinstance(row, dict)
+    ]
 
     satisfied: list[str] = []
     for condition in raw_conditions:

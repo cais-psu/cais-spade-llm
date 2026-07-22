@@ -607,6 +607,7 @@ def _compact_recovery_goals(
     projected_parts: list[dict[str, Any]],
     current_recovery_blockers: list[dict[str, Any]],
 ) -> str:
+    del current_recovery_blockers
     parts_by_name: dict[str, dict[str, Any]] = {}
     for row in projected_parts:
         if not isinstance(row, dict):
@@ -615,53 +616,39 @@ def _compact_recovery_goals(
         if part_name and part_name not in parts_by_name:
             parts_by_name[part_name] = dict(row)
 
-    goal_part_names: set[str] = {
-        str(part_name).strip()
-        for part_name in (dict(llm_input.get("fault_event") or {}).get("affected_part_names") or [])
-        if str(part_name).strip()
-    }
-    rules_by_id = {
-        str(rule.get("id") or rule.get("rule_id") or "").strip(): rule
-        for rule in (llm_input.get("loaded_safety_rules") or [])
-        if isinstance(rule, dict)
-        and str(rule.get("id") or rule.get("rule_id") or "").strip()
-    }
-    remaining_condition_lines: set[str] = set()
-    for blocker in current_recovery_blockers:
-        if not isinstance(blocker, dict):
+    goal_conditions_by_part: dict[str, dict[str, Any]] = {}
+    for raw_condition in llm_input.get("goal_conditions") or []:
+        if not isinstance(raw_condition, dict):
             continue
-        kind = str(blocker.get("kind") or "").strip()
-        if kind in {
-            "focused_resource_terminal_state",
-            "safety_destination_occupancy",
-        }:
-            # Destination occupancy is already visible in Current DES State and
-            # its governing rule is rendered under Safety Rules. Keep the
-            # derived blocker private so it cannot steer candidate generation.
+        condition = dict(raw_condition)
+        if str(condition.get("entity_kind") or "").strip() != "part":
             continue
-        if str(blocker.get("entity_kind") or "").strip() == "part":
-            entity = str(blocker.get("entity") or "").strip()
-            if entity:
-                goal_part_names.add(entity)
-        if kind == "safety_blocked_suffix_task":
-            rule_id = str(blocker.get("blocking_rule_id") or "").strip()
-            products = list(dict(rules_by_id.get(rule_id) or {}).get("product") or [])
-            if products and str(products[0]).strip():
-                goal_part_names.add(str(products[0]).strip())
+        part_name = str(condition.get("entity") or "").strip()
+        field = str(condition.get("field") or "").strip()
+        if not part_name or not field:
             continue
-        summary = str(blocker.get("summary") or "").strip()
-        if summary:
-            remaining_condition_lines.add(summary)
+        goal_conditions_by_part.setdefault(part_name, {})[field] = deepcopy(
+            condition.get("expected")
+        )
 
     lines: list[str] = []
-    for part_name in sorted(goal_part_names):
+    for part_name in sorted(goal_conditions_by_part):
         part_row = dict(parts_by_name.get(part_name) or {})
-        goal_location = str(part_row.get("goal_location") or "").strip()
-        if goal_location:
+        conditions = goal_conditions_by_part[part_name]
+        goal_location = str(
+            conditions.get("location") or part_row.get("goal_location") or ""
+        ).strip()
+        goal_state = str(conditions.get("state") or "").strip()
+        if goal_location and goal_state:
+            lines.append(
+                f"- restore {part_name} to {goal_location} with part_state={goal_state}"
+            )
+        elif goal_location:
             lines.append(f"- restore {part_name} to {goal_location}")
+        elif goal_state:
+            lines.append(f"- restore {part_name} with part_state={goal_state}")
         else:
             lines.append(f"- restore {part_name}")
-    lines.extend(f"- {summary}" for summary in sorted(remaining_condition_lines))
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -1403,6 +1390,10 @@ def _candidate_rejection_history(session_state: dict[str, Any]) -> list[dict[str
 def _compact_selection_feedback_evidence(row: dict[str, Any]) -> dict[str, Any]:
     """Keep only comparison evidence that can change the next LLM proposal."""
     evidence = dict(row.get("evidence") or {})
+    is_no_progress = (
+        str(row.get("constraint_code") or "").strip()
+        == "no_progressing_candidate"
+    )
     compact: dict[str, Any] = {}
     for field_name in (
         "nondominated_candidate_ids",
@@ -1416,25 +1407,48 @@ def _compact_selection_feedback_evidence(row: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(candidate, dict):
             continue
         selection_evidence = dict(candidate.get("selection_evidence") or {})
-        comparison.append(
-            {
-                "candidate_id": str(candidate.get("candidate_id") or ""),
-                "selection_status": str(
-                    candidate.get("selection_status") or ""
-                ),
-                "cleared_recovery_obligation_ids": deepcopy(
-                    selection_evidence.get("cleared_recovery_obligation_ids") or []
-                ),
-                "open_recovery_obligation_ids_after": deepcopy(
-                    selection_evidence.get("open_recovery_obligation_ids_after")
-                    or []
-                ),
-                "newly_enabled_recovery_event_ids": deepcopy(
-                    selection_evidence.get("newly_enabled_recovery_event_ids")
-                    or []
-                ),
-            }
-        )
+        comparison_row = {
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "selection_status": str(candidate.get("selection_status") or ""),
+            "cleared_recovery_obligation_ids": deepcopy(
+                selection_evidence.get("cleared_recovery_obligation_ids") or []
+            ),
+            "open_recovery_obligation_ids_after": deepcopy(
+                selection_evidence.get("open_recovery_obligation_ids_after") or []
+            ),
+        }
+        if is_no_progress:
+            part_name = str(candidate.get("part_name") or "").strip()
+            comparison_row.update(
+                {
+                    "resource_jid": str(
+                        candidate.get("resource_jid") or ""
+                    ).strip(),
+                    **({"part_name": part_name} if part_name else {}),
+                    "expected_end_state": deepcopy(
+                        candidate.get("expected_end_state") or {}
+                    ),
+                    "open_recovery_obligation_ids_before": deepcopy(
+                        selection_evidence.get(
+                            "open_recovery_obligation_ids_before"
+                        )
+                        or []
+                    ),
+                    "introduced_recovery_obligation_ids": deepcopy(
+                        selection_evidence.get(
+                            "introduced_recovery_obligation_ids"
+                        )
+                        or []
+                    ),
+                    "safety_dfa_states_before": deepcopy(
+                        selection_evidence.get("safety_dfa_states_before") or {}
+                    ),
+                    "safety_dfa_states_after": deepcopy(
+                        selection_evidence.get("safety_dfa_states_after") or {}
+                    ),
+                }
+            )
+        comparison.append(comparison_row)
     if comparison:
         compact["candidate_comparison"] = comparison
     return compact
@@ -1746,7 +1760,6 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
             or static_capabilities.get("available_named_poses")
             or []
         )
-        named_pose_text = ", ".join(named_poses) if named_poses else "none advertised"
         reachable_locations = [
             str(token).strip()
             for token in (
@@ -1758,16 +1771,21 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
             )
             if str(token).strip()
         ]
-        reachable_text = (
-            ", ".join(dict.fromkeys(reachable_locations))
-            if reachable_locations
+        known_resource_locations = sorted(
+            set(named_poses).union(reachable_locations)
+        )
+        known_resource_location_text = (
+            ", ".join(known_resource_locations)
+            if known_resource_locations
             else "none advertised"
         )
 
         lines.append(
-            f"- {resource_jid}: {manipulation}; named poses {named_pose_text}; "
-            f"reachable locations {reachable_text}"
+            f"- {resource_jid}: {manipulation}; known resource locations: "
+            f"{known_resource_location_text}"
         )
+    if lines:
+        lines.append("- Location order is lexical and does not express a preference.")
     return "\n".join(lines) if lines else "(none advertised)"
 
 
@@ -2007,6 +2025,17 @@ def _top_validation_feedback_section(
         label,
         normalized,
     ]
+
+
+def _no_progress_revision_instruction(summary: str) -> str:
+    """Tell candidate generation to revise effects after no-progress feedback."""
+    if "no_progressing_candidate" not in str(summary or ""):
+        return ""
+    return (
+        "\nWhen a candidate is excluded_no_progress, revise its symbolic "
+        "expected_end_state to produce a materially different effect. "
+        "Changing only event_name, outline_id, or rationale repeats the same effect."
+    )
 
 
 def _outline_immediate_validation_feedback_summary(
@@ -2553,31 +2582,6 @@ def _projected_outline_parts(
     return [deepcopy(parts_by_name[name]) for name in sorted(parts_by_name)]
 
 
-def _clean_continuation_gap(llm_input: dict[str, Any]) -> dict[str, Any]:
-    """Keep only unresolved recovery conditions and readiness."""
-    raw_gap = dict(llm_input.get("modeled_continuation_gap") or {})
-    cleaned: dict[str, Any] = {}
-
-    conditions = []
-    _drop_fields = {"condition_id", "condition_family", "source_task_ids", "role"}
-    for cond in raw_gap.get("unmet_continuation_conditions") or []:
-        if not isinstance(cond, dict):
-            continue
-        clean_cond = {k: v for k, v in cond.items() if k not in _drop_fields}
-        kind = str(clean_cond.get("kind") or "").strip()
-        if kind.startswith("focused_"):
-            clean_cond["kind"] = kind[len("focused_") :]
-        conditions.append(clean_cond)
-    if conditions:
-        cleaned["unmet_continuation_conditions"] = conditions
-
-    resume_ready = raw_gap.get("resume_ready")
-    if resume_ready is not None:
-        cleaned["resume_ready"] = resume_ready
-
-    return cleaned
-
-
 def _slim_fault_event(fault_event: dict[str, Any]) -> dict[str, Any]:
     """Drop resource_state_after (redundant with resource facts)."""
     return {k: v for k, v in dict(fault_event or {}).items() if k != "resource_state_after"}
@@ -2714,8 +2718,16 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
         "Safety Rules",
         _compact_safety_rules(llm_input),
         "",
-        "Modeled Continuation Gap",
-        _compact_json(_clean_continuation_gap(llm_input)),
+        "Recovery Goals",
+        _compact_recovery_goals(
+            llm_input,
+            projected_parts=[
+                deepcopy(row)
+                for row in (llm_input.get("part_facts") or [])
+                if isinstance(row, dict)
+            ],
+            current_recovery_blockers=[],
+        ),
     ]
 
     if world_observation_surface:
@@ -3055,6 +3067,22 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         for row in (session_state.get("candidate_rejection_feedback") or [])
         if isinstance(row, dict)
     ]
+    candidate_revision_targets = [
+        {
+            "candidate_id": str(row.get("candidate_id") or "").strip(),
+            "resource_jid": str(row.get("resource_jid") or "").strip(),
+            **(
+                {"part_name": str(row.get("part_name") or "").strip()}
+                if str(row.get("part_name") or "").strip()
+                else {}
+            ),
+            "expected_end_state": deepcopy(row.get("expected_end_state") or {}),
+            "constraint_codes": deepcopy(row.get("constraint_codes") or []),
+        }
+        for row in (session_state.get("candidate_revision_targets") or [])
+        if isinstance(row, dict)
+        and str(row.get("resource_jid") or "").strip()
+    ]
     primitive_escalation_diagnostics = [
         deepcopy(row)
         for row in (session_state.get("primitive_escalation_diagnostics") or [])
@@ -3113,7 +3141,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
     )
-
     if is_single_pass:
         role_text = (
             "You are the active replanner for a recovery session.\n"
@@ -3180,6 +3207,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "\nReturn at most one representative for each exact equivalent "
                     "successor class listed in the comparison evidence."
                 )
+            role_text += _no_progress_revision_instruction(
+                immediate_validation_feedback
+            )
     else:
         role_text = (
             "You are the active replanner for a DES fallback recovery session.\n"
@@ -3217,6 +3247,27 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             label="Validation Feedback",
         )
     )
+
+    if is_candidate_mode and candidate_revision_targets:
+        sections.extend(
+            [
+                "",
+                "Candidate Revision Targets",
+                _compact_json(candidate_revision_targets),
+                (
+                    "- Include one materially revised candidate for every listed "
+                    "target, up to the candidate bound."
+                ),
+                (
+                    "- Keep each target's resource_jid and part_name unchanged; "
+                    "change expected_end_state to address its constraint codes."
+                ),
+                (
+                    "- Changing only event_name, outline_id, or rationale does not "
+                    "satisfy a revision target. Other candidate slots remain free."
+                ),
+            ]
+        )
 
     if primitive_escalation_diagnostics:
         sections.extend(
@@ -3362,18 +3413,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "state effect or satisfy a listed recovery condition."
                 ),
                 (
-                    "- Use only supplied resources, parts, locations, named poses, predicates, "
-                    "and resource-specific values."
+                    "- Use only supplied resources, parts, known resource locations, "
+                    "predicates, and resource-specific values."
                 ),
-            ]
-        )
-
-    if not is_candidate_mode:
-        sections.extend(
-            [
-                "",
-                "Modeled Continuation Gap (unresolved target predicates)",
-                _compact_json(_clean_continuation_gap(llm_input)),
             ]
         )
 
