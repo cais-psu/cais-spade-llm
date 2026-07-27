@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -1352,9 +1353,8 @@ def _finding_still_unresolved(
         if not resource_jid or not part_name:
             return False
         current_holder = str(part_row.get("current_holder_resource_jid") or "").strip()
-        current_state = str(part_row.get("current_state") or "").strip().lower()
         current_location = str(part_row.get("current_location") or "").strip()
-        if current_holder or current_state in {"held", "in_gripper", "assembled", "placed"}:
+        if current_holder:
             return False
         if current_location:
             return False
@@ -3476,6 +3476,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.mult
     _handle_outline_phase,
     _handle_outline_single_pass,
     _projected_outline_validation_context,
+    _try_handle_modeled_continuation,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import (
     _accepted_program_row,
@@ -3576,6 +3577,8 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         for field_name, declaration in dict(
             dict(descriptor or {}).get("state_variables") or {}
         ).items():
+            if dict(declaration or {}).get("private") is True:
+                continue
             declared_state_variables.setdefault(
                 str(field_name),
                 deepcopy(dict(declaration or {})),
@@ -4002,6 +4005,8 @@ def _artifact_response_payload(
         "action_horizon",
         "candidate_count",
         "remaining_blocked_issue_count",
+        "candidate_source",
+        "llm_called",
     ):
         if turn_entry.get(key) not in (None, "", [], {}):
             artifact_payload[key] = deepcopy(turn_entry.get(key))
@@ -4137,24 +4142,13 @@ def _resolve_multi_turn_primary_obligation(
     )
 
 
-def _target_location_for_part(
-    *,
-    part_name: str,
-    prepared_recovery_request: dict[str, Any],
-) -> str:
-    grounding_context = dict(prepared_recovery_request.get("grounding_context") or {})
-    parts = dict(grounding_context.get("parts") or {})
-    part_entry = dict(parts.get(part_name) or {})
-    target = dict(part_entry.get("target") or {})
-    return str(target.get("location") or "").strip()
-
-
 def _multi_turn_recovery_task_context(
     *,
     transition_event: dict[str, Any],
     primitive_row: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    del prepared_recovery_request
     expected_start = dict(transition_event.get("expected_start_state") or {})
     expected_end = dict(transition_event.get("expected_end_state") or {})
     action_target = dict(transition_event.get("action_target") or {})
@@ -4162,8 +4156,10 @@ def _multi_turn_recovery_task_context(
         primitive_row.get("part_name") or _task_part_name(transition_event) or ""
     ).strip()
     target_location = str(
-        _task_target_ref(transition_event)
+        expected_end.get("task_ctx.destination_location")
         or action_target.get("target_location")
+        or _task_target_ref(transition_event)
+        or expected_end.get("resource_location")
         or expected_end.get("part_location")
         or ""
     ).strip()
@@ -4194,14 +4190,9 @@ def _multi_turn_recovery_task_context(
     transition: dict[str, Any] = {}
     end_held = str(expected_end.get("held_part") or "").strip()
     end_part_state = str(expected_end.get("part_state") or "").strip()
-    product_target_location = _target_location_for_part(
-        part_name=part_name,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-
     if end_held and end_held == part_name:
         transition = {
-            "state": end_part_state or "in_gripper",
+            "state": end_part_state,
             "location_template": "{resource_jid}_gripper",
         }
     elif target_location:
@@ -4209,11 +4200,8 @@ def _multi_turn_recovery_task_context(
         task_metadata["context_mapping"] = {
             "location_param": "destination_location",
         }
-        transition_state = end_part_state or "ready"
-        if product_target_location and target_location == product_target_location:
-            transition_state = "assembled"
         transition = {
-            "state": transition_state,
+            "state": end_part_state,
             "location_param": "destination_location",
         }
     elif str(expected_end.get("part_location") or "").strip():
@@ -4226,7 +4214,7 @@ def _multi_turn_recovery_task_context(
             str(expected_end.get("part_location") or "").strip(),
         )
         transition = {
-            "state": end_part_state or "ready",
+            "state": end_part_state,
             "location_param": "destination_location",
         }
 
@@ -5063,6 +5051,151 @@ def _resource_outline_batches(
     return grouped
 
 
+_MODELED_STEP_PLACEHOLDER = re.compile(r"<([A-Z0-9_]+)>")
+
+
+def _modeled_step_bindings(
+    *,
+    outline_event: dict[str, Any],
+    grounding_context: dict[str, Any],
+) -> dict[str, Any]:
+    part_name = _task_part_name(outline_event)
+    resource_jid = _task_resource_jid(outline_event)
+    start_state = dict(outline_event.get("expected_start_state") or {})
+    end_state = dict(outline_event.get("expected_end_state") or {})
+    action_target = dict(outline_event.get("action_target") or {})
+    destination_location = next(
+        (
+            value
+            for value in (
+                end_state.get("task_ctx.destination_location"),
+                action_target.get("target_location"),
+                end_state.get("part_location"),
+                end_state.get("resource_location"),
+            )
+            if value not in (None, "")
+            and not str(value).strip().endswith("_gripper")
+        ),
+        None,
+    )
+    origin_resource_location = next(
+        (
+            value
+            for value in (
+                start_state.get("task_ctx.origin_resource_location"),
+                action_target.get("source_location"),
+                start_state.get("part_location"),
+                start_state.get("resource_location"),
+            )
+            if value not in (None, "")
+            and not str(value).strip().endswith("_gripper")
+        ),
+        None,
+    )
+    part_context = dict(grounding_context.get("part") or {})
+    part_target = dict(part_context.get("target") or {})
+    model_name = next(
+        (
+            value
+            for value in (
+                part_target.get("model_name"),
+                part_context.get("model_name"),
+                dict(part_context.get("observed_pose") or {}).get("model_name"),
+            )
+            if value not in (None, "")
+        ),
+        None,
+    )
+    return {
+        "PART": part_name or None,
+        "RESOURCE_JID": resource_jid or None,
+        "DESTINATION_LOCATION": destination_location,
+        "ORIGIN_RESOURCE_LOCATION": origin_resource_location,
+        "MODEL_NAME_FROM_PART_TARGET": model_name,
+    }
+
+
+def _ground_modeled_step_value(
+    value: Any,
+    *,
+    bindings: dict[str, Any],
+) -> tuple[Any, set[str]]:
+    if isinstance(value, dict):
+        if set(value) == {"$ref"}:
+            grounded, unresolved = _ground_modeled_step_value(
+                str(value.get("$ref") or ""),
+                bindings=bindings,
+            )
+            return {"context_ref": grounded}, unresolved
+        grounded_dict: dict[str, Any] = {}
+        unresolved: set[str] = set()
+        for key, item in value.items():
+            grounded_item, item_unresolved = _ground_modeled_step_value(
+                item,
+                bindings=bindings,
+            )
+            grounded_dict[str(key)] = grounded_item
+            unresolved.update(item_unresolved)
+        return grounded_dict, unresolved
+    if isinstance(value, list):
+        grounded_list: list[Any] = []
+        unresolved: set[str] = set()
+        for item in value:
+            grounded_item, item_unresolved = _ground_modeled_step_value(
+                item,
+                bindings=bindings,
+            )
+            grounded_list.append(grounded_item)
+            unresolved.update(item_unresolved)
+        return grounded_list, unresolved
+    if not isinstance(value, str):
+        return deepcopy(value), set()
+
+    unresolved: set[str] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        token = str(match.group(1) or "")
+        replacement = bindings.get(token)
+        if replacement in (None, ""):
+            unresolved.add(token)
+            return match.group(0)
+        return str(replacement)
+
+    return _MODELED_STEP_PLACEHOLDER.sub(replace, value), unresolved
+
+
+def _ground_modeled_task_steps(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    outline_event: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    grounding_context = _primitive_grounding_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        outline_event=outline_event,
+    )
+    bindings = _modeled_step_bindings(
+        outline_event=outline_event,
+        grounding_context=grounding_context,
+    )
+    grounded_steps: list[dict[str, Any]] = []
+    unresolved: set[str] = set()
+    for raw_step in outline_event.get("modeled_task_steps") or []:
+        if not isinstance(raw_step, dict):
+            continue
+        grounded, step_unresolved = _ground_modeled_step_value(
+            {
+                "primitive": raw_step.get("primitive"),
+                "params": deepcopy(raw_step.get("params") or {}),
+            },
+            bindings=bindings,
+        )
+        grounded_steps.append(dict(grounded or {}))
+        unresolved.update(step_unresolved)
+    return grounded_steps, sorted(unresolved)
+
+
 async def _run_resource_primitive_batch(
     *,
     planner: Any,
@@ -5071,6 +5204,51 @@ async def _run_resource_primitive_batch(
     resource_jid: str,
     assigned_outline_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    modeled_primitive_rows: list[dict[str, Any]] = []
+    llm_outline_events: list[dict[str, Any]] = []
+    for outline_event in assigned_outline_events:
+        if str(outline_event.get("candidate_source") or "").strip() != (
+            "robot_task_program"
+        ):
+            llm_outline_events.append(deepcopy(outline_event))
+            continue
+        primitive_steps, unresolved = _ground_modeled_task_steps(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            outline_event=outline_event,
+        )
+        if unresolved or not primitive_steps:
+            return {
+                "decision": "primitive_blocked",
+                "primitive_events": [],
+                "turns": [],
+                "feedback": [
+                    _primitive_feedback_row(
+                        outline_event=outline_event,
+                        constraint_code="modeled_primitive_grounding_incomplete",
+                        reason=(
+                            "RobotTaskProgram steps could not be grounded from "
+                            "the available execution context"
+                        ),
+                        finding={"evidence": {"unresolved": unresolved}},
+                    )
+                ],
+            }
+        modeled_primitive_rows.append(
+            {
+                "outline_id": str(outline_event.get("outline_id") or "").strip(),
+                "resource_jid": resource_jid,
+                "primitive_steps": primitive_steps,
+            }
+        )
+
+    if not llm_outline_events:
+        return {
+            "decision": "draft_ready",
+            "primitive_events": modeled_primitive_rows,
+            "turns": [],
+        }
+
     resource_agents = _resource_agent_map(planner)
     resource_agent = resource_agents.get(resource_jid)
     product_agent = getattr(planner, "product_agent", None)
@@ -5085,28 +5263,48 @@ async def _run_resource_primitive_batch(
     }
 
     if callable(batch_fn):
-        return await batch_fn(
+        result = await batch_fn(
             recovery_session_id=str(
                 dict(prepared_recovery_request.get("recovery_session") or {}).get("session_id") or ""
             ).strip(),
             resource_jid=resource_jid,
-            assigned_outline_events=assigned_outline_events,
+            assigned_outline_events=llm_outline_events,
             prepared_recovery_request=prepared_recovery_request,
             carried_session_state=carried_session_state,
         )
+        payload = deepcopy(result if isinstance(result, dict) else {})
+        payload["primitive_events"] = [
+            *[
+                deepcopy(row)
+                for row in (payload.get("primitive_events") or [])
+                if isinstance(row, dict)
+            ],
+            *modeled_primitive_rows,
+        ]
+        return payload
 
     llm_owner = resource_agent
     if not callable(getattr(llm_owner, "ask_llm_structured", None)):
         llm_owner = product_agent
-    return await generate_primitive_batch_with_llm_agent(
+    result = await generate_primitive_batch_with_llm_agent(
         llm_agent=llm_owner,
         prepared_recovery_request=prepared_recovery_request,
-        assigned_outline_events=assigned_outline_events,
+        assigned_outline_events=llm_outline_events,
         recovery_session_id=str(
             dict(prepared_recovery_request.get("recovery_session") or {}).get("session_id") or ""
         ).strip(),
         carried_session_state=carried_session_state,
     )
+    payload = deepcopy(result if isinstance(result, dict) else {})
+    payload["primitive_events"] = [
+        *[
+            deepcopy(row)
+            for row in (payload.get("primitive_events") or [])
+            if isinstance(row, dict)
+        ],
+        *modeled_primitive_rows,
+    ]
+    return payload
 
 
 def _validate_resource_primitive_batch(
@@ -5291,13 +5489,25 @@ async def _run_resource_owned_primitive_generation_phase(
         primitive_rows = [
             deepcopy(row) for row in (result.get("primitive_events") or []) if isinstance(row, dict)
         ]
-        accepted_rows, validation_feedback = _validate_resource_primitive_batch(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-            resource_jid=resource_jid,
-            assigned_outline_events=batches[resource_jid],
-            primitive_rows=primitive_rows,
-        )
+        if (
+            decision == "primitive_blocked"
+            and not primitive_rows
+            and list(result.get("feedback") or [])
+        ):
+            accepted_rows = []
+            validation_feedback = [
+                deepcopy(row)
+                for row in (result.get("feedback") or [])
+                if isinstance(row, dict)
+            ]
+        else:
+            accepted_rows, validation_feedback = _validate_resource_primitive_batch(
+                session_state=session_state,
+                prepared_recovery_request=prepared_recovery_request,
+                resource_jid=resource_jid,
+                assigned_outline_events=batches[resource_jid],
+                primitive_rows=primitive_rows,
+            )
         if accepted_rows:
             for row in accepted_rows:
                 outline_id = str(row.get("outline_id") or "").strip()
@@ -5541,64 +5751,76 @@ async def execute_multi_turn_recovery(
                 prepared_recovery_request=prepared_recovery_request,
             )
         else:
-            # 1. Build prompt
-            prompt_input, prompt_text = _build_phase_prompt(
-                prepared_recovery_request,
-                session_state,
-            )
-
-            # 2. Call LLM
-            response_schema = _get_response_schema(current_phase, session_state)
-            await _emit_progress(
-                session_state=session_state,
-                current_phase=current_phase,
-                status_label="waiting_for_llm",
-            )
-            llm_started_at = asyncio.get_running_loop().time()
-            response_task = asyncio.create_task(
-                ask_llm_structured(
-                    prompt=prompt_text,
-                    response_format=response_schema,
+            modeled_continuation = None
+            if current_phase == "outline":
+                modeled_continuation = await _try_handle_modeled_continuation(
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                    planner=planner,
                 )
-            )
-            while True:
-                try:
-                    raw_response = await asyncio.wait_for(
-                        asyncio.shield(response_task),
-                        timeout=_LLM_WAIT_LOG_INTERVAL_S,
+            if modeled_continuation is not None:
+                decision, turn_entry, parsed_response = modeled_continuation
+            else:
+                # 1. Build prompt
+                prompt_input, prompt_text = _build_phase_prompt(
+                    prepared_recovery_request,
+                    session_state,
+                )
+
+                # 2. Call LLM
+                response_schema = _get_response_schema(current_phase, session_state)
+                await _emit_progress(
+                    session_state=session_state,
+                    current_phase=current_phase,
+                    status_label="waiting_for_llm",
+                )
+                llm_started_at = asyncio.get_running_loop().time()
+                response_task = asyncio.create_task(
+                    ask_llm_structured(
+                        prompt=prompt_text,
+                        response_format=response_schema,
                     )
+                )
+                while True:
+                    try:
+                        raw_response = await asyncio.wait_for(
+                            asyncio.shield(response_task),
+                            timeout=_LLM_WAIT_LOG_INTERVAL_S,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        elapsed_s = asyncio.get_running_loop().time() - llm_started_at
+                        await _emit_progress(
+                            session_state=session_state,
+                            current_phase=current_phase,
+                            status_label="still_waiting_for_llm",
+                            elapsed_s=elapsed_s,
+                        )
+                parsed_response = deepcopy(
+                    raw_response if isinstance(raw_response, dict) else {}
+                )
+                llm_request = deepcopy(
+                    dict(getattr(product_agent, "_last_structured_request", {}) or {})
+                )
+                await _emit_progress(
+                    session_state=session_state,
+                    current_phase=current_phase,
+                    status_label="response_received",
+                )
+
+                # 3. Dispatch to phase handler
+                handler = _PHASE_HANDLERS.get(current_phase)
+                if handler is None:
+                    _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
+                    session_state["status"] = "error"
                     break
-                except asyncio.TimeoutError:
-                    elapsed_s = asyncio.get_running_loop().time() - llm_started_at
-                    await _emit_progress(
-                        session_state=session_state,
-                        current_phase=current_phase,
-                        status_label="still_waiting_for_llm",
-                        elapsed_s=elapsed_s,
-                    )
-            parsed_response = deepcopy(raw_response if isinstance(raw_response, dict) else {})
-            llm_request = deepcopy(
-                dict(getattr(product_agent, "_last_structured_request", {}) or {})
-            )
-            await _emit_progress(
-                session_state=session_state,
-                current_phase=current_phase,
-                status_label="response_received",
-            )
 
-            # 3. Dispatch to phase handler
-            handler = _PHASE_HANDLERS.get(current_phase)
-            if handler is None:
-                _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
-                session_state["status"] = "error"
-                break
-
-            decision, turn_entry = await handler(
-                session_state=session_state,
-                parsed_response=parsed_response,
-                prepared_recovery_request=prepared_recovery_request,
-                planner=planner,
-            )
+                decision, turn_entry = await handler(
+                    session_state=session_state,
+                    parsed_response=parsed_response,
+                    prepared_recovery_request=prepared_recovery_request,
+                    planner=planner,
+                )
 
         # 4. Record turn
         turn_entry["turn_index"] = turn_idx
@@ -5608,7 +5830,11 @@ async def execute_multi_turn_recovery(
         turn_entry["prompt_text"] = prompt_text
         if llm_request:
             turn_entry["llm_request"] = deepcopy(llm_request)
-        turn_entry["llm_raw_response"] = deepcopy(parsed_response)
+        if turn_entry.get("llm_called") is False:
+            turn_entry["llm_raw_response"] = {}
+            turn_entry["modeled_candidate_response"] = deepcopy(parsed_response)
+        else:
+            turn_entry["llm_raw_response"] = deepcopy(parsed_response)
         turn_entry["decision"] = decision
         next_phase = transition_multi_turn_phase(current_phase, decision)
         turn_entry["next_phase"] = next_phase

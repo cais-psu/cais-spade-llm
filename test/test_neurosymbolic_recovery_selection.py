@@ -31,6 +31,9 @@ from cais_spade_llm.resources.resource_profile import (
     ResourceProfile,
     register_resource_profile,
 )
+from cais_spade_llm.resources.robot.robot_tasks import (
+    robot_recovery_des_descriptor,
+)
 
 
 def _condition(
@@ -317,6 +320,487 @@ def test_robot_and_printer_use_the_ra_owned_des_interface() -> None:
         "move_relative",
     ):
         assert primitive_name not in robot_descriptor["local_event_alphabet"]
+
+    assert robot_descriptor["state_variables"][
+        "task_ctx.destination_location"
+    ]["private"] is True
+    place_approach = next(
+        event
+        for event in robot_descriptor["events"]
+        if event["event_name"] == "place_approach"
+    )
+    place_insert = next(
+        event
+        for event in robot_descriptor["events"]
+        if event["event_name"] == "place_insert"
+    )
+    move_home = next(
+        event
+        for event in robot_descriptor["events"]
+        if event["event_name"] == "move_home"
+    )
+    assert place_approach["guards"]["held_part"] == {
+        "equals_from_param": "part_name"
+    }
+    assert place_insert["guards"]["task_ctx.destination_location"] == {
+        "equals_from_param": "destination_location"
+    }
+    assert move_home["updates"]["resource_location"] == {"set": "home"}
+
+    schema_session = _session(parts={})
+    schema_session["recovery_des_models"] = {
+        robot.jid: deepcopy(robot_descriptor)
+    }
+    response_schema = multi_turn._get_response_schema("outline", schema_session)
+    outline_state_properties = response_schema["schema"]["$defs"][
+        "outline_state"
+    ]["properties"]
+    assert "task_ctx.destination_location" not in outline_state_properties
+
+
+def test_robot_task_program_backward_relevance_and_forward_enabledness() -> None:
+    resource_jid = "ur5e@localhost"
+    part_name = "LG"
+    destination = "assembly_board-v1"
+    carried_location = f"{resource_jid}_gripper"
+    descriptor = robot_recovery_des_descriptor(
+        resource_jid=resource_jid,
+        snapshot={
+            "current_state": "holding",
+            "current_location": "prusa-mk4-2",
+            "held_part": part_name,
+        },
+        reachable_locations=[destination, "prusa-mk4-2"],
+        named_poses=["home"],
+    )
+    goal_conditions = (
+        {
+            "condition_id": "goal_lg_state",
+            "kind": "goal_part_state",
+            "entity_kind": "part",
+            "entity": part_name,
+            "field": "state",
+            "expected": "assembled",
+        },
+        {
+            "condition_id": "goal_lg_location",
+            "kind": "goal_part_location",
+            "entity_kind": "part",
+            "entity": part_name,
+            "field": "location",
+            "expected": destination,
+        },
+    )
+    prepared = _prepared(*goal_conditions)
+    prepared["recovery_resources"] = {
+        resource_jid: {"recovery_des_model": deepcopy(descriptor)}
+    }
+    session_state = _session(parts={})
+    session_state["recovery_des_models"] = {
+        resource_jid: deepcopy(descriptor)
+    }
+    session_state["symbolic_resources"] = {
+        resource_jid: {
+            "resource_jid": resource_jid,
+            "resource_state": "holding",
+            "current_state": "holding",
+            "resource_location": "prusa-mk4-2",
+            "current_location": "prusa-mk4-2",
+            "held_part": part_name,
+        }
+    }
+    session_state["symbolic_parts"] = {
+        part_name: {
+            "part_name": part_name,
+            "part_state": "held",
+            "current_state": "held",
+            "part_location": carried_location,
+            "current_location": carried_location,
+            "part_holder_resource_jid": resource_jid,
+            "current_holder_resource_jid": resource_jid,
+            "goal_location": destination,
+        }
+    }
+
+    unresolved = multi_turn_outline_generation._unresolved_condition_ids(
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    enabled = (
+        multi_turn_outline_generation._symbolically_enabled_recovery_event_instances(
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+            unresolved_condition_ids=unresolved,
+        )
+    )
+
+    assert [row["task"]["event_name"] for row in enabled] == [
+        "place_approach"
+    ]
+    approach = deepcopy(enabled[0]["task"])
+    assert approach["expected_end_state"][
+        "task_ctx.destination_location"
+    ] == destination
+
+    multi_turn._apply_task_effects_to_symbolic_state(approach, session_state)
+    unresolved = multi_turn_outline_generation._unresolved_condition_ids(
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+    enabled_after_approach = (
+        multi_turn_outline_generation._symbolically_enabled_recovery_event_instances(
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+            unresolved_condition_ids=unresolved,
+        )
+    )
+    assert "place_insert" in {
+        row["task"]["event_name"] for row in enabled_after_approach
+    }
+
+
+def test_arbitrary_bridge_labels_progress_only_through_structural_enabledness() -> None:
+    resource_jid = "ur5e@localhost"
+    part_name = "LG"
+    destination = "assembly_board-v1"
+    carried_location = f"{resource_jid}_gripper"
+    descriptor = robot_recovery_des_descriptor(
+        resource_jid=resource_jid,
+        snapshot={
+            "current_state": "idle",
+            "current_location": "prusa-mk4-2",
+            "held_part": None,
+        },
+        reachable_locations=[destination, "prusa-mk4-2"],
+        named_poses=["home"],
+    )
+    prepared = _prepared(
+        {
+            "condition_id": "goal_lg_state",
+            "kind": "goal_part_state",
+            "entity_kind": "part",
+            "entity": part_name,
+            "field": "state",
+            "expected": "assembled",
+        },
+        {
+            "condition_id": "goal_lg_location",
+            "kind": "goal_part_location",
+            "entity_kind": "part",
+            "entity": part_name,
+            "field": "location",
+            "expected": destination,
+        },
+    )
+    prepared["recovery_resources"] = {
+        resource_jid: {"recovery_des_model": deepcopy(descriptor)}
+    }
+    session_state = _session(parts={})
+    session_state["recovery_des_models"] = {
+        resource_jid: deepcopy(descriptor)
+    }
+    session_state["symbolic_resources"] = {
+        resource_jid: {
+            "resource_jid": resource_jid,
+            "resource_state": "idle",
+            "current_state": "idle",
+            "resource_location": "prusa-mk4-2",
+            "current_location": "prusa-mk4-2",
+            "held_part": None,
+        }
+    }
+    session_state["symbolic_parts"] = {
+        part_name: {
+            "part_name": part_name,
+            "part_state": "misplaced",
+            "current_state": "misplaced",
+            "part_location": "prusa-mk4-2",
+            "current_location": "prusa-mk4-2",
+            "part_holder_resource_jid": None,
+            "current_holder_resource_jid": None,
+            "goal_location": destination,
+        }
+    }
+    bridge = {
+        "outline_id": "opaque_bridge",
+        "event_name": "unrelated_authored_token",
+        "resource_jid": resource_jid,
+        "part_name": part_name,
+        "expected_start_state": {},
+        "expected_end_state": {
+            "resource_state": "holding",
+            "resource_location": "prusa-mk4-2",
+            "held_part": part_name,
+            "part_state": "staged",
+            "part_location": carried_location,
+        },
+        "rationale": "Apply the exact proposed state facts.",
+    }
+    projected = deepcopy(session_state)
+    multi_turn._apply_task_effects_to_symbolic_state(bridge, projected)
+    evaluation = {
+        "candidate_index": 0,
+        "valid": True,
+        "projected_symbolic_resources": deepcopy(
+            projected["symbolic_resources"]
+        ),
+        "projected_symbolic_parts": deepcopy(projected["symbolic_parts"]),
+        "safety_dfa_states_before": {},
+        "safety_dfa_states_after": {},
+    }
+
+    selected = multi_turn_outline_generation._apply_neurosymbolic_comparison(
+        candidate_sequences=[
+            {"candidate_index": 0, "surface_events": [bridge]}
+        ],
+        candidate_evaluations=[evaluation],
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert selected == [evaluation["candidate_id"]]
+    assert projected["symbolic_resources"][resource_jid][
+        "resource_state"
+    ] == "holding"
+    assert projected["symbolic_parts"][part_name]["part_state"] == "staged"
+    assert len(evaluation["selection_evidence"][
+        "newly_enabled_recovery_event_ids"
+    ]) == 1
+    assert "place_approach" in evaluation["selection_evidence"][
+        "newly_enabled_recovery_event_ids"
+    ][0]
+
+
+def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_state = _session(parts={"LG": "staged"}, candidate_bound=3)
+    session_state["candidate_count"] = 3
+    session_state["modeled_continuation_binding"] = {
+        "resource_jid": "resource@localhost",
+        "part_name": "LG",
+    }
+    prepared = _prepared(
+        _condition("goal_LG", part_name="LG", expected="assembled")
+    )
+    modeled_task = {
+        "outline_id": "enabledness_private",
+        "event_name": "registered_transition",
+        "resource_jid": "resource@localhost",
+        "part_name": "LG",
+        "expected_start_state": {
+            "resource_state": "holding",
+            "held_part": "LG",
+            "part_state": "staged",
+            "part_location": "resource@localhost_gripper",
+        },
+        "expected_end_state": {
+            "resource_state": "positioned",
+            "held_part": "LG",
+            "part_state": "in_transit",
+            "part_location": "resource@localhost_gripper",
+        },
+        "rationale": "Modeled continuation.",
+    }
+    modeled_steps = [
+        {
+            "primitive": "compute_place_targets",
+            "params": {
+                "part_name": "<PART>",
+                "destination_location": "<DESTINATION_LOCATION>",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_symbolically_enabled_recovery_event_instances",
+        lambda **kwargs: [
+            {
+                "event_id": "private_event_id",
+                "resource_jid": "resource@localhost",
+                "part_name": "LG",
+                "task": deepcopy(modeled_task),
+                "recovery_visible_steps": deepcopy(modeled_steps),
+            }
+        ],
+    )
+
+    async def accept_modeled_candidate(**kwargs: Any) -> tuple[str, dict[str, Any]]:
+        working_state = kwargs["session_state"]
+        parsed_response = kwargs["parsed_response"]
+        candidate = deepcopy(parsed_response["candidate_events"][0])
+        assert "expected_start_state" not in candidate
+        committed = {
+            **candidate,
+            "outline_id": "RECOVERY_SEQ1",
+            "llm_outline_id": candidate["outline_id"],
+        }
+        working_state["accepted_outline_prefix"] = [deepcopy(committed)]
+        return "need_next_task", {
+            "selected_candidate_task": candidate,
+            "selected_transition": deepcopy(committed),
+            "selected_transition_sequence": [deepcopy(committed)],
+            "next_transition": deepcopy(committed),
+        }
+
+    monkeypatch.setattr(
+        multi_turn_outline_generation,
+        "_handle_outline_phase",
+        accept_modeled_candidate,
+    )
+
+    result = asyncio.run(
+        multi_turn_outline_generation._try_handle_modeled_continuation(
+            session_state=session_state,
+            prepared_recovery_request=prepared,
+            planner=object(),
+        )
+    )
+
+    assert result is not None
+    decision, turn_entry, _parsed_response = result
+    assert decision == "need_next_task"
+    assert turn_entry["candidate_source"] == "robot_task_program"
+    assert turn_entry["llm_called"] is False
+    assert session_state["candidate_count"] == 3
+    accepted = session_state["accepted_outline_prefix"][0]
+    assert accepted["candidate_source"] == "robot_task_program"
+    assert accepted["modeled_task_steps"] == modeled_steps
+
+
+def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> None:
+    resource_jid = "ur5e@localhost"
+    part_name = "LG"
+    destination = "assembly_board-v1"
+    carried_location = f"{resource_jid}_gripper"
+    descriptor = robot_recovery_des_descriptor(
+        resource_jid=resource_jid,
+        snapshot={
+            "current_state": "holding",
+            "current_location": "prusa-mk4-2",
+            "held_part": part_name,
+        },
+        reachable_locations=[destination],
+        named_poses=["home"],
+    )
+    place_approach = next(
+        event
+        for event in descriptor["events"]
+        if event["event_name"] == "place_approach"
+    )
+    outline_event = {
+        "outline_id": "RECOVERY_SEQ1",
+        "event_name": "place_approach",
+        "resource_jid": resource_jid,
+        "part_name": part_name,
+        "candidate_source": "robot_task_program",
+        "expected_start_state": {
+            "resource_state": "holding",
+            "resource_location": "prusa-mk4-2",
+            "held_part": part_name,
+            "part_state": "staged",
+            "part_location": carried_location,
+            "task_ctx.destination_location": None,
+        },
+        "expected_end_state": {
+            "resource_state": "positioned",
+            "resource_location": destination,
+            "held_part": part_name,
+            "part_state": "in_transit",
+            "part_location": carried_location,
+            "task_ctx.destination_location": destination,
+        },
+        "modeled_task_steps": deepcopy(
+            place_approach["recovery_visible_steps"]
+        ),
+    }
+    session_state = {
+        "accepted_outline_prefix": [deepcopy(outline_event)],
+        "accepted_primitive_program": [],
+        "symbolic_resources": {
+            resource_jid: {
+                "resource_jid": resource_jid,
+                "resource_state": "positioned",
+                "current_state": "positioned",
+                "resource_location": destination,
+                "current_location": destination,
+                "held_part": part_name,
+            }
+        },
+        "symbolic_parts": {
+            part_name: {
+                "part_name": part_name,
+                "part_state": "in_transit",
+                "current_state": "in_transit",
+                "part_location": carried_location,
+                "current_location": carried_location,
+                "part_holder_resource_jid": resource_jid,
+                "current_holder_resource_jid": resource_jid,
+            }
+        },
+        "observation_store": {},
+    }
+    prepared = {
+        "recovery_resources": {
+            resource_jid: {
+                "recovery_snapshot": {
+                    "resource_jid": resource_jid,
+                    "resource_type": "robot",
+                    "current_state": "holding",
+                    "current_location": "prusa-mk4-2",
+                    "held_part": part_name,
+                },
+                "static_capabilities": {},
+            }
+        },
+        "grounding_context": {
+            "parts": {
+                part_name: {
+                    "target": {
+                        "location": destination,
+                        "model_name": "gear_large",
+                    }
+                }
+            }
+        },
+    }
+
+    primitive_steps, unresolved = multi_turn._ground_modeled_task_steps(
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+        outline_event=outline_event,
+    )
+
+    assert unresolved == []
+    assert primitive_steps[0] == {
+        "primitive": "compute_place_targets",
+        "params": {
+            "part_name": part_name,
+            "destination_location": destination,
+        },
+    }
+    assert primitive_steps[1]["params"]["x"] == {
+        "context_ref": "event_facts.place_targets.LG.approach_pose.x"
+    }
+
+    batch_result = asyncio.run(
+        multi_turn._run_resource_primitive_batch(
+            planner=object(),
+            prepared_recovery_request=prepared,
+            session_state=session_state,
+            resource_jid=resource_jid,
+            assigned_outline_events=[outline_event],
+        )
+    )
+    assert batch_result["decision"] == "draft_ready"
+    assert batch_result["primitive_events"] == [
+        {
+            "outline_id": "RECOVERY_SEQ1",
+            "resource_jid": resource_jid,
+            "primitive_steps": primitive_steps,
+        }
+    ]
 
 
 def test_base_resource_uses_only_an_explicit_private_des_descriptor() -> None:

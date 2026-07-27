@@ -461,7 +461,6 @@ def _outline_audit_payload(
         {
             "turn_index": int(multi_turn_ctx.get("turn_index") or 0),
             "phase": "outline",
-            "llm_response": deepcopy(llm_response if llm_response is not None else {}),
             "decision": str(latest_turn.get("decision") or "").strip(),
             "next_phase": str(latest_turn.get("next_phase") or "").strip(),
             "accepted_trace_length": len(_extract_outline_transition_trace(payload)),
@@ -471,6 +470,15 @@ def _outline_audit_payload(
             "artifact_paths": deepcopy(artifact_paths),
         }
     )
+    if latest_turn.get("llm_called") is False:
+        result_payload["candidate_source"] = str(
+            latest_turn.get("candidate_source") or "robot_task_program"
+        ).strip()
+        result_payload["llm_called"] = False
+    else:
+        result_payload["llm_response"] = deepcopy(
+            llm_response if llm_response is not None else {}
+        )
     if str(result_payload.get("recovery_selection_mode") or "").strip() != "neurosymbolic":
         result_payload.setdefault(
             "selected_candidate_index",
@@ -498,6 +506,14 @@ def _human_outline_task(task: Any) -> dict[str, Any]:
         value = task.get(key)
         if value in (None, "", [], {}):
             continue
+        if key == "expected_end_state" and isinstance(value, dict):
+            value = {
+                field_name: deepcopy(field_value)
+                for field_name, field_value in value.items()
+                if not str(field_name).startswith("task_ctx.")
+            }
+            if not value:
+                continue
         compact[key] = deepcopy(value)
     return compact
 
@@ -657,21 +673,18 @@ def _outline_result_payload(audit_payload: dict[str, Any]) -> dict[str, Any]:
 
 def _outline_artifact_paths(
     *,
-    request_artifact_path: Path,
+    request_artifact_path: Path | None,
     result_artifact_path: Path,
     audit_artifact_path: Path,
     stack_artifact_path: Path,
     latest_audit_artifact_path: Path | None = None,
 ) -> dict[str, str]:
     """Return canonical outline paths together with compatibility aliases."""
-    request_path = str(request_artifact_path)
     result_path = str(result_artifact_path)
-    return {
-        "request_artifact_path": request_path,
+    paths = {
         "outline_result_artifact_path": result_path,
         "outline_audit_artifact_path": str(audit_artifact_path),
         "outline_stack_artifact_path": str(stack_artifact_path),
-        "prompt_artifact_path": request_path,
         "response_artifact_path": result_path,
         **(
             {
@@ -683,6 +696,11 @@ def _outline_artifact_paths(
             else {}
         ),
     }
+    if request_artifact_path is not None:
+        request_path = str(request_artifact_path)
+        paths["request_artifact_path"] = request_path
+        paths["prompt_artifact_path"] = request_path
+    return paths
 
 
 def _outline_stack_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -971,6 +989,8 @@ def _compact_multi_turn_runtime_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "resource_jid",
         "primitive_local_turn_index",
         "final_output_stage",
+        "candidate_source",
+        "llm_called",
         "request_artifact_path",
         "grounding_result_artifact_path",
         "outline_result_artifact_path",
@@ -1472,8 +1492,16 @@ def write_recovery_artifacts(
         reasoning_mode == "multi_turn"
         and str(multi_turn_ctx.get("phase") or "").strip() == "outline"
     )
+    modeled_outline_artifact = bool(
+        is_outline_artifact
+        and _latest_multi_turn_turn(normalized_payload).get("llm_called") is False
+    )
     primary_text = report_text if is_report_artifact else prompt_text
-    if (is_grounding_artifact or is_outline_artifact) and not is_report_artifact:
+    if (
+        (is_grounding_artifact or is_outline_artifact)
+        and not is_report_artifact
+        and not modeled_outline_artifact
+    ):
         primary_text = _render_structured_llm_request(
             normalized_payload,
             fallback_prompt_text=prompt_text,
@@ -1588,7 +1616,9 @@ def write_recovery_artifacts(
         else latest_response_artifact_name
     )
     if is_outline_artifact and not is_report_artifact:
-        request_artifact_path = target_dir / primary_artifact_name
+        request_artifact_path = (
+            None if modeled_outline_artifact else target_dir / primary_artifact_name
+        )
         outline_result_artifact_path = target_dir / secondary_artifact_name
         outline_audit_artifact_path = target_dir / outline_audit_artifact_name
         outline_stack_artifact_path = target_dir / outline_stack_artifact_name
@@ -1634,7 +1664,11 @@ def write_recovery_artifacts(
             elif is_outline_artifact:
                 artifact_paths.update(
                     _outline_artifact_paths(
-                        request_artifact_path=target_dir / primary_artifact_name,
+                        request_artifact_path=(
+                            None
+                            if modeled_outline_artifact
+                            else target_dir / primary_artifact_name
+                        ),
                         result_artifact_path=secondary_artifact_path,
                         audit_artifact_path=(
                             target_dir / outline_audit_artifact_name

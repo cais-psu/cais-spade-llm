@@ -527,6 +527,63 @@ def _recovery_relevant_resource_ids(
     return exact_resources or set(resource_ids)
 
 
+def _recovery_condition_requirement(
+    condition: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    field_name = str(condition.get("field") or "").strip()
+    if not field_name:
+        return None
+    entity_kind = str(condition.get("entity_kind") or "").strip().lower()
+    if entity_kind == "part":
+        field_name = {
+            "state": "part_state",
+            "location": "part_location",
+        }.get(field_name, field_name)
+    elif entity_kind == "resource":
+        field_name = {
+            "state": "resource_state",
+            "location": "resource_location",
+        }.get(field_name, field_name)
+    expected = deepcopy(condition.get("expected"))
+    if isinstance(expected, dict) and set(expected) == {"not"}:
+        return field_name, {"not_equals": deepcopy(expected.get("not"))}
+    return field_name, {"equals": expected}
+
+
+def _recovery_update_can_satisfy(
+    update: Any,
+    requirement: dict[str, Any],
+) -> bool:
+    if not isinstance(update, dict):
+        return False
+    if "set" in update:
+        value = update.get("set")
+        if requirement.get("exists") is True:
+            return value not in (None, "")
+        if "equals" in requirement:
+            return value == requirement.get("equals")
+        if "not_equals" in requirement:
+            return value != requirement.get("not_equals")
+        if "equals_from_param" in requirement:
+            return value not in (None, "")
+        if "not_equals_from_param" in requirement:
+            return True
+        return False
+    has_parameter_value = bool(
+        str(update.get("set_from_param") or "").strip()
+        or [
+            item
+            for item in (update.get("set_from_param_any_of") or [])
+            if str(item).strip()
+        ]
+    )
+    if not has_parameter_value:
+        return False
+    if "equals" in requirement and requirement.get("equals") in (None, ""):
+        return False
+    return True
+
+
 def _recovery_relevant_event_ids(
     *,
     models: dict[str, dict[str, Any]],
@@ -534,17 +591,15 @@ def _recovery_relevant_event_ids(
     prepared_recovery_request: dict[str, Any],
     unresolved_condition_ids: set[str],
 ) -> set[str]:
-    relevant_fields: set[str] = set()
+    requirements: list[tuple[str, dict[str, Any]]] = []
     for condition in _shared._active_continuation_conditions(
         prepared_recovery_request
     ):
         if _exact_condition_identifier(condition) not in unresolved_condition_ids:
             continue
-        field_name = str(condition.get("field") or "").strip()
-        if field_name:
-            relevant_fields.add(field_name)
-        if str(condition.get("entity_kind") or "").strip().lower() == "part":
-            relevant_fields.update({"held_part", "part_state", "part_location"})
+        requirement = _recovery_condition_requirement(condition)
+        if requirement is not None and requirement not in requirements:
+            requirements.append(requirement)
 
     event_rows: list[tuple[str, dict[str, Any]]] = []
     for resource_jid in sorted(relevant_resource_ids):
@@ -562,30 +617,50 @@ def _recovery_relevant_event_ids(
             event_rows.append((event_id, event))
 
     selected: set[str] = set()
-    for pass_index in range(2):
+    changed = True
+    while changed:
+        changed = False
+        for event_id, event in event_rows:
+            if event_id in selected:
+                continue
+            updates = dict(event.get("updates") or {})
+            if not any(
+                field_name in updates
+                and _recovery_update_can_satisfy(
+                    updates.get(field_name),
+                    requirement,
+                )
+                for field_name, requirement in requirements
+            ):
+                continue
+            selected.add(event_id)
+            for field_name, guard in dict(event.get("guards") or {}).items():
+                requirement = (str(field_name), deepcopy(dict(guard or {})))
+                if requirement not in requirements:
+                    requirements.append(requirement)
+            changed = True
+
+    if not selected:
+        # Non-robot descriptors may expose only an RA-local bridge while the
+        # product obligation names no RA-local field. Preserve that existing
+        # descriptor-driven fallback without inspecting event names or values.
+        relevant_fields = {
+            str(field_name)
+            for _event_id, event in event_rows
+            for field_name in dict(event.get("guards") or {})
+        }
         changed = True
         while changed:
             changed = False
             for event_id, event in event_rows:
-                update_fields = {
-                    str(field) for field in dict(event.get("updates") or {})
-                }
-                if event_id in selected or not (update_fields & relevant_fields):
+                if event_id in selected:
+                    continue
+                update_fields = set(dict(event.get("updates") or {}))
+                if not update_fields & relevant_fields:
                     continue
                 selected.add(event_id)
-                relevant_fields.update(
-                    str(field) for field in dict(event.get("guards") or {})
-                )
+                relevant_fields.update(dict(event.get("guards") or {}))
                 changed = True
-        if selected or pass_index > 0:
-            break
-        # If the product obligation does not name an RA-local variable, start
-        # backward relevance at the RA's own guard variables. This remains
-        # descriptor-driven and does not inspect event names or resource types.
-        for _event_id, event in event_rows:
-            relevant_fields.update(
-                str(field) for field in dict(event.get("guards") or {})
-            )
     return selected
 
 
@@ -599,6 +674,83 @@ def _efa_guard_is_satisfied(condition: Any, actual: Any) -> bool:
     return not (
         "not_equals" in condition and actual == condition.get("not_equals")
     )
+
+
+def _recovery_event_parameter_value(
+    *,
+    event: dict[str, Any],
+    parameter_name: str,
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> tuple[bool, Any]:
+    explicit_parameters = dict(parameters or {})
+    if (
+        parameter_name in explicit_parameters
+        and explicit_parameters.get(parameter_name) not in (None, "")
+    ):
+        return True, deepcopy(explicit_parameters.get(parameter_name))
+    if parameter_name == "part_name" and part_name:
+        return True, part_name
+    if parameter_name in {"resource_jid", "holder_resource_jid"}:
+        return True, resource_jid
+
+    binding = dict(
+        dict(event.get("parameter_bindings") or {}).get(parameter_name) or {}
+    )
+    location_type = str(binding.get("location_type") or "").strip()
+    if location_type == "part_location":
+        value = _exact_state_field_value(part_row, "part_location")
+        return (value not in (None, "")), deepcopy(value)
+    if location_type == "current_location":
+        value = _exact_state_field_value(resource_row, "resource_location")
+        return (value not in (None, "")), deepcopy(value)
+    if location_type == "reachable_location":
+        value = part_row.get("goal_location")
+        return (value not in (None, "")), deepcopy(value)
+
+    for row in (part_row, resource_row):
+        if parameter_name in row and row.get(parameter_name) not in (None, ""):
+            return True, deepcopy(row.get(parameter_name))
+    return False, None
+
+
+def _recovery_event_guard_is_satisfied(
+    *,
+    event: dict[str, Any],
+    condition: Any,
+    actual: Any,
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> bool:
+    if not isinstance(condition, dict):
+        return True
+    resolved = deepcopy(condition)
+    for source_key, target_key in (
+        ("equals_from_param", "equals"),
+        ("not_equals_from_param", "not_equals"),
+    ):
+        parameter_name = str(resolved.pop(source_key, "") or "").strip()
+        if not parameter_name:
+            continue
+        available, value = _recovery_event_parameter_value(
+            event=event,
+            parameter_name=parameter_name,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+            parameters=parameters,
+        )
+        if not available:
+            return False
+        resolved[target_key] = value
+    return _efa_guard_is_satisfied(resolved, actual)
 
 
 def _nominal_reentry_event_id(task: dict[str, Any]) -> str:
@@ -837,14 +989,20 @@ def _admissible_recovery_enabled_event_ids(
         prepared_recovery_request=prepared_recovery_request,
         unresolved_condition_ids=unresolved_condition_ids,
     )
+    relevant_parts = _recovery_relevant_part_names(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        available_part_names=set(parts_by_name),
+    )
     enabled: set[str] = set()
     for resource_jid in sorted(relevant_resources):
         resource_row = dict(resources_by_jid.get(resource_jid) or {})
         resource_model = dict(models.get(resource_jid) or {})
         state_variables = dict(resource_model.get("state_variables") or {})
-        for event in resource_model.get("events") or []:
-            if not isinstance(event, dict) or event.get("controllable") is not True:
+        for raw_event in resource_model.get("events") or []:
+            if not isinstance(raw_event, dict) or raw_event.get("controllable") is not True:
                 continue
+            event = dict(raw_event)
             event_id = json.dumps(
                 {
                     "resource_jid": resource_jid,
@@ -855,48 +1013,45 @@ def _admissible_recovery_enabled_event_ids(
             )
             if event_id not in relevant_event_ids:
                 continue
-            guards = dict(event.get("guards") or {})
-            resource_guards = {
-                str(field_name): condition
-                for field_name, condition in guards.items()
-                if str(
-                    dict(state_variables.get(str(field_name)) or {}).get("scope")
-                    or "resource"
+            part_bindings = (
+                sorted(relevant_parts)
+                if _recovery_event_requires_part_binding(
+                    event=event,
+                    state_variables=state_variables,
                 )
-                == "resource"
-            }
-            part_guards = {
-                str(field_name): condition
-                for field_name, condition in guards.items()
-                if str(
-                    dict(state_variables.get(str(field_name)) or {}).get("scope")
-                    or "resource"
-                )
-                == "part"
-            }
-            resource_enabled = all(
-                _efa_guard_is_satisfied(condition, resource_row.get(str(field_name)))
-                for field_name, condition in resource_guards.items()
+                else [""]
             )
-            if not resource_enabled:
-                continue
-            if not part_guards:
-                enabled.add(event_id)
-                continue
-            for part_name, part_row in sorted(parts_by_name.items()):
+            for part_name in part_bindings:
+                part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
                 if all(
-                    _efa_guard_is_satisfied(
-                        condition,
-                        dict(part_row or {}).get(str(field_name)),
+                    _recovery_event_guard_is_satisfied(
+                        event=event,
+                        condition=condition,
+                        actual=_exact_state_field_value(
+                            part_row
+                            if str(
+                                dict(state_variables.get(str(field_name)) or {}).get(
+                                    "scope"
+                                )
+                                or "resource"
+                            ).strip()
+                            == "part"
+                            else resource_row,
+                            str(field_name),
+                        ),
+                        resource_jid=resource_jid,
+                        part_name=part_name,
+                        resource_row=resource_row,
+                        part_row=part_row,
                     )
-                    for field_name, condition in part_guards.items()
+                    for field_name, condition in dict(event.get("guards") or {}).items()
                 ):
                     enabled.add(
                         json.dumps(
                             {
                                 "resource_jid": resource_jid,
                                 "event_name": str(event.get("event_name") or ""),
-                                "part_name": str(part_name),
+                                **({"part_name": part_name} if part_name else {}),
                             },
                             sort_keys=True,
                             separators=(",", ":"),
@@ -928,6 +1083,8 @@ def _recovery_event_requires_part_binding(
     event: dict[str, Any],
     state_variables: dict[str, Any],
 ) -> bool:
+    if event.get("requires_part_binding") is True:
+        return True
     for field_name in set(dict(event.get("guards") or {})) | set(
         dict(event.get("updates") or {})
     ):
@@ -935,9 +1092,17 @@ def _recovery_event_requires_part_binding(
         if str(declaration.get("scope") or "resource").strip() == "part":
             return True
     held_part_update = dict(dict(event.get("updates") or {}).get("held_part") or {})
-    return bool(
+    if bool(
         str(held_part_update.get("set_from_param") or "").strip() == "part_name"
         or "part_name" in (held_part_update.get("set_from_param_any_of") or [])
+    ):
+        return True
+    return any(
+        str(dict(condition or {}).get("equals_from_param") or "").strip()
+        == "part_name"
+        or str(dict(condition or {}).get("not_equals_from_param") or "").strip()
+        == "part_name"
+        for condition in dict(event.get("guards") or {}).values()
     )
 
 
@@ -945,8 +1110,10 @@ def _recovery_event_update_value(
     *,
     field_name: str,
     update: Any,
+    event: dict[str, Any],
     resource_jid: str,
     part_name: str,
+    resource_row: dict[str, Any],
     part_row: dict[str, Any],
 ) -> tuple[bool, Any]:
     if not isinstance(update, dict):
@@ -962,20 +1129,25 @@ def _recovery_event_update_value(
         if str(item).strip()
     )
     for parameter_name in parameter_names:
-        if parameter_name == "part_name" and part_name:
-            return True, part_name
-        if field_name == "part_location":
-            for source_name in ("goal_location", "current_location", "origin_location"):
-                value = part_row.get(source_name)
-                if value not in (None, ""):
-                    return True, deepcopy(value)
-        if field_name == "resource_location":
-            for source_name in ("current_location", "origin_location", "goal_location"):
-                value = part_row.get(source_name)
-                if value not in (None, ""):
-                    return True, deepcopy(value)
-        if parameter_name in {"resource_jid", "holder_resource_jid"}:
-            return True, resource_jid
+        available, value = _recovery_event_parameter_value(
+            event=event,
+            parameter_name=parameter_name,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+        )
+        if available:
+            return True, value
+        if field_name in {"part_location", "resource_location"}:
+            for source_name in (
+                "goal_location",
+                "current_location",
+                "origin_location",
+            ):
+                fallback = part_row.get(source_name)
+                if fallback not in (None, ""):
+                    return True, deepcopy(fallback)
     return False, None
 
 
@@ -1026,8 +1198,10 @@ def _recovery_event_instance_task(
         resolved, value = _recovery_event_update_value(
             field_name=str(field_name),
             update=update,
+            event=event,
             resource_jid=resource_jid,
             part_name=part_name,
+            resource_row=resource_row,
             part_row=part_row,
         )
         if not resolved:
@@ -1067,7 +1241,7 @@ def _recovery_event_instance_task(
         "resource_jid": resource_jid,
         "expected_start_state": start_state,
         "expected_end_state": end_state,
-        "rationale": "",
+        "rationale": "Modeled continuation from the registered RobotTaskProgram.",
     }
     if part_name:
         task["part_name"] = part_name
@@ -1241,9 +1415,10 @@ def _symbolically_enabled_recovery_event_instances(
                 part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
                 guards = dict(event.get("guards") or {})
                 if not all(
-                    _efa_guard_is_satisfied(
-                        condition,
-                        _exact_state_field_value(
+                    _recovery_event_guard_is_satisfied(
+                        event=event,
+                        condition=condition,
+                        actual=_exact_state_field_value(
                             part_row
                             if str(
                                 dict(state_variables.get(str(field_name)) or {}).get(
@@ -1255,6 +1430,10 @@ def _symbolically_enabled_recovery_event_instances(
                             else resource_row,
                             str(field_name),
                         ),
+                        resource_jid=resource_jid,
+                        part_name=part_name,
+                        resource_row=resource_row,
+                        part_row=part_row,
                     )
                     for field_name, condition in guards.items()
                 ):
@@ -1307,6 +1486,9 @@ def _symbolically_enabled_recovery_event_instances(
                             task=task,
                             session_state=session_state,
                             prepared_recovery_request=prepared_recovery_request,
+                        ),
+                        "recovery_visible_steps": deepcopy(
+                            event.get("recovery_visible_steps") or []
                         ),
                     }
                 )
@@ -1402,9 +1584,15 @@ def _nominal_reentry_guard_is_enabled(
             or ("part" if str(field_name).startswith("part_") else "resource")
         ).strip()
         source_row = part_row if scope == "part" else resource_row
-        if not _efa_guard_is_satisfied(
-            condition,
-            _exact_state_field_value(source_row, str(field_name)),
+        if not _recovery_event_guard_is_satisfied(
+            event=ra_event,
+            condition=condition,
+            actual=_exact_state_field_value(source_row, str(field_name)),
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+            parameters=params,
         ):
             return False
     return True
@@ -2065,6 +2253,42 @@ def _candidate_projected_session(
         evaluation.get("safety_dfa_states_after") or {}
     )
     return projected
+
+
+def _recovery_event_binding(event_id: str) -> dict[str, str]:
+    """Return the exact resource/part binding encoded in one private event id."""
+    try:
+        payload = json.loads(str(event_id or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    resource_jid = str(payload.get("resource_jid") or "").strip()
+    part_name = str(payload.get("part_name") or "").strip()
+    if not resource_jid or not part_name:
+        return {}
+    return {
+        "resource_jid": resource_jid,
+        "part_name": part_name,
+    }
+
+
+def _next_modeled_continuation_binding(
+    selected: dict[str, Any],
+) -> dict[str, str]:
+    """Keep a modeled chain only for the selected task's exact resource and part."""
+    task = dict(selected.get("task") or {})
+    resource_jid = _shared._task_resource_jid(task)
+    part_name = _shared._task_part_name(task)
+    if not resource_jid or not part_name:
+        return {}
+    evidence = dict(selected.get("selection_evidence") or {})
+    event_ids = evidence.get("admissible_recovery_enabled_event_ids_after") or []
+    for event_id in sorted(str(item) for item in event_ids if str(item).strip()):
+        binding = _recovery_event_binding(event_id)
+        if binding == {"resource_jid": resource_jid, "part_name": part_name}:
+            return binding
+    return {}
 
 
 def _apply_neurosymbolic_comparison(  # noqa: C901
@@ -4367,6 +4591,11 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
     session_state["candidate_revision_state_fingerprint"] = ""
     session_state["active_selection_ambiguity_feedback"] = {}
     session_state["active_selection_ambiguity_fingerprint"] = ""
+    session_state["modeled_continuation_binding"] = (
+        _next_modeled_continuation_binding(selected)
+        if recovery_selection_mode == "neurosymbolic"
+        else {}
+    )
     session_state["projected_safety_dfa_states"] = deepcopy(
         selected.get("safety_dfa_states_after") or {}
     )
@@ -4484,9 +4713,12 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         outline_complete,
     )
 
-    session_state["status"] = (
-        "ready_for_primitive_generation" if outline_complete else "paused_after_outline_turn"
-    )
+    if outline_complete:
+        session_state["status"] = "ready_for_primitive_generation"
+    elif session_state.get("modeled_continuation_binding"):
+        session_state["status"] = "running"
+    else:
+        session_state["status"] = "paused_after_outline_turn"
     return decision, turn_entry
 
 
@@ -4543,6 +4775,148 @@ async def _handle_outline_phase(
     return decision, turn_entry
 
 
+def _modeled_candidate_row(task: dict[str, Any]) -> dict[str, Any]:
+    """Keep the same candidate surface used for LLM-authored bridge actions."""
+    row = {
+        key: deepcopy(task.get(key))
+        for key in (
+            "outline_id",
+            "event_name",
+            "resource_jid",
+            "expected_end_state",
+            "rationale",
+        )
+    }
+    part_name = str(task.get("part_name") or "").strip()
+    if part_name:
+        row["part_name"] = part_name
+    return row
+
+
+def _attach_modeled_task_steps(
+    *,
+    session_state: dict[str, Any],
+    turn_entry: dict[str, Any],
+    instance_by_outline_id: dict[str, dict[str, Any]],
+) -> None:
+    selected_candidate = dict(turn_entry.get("selected_candidate_task") or {})
+    source_outline_id = str(selected_candidate.get("outline_id") or "").strip()
+    instance = dict(instance_by_outline_id.get(source_outline_id) or {})
+    modeled_task_steps = [
+        deepcopy(row)
+        for row in (instance.get("recovery_visible_steps") or [])
+        if isinstance(row, dict)
+    ]
+    if not modeled_task_steps:
+        return
+
+    selected_outline_ids = {
+        str(row.get("outline_id") or "").strip()
+        for row in (turn_entry.get("selected_transition_sequence") or [])
+        if isinstance(row, dict) and str(row.get("outline_id") or "").strip()
+    }
+    for row in session_state.get("accepted_outline_prefix") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("outline_id") or "").strip() not in selected_outline_ids:
+            continue
+        row["candidate_source"] = "robot_task_program"
+        row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+    for key in ("selected_transition", "next_transition"):
+        row = turn_entry.get(key)
+        if isinstance(row, dict):
+            row["candidate_source"] = "robot_task_program"
+            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+    for row in turn_entry.get("selected_transition_sequence") or []:
+        if isinstance(row, dict):
+            row["candidate_source"] = "robot_task_program"
+            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+
+
+async def _try_handle_modeled_continuation(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    planner: Any,
+) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+    """Validate and select the next enabled RobotTaskProgram transition."""
+    if (
+        _recovery_selection_mode(session_state) != "neurosymbolic"
+        or str(session_state.get("outline_mode") or "").strip().lower()
+        != "incremental_candidates_validated"
+        or _action_horizon(session_state) != "1"
+    ):
+        return None
+    binding = {
+        key: str(value or "").strip()
+        for key, value in dict(
+            session_state.get("modeled_continuation_binding") or {}
+        ).items()
+        if key in {"resource_jid", "part_name"}
+    }
+    if not binding.get("resource_jid") or not binding.get("part_name"):
+        return None
+
+    unresolved_condition_ids = _unresolved_condition_ids(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    instances = [
+        row
+        for row in _symbolically_enabled_recovery_event_instances(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            unresolved_condition_ids=unresolved_condition_ids,
+        )
+        if str(row.get("resource_jid") or "").strip()
+        == binding["resource_jid"]
+        and str(row.get("part_name") or "").strip() == binding["part_name"]
+    ]
+    if not instances:
+        session_state["modeled_continuation_binding"] = {}
+        return None
+
+    candidate_bound = max(
+        1,
+        int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND),
+    )
+    instances = instances[:candidate_bound]
+    parsed_response = {
+        "candidate_events": [
+            _modeled_candidate_row(dict(instance.get("task") or {}))
+            for instance in instances
+        ]
+    }
+    instance_by_outline_id = {
+        str(dict(instance.get("task") or {}).get("outline_id") or "").strip(): instance
+        for instance in instances
+    }
+    working_state = deepcopy(session_state)
+    configured_candidate_count = working_state.get("candidate_count", "auto")
+    working_state["candidate_count"] = "auto"
+    decision, turn_entry = await _handle_outline_phase(
+        session_state=working_state,
+        parsed_response=parsed_response,
+        prepared_recovery_request=prepared_recovery_request,
+        planner=planner,
+    )
+    if decision not in {"need_next_task", "outline_ready"}:
+        session_state["modeled_continuation_binding"] = {}
+        return None
+
+    _attach_modeled_task_steps(
+        session_state=working_state,
+        turn_entry=turn_entry,
+        instance_by_outline_id=instance_by_outline_id,
+    )
+    working_state["candidate_count"] = configured_candidate_count
+    turn_entry["candidate_source"] = "robot_task_program"
+    turn_entry["llm_called"] = False
+    session_state.clear()
+    session_state.update(working_state)
+    return decision, turn_entry, parsed_response
+
+
 __all__ = [
     "_projected_outline_validation_context",
     "_handle_outline_single_pass",
@@ -4550,4 +4924,5 @@ __all__ = [
     "_handle_outline_incremental_validated",
     "_handle_outline_incremental_candidates_validated",
     "_handle_outline_phase",
+    "_try_handle_modeled_continuation",
 ]

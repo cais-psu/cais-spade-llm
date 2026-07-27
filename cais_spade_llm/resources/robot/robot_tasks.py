@@ -60,6 +60,7 @@ class RobotTaskGuard:
     args: dict[str, Any] = field(default_factory=dict)
     message: Any = ""
     description: Any = ""
+    condition: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -434,6 +435,32 @@ def _evaluate_guard(
     runtime_state: dict[str, Any],
     step_outputs: dict[str, Any],
 ) -> bool:
+    if guard.condition:
+        field_name = str(guard.condition.get("field") or "").strip()
+        operator = str(guard.condition.get("operator") or "equals").strip()
+        if field_name.startswith("task_ctx."):
+            context_key = field_name.split(".", 1)[1]
+            actual = dict(runtime_state.get("_task_ctx") or {}).get(context_key)
+        else:
+            runtime_field = {
+                "held_part": "_held_part",
+                "resource_state": "_current_state",
+                "gripper_state": "_gripper_state",
+                "resource_location": "_recovery_pose_ref",
+            }.get(field_name, f"_{field_name}")
+            actual = runtime_state.get(runtime_field)
+        expected = _resolve_value(
+            guard.condition.get("value"),
+            args=args,
+            runtime_state=runtime_state,
+            step_outputs=step_outputs,
+        )
+        if operator == "exists":
+            return actual not in (None, "")
+        if operator == "not_equals":
+            return actual != expected
+        return actual == expected
+
     predicate = str(guard.predicate or "").strip()
     resolved_args = _resolve_value(
         guard.args,
@@ -932,6 +959,11 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         predicate="held_part_empty",
                         message="Cannot move-to-pick while already holding a part.",
                         description="held_part is empty",
+                        condition={
+                            "field": "held_part",
+                            "operator": "equals",
+                            "value": None,
+                        },
                     ),
                 ),
                 steps=(
@@ -1127,10 +1159,21 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             held_part=_state("_held_part"),
                         ),
                         description="resource is already at the pick pose from pick_approach",
+                        condition={
+                            "field": "held_part",
+                            "operator": "equals",
+                            "value": None,
+                        },
                     ),
                     RobotTaskGuard(
                         predicate="always",
-                        description="held_part is empty",
+                        message="pick_approach has not established the requested origin context.",
+                        description="pick target was grounded for the requested origin",
+                        condition={
+                            "field": "task_ctx.origin_resource_location",
+                            "operator": "equals",
+                            "value": _arg("origin_resource_location"),
+                        },
                     ),
                     RobotTaskGuard(
                         predicate="always",
@@ -1271,6 +1314,11 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         predicate="held_part_exists",
                         message="Cannot move-loaded without holding a part.",
                         description="held_part exists",
+                        condition={
+                            "field": "held_part",
+                            "operator": "equals",
+                            "value": _arg("part_name"),
+                        },
                     ),
                     RobotTaskGuard(
                         predicate="always",
@@ -1449,10 +1497,21 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         predicate="held_part_exists",
                         message="No part currently held; run pick_grasp first.",
                         description="held_part exists",
+                        condition={
+                            "field": "held_part",
+                            "operator": "equals",
+                            "value": _arg("part_name"),
+                        },
                     ),
                     RobotTaskGuard(
                         predicate="always",
+                        message="place_approach has not established this destination context.",
                         description="place_approach already positioned the robot at the target pose",
+                        condition={
+                            "field": "task_ctx.destination_location",
+                            "operator": "equals",
+                            "value": _arg("destination_location"),
+                        },
                     ),
                 ),
                 steps=(
@@ -1600,6 +1659,11 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         predicate="held_part_empty",
                         message="Cannot move home while still holding a part; assemble it first.",
                         description="held_part is empty",
+                        condition={
+                            "field": "held_part",
+                            "operator": "equals",
+                            "value": None,
+                        },
                     ),
                     RobotTaskGuard(
                         predicate="named_pose_available",
@@ -1660,6 +1724,51 @@ def robot_task_names() -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _recovery_condition_descriptor(
+    guard: RobotTaskGuard,
+) -> tuple[str, dict[str, Any]] | None:
+    condition = dict(guard.condition or {})
+    field_name = str(condition.get("field") or "").strip()
+    if not field_name:
+        return None
+    operator = str(condition.get("operator") or "equals").strip()
+    if operator == "exists":
+        return field_name, {"exists": True}
+    value = condition.get("value")
+    if isinstance(value, dict) and str(value.get("$arg") or "").strip():
+        parameter_name = str(value.get("$arg") or "").strip()
+        key = "not_equals_from_param" if operator == "not_equals" else "equals_from_param"
+        return field_name, {key: parameter_name}
+    key = "not_equals" if operator == "not_equals" else "equals"
+    return field_name, {key: deepcopy(value)}
+
+
+def _recovery_update_descriptor(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        parameter_name = str(value.get("$arg") or "").strip()
+        if parameter_name:
+            return {"set_from_param": parameter_name}
+        if any(str(key).startswith("$") for key in value):
+            return None
+    return {"set": deepcopy(value)}
+
+
+def _robot_task_context_fields(tasks: list[RobotTaskDefinition]) -> set[str]:
+    fields: set[str] = set()
+    for task in tasks:
+        for guard in task.program.entry_guards:
+            field_name = str(dict(guard.condition or {}).get("field") or "").strip()
+            if field_name.startswith("task_ctx."):
+                fields.add(field_name)
+        for effect in task.program.effects:
+            if effect.target != "task_ctx" or not isinstance(effect.value, dict):
+                continue
+            for key, value in effect.value.items():
+                if _recovery_update_descriptor(value) is not None:
+                    fields.add(f"task_ctx.{key}")
+    return fields
+
+
 def robot_recovery_des_descriptor(
     *,
     resource_jid: str,
@@ -1669,7 +1778,7 @@ def robot_recovery_des_descriptor(
     named_poses: list[Any] | tuple[Any, ...] | None = None,
     marked_state_conditions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build the robot's private task-level recovery DES descriptor."""
+    """Compile the robot task registry into the private recovery DES view."""
     registry = robot_task_registry()
     selected_names = tuple(task_names or robot_task_names())
     selected_tasks = [registry[name] for name in selected_names if name in registry]
@@ -1686,43 +1795,61 @@ def robot_recovery_des_descriptor(
     locations.extend(reachable_locations or [])
     locations.extend(named_poses or [])
     events: list[dict[str, Any]] = []
+    task_context_fields = _robot_task_context_fields(selected_tasks)
 
     for task in selected_tasks:
         program = task.program
         resource_states.extend((program.entry_state, program.success_state))
         guards: dict[str, dict[str, Any]] = {}
-        # Recovery transitions may introduce exact new state labels. Re-entry
-        # therefore uses the task's physical entry guards; nominal lifecycle
-        # labels remain in the model domain and updates but do not reinterpret
-        # a novel label as semantic evidence.
         if program.part_in_state:
             part_states.append(program.part_in_state)
         for guard in program.entry_guards:
-            if guard.predicate == "held_part_empty":
-                guards["held_part"] = {"equals": None}
-            elif guard.predicate == "held_part_exists":
-                guards["held_part"] = {"exists": True}
+            compiled_guard = _recovery_condition_descriptor(guard)
+            if compiled_guard is not None:
+                field_name, condition = compiled_guard
+                guards[field_name] = condition
 
         updates: dict[str, dict[str, Any]] = {
             "resource_state": {"set": program.success_state}
         }
         for effect in program.effects:
             if effect.target == "current_state" and effect.action == "set":
-                updates["resource_state"] = {"set": deepcopy(effect.value)}
+                compiled_update = _recovery_update_descriptor(effect.value)
+                if compiled_update is not None:
+                    updates["resource_state"] = compiled_update
             elif effect.target == "held_part":
-                updates["held_part"] = (
-                    {"set": None}
-                    if effect.action == "clear"
-                    else {"set_from_param": "part_name"}
-                )
+                if effect.action == "clear":
+                    updates["held_part"] = {"set": None}
+                else:
+                    compiled_update = _recovery_update_descriptor(effect.value)
+                    if compiled_update is not None:
+                        updates["held_part"] = compiled_update
+            elif (
+                effect.target == "recovery_pose_ref"
+                and effect.action == "set"
+                and effect.value is not None
+            ):
+                compiled_update = _recovery_update_descriptor(effect.value)
+                if compiled_update is not None:
+                    updates["resource_location"] = compiled_update
+            elif effect.target == "task_ctx":
+                if effect.action == "clear":
+                    for field_name in task_context_fields:
+                        updates[field_name] = {"set": None}
+                elif isinstance(effect.value, dict):
+                    for key, value in effect.value.items():
+                        compiled_update = _recovery_update_descriptor(value)
+                        if compiled_update is not None:
+                            updates[f"task_ctx.{key}"] = compiled_update
 
-        location_param = str(
-            dict(program.context_mapping or {}).get("location_param") or ""
+        context_mapping = dict(program.context_mapping or {})
+        context_location_param = str(
+            context_mapping.get("location_param") or ""
         ).strip()
-        if task.name == "move_home":
-            updates["resource_location"] = {"set": "home"}
-        elif location_param:
-            updates["resource_location"] = {"set_from_param": location_param}
+        if context_location_param:
+            updates["resource_location"] = {
+                "set_from_param": context_location_param
+            }
 
         completed_part_transition = dict(
             dict(program.part_transition or {}).get("completed") or {}
@@ -1735,7 +1862,7 @@ def robot_recovery_des_descriptor(
             location_template = str(
                 completed_part_transition.get("location_template") or ""
             ).strip()
-            location_param = str(
+            part_location_param = str(
                 completed_part_transition.get("location_param") or ""
             ).strip()
             if location_template:
@@ -1744,8 +1871,10 @@ def robot_recovery_des_descriptor(
                 )
                 updates["part_location"] = {"set": resolved_location}
                 part_locations.append(resolved_location)
-            elif location_param:
-                updates["part_location"] = {"set_from_param": location_param}
+            elif part_location_param:
+                updates["part_location"] = {
+                    "set_from_param": part_location_param
+                }
 
         events.append(
             {
@@ -1754,6 +1883,22 @@ def robot_recovery_des_descriptor(
                 "observable": True,
                 "guards": guards,
                 "updates": updates,
+                "parameter_bindings": (
+                    {
+                        context_location_param: {
+                            "location_type": str(
+                                context_mapping.get("location_type") or ""
+                            ).strip()
+                        }
+                    }
+                    if context_location_param
+                    else {}
+                ),
+                "requires_part_binding": any(
+                    argument.name == "part_name" for argument in task.arguments
+                ),
+                "recovery_visible_steps": program.render_recovery_steps(),
+                "source": task.source,
             }
         )
 
@@ -1764,31 +1909,42 @@ def robot_recovery_des_descriptor(
                 result.append(deepcopy(value))
         return result
 
+    state_variables: dict[str, dict[str, Any]] = {
+        "resource_state": {
+            "scope": "resource",
+            "domain": _domain(resource_states),
+        },
+        "resource_location": {
+            "scope": "resource",
+            "domain": _domain(locations),
+        },
+        "held_part": {
+            "scope": "resource",
+            "domain": _domain([held_part, None]),
+        },
+        "part_state": {"scope": "part", "domain": _domain(part_states)},
+        "part_location": {
+            "scope": "part",
+            "domain": _domain(part_locations + locations),
+        },
+    }
+    for field_name in sorted(task_context_fields):
+        state_variables[field_name] = {
+            "scope": "resource",
+            "domain": _domain([None, *locations]),
+            "private": True,
+        }
+
+    current_valuation = {
+        "resource_state": current_state,
+        "resource_location": current_location,
+        "held_part": held_part,
+    }
+    current_valuation.update({field_name: None for field_name in task_context_fields})
+
     return {
-        "state_variables": {
-            "resource_state": {
-                "scope": "resource",
-                "domain": _domain(resource_states),
-            },
-            "resource_location": {
-                "scope": "resource",
-                "domain": _domain(locations),
-            },
-            "held_part": {
-                "scope": "resource",
-                "domain": _domain([held_part, None]),
-            },
-            "part_state": {"scope": "part", "domain": _domain(part_states)},
-            "part_location": {
-                "scope": "part",
-                "domain": _domain(part_locations + locations),
-            },
-        },
-        "current_valuation": {
-            "resource_state": current_state,
-            "resource_location": current_location,
-            "held_part": held_part,
-        },
+        "state_variables": state_variables,
+        "current_valuation": current_valuation,
         "events": events,
         "marked_state_conditions": deepcopy(marked_state_conditions or []),
     }

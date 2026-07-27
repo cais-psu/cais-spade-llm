@@ -3066,7 +3066,10 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         if isinstance(turn, dict)
         and str(turn.get("phase") or "").strip().lower() == "outline"
     ]
-    assert len(outline_request_paths) == len(outline_turns)
+    llm_outline_turns = [
+        turn for turn in outline_turns if turn.get("llm_called") is not False
+    ]
+    assert len(outline_request_paths) == len(llm_outline_turns)
     assert len(outline_result_paths) == len(outline_turns)
     assert len(outline_audit_paths) == len(outline_turns)
     assert len(outline_stack_paths) == len(outline_turns)
@@ -3208,9 +3211,16 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert result_artifact_paths["outline_result_artifact_path"] == str(result_path)
         assert result_artifact_paths["response_artifact_path"] == str(result_path)
         assert result_artifact_paths["outline_audit_artifact_path"] == str(audit_path)
-        assert result_artifact_paths["request_artifact_path"] == (
-            result_artifact_paths["prompt_artifact_path"]
-        )
+        if outline_audit.get("llm_called") is False:
+            assert outline_audit["candidate_source"] == "robot_task_program"
+            assert "llm_response" not in outline_audit
+            assert "request_artifact_path" not in result_artifact_paths
+            assert "prompt_artifact_path" not in result_artifact_paths
+        else:
+            assert result_artifact_paths["request_artifact_path"] == (
+                result_artifact_paths["prompt_artifact_path"]
+            )
+            assert "llm_response" in outline_audit
         assert Path(result_artifact_paths["outline_audit_artifact_path"]).exists()
         assert Path(result_artifact_paths["outline_stack_artifact_path"]).exists()
         serialized_result = json.dumps(outline_result, sort_keys=True)
@@ -3238,7 +3248,6 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         serialized_audit = json.dumps(outline_audit, sort_keys=True)
         assert '"recovery_admission"' not in serialized_audit
         for audit_token in (
-            '"llm_response":',
             '"validation_stages":',
             '"state_fingerprint":',
             '"recovery_enabledness_validation_after":',
@@ -3306,7 +3315,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
             "remaining_blocked_issue_count"
         ]
         for path in outline_result_paths
-    ] == [2, 2, 2, 0]
+    ] == [2, 2, 2, 2, 0]
     mcp_release_audit = json.loads(
         outline_audit_paths[1].read_text(encoding="utf-8")
     )
@@ -3319,11 +3328,11 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         "recovery_enabledness_validation_after"
     ]
     xarm6_lg_event_id = (
-        '{"event_name":"pick_grasp","part_name":"LG",'
+        '{"event_name":"pick_approach","part_name":"LG",'
         '"resource_jid":"xarm6@localhost"}'
     )
     ur5e_lg_event_id = (
-        '{"event_name":"pick_grasp","part_name":"LG",'
+        '{"event_name":"pick_approach","part_name":"LG",'
         '"resource_jid":"ur5e@localhost"}'
     )
     assert xarm6_lg_event_id in enabledness_after[
@@ -3354,9 +3363,10 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert isinstance(stack_payload, list)
         assert stack_payload
     latest_outline_turn = outline_turns[-1]
-    assert latest_outline_turn["request_artifact_path"] == (
-        latest_outline_turn["prompt_artifact_path"]
-    )
+    assert latest_outline_turn["candidate_source"] == "robot_task_program"
+    assert latest_outline_turn["llm_called"] is False
+    assert "request_artifact_path" not in latest_outline_turn
+    assert "prompt_artifact_path" not in latest_outline_turn
     assert latest_outline_turn["outline_result_artifact_path"] == (
         latest_outline_turn["response_artifact_path"]
     )
@@ -3414,11 +3424,19 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     trace = result["transition_trace"]
     session_state = result["multi_turn_session"]
 
-    assert [row["event_name"] for row in trace] == ["evt_q7", "evt_z9", "evt_n4", "evt_v2"]
+    assert [row["event_name"] for row in trace] == [
+        "evt_q7",
+        "evt_z9",
+        "evt_n4",
+        "place_approach",
+        "place_insert",
+    ]
     assert trace[0]["expected_end_state"]["resource_state"] == "xarm6_clear_state"
     assert trace[1]["expected_end_state"]["part_state"] == "mcp_waiting_recovery"
     assert trace[2]["expected_end_state"]["resource_state"] == "lg_secured"
-    assert trace[3]["expected_end_state"]["part_state"] == "assembled"
+    assert trace[3]["candidate_source"] == "robot_task_program"
+    assert trace[4]["candidate_source"] == "robot_task_program"
+    assert trace[4]["expected_end_state"]["part_state"] == "assembled"
     assert "semantic_state_history" not in session_state
     assert session_state["status"] == "ready_for_primitive_generation"
     assert result["llm_response_source"] == "mocked_scripted_fixture"

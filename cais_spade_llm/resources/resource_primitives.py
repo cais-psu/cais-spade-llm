@@ -278,6 +278,8 @@ def build_recovery_des_model(
                 *domain,
             ),
         }
+        if declaration.get("private") is True:
+            state_variables[field_name]["private"] = True
         if scope == "resource":
             current_valuation[field_name] = current_value
 
@@ -298,15 +300,22 @@ def build_recovery_des_model(
             or any(not isinstance(value, dict) for value in updates.values())
         ):
             return {}
-        events.append(
-            {
-                "event_name": event_name,
-                "controllable": bool(raw_event.get("controllable", True)),
-                "observable": bool(raw_event.get("observable", True)),
-                "guards": deepcopy(guards),
-                "updates": deepcopy(updates),
-            }
-        )
+        event = {
+            "event_name": event_name,
+            "controllable": bool(raw_event.get("controllable", True)),
+            "observable": bool(raw_event.get("observable", True)),
+            "guards": deepcopy(guards),
+            "updates": deepcopy(updates),
+        }
+        for key in (
+            "parameter_bindings",
+            "requires_part_binding",
+            "recovery_visible_steps",
+            "source",
+        ):
+            if key in raw_event:
+                event[key] = deepcopy(raw_event.get(key))
+        events.append(event)
     if not events:
         return {}
 
