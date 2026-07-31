@@ -2503,11 +2503,10 @@ def _commit_selected_candidate_task(
     sequence_index: int,
 ) -> dict[str, Any]:
     committed_task = deepcopy(task or {})
-    llm_outline_id = str(committed_task.get("outline_id") or "").strip()
-    committed_outline_id = _committed_outline_id(sequence_index=sequence_index)
-    if llm_outline_id and llm_outline_id != committed_outline_id:
-        committed_task["llm_outline_id"] = llm_outline_id
-    committed_task["outline_id"] = committed_outline_id
+    committed_task["outline_id"] = _committed_outline_id(
+        sequence_index=sequence_index
+    )
+    committed_task["candidate_source"] = "llm"
     return committed_task
 
 
@@ -3405,7 +3404,9 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         for field_name, declaration in dict(
             dict(descriptor or {}).get("state_variables") or {}
         ).items():
-            if dict(declaration or {}).get("private") is True:
+            if dict(declaration or {}).get("private") is True or str(
+                field_name
+            ).startswith("task_ctx."):
                 continue
             declared_state_variables.setdefault(
                 str(field_name),
@@ -3433,7 +3434,7 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
 _ARTIFACT_TASK_KEYS = (
     "outline_id",
     "candidate_outline_id",
-    "llm_outline_id",
+    "candidate_source",
     "event_name",
     "resource_jid",
     "part_name",
@@ -4576,7 +4577,9 @@ def build_multi_turn_recovery_proposal(
         macro_tasks.append(
             {
                 "outline_id": outline_id,
-                "llm_outline_id": str(transition_event.get("llm_outline_id") or "").strip(),
+                "candidate_source": str(
+                    transition_event.get("candidate_source") or ""
+                ).strip(),
                 "predecessors": predecessors,
                 "resource_jid": resource_jid,
                 "event_name": str(transition_event.get("event_name") or "").strip(),
@@ -4700,6 +4703,9 @@ def _build_final_output_payload(
             {
                 "outline_id": outline_id,
                 "des_event_id": outline_id,
+                "candidate_source": str(
+                    event.get("candidate_source") or ""
+                ).strip(),
                 "event_name": str(
                     event.get("event_name") or primitive_row.get("event_name") or ""
                 ).strip(),

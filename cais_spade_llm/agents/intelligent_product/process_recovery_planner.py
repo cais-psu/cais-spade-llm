@@ -1547,7 +1547,6 @@ class ProcessRecoveryPlanner:
                 or f"recovery_macro_{index}"
             ).strip()
             outline_id = str(macro_task.get("outline_id") or f"recovery_outline_{index}").strip()
-            llm_outline_id = str(macro_task.get("llm_outline_id") or "").strip()
             resource_jid = str(
                 macro_task.get("resource_jid") or proposal.get("resource_jid") or ""
             ).strip()
@@ -1614,8 +1613,6 @@ class ProcessRecoveryPlanner:
                 "product_jid": str(self.product_agent.jid),
                 "task_id": task_id,
             }
-            if llm_outline_id:
-                params["llm_outline_id"] = llm_outline_id
             if isinstance(task_params, dict):
                 for key, value in task_params.items():
                     params[str(key)] = deepcopy(value)
@@ -1680,8 +1677,6 @@ class ProcessRecoveryPlanner:
                 "recovery_group_id": recovery_sequence_id,
                 "recovery_kind": "recovery_macro",
             }
-            if llm_outline_id:
-                task_node["llm_outline_id"] = llm_outline_id
             event_name = str(dict(outline_semantics or {}).get("event_name") or "").strip()
             if event_name:
                 task_node["event_name"] = event_name

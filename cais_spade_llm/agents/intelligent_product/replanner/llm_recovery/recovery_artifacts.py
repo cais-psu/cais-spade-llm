@@ -497,7 +497,7 @@ def _human_outline_task(task: Any) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key in (
         "outline_id",
-        "llm_outline_id",
+        "candidate_source",
         "event_name",
         "resource_jid",
         "part_name",

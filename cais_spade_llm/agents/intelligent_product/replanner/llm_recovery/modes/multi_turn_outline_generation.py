@@ -1153,7 +1153,7 @@ def _recovery_event_update_value(
 
 def _recovery_event_instance_task(
     *,
-    event_id: str,
+    outline_id: str,
     resource_jid: str,
     event: dict[str, Any],
     resource_row: dict[str, Any],
@@ -1236,7 +1236,7 @@ def _recovery_event_instance_task(
         action_target["target_location"] = deepcopy(end_state.get("part_location"))
 
     task: dict[str, Any] = {
-        "outline_id": f"enabledness_{recovery_validation_fingerprint(event_id)[:16]}",
+        "outline_id": outline_id,
         "event_name": str(event.get("event_name") or "").strip(),
         "resource_jid": resource_jid,
         "expected_start_state": start_state,
@@ -1321,7 +1321,12 @@ def _goal_relevant_recovery_event_rows(
                     separators=(",", ":"),
                 )
                 task = _recovery_event_instance_task(
-                    event_id=event_id,
+                    outline_id=_shared._candidate_outline_id(
+                        sequence_index=_shared._next_recovery_sequence_index(
+                            session_state
+                        ),
+                        candidate_index=len(rows),
+                    ),
                     resource_jid=resource_jid,
                     event=event,
                     resource_row=resource_row,
@@ -1448,7 +1453,12 @@ def _symbolically_enabled_recovery_event_instances(
                     separators=(",", ":"),
                 )
                 task = _recovery_event_instance_task(
-                    event_id=event_id,
+                    outline_id=_shared._candidate_outline_id(
+                        sequence_index=_shared._next_recovery_sequence_index(
+                            session_state
+                        ),
+                        candidate_index=len(instances),
+                    ),
                     resource_jid=resource_jid,
                     event=event,
                     resource_row=resource_row,
@@ -4268,6 +4278,17 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         return "need_revision", turn_entry
 
     selected_candidate_task = deepcopy(dict(selected.get("task") or {}))
+    verified_models = {
+        str(resource_jid): deepcopy(descriptor)
+        for resource_jid, descriptor in dict(
+            selected.get("recovery_des_models") or {}
+        ).items()
+        if str(resource_jid).strip() and isinstance(descriptor, dict)
+    }
+    if verified_models:
+        recovery_des_models = dict(session_state.get("recovery_des_models") or {})
+        recovery_des_models.update(verified_models)
+        session_state["recovery_des_models"] = recovery_des_models
     selected_committed_events = [
         deepcopy(row) for row in (selected.get("committed_events") or []) if isinstance(row, dict)
     ]
@@ -4541,8 +4562,20 @@ def _attach_modeled_task_steps(
         for row in (instance.get("recovery_visible_steps") or [])
         if isinstance(row, dict)
     ]
-    if not modeled_task_steps:
-        return
+    selected_candidate["candidate_source"] = "robot_task_program"
+    turn_entry["selected_candidate_task"] = selected_candidate
+
+    for evaluation in turn_entry.get("candidate_evaluations") or []:
+        if not isinstance(evaluation, dict):
+            continue
+        for key in ("surface_task", "task", "validated_task"):
+            row = evaluation.get(key)
+            if isinstance(row, dict):
+                row["candidate_source"] = "robot_task_program"
+        for key in ("surface_events", "validated_events", "committed_events"):
+            for row in evaluation.get(key) or []:
+                if isinstance(row, dict):
+                    row["candidate_source"] = "robot_task_program"
 
     selected_outline_ids = {
         str(row.get("outline_id") or "").strip()
@@ -4555,16 +4588,19 @@ def _attach_modeled_task_steps(
         if str(row.get("outline_id") or "").strip() not in selected_outline_ids:
             continue
         row["candidate_source"] = "robot_task_program"
-        row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+        if modeled_task_steps:
+            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
     for key in ("selected_transition", "next_transition"):
         row = turn_entry.get(key)
         if isinstance(row, dict):
             row["candidate_source"] = "robot_task_program"
-            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+            if modeled_task_steps:
+                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
     for row in turn_entry.get("selected_transition_sequence") or []:
         if isinstance(row, dict):
             row["candidate_source"] = "robot_task_program"
-            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+            if modeled_task_steps:
+                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
 
 
 async def _try_handle_modeled_continuation(
@@ -4615,16 +4651,18 @@ async def _try_handle_modeled_continuation(
         int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND),
     )
     instances = instances[:candidate_bound]
-    parsed_response = {
-        "candidate_events": [
-            _modeled_candidate_row(dict(instance.get("task") or {}))
-            for instance in instances
-        ]
-    }
-    instance_by_outline_id = {
-        str(dict(instance.get("task") or {}).get("outline_id") or "").strip(): instance
-        for instance in instances
-    }
+    sequence_index = _shared._next_recovery_sequence_index(session_state)
+    candidate_events: list[dict[str, Any]] = []
+    instance_by_outline_id: dict[str, dict[str, Any]] = {}
+    for candidate_index, instance in enumerate(instances):
+        candidate = _modeled_candidate_row(dict(instance.get("task") or {}))
+        candidate["outline_id"] = _shared._candidate_outline_id(
+            sequence_index=sequence_index,
+            candidate_index=candidate_index,
+        )
+        candidate_events.append(candidate)
+        instance_by_outline_id[candidate["outline_id"]] = instance
+    parsed_response = {"candidate_events": candidate_events}
     working_state = deepcopy(session_state)
     configured_candidate_count = working_state.get("candidate_count", "auto")
     working_state["candidate_count"] = "auto"
@@ -4642,6 +4680,11 @@ async def _try_handle_modeled_continuation(
         session_state=working_state,
         turn_entry=turn_entry,
         instance_by_outline_id=instance_by_outline_id,
+    )
+    _shared._sync_des_recovery_aliases(
+        working_state,
+        turn_entry=turn_entry,
+        transition_validation=dict(turn_entry.get("transition_validation") or {}),
     )
     working_state["candidate_count"] = configured_candidate_count
     turn_entry["candidate_source"] = "robot_task_program"

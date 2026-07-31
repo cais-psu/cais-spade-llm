@@ -2805,6 +2805,7 @@ async def _run_mocked_candidate_handler(
     session_state: dict[str, Any],
     parsed_response: dict[str, Any],
     invalid_candidate_indexes: set[int] | None = None,
+    recovery_des_models: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_generation,
@@ -2855,6 +2856,7 @@ async def _run_mocked_candidate_handler(
         return {
             "candidate_index": candidate_index,
             "valid": not invalid,
+            "recovery_des_models": deepcopy(recovery_des_models or {}),
             "task": deepcopy(events[0] if events else {}),
             "surface_events": events,
             "validated_events": deepcopy(events),
@@ -3077,13 +3079,13 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         line
         for line in outline_message_text.splitlines()
         if "ur5e@localhost" in line
-        and ("known resource locations" in line or "grounded_target_refs=" in line)
+        and ("reachability=" in line or "grounded_target_refs=" in line)
     ]
     xarm6_capability_lines = [
         line
         for line in outline_message_text.splitlines()
         if "xarm6@localhost" in line
-        and ("known resource locations" in line or "grounded_target_refs=" in line)
+        and ("reachability=" in line or "grounded_target_refs=" in line)
     ]
     assert ur5e_capability_lines
     assert all("prusa-mk4-2" in line for line in ur5e_capability_lines)
@@ -3091,9 +3093,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert xarm6_capability_lines
     assert all("prusa-mk4-1" in line for line in xarm6_capability_lines)
     assert all("prusa-mk4-2" not in line for line in xarm6_capability_lines)
-    assert (
-        "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
-        in outline_message_text
+    assert 'reachability=["prusa-mk4-1", "prusa-mk3", "assembly_board-v1"]' in (
+        outline_message_text
     )
     assert "Location order is lexical and does not express a preference." not in (
         outline_message_text
@@ -3182,6 +3183,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert Path(result_artifact_paths["outline_audit_artifact_path"]).exists()
         assert Path(result_artifact_paths["outline_stack_artifact_path"]).exists()
         serialized_result = json.dumps(outline_result, sort_keys=True)
+        assert "llm_outline_id" not in serialized_result
+        assert '"outline_id": "enabledness_' not in serialized_result
         for private_result_token in (
             '"llm_response":',
             '"snapshot":',
@@ -3204,6 +3207,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
             assert private_result_token not in serialized_result
         assert '"recovery_admission"' not in serialized_result
         serialized_audit = json.dumps(outline_audit, sort_keys=True)
+        assert "llm_outline_id" not in serialized_audit
+        assert '"outline_id": "enabledness_' not in serialized_audit
         assert '"recovery_admission"' not in serialized_audit
         for audit_token in (
             '"validation_stages":',
@@ -3231,7 +3236,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         assert set(outline_result["selected_transition"]).issubset(
             {
                 "outline_id",
-                "llm_outline_id",
+                "candidate_source",
                 "event_name",
                 "resource_jid",
                 "part_name",
@@ -3252,7 +3257,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
             assert set(candidate_row.get("task") or {}).issubset(
                 {
                     "outline_id",
-                    "llm_outline_id",
+                    "candidate_source",
                     "event_name",
                     "resource_jid",
                     "part_name",
@@ -3274,6 +3279,13 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         ]
         for path in outline_result_paths
     ] == [2, 2, 2, 2, 0]
+    assert [row["candidate_source"] for row in trace] == [
+        "llm",
+        "llm",
+        "llm",
+        "robot_task_program",
+        "robot_task_program",
+    ]
     seq3 = next(row for row in trace if row["outline_id"] == "RECOVERY_SEQ3")
     assert seq3["event_name"] == "pick_lg_from_observed_pose"
     assert seq3["resource_jid"] == "ur5e@localhost"
@@ -3297,6 +3309,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert seq3_transition_stage["validator_role"] == "RA"
     assert seq3_transition_stage["status"] == "passed"
     assert seq3_audit["selection_status"] == "selected"
+    assert seq3_audit["selected_transition"]["candidate_source"] == "llm"
     mcp_release_audit = json.loads(
         outline_audit_paths[1].read_text(encoding="utf-8")
     )
@@ -3348,6 +3361,23 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
         assert isinstance(stack_payload, list)
         assert stack_payload
+        serialized_stack = json.dumps(stack_payload, sort_keys=True)
+        assert "llm_outline_id" not in serialized_stack
+        assert '"outline_id": "enabledness_' not in serialized_stack
+        expected_sources = [
+            "llm" if index < 3 else "robot_task_program"
+            for index in range(len(stack_payload))
+        ]
+        assert [row["candidate_source"] for row in stack_payload] == expected_sources
+    final_output = dict(result["multi_turn_session"].get("final_output") or {})
+    assert [
+        row["candidate_source"]
+        for row in (final_output.get("executable_recovery_trace") or [])
+    ] == ["llm", "llm", "llm", "robot_task_program", "robot_task_program"]
+    serialized_final_output = json.dumps(final_output, sort_keys=True)
+    assert "llm_outline_id" not in serialized_final_output
+    assert '"outline_id": "enabledness_' not in serialized_final_output
+    assert "recovery_sequence_source" not in final_output
     latest_outline_turn = outline_turns[-1]
     assert latest_outline_turn["candidate_source"] == "robot_task_program"
     assert latest_outline_turn["llm_called"] is False
@@ -3420,6 +3450,7 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     assert trace[0]["expected_end_state"]["resource_state"] == "xarm6_clear_state"
     assert trace[1]["expected_end_state"]["part_state"] == "mcp_waiting_recovery"
     assert trace[2]["expected_end_state"]["resource_state"] == "lg_secured"
+    assert [row["candidate_source"] for row in trace[:3]] == ["llm", "llm", "llm"]
     assert trace[3]["candidate_source"] == "robot_task_program"
     assert trace[4]["candidate_source"] == "robot_task_program"
     assert trace[4]["expected_end_state"]["part_state"] == "assembled"
@@ -3595,9 +3626,8 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
     )
     assert "restore LG to assembly_board-v1" in outline_prompt
     assert '"origin_location"' not in outline_prompt
-    assert (
-        "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
-        in outline_prompt
+    assert 'reachability=["prusa-mk4-1", "prusa-mk3", "assembly_board-v1"]' in (
+        outline_prompt
     )
     assert "Location order is lexical and does not express a preference." not in (
         outline_prompt
@@ -3945,8 +3975,12 @@ def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbo
     assert "Accepted Transition Prefix (already applied; do not repeat)" in prompt
     assert accepted_event_name in prompt
     assert '"outline_id": "RECOVERY_SEQ1"' in prompt
-    assert '"resource_state": "failed"' in prompt
-    assert '"resource_state": "new_clear_state"' in prompt
+    accepted_history = prompt.split(
+        "Accepted Transition Prefix (already applied; do not repeat)", maxsplit=1
+    )[1].split("Resource Capabilities", maxsplit=1)[0]
+    assert "expected_start_state" not in accepted_history
+    assert "expected_end_state" not in accepted_history
+    assert "new_clear_state" not in prompt
     assert "These transitions have already been applied" in prompt
     assert "You may author a new `event_name`" in prompt
     assert "optional new `resource_state` or `part_state` values" in prompt
@@ -3959,7 +3993,7 @@ def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbo
     )
     assert "named poses" not in prompt
     assert "Outline Candidate Contract" not in prompt
-    assert '"expected_start_state"' in prompt
+    assert "Current DES State" in prompt
 
     initial_prompt = _render_non_case3_candidate_prompt()
     assert "Accepted Transition Prefix" not in initial_prompt
@@ -5222,6 +5256,7 @@ def test_concise_result_hides_internal_custody_codes() -> None:
 
 def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path) -> None:
     transition_trace = [_candidate_event("better_score", outline_id="RECOVERY_SEQ1")]
+    transition_trace[0]["candidate_source"] = "llm"
     candidate_evaluations = [
         {
             "candidate_index": candidate_index,
@@ -5318,6 +5353,7 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
     assert len(audit_payload["candidate_evaluation_summary"]) == 3
     assert result_payload["selected_transition"] == {
         "outline_id": "RECOVERY_SEQ1",
+        "candidate_source": "llm",
         "event_name": "better_score",
         "resource_jid": "xarm6@localhost",
         "part_name": "LG",
@@ -5348,6 +5384,13 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
     assert audit_payload["artifact_paths"] == result_payload["artifact_paths"]
     stack_payload = json.loads(stack_artifact.read_text(encoding="utf-8"))
     assert stack_payload == transition_trace
+    for serialized_payload in (
+        json.dumps(result_payload, sort_keys=True),
+        json.dumps(audit_payload, sort_keys=True),
+        json.dumps(stack_payload, sort_keys=True),
+    ):
+        assert "llm_outline_id" not in serialized_payload
+        assert '"outline_id": "enabledness_' not in serialized_payload
 
 
 def test_outline_latest_paths_link_concise_result_and_detailed_audit(
@@ -5520,6 +5563,66 @@ def test_case3_pure_llm_keeps_llm_selected_one_step_candidate() -> None:
         True,
     ]
     assert session_state["accepted_outline_prefix"][0]["event_name"] == "better_score"
+
+
+def test_selected_verified_ra_vocabulary_is_used_by_the_next_prompt() -> None:
+    resource_jid = "resource@localhost"
+    session_state = _candidate_session(
+        recovery_selection_mode="pure_llm",
+        action_horizon="1",
+    )
+    session_state["outline_mode"] = "incremental_candidates_validated"
+    session_state["recovery_des_models"] = {
+        resource_jid: {
+            "state_variables": {
+                "resource_state": {
+                    "scope": "resource",
+                    "domain": ["previous_vocabulary_token"],
+                }
+            }
+        }
+    }
+    refreshed_model = {
+        "state_variables": {
+            "resource_state": {
+                "scope": "resource",
+                "domain": ["next_request_vocabulary_token"],
+            }
+        }
+    }
+
+    asyncio.run(
+        _run_mocked_candidate_handler(
+            session_state=session_state,
+            recovery_des_models={resource_jid: refreshed_model},
+            parsed_response={
+                "thought": "select the refreshed candidate",
+                "selected_candidate_index": 0,
+                "candidate_events": [
+                    _candidate_event("first_choice"),
+                    _candidate_event("second_choice"),
+                    _candidate_event("third_choice"),
+                ],
+            },
+        )
+    )
+    assert session_state["recovery_des_models"][resource_jid] == refreshed_model
+
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input={
+                "observed_runtime_state": {"resources": []},
+                "part_facts": [],
+                "goal_conditions": [],
+                "loaded_safety_rules": [],
+            },
+            session_state=session_state,
+            recovery_resources={},
+        )
+    )
+    assert "next_request_vocabulary_token" in prompt
+    assert "previous_vocabulary_token" not in prompt
 
 
 def test_case3_invalid_llm_selected_candidate_is_not_substituted() -> None:

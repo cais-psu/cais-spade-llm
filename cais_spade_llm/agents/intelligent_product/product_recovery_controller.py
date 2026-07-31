@@ -1306,9 +1306,6 @@ class ProductRecoveryController:
             if recovery_outline_id:
                 params.setdefault("recovery_outline_id", recovery_outline_id)
                 params.setdefault("outline_id", recovery_outline_id)
-            llm_outline_id = str(task_node.get("llm_outline_id") or "").strip()
-            if llm_outline_id:
-                params.setdefault("llm_outline_id", llm_outline_id)
             event_name = str(params.get("event_name") or task_node.get("event_name") or "").strip()
             if event_name:
                 params["event_name"] = event_name

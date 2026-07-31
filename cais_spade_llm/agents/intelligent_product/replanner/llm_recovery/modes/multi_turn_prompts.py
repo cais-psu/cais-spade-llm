@@ -1242,22 +1242,12 @@ def _outline_task_sequence_summary(
 
 def _accepted_transition_prefix_for_prompt(
     tasks: list[dict[str, Any]],
-    *,
-    recovery_des_models: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Return exact accepted public transition fields for prompt history."""
+    """Return accepted transition identities without prior state examples."""
     prompt_rows: list[dict[str, Any]] = []
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        resource_jid = str(task.get("resource_jid") or "").strip()
-        descriptor = dict(recovery_des_models.get(resource_jid) or {})
-        state_variables = dict(descriptor.get("state_variables") or {})
-        public_state_fields = {
-            str(field_name)
-            for field_name, declaration in state_variables.items()
-            if dict(declaration or {}).get("private") is not True
-        }
         row: dict[str, Any] = {}
         for field_name in ("outline_id", "event_name", "resource_jid", "part_name"):
             if field_name not in task:
@@ -1266,17 +1256,6 @@ def _accepted_transition_prefix_for_prompt(
             if field_name == "part_name" and not str(field_value or "").strip():
                 continue
             row[field_name] = deepcopy(field_value)
-        for state_field in ("expected_start_state", "expected_end_state"):
-            if not isinstance(task.get(state_field), dict):
-                continue
-            state = dict(task.get(state_field) or {})
-            if public_state_fields:
-                state = {
-                    field_name: deepcopy(field_value)
-                    for field_name, field_value in state.items()
-                    if str(field_name) in public_state_fields
-                }
-            row[state_field] = state
         if row:
             prompt_rows.append(row)
     return prompt_rows
@@ -1708,7 +1687,7 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
     if not isinstance(recovery_resources, dict) or not recovery_resources:
         return "(none advertised)"
 
-    lines: list[str] = []
+    rows: list[dict[str, Any]] = []
     for resource_jid in sorted(recovery_resources):
         entry = dict(recovery_resources.get(resource_jid) or {})
         recovery_snapshot = dict(entry.get("recovery_snapshot") or {})
@@ -1717,48 +1696,92 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
             entry.get("recovery_adapter") or recovery_snapshot.get("recovery_adapter") or {}
         )
 
-        manipulation = (
-            "manipulate parts"
-            if bool(recovery_adapter.get("supports_manipulator_pick_place"))
-            else (
-                "execute recovery actions"
-                if bool(recovery_adapter.get("supports_executable_recovery"))
-                else "manipulation not advertised"
-            )
+        row: dict[str, Any] = {"resource_jid": resource_jid}
+        resource_type = (
+            entry.get("resource_type")
+            or recovery_adapter.get("resource_type")
+            or recovery_snapshot.get("resource_type")
+            or static_capabilities.get("resource_type")
         )
+        if resource_type not in (None, "", [], {}):
+            row["resource_type"] = deepcopy(resource_type)
+        for field_name, value in recovery_adapter.items():
+            if str(field_name).startswith("supports_") and value is True:
+                row[str(field_name)] = True
+        example_families = recovery_adapter.get("example_families")
+        if example_families not in (None, "", [], {}):
+            row["example_families"] = deepcopy(example_families)
+        for field_name in (
+            "named_poses",
+            "available_named_poses",
+            "reachability",
+            "reachable_locations",
+        ):
+            for source in (recovery_snapshot, static_capabilities):
+                value = source.get(field_name)
+                if value in (None, "", [], {}):
+                    continue
+                row[field_name] = deepcopy(value)
+                break
+        rows.append(row)
+    if not rows:
+        return "(none advertised)"
+    return "\n".join(
+        "- "
+        + " | ".join(
+            f"{field_name}={_inline_json(value)}"
+            for field_name, value in row.items()
+        )
+        for row in rows
+    )
 
-        named_poses = _named_pose_tokens(
-            recovery_snapshot.get("named_poses")
-            or static_capabilities.get("named_poses")
-            or recovery_snapshot.get("available_named_poses")
-            or static_capabilities.get("available_named_poses")
-            or []
-        )
-        reachable_locations = [
-            str(token).strip()
-            for token in (
-                static_capabilities.get("reachability")
-                or static_capabilities.get("reachable_locations")
-                or recovery_snapshot.get("reachability")
-                or recovery_snapshot.get("reachable_locations")
-                or []
-            )
-            if str(token).strip()
-        ]
-        known_resource_locations = sorted(
-            set(named_poses).union(reachable_locations)
-        )
-        known_resource_location_text = (
-            ", ".join(known_resource_locations)
-            if known_resource_locations
-            else "none advertised"
-        )
 
-        lines.append(
-            f"- {resource_jid}: {manipulation}; known resource locations: "
-            f"{known_resource_location_text}"
+def _resource_state_vocabulary_summary(
+    *,
+    recovery_resources: dict[str, Any],
+    recovery_des_models: dict[str, Any],
+) -> str:
+    """Render exact non-private RA state-variable declarations."""
+    resource_jids = sorted(set(recovery_resources) | set(recovery_des_models))
+    rows: list[dict[str, Any]] = []
+    for resource_jid in resource_jids:
+        entry = dict(recovery_resources.get(resource_jid) or {})
+        descriptor = dict(
+            recovery_des_models.get(resource_jid)
+            or entry.get("recovery_des_model")
+            or {}
         )
-    return "\n".join(lines) if lines else "(none advertised)"
+        state_variables: dict[str, Any] = {}
+        for field_name, raw_declaration in dict(
+            descriptor.get("state_variables") or {}
+        ).items():
+            declaration = dict(raw_declaration or {})
+            if declaration.get("private") is True or str(field_name).startswith(
+                "task_ctx."
+            ):
+                continue
+            state_variables[str(field_name)] = {
+                key: deepcopy(declaration.get(key))
+                for key in ("scope", "domain")
+                if key in declaration
+            }
+        if state_variables:
+            rows.append(
+                {
+                    "resource_jid": resource_jid,
+                    "state_variables": state_variables,
+                }
+            )
+    if not rows:
+        return "(none advertised)"
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"- {row['resource_jid']}")
+        for field_name, declaration in dict(
+            row.get("state_variables") or {}
+        ).items():
+            lines.append(f"  - {field_name}: {_inline_json(declaration)}")
+    return "\n".join(lines)
 
 
 def _active_primitive_outline_event(
@@ -3193,9 +3216,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     _compact_json(
                         _accepted_transition_prefix_for_prompt(
                             accepted_prefix,
-                            recovery_des_models=dict(
-                                session_state.get("recovery_des_models") or {}
-                            ),
                         )
                     ),
                     "- These transitions have already been applied. Do not propose them again.",
@@ -3206,11 +3226,12 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             sections.extend(
                 [
                     "",
-                    "Accepted Transition Prefix (keep exactly, do not modify)",
-                    _outline_task_sequence_summary(
-                        accepted_prefix,
-                        include_descriptions=True,
+                    "Accepted Transition Prefix (already applied; do not repeat)",
+                    _compact_json(
+                        _accepted_transition_prefix_for_prompt(accepted_prefix)
                     ),
+                    "- These transitions have already been applied. Do not propose them again.",
+                    "- Use Current DES State below as the exact start point for the next transition.",
                 ]
             )
 
@@ -3244,6 +3265,15 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "",
                 "Resource Capabilities",
                 _resource_capabilities_summary(recovery_resources),
+                "",
+                "RA State Vocabulary",
+                "These are the public state values currently declared by each Resource Agent. They describe the current model; new `resource_state` and `part_state` values may still be authored when they express a concrete state effect.",
+                _resource_state_vocabulary_summary(
+                    recovery_resources=recovery_resources,
+                    recovery_des_models=dict(
+                        session_state.get("recovery_des_models") or {}
+                    ),
+                ),
             ]
         )
     elif outline_validation_findings:
@@ -3352,9 +3382,12 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 ),
                 (
                     "- A candidate with `part_name` must include `held_part`, `part_state`, "
-                    "and `part_location` in `expected_end_state`. A custody-changing end state "
-                    "must use an exact supplied, non-null `part_location`."
+                    "and `part_location` in `expected_end_state`. When `held_part` equals "
+                    "`part_name`, `part_location` must equal that candidate's `resource_jid`. "
+                    "Every custody-changing end state must use an exact supplied, non-null "
+                    "`part_location`."
                 ),
+                "- A non-null `observed_pose` is grounded source evidence for its part.",
                 (
                     "- You may author a new `event_name` and optional new `resource_state` "
                     "or `part_state` values."

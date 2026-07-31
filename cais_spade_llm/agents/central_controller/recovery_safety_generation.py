@@ -50,7 +50,6 @@ def _outline_event_echo_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "outline_id": {"type": "string"},
-            "llm_outline_id": {"type": "string"},
             "event_name": {"type": "string"},
             "resource_jid": {"type": "string"},
             "part_name": {"type": "string"},
@@ -60,7 +59,6 @@ def _outline_event_echo_schema() -> dict[str, Any]:
         },
         "required": [
             "outline_id",
-            "llm_outline_id",
             "event_name",
             "resource_jid",
             "part_name",
@@ -250,7 +248,6 @@ def _normalize_grounded_events(items: Any) -> list[dict[str, Any]]:
         result.append(
             {
                 "outline_id": str(item.get("outline_id") or "").strip(),
-                "llm_outline_id": str(item.get("llm_outline_id") or "").strip(),
                 "event_name": str(item.get("event_name") or "").strip(),
                 "resource_jid": str(item.get("resource_jid") or "").strip(),
                 "part_name": str(item.get("part_name") or "").strip(),
@@ -292,7 +289,6 @@ def _normalize_grounded_states(items: Any) -> list[dict[str, Any]]:
         result.append(
             {
                 "outline_id": str(item.get("outline_id") or "").strip(),
-                "llm_outline_id": str(item.get("llm_outline_id") or "").strip(),
                 "resource_jid": str(item.get("resource_jid") or "").strip(),
                 "part_name": str(item.get("part_name") or "").strip(),
                 "field": field,
@@ -356,7 +352,6 @@ def _normalize_generated_aps(items: Any) -> list[dict[str, Any]]:
                 if str(token).strip()
             ],
             "outline_id": str(item.get("outline_id") or "").strip(),
-            "llm_outline_id": str(item.get("llm_outline_id") or "").strip(),
             "id": str(item.get("id") or "").strip(),
             "event_name": str(item.get("event_name") or "").strip(),
             "function": str(item.get("function") or "").strip(),
@@ -394,13 +389,6 @@ def _grounded_bindings_from_row(
                 str(item.get("outline_id") or "").strip()
                 for item in recovery_events + recovery_states
                 if str(item.get("outline_id") or "").strip()
-            }
-        ),
-        "recovery_llm_outline_ids": sorted(
-            {
-                str(item.get("llm_outline_id") or "").strip()
-                for item in recovery_events + recovery_states
-                if str(item.get("llm_outline_id") or "").strip()
             }
         ),
         "recovery_resource_jids": sorted(
@@ -706,7 +694,6 @@ def _recovery_event_rows_for_ids(
         rows.append(
             {
                 "outline_id": str(accepted_row.get("outline_id") or "").strip(),
-                "llm_outline_id": str(accepted_row.get("llm_outline_id") or "").strip(),
                 "event_name": str(accepted_row.get("event_name") or "").strip(),
                 "resource_jid": str(accepted_row.get("resource_jid") or "").strip(),
                 "part_name": str(accepted_row.get("part_name") or "").strip(),
@@ -768,7 +755,6 @@ def _selected_recovery_states(
             rows.append(
                 {
                     "outline_id": str(accepted_row.get("outline_id") or "").strip(),
-                    "llm_outline_id": str(accepted_row.get("llm_outline_id") or "").strip(),
                     "resource_jid": str(accepted_row.get("resource_jid") or "").strip(),
                     "part_name": str(accepted_row.get("part_name") or "").strip(),
                     "field": field,
@@ -900,7 +886,6 @@ def _recovery_event_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, A
         "source": "recovery",
         "source_task_ids": [outline_id] if outline_id else [],
         "outline_id": outline_id,
-        "llm_outline_id": str(row.get("llm_outline_id") or "").strip(),
         "id": "",
         "event_name": "",
         "function": "execute_recovery_macro",
@@ -926,7 +911,6 @@ def _nominal_event_ap(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, An
         "source": "nominal",
         "source_task_ids": [task_id] if task_id else [],
         "outline_id": "",
-        "llm_outline_id": "",
         "id": task_id,
         "event_name": "",
         "function": function,
@@ -973,7 +957,6 @@ def _recovery_state_ap(
         "source": "recovery",
         "source_task_ids": [outline_id] if outline_id else [],
         "outline_id": outline_id,
-        "llm_outline_id": str(row.get("llm_outline_id") or "").strip(),
         "id": "",
         "event_name": "",
         "function": "",
@@ -1011,7 +994,6 @@ def _nominal_state_ap(
         "source": "nominal",
         "source_task_ids": [task_id] if task_id else [],
         "outline_id": "",
-        "llm_outline_id": "",
         "id": task_id,
         "event_name": "",
         "function": str(row.get("function") or "").strip(),
@@ -1590,9 +1572,6 @@ def _normalize_grounded_bindings(items: Any) -> dict[str, Any]:
     payload = dict(items or {})
     return {
         "recovery_outline_ids": _normalize_string_tokens(payload.get("recovery_outline_ids") or []),
-        "recovery_llm_outline_ids": _normalize_string_tokens(
-            payload.get("recovery_llm_outline_ids") or []
-        ),
         "recovery_resource_jids": _normalize_string_tokens(
             payload.get("recovery_resource_jids") or []
         ),
@@ -1674,7 +1653,7 @@ def _validate_grounded_rule_result(
             return (
                 f"grounded recovery event references unknown outline_id {outline_id or '<missing>'}"
             )
-        for key in ("llm_outline_id", "event_name", "resource_jid", "part_name"):
+        for key in ("event_name", "resource_jid", "part_name"):
             token = str(item.get(key) or "").strip()
             accepted_token = str(accepted_row.get(key) or "").strip()
             if token != accepted_token:

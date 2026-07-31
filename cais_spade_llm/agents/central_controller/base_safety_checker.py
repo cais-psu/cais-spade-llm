@@ -86,7 +86,6 @@ class BaseSafetyChecker:
             str(params.get("task_id") or "").strip(),
             str(params.get("recovery_outline_id") or "").strip(),
             str(params.get("outline_id") or "").strip(),
-            str(params.get("llm_outline_id") or "").strip(),
         }
         return {token for token in tokens if token}
 

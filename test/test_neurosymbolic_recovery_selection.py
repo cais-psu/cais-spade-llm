@@ -584,7 +584,7 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
         _condition("goal_LG", part_name="LG", expected="assembled")
     )
     modeled_task = {
-        "outline_id": "enabledness_private",
+        "outline_id": "private_internal_candidate",
         "event_name": "registered_transition",
         "resource_jid": "resource@localhost",
         "part_name": "LG",
@@ -631,13 +631,24 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
         parsed_response = kwargs["parsed_response"]
         candidate = deepcopy(parsed_response["candidate_events"][0])
         assert "expected_start_state" not in candidate
+        assert candidate["outline_id"] == "RECOVERY_SEQ1_1"
         committed = {
             **candidate,
             "outline_id": "RECOVERY_SEQ1",
-            "llm_outline_id": candidate["outline_id"],
+            "candidate_source": "llm",
         }
         working_state["accepted_outline_prefix"] = [deepcopy(committed)]
         return "need_next_task", {
+            "candidate_evaluations": [
+                {
+                    "candidate_index": 0,
+                    "task": deepcopy(candidate),
+                    "validated_task": deepcopy(candidate),
+                    "surface_events": [deepcopy(candidate)],
+                    "validated_events": [deepcopy(candidate)],
+                    "committed_events": [deepcopy(committed)],
+                }
+            ],
             "selected_candidate_task": candidate,
             "selected_transition": deepcopy(committed),
             "selected_transition_sequence": [deepcopy(committed)],
@@ -659,14 +670,116 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
     )
 
     assert result is not None
-    decision, turn_entry, _parsed_response = result
+    decision, turn_entry, parsed_response = result
     assert decision == "need_next_task"
     assert turn_entry["candidate_source"] == "robot_task_program"
     assert turn_entry["llm_called"] is False
     assert session_state["candidate_count"] == 3
+    assert parsed_response["candidate_events"][0]["outline_id"] == "RECOVERY_SEQ1_1"
     accepted = session_state["accepted_outline_prefix"][0]
     assert accepted["candidate_source"] == "robot_task_program"
     assert accepted["modeled_task_steps"] == modeled_steps
+    modeled_evaluation = turn_entry["candidate_evaluations"][0]
+    for key in ("task", "validated_task"):
+        assert modeled_evaluation[key]["candidate_source"] == "robot_task_program"
+    for key in ("surface_events", "validated_events", "committed_events"):
+        assert modeled_evaluation[key][0]["candidate_source"] == (
+            "robot_task_program"
+        )
+    for key in (
+        "transition_trace",
+        "accepted_transition_prefix",
+        "des_event_sequence",
+    ):
+        assert session_state[key][0]["candidate_source"] == "robot_task_program"
+        assert turn_entry[key][0]["candidate_source"] == "robot_task_program"
+
+
+def test_modeled_continuation_source_does_not_require_visible_steps() -> None:
+    committed = {
+        "outline_id": "RECOVERY_SEQ1",
+        "event_name": "registered_transition",
+        "resource_jid": "resource@localhost",
+        "candidate_source": "llm",
+    }
+    session_state = {"accepted_outline_prefix": [deepcopy(committed)]}
+    turn_entry = {
+        "selected_candidate_task": {
+            **deepcopy(committed),
+            "outline_id": "RECOVERY_SEQ1_1",
+        },
+        "selected_transition": deepcopy(committed),
+        "selected_transition_sequence": [deepcopy(committed)],
+        "next_transition": deepcopy(committed),
+        "candidate_evaluations": [
+            {
+                "candidate_index": 0,
+                "validated_task": {
+                    **deepcopy(committed),
+                    "outline_id": "RECOVERY_SEQ1_1",
+                },
+                "committed_events": [deepcopy(committed)],
+            }
+        ],
+    }
+
+    multi_turn_outline_generation._attach_modeled_task_steps(
+        session_state=session_state,
+        turn_entry=turn_entry,
+        instance_by_outline_id={
+            "RECOVERY_SEQ1_1": {
+                "event_id": "private_event_id",
+                "recovery_visible_steps": [],
+            }
+        },
+    )
+
+    assert session_state["accepted_outline_prefix"][0]["candidate_source"] == (
+        "robot_task_program"
+    )
+    assert turn_entry["selected_transition"]["candidate_source"] == (
+        "robot_task_program"
+    )
+    assert turn_entry["candidate_evaluations"][0]["committed_events"][0][
+        "candidate_source"
+    ] == "robot_task_program"
+    assert "modeled_task_steps" not in session_state["accepted_outline_prefix"][0]
+
+
+def test_final_output_keeps_only_per_transition_candidate_source() -> None:
+    accepted = [
+        {
+            "outline_id": "RECOVERY_SEQ1",
+            "event_name": "authored_transition",
+            "resource_jid": "resource@localhost",
+            "candidate_source": "llm",
+        },
+        {
+            "outline_id": "RECOVERY_SEQ2",
+            "event_name": "registered_transition",
+            "resource_jid": "resource@localhost",
+            "candidate_source": "robot_task_program",
+        },
+    ]
+
+    payload = multi_turn._build_final_output_payload(
+        {
+            "accepted_outline_prefix": deepcopy(accepted),
+            "accepted_primitive_program": [],
+            "status": "ready_for_primitive_generation",
+            "current_phase": "primitive_generation",
+        },
+        stage="ready_for_primitive_generation",
+    )
+
+    assert [row["candidate_source"] for row in payload["transition_trace"]] == [
+        "llm",
+        "robot_task_program",
+    ]
+    assert [
+        row["candidate_source"] for row in payload["executable_recovery_trace"]
+    ] == ["llm", "robot_task_program"]
+    assert "recovery_sequence_source" not in payload
 
 
 def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> None:
@@ -1270,7 +1383,7 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
     assert findings[0]["constraint_code"] == "candidate_schema_violation"
 
 
-def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> None:
+def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history_states() -> None:
     printer_jid = "printer@localhost"
     robot_jid = "robot@localhost"
     printer_state_variables = {
@@ -1281,6 +1394,10 @@ def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> Non
             "domain": ["M1"],
             "private": True,
         },
+        "task_ctx.hidden_value": {
+            "scope": "resource",
+            "domain": ["private_task_context_token"],
+        },
     }
     robot_state_variables = {
         "resource_state": {"scope": "resource", "domain": ["failed", "idle"]},
@@ -1288,7 +1405,19 @@ def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> Non
     }
     session_state = _session(parts={})
     session_state["recovery_des_models"] = {
-        printer_jid: {"state_variables": deepcopy(printer_state_variables)},
+        printer_jid: {
+            "state_variables": deepcopy(printer_state_variables),
+            "events": [
+                {
+                    "event_name": "private_event_token",
+                    "guards": {"job_state": {"equals": "private_guard_token"}},
+                    "updates": {"job_state": {"set": "private_update_token"}},
+                    "recovery_visible_steps": [
+                        {"primitive": "private_program_step_token"}
+                    ],
+                }
+            ],
+        },
         robot_jid: {"state_variables": deepcopy(robot_state_variables)},
     }
     session_state["symbolic_resources"] = {
@@ -1343,11 +1472,29 @@ def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> Non
     }
     recovery_resources = {
         printer_jid: {
+            "resource_type": "printer",
+            "recovery_adapter": {
+                "resource_type": "printer",
+                "supports_executable_recovery": True,
+                "supports_printer_job_control": True,
+                "supports_manipulator_pick_place": False,
+                "example_families": ["generic_recovery", "printer_job_control"],
+            },
+            "static_capabilities": {"reachability": ["stale_location_token"]},
+            "recovery_snapshot": {"reachability": ["fresh_location_token"]},
             "recovery_des_model": {
                 "state_variables": deepcopy(printer_state_variables)
             }
         },
         robot_jid: {
+            "resource_type": "robot",
+            "recovery_adapter": {
+                "resource_type": "robot",
+                "supports_executable_recovery": True,
+                "supports_manipulator_pick_place": True,
+                "supports_printer_job_control": False,
+                "example_families": ["generic_recovery", "manipulator_pick_place"],
+            },
             "recovery_des_model": {"state_variables": deepcopy(robot_state_variables)}
         },
     }
@@ -1362,15 +1509,54 @@ def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> Non
     )
 
     assert "Accepted Transition Prefix (already applied; do not repeat)" in prompt
-    assert '"outline_id": "RECOVERY_SEQ1"' in prompt
-    assert '"event_name": "pause_job"' in prompt
-    assert '"job_state": "printing"' in prompt
-    assert '"job_state": "paused"' in prompt
-    assert '"outline_id": "RECOVERY_SEQ2"' in prompt
-    assert '"event_name": "clear_failure"' in prompt
-    assert '"held_part": null' in prompt
+    accepted_history = prompt.split(
+        "Accepted Transition Prefix (already applied; do not repeat)", maxsplit=1
+    )[1].split("Resource Capabilities", maxsplit=1)[0]
+    assert '"outline_id": "RECOVERY_SEQ1"' in accepted_history
+    assert '"event_name": "pause_job"' in accepted_history
+    assert '"outline_id": "RECOVERY_SEQ2"' in accepted_history
+    assert '"event_name": "clear_failure"' in accepted_history
+    assert "expected_start_state" not in accepted_history
+    assert "expected_end_state" not in accepted_history
+    assert "job_state" not in accepted_history
+    assert "held_part" not in accepted_history
+    assert "RA State Vocabulary" in prompt
+    assert (
+        'job_state: {"domain": ["printing", "paused"], "scope": "resource"}'
+        in prompt
+    )
+    assert 'held_part: {"domain": [null], "scope": "resource"}' in prompt
+    assert 'resource_type="printer"' in prompt
+    assert "supports_printer_job_control=true" in prompt
+    assert 'example_families=["generic_recovery", "printer_job_control"]' in prompt
+    assert "supports_manipulator_pick_place=false" not in prompt
+    assert 'reachability=["fresh_location_token"]' in prompt
+    assert "stale_location_token" not in prompt
     assert "maintenance_code" not in prompt
+    for private_token in (
+        "task_ctx.hidden_value",
+        "private_task_context_token",
+        "private_event_token",
+        "private_guard_token",
+        "private_update_token",
+        "private_program_step_token",
+    ):
+        assert private_token not in prompt
     assert "You may author a new `event_name`" in prompt
+
+    session_state["recovery_des_models"][printer_jid]["state_variables"][
+        "job_state"
+    ]["domain"] = ["printing", "paused", "next_request_vocabulary_token"]
+    next_prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input=llm_input,
+            session_state=session_state,
+            recovery_resources=recovery_resources,
+        )
+    )
+    assert "next_request_vocabulary_token" in next_prompt
+    assert "next_request_vocabulary_token" not in prompt
 
 
 def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:

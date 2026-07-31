@@ -130,7 +130,6 @@
   "selected_candidate_index": 0,
   "selected_transition": {
     "outline_id": "RECOVERY_SEQ1",
-    "llm_outline_id": "recovery_xarm6_failed_to_idle_home",
     "event_name": "recover_to_home_idle",
     "resource_jid": "xarm6@localhost",
     "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
@@ -169,8 +168,7 @@
         "resource_state": "idle",
         "resource_location": "home"
       },
-      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2.",
-      "llm_outline_id": "recovery_xarm6_failed_to_idle_home"
+      "rationale": "Enabled because xarm6@localhost is currently failed in the DES state and holds no part. This directly clears the open guard requiring xarm6@localhost to reach idle, restoring the resource for later LG recovery or coordination while remaining consistent with SAFE_2."
     }
   ],
   "transition_validation": {
