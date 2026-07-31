@@ -10,7 +10,6 @@ _COLORS = {
     "picked": "cyan",
     "positioned": "teal",
     "placed": "green",
-    "recovery_required": "red",
     "running": "orange",
     "completed": "green",
     "failed": "red",

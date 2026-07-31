@@ -7,6 +7,11 @@
       "event_name": "pick_lg_from_observed_pose",
       "resource_jid": "ur5e@localhost",
       "part_name": "LG",
+      "action_target": {
+        "x": 0.0,
+        "y": 0.2,
+        "z": 1.035
+      },
       "rationale": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1.",
       "expected_start_state": {
         "resource_state": "idle",
@@ -15,10 +20,9 @@
         "part_location": null
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "picked",
         "held_part": "LG",
-        "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_state": "in_gripper"
       },
       "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
     },
@@ -27,6 +31,11 @@
       "event_name": "secure_lg_from_observed_pose",
       "resource_jid": "ur5e@localhost",
       "part_name": "LG",
+      "action_target": {
+        "x": 0.0,
+        "y": 0.2,
+        "z": 1.035
+      },
       "rationale": "Acquire LG from the same grounded observation as an alternative authored transition.",
       "expected_start_state": {
         "resource_state": "idle",
@@ -35,10 +44,9 @@
         "part_location": null
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "picked",
         "held_part": "LG",
-        "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_state": "in_gripper"
       },
       "description": "Acquire LG from the same grounded observation as an alternative authored transition."
     },
@@ -47,6 +55,11 @@
       "event_name": "control_lg_from_observed_pose",
       "resource_jid": "ur5e@localhost",
       "part_name": "LG",
+      "action_target": {
+        "x": 0.0,
+        "y": 0.2,
+        "z": 1.035
+      },
       "rationale": "Put LG under ur5e control from its supplied observed pose as another candidate.",
       "expected_start_state": {
         "resource_state": "idle",
@@ -55,10 +68,9 @@
         "part_location": null
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "picked",
         "held_part": "LG",
-        "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_state": "in_gripper"
       },
       "description": "Put LG under ur5e control from its supplied observed pose as another candidate."
     }

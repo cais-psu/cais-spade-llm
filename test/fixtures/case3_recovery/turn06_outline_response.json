@@ -15,7 +15,8 @@
         "part_location": "ur5e@localhost_gripper"
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "placed",
+        "resource_location": "assembly_board-v1",
         "held_part": null,
         "part_state": "assembled",
         "part_location": "assembly_board-v1"
@@ -35,7 +36,8 @@
         "part_location": "ur5e@localhost_gripper"
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "placed",
+        "resource_location": "assembly_board-v1",
         "held_part": null,
         "part_state": "assembled",
         "part_location": "assembly_board-v1"
@@ -55,7 +57,8 @@
         "part_location": "ur5e@localhost_gripper"
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "placed",
+        "resource_location": "assembly_board-v1",
         "held_part": null,
         "part_state": "assembled",
         "part_location": "assembly_board-v1"

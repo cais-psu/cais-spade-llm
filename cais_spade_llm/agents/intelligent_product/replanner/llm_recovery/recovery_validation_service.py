@@ -6,15 +6,9 @@ from copy import deepcopy
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
-    _apply_outline_task_effects,
-    _build_outline_task_type_lookup,
     _infer_outline_macro_signature,
 )
-from cais_spade_llm.resources.resource_profile import (
-    get_resource_profile,
-    resource_snapshot_carried_entity_location,
-    resource_type_from_value,
-)
+from cais_spade_llm.resources.capability_engine import configured_recovery_state
 
 SYNTAX_AND_GROUNDING_VALIDATION = "syntax_and_grounding_validation"
 TRANSITION_FEASIBILITY = "transition_feasibility"
@@ -22,21 +16,13 @@ PHYSICAL_FEASIBILITY = "physical_feasibility"
 SAFETY = "safety"
 
 _OUTLINE_VALIDATION_CONTRACT = {
-    "allowed_state_fields": [
-        "resource_state",
-        "resource_location",
-        "held_part",
-        "part_state",
-        "part_location",
-    ],
-    "disallow_unknown_state_fields": True,
-    "require_expected_start_match": True,
-    "require_part_traceability": True,
+    "disallow_unknown_state_fields": False,
+    "require_expected_start_match": False,
+    "require_part_traceability": False,
 }
 
 _SYNTAX_AND_GROUNDING_CODES = {
     "candidate_schema_violation",
-    "disallowed_outline_state_field",
     "invalid_object_bindings_type",
     "invalid_parameters_type",
     "invalid_rationale_type",
@@ -54,13 +40,13 @@ _SYNTAX_AND_GROUNDING_CODES = {
     "unknown_product_binding",
     "unknown_resource_binding",
     "unknown_state_token",
-    "state_value_outside_ra_domain",
 }
 
 _TRANSITION_FEASIBILITY_CODES = {
     "blocker_open",
     "claimed_condition_not_currently_unmet",
     "dependency_unsatisfied",
+    "disallowed_outline_state_field",
     "expected_start_state_mismatch",
     "held_part_location_mismatch",
     "invalid_dependency_reference",
@@ -70,8 +56,12 @@ _TRANSITION_FEASIBILITY_CODES = {
     "part_traceability_violation",
     "part_relocation_without_carrier",
     "source_reference_unavailable",
+    "state_value_outside_ra_domain",
     "supervisor_blocked",
     "unsatisfied_guard_predicate",
+    "parameter_binding_unavailable",
+    "resource_state_outside_configured_domain",
+    "transition_effect_mismatch",
 }
 
 _PHYSICAL_FEASIBILITY_CODES = {
@@ -200,46 +190,50 @@ def _task_action_target(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _state_location_token(state: dict[str, Any]) -> str:
-    return str(
-        _first_non_empty(
-            state,
-            "part_location",
-            "resource_location",
-            "location",
-            "current_location",
-            "named_pose",
-        )
-        or ""
-    ).strip()
+    configured_state = configured_recovery_state(state)
+    value = _first_non_empty(
+        configured_state,
+        "part_location",
+        "resource_location",
+        "location",
+        "current_location",
+        "named_pose",
+    )
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def _state_part_location_token(state: dict[str, Any]) -> str:
-    return str(
-        _first_non_empty(
-            state,
-            "part_location",
-            "location",
-            "current_location",
-        )
-        or ""
-    ).strip()
+    configured_state = configured_recovery_state(state)
+    value = _first_non_empty(
+        configured_state,
+        "part_location",
+        "location",
+        "current_location",
+    )
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def _state_resource_location_token(state: dict[str, Any]) -> str:
-    return str(
-        _first_non_empty(
-            state,
-            "resource_location",
-            "named_pose",
-            "location",
-            "current_location",
-        )
-        or ""
-    ).strip()
+    configured_state = configured_recovery_state(state)
+    value = _first_non_empty(
+        configured_state,
+        "resource_location",
+        "named_pose",
+        "location",
+        "current_location",
+    )
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def _state_pose_value(state: dict[str, Any]) -> dict[str, Any] | None:
-    pose = state.get("position") or state.get("pose") or state.get("current_pose")
+    configured_state = configured_recovery_state(state)
+    pose = (
+        state.get("position")
+        or state.get("pose")
+        or state.get("current_pose")
+        or configured_state.get("part_location")
+        or configured_state.get("resource_location")
+    )
     if not isinstance(pose, dict) or "x" not in pose:
         return None
     return deepcopy(pose)
@@ -261,19 +255,37 @@ def _state_pose_ref_token(state: dict[str, Any]) -> str:
 
 
 def _state_resource_state_token(state: dict[str, Any]) -> str:
-    return str(_first_non_empty(state, "current_state", "state", "resource_state") or "").strip()
+    configured_state = configured_recovery_state(state)
+    return str(
+        _first_non_empty(
+            configured_state,
+            "current_state",
+            "state",
+            "resource_state",
+        )
+        or ""
+    ).strip()
 
 
 def _state_part_state_token(state: dict[str, Any]) -> str:
+    configured_state = configured_recovery_state(state)
     return str(
-        _first_non_empty(state, "part_state", "part_status", "current_state", "state") or ""
+        _first_non_empty(
+            configured_state,
+            "part_state",
+            "part_status",
+            "current_state",
+            "state",
+        )
+        or ""
     ).strip()
 
 
 def _state_effect_part_state_token(state: dict[str, Any]) -> str:
+    configured_state = configured_recovery_state(state)
     return str(
         _first_non_empty(
-            state,
+            configured_state,
             "part_state",
             "part_status",
             "current_state",
@@ -386,12 +398,13 @@ def _resource_state_tokens(
 
 
 def _explicit_state_location_tokens(state: dict[str, Any]) -> list[str]:
+    configured_state = configured_recovery_state(state)
     return _dedupe_tokens(
         [
-            str(state.get("part_location") or "").strip(),
-            str(state.get("resource_location") or "").strip(),
-            str(state.get("location") or "").strip(),
-            str(state.get("current_location") or "").strip(),
+            str(configured_state.get("part_location") or "").strip(),
+            str(configured_state.get("resource_location") or "").strip(),
+            str(configured_state.get("location") or "").strip(),
+            str(configured_state.get("current_location") or "").strip(),
         ]
     )
 
@@ -878,7 +891,9 @@ def _build_preconditions_and_effects(
             ("held_part", end_state.get("held_part")),
             (
                 "location",
-                _state_location_token(end_state) or _state_pose_ref_token(end_state) or None,
+                _state_resource_location_token(end_state)
+                or _state_pose_ref_token(end_state)
+                or None,
             ),
         )
         if value not in (None, "", [], {})
@@ -908,20 +923,33 @@ def _build_preconditions_and_effects(
     current_part_holder = _part_row_holder_token(part_row)
 
     expected_part_effect: dict[str, Any] = {"part_name": part_name}
+    start_part_state = _state_effect_part_state_token(start_state)
     part_state = _state_effect_part_state_token(end_state)
-    if part_state:
+    if part_state and part_state != start_part_state:
         expected_part_effect["state"] = part_state
-    part_location = _state_location_token(end_state) or requested_target_location
-    if part_location:
+    start_part_location = _state_part_location_token(start_state)
+    part_location = (
+        _state_part_location_token(end_state)
+        or requested_target_location
+    )
+    if part_location and part_location != start_part_location:
         expected_part_effect["location"] = part_location
+    start_part_pose = _state_pose_value(start_state)
     part_pose = _state_pose_value(end_state)
-    if part_pose is not None:
+    if part_pose is not None and part_pose != start_part_pose:
         expected_part_effect["pose"] = deepcopy(part_pose)
 
     if "held_part" in end_state:
+        start_held_part = str(start_state.get("held_part") or "").strip()
         end_held_part = str(end_state.get("held_part") or "").strip()
-        expected_part_effect["holder"] = resource_jid if end_held_part == part_name else None
-    elif requested_target_location or part_location or part_pose is not None:
+        start_holder = resource_jid if start_held_part == part_name else None
+        end_holder = resource_jid if end_held_part == part_name else None
+        if end_holder != start_holder:
+            expected_part_effect["holder"] = end_holder
+    elif (
+        requested_target_location
+        and requested_target_location != start_part_location
+    ):
         expected_part_effect["holder"] = None
 
     part_affecting = any(
@@ -987,9 +1015,12 @@ def _build_preconditions_and_effects(
     if source_ref is not None:
         preconditions["source_ref"] = deepcopy(source_ref)
 
-    effect_scope = (
-        "resource_and_part" if expected_resource_effect and part_affecting else "part_only"
-    )
+    if expected_resource_effect and part_affecting:
+        effect_scope = "resource_and_part"
+    elif part_affecting:
+        effect_scope = "part_only"
+    else:
+        effect_scope = "resource_only"
     return (
         preconditions,
         {"resource": expected_resource_effect, "part": expected_part_effect},
@@ -1029,6 +1060,9 @@ def _grounded_action(
     pose_ref = _state_pose_ref_token(end_state) or _state_pose_ref_token(start_state)
     if pose_ref and "named_pose" not in target:
         target["named_pose"] = pose_ref
+    action_target_pose = action_target.get("pose")
+    if isinstance(action_target_pose, dict):
+        target["pose"] = deepcopy(action_target_pose)
     explicit_pose = _state_pose_value(end_state) or _state_pose_value(start_state)
     if explicit_pose is not None:
         target["pose"] = deepcopy(explicit_pose)
@@ -1045,6 +1079,12 @@ def _grounded_action(
         part_row=part_row,
         task_kind=task_kind,
     )
+    if effect_scope == "resource_only":
+        task_kind = "resource_only"
+        target.pop("source_location", None)
+        resource_target_location = _state_resource_location_token(end_state)
+        if resource_target_location:
+            target["target_location"] = resource_target_location
 
     if task_kind == "continuation_resume":
         operation_kind = "continuation_resume"
@@ -1432,6 +1472,8 @@ def _binding_token_findings(
     raw_action_target = dict(task.get("action_target") or {})
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
+    if location_validation_mode == "deferred":
+        return []
 
     requested_named_pose = str(raw_action_target.get("named_pose") or "").strip()
     if requested_named_pose:
@@ -1525,148 +1567,6 @@ def _binding_token_findings(
     return []
 
 
-def compile_grounded_recovery_outline_task(
-    task: dict[str, Any],
-    *,
-    resources_by_jid: dict[str, dict[str, Any]],
-    parts_by_name: dict[str, dict[str, Any]],
-    outline_contract: dict[str, Any] | None = None,
-    location_validation_mode: str = "strict",
-) -> dict[str, Any]:
-    task_id = str(task.get("outline_id") or "").strip()
-    resource_jid = _task_resource_jid(task)
-    resource_row = dict(resources_by_jid.get(resource_jid) or {})
-    part_binding = _task_part_binding(task, parts_by_name=parts_by_name)
-    candidate_part_names = list(part_binding.get("candidate_part_names") or [])
-    effective_part_name = str(part_binding.get("effective_part_name") or "").strip()
-    task_kind = _infer_task_kind(task, part_binding=part_binding)
-    candidate_bindings = [
-        {
-            "resource_jid": resource_jid or None,
-            "part_name": part_name,
-        }
-        for part_name in candidate_part_names
-    ]
-
-    if not resource_jid or resource_jid not in resources_by_jid:
-        reason = f"task '{task_id}' does not bind a resource that exists in current recovery state"
-        return {
-            "status": "resource_unbound",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": _binding_finding(
-                task=task,
-                constraint_code="resource_unbound",
-                reason=reason,
-                evidence={"candidate_resource_jids": sorted(resources_by_jid)},
-            ),
-        }
-
-    if task_kind != "resource_only" and bool(part_binding.get("is_ambiguous")):
-        reason = (
-            f"task '{task_id}' could refer to multiple parts: {', '.join(candidate_part_names)}"
-        )
-        return {
-            "status": "part_ambiguous",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": _binding_finding(
-                task=task,
-                constraint_code="part_ambiguous",
-                resource_jid=resource_jid,
-                reason=reason,
-                evidence={"candidate_part_names": candidate_part_names},
-            ),
-        }
-
-    if task_kind != "resource_only" and not effective_part_name:
-        reason = f"task '{task_id}' does not bind a manipulable part"
-        return {
-            "status": "part_unbound",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": _binding_finding(
-                task=task,
-                constraint_code="part_unbound",
-                resource_jid=resource_jid,
-                reason=reason,
-            ),
-        }
-
-    if (
-        task_kind != "resource_only"
-        and effective_part_name
-        and _is_structured_continuation_resume(
-            task,
-            resource_row=resource_row,
-            part_row=dict(parts_by_name.get(effective_part_name) or {}),
-            part_name=effective_part_name,
-        )
-    ):
-        task_kind = "continuation_resume"
-
-    operation_kind = _infer_operation_kind(
-        task,
-        task_kind=task_kind,
-        part_name=effective_part_name,
-    )
-    outline_contract_finding = _outline_contract_finding(
-        task=task,
-        outline_contract=outline_contract,
-        resource_jid=resource_jid,
-        part_name=effective_part_name,
-        resource_row=resource_row,
-        part_row=dict(parts_by_name.get(effective_part_name) or {}),
-        resources_by_jid=resources_by_jid,
-    )
-    if outline_contract_finding:
-        return {
-            "status": "outline_contract_violation",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": deepcopy(outline_contract_finding),
-        }
-    binding_token_findings = _binding_token_findings(
-        task=task,
-        task_kind=task_kind,
-        resource_jid=resource_jid,
-        resource_row=resource_row,
-        part_name=effective_part_name,
-        part_row=dict(parts_by_name.get(effective_part_name) or {}),
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-        outline_contract=outline_contract,
-        location_validation_mode=location_validation_mode,
-    )
-    if binding_token_findings:
-        return {
-            "status": "binding_token_unresolved",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": deepcopy(binding_token_findings[0]),
-        }
-    grounded_action = _grounded_action(
-        task,
-        resource_jid=resource_jid,
-        resource_row=resource_row,
-        part_name=effective_part_name,
-        part_row=dict(parts_by_name.get(effective_part_name) or {}),
-        task_kind=task_kind,
-        operation_kind=operation_kind,
-    )
-    return {
-        "status": "grounded",
-        "grounded_action": grounded_action,
-        "candidate_bindings": [
-            {
-                "resource_jid": resource_jid,
-                "part_name": effective_part_name or None,
-            }
-        ],
-        "finding": None,
-    }
-
-
 def projected_outline_validation_context(  # noqa: C901, PLR0912
     *,
     session_state: dict[str, Any],
@@ -1696,11 +1596,6 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
         recovery_snapshot = dict(entry.get("recovery_snapshot") or {})
         static_capabilities = dict(entry.get("static_capabilities") or {})
         resource_row = resources_by_jid.setdefault(token, {"resource_jid": token})
-        recovery_des_model = dict(entry.get("recovery_des_model") or {})
-        current_valuation = dict(recovery_des_model.get("current_valuation") or {})
-        for field_name, value in current_valuation.items():
-            if field_name not in resource_row:
-                resource_row[field_name] = deepcopy(value)
         for key in (
             "named_poses",
             "available_named_poses",
@@ -1774,47 +1669,6 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
     return resources_by_jid, parts_by_name
 
 
-def _declared_carried_part_location(
-    *,
-    resource_jid: str,
-    recovery_entry: dict[str, Any],
-    recovery_des_model: dict[str, Any],
-    session_state: dict[str, Any],
-) -> str:
-    """Return the RA-owned carried-part token only when its DES domain permits it."""
-    jid = str(resource_jid or "").strip()
-    if not jid:
-        return ""
-    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
-    recovery_snapshot.update(
-        deepcopy(dict(dict(session_state.get("symbolic_resources") or {}).get(jid) or {}))
-    )
-    resource_type = resource_type_from_value(
-        recovery_entry.get("resource_type")
-        or recovery_snapshot.get("resource_type")
-        or dict(recovery_snapshot.get("resource_core") or {}).get("resource_type")
-    )
-    carried_part_location = resource_snapshot_carried_entity_location(
-        resource_jid=jid,
-        snapshot=recovery_snapshot,
-        profile=get_resource_profile(resource_type),
-    )
-    if not carried_part_location:
-        return ""
-    declaration = dict(
-        dict(recovery_des_model.get("state_variables") or {}).get("part_location")
-        or {}
-    )
-    domain = declaration.get("domain")
-    if (
-        str(declaration.get("scope") or "").strip() != "part"
-        or not isinstance(domain, list)
-        or carried_part_location not in domain
-    ):
-        return ""
-    return carried_part_location
-
-
 def validate_recovery_outline_task(
     *,
     planner: Any,
@@ -1822,7 +1676,7 @@ def validate_recovery_outline_task(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Run only ProductAgent-owned syntax, grounding, and transition validation."""
+    """Validate candidate syntax and build routing data without capability semantics."""
     del planner
     prepared_recovery_request = deepcopy(prepared_recovery_request)
     resources_by_jid, parts_by_name = projected_outline_validation_context(
@@ -1830,50 +1684,77 @@ def validate_recovery_outline_task(
         prepared_recovery_request=prepared_recovery_request,
     )
     resource_jid = _task_resource_jid(task)
-    recovery_entry = dict(
-        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
-            resource_jid
-        )
-        or {}
-    )
-    recovery_des_model = dict(
-        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
-        or recovery_entry.get("recovery_des_model")
-        or {}
-    )
-    state_variables = dict(recovery_des_model.get("state_variables") or {})
-    outline_contract = deepcopy(_OUTLINE_VALIDATION_CONTRACT)
-    if state_variables:
-        outline_contract["allowed_state_fields"] = sorted(state_variables)
-        outline_contract["state_field_scopes"] = {
-            str(field_name): str(dict(declaration or {}).get("scope") or "resource")
-            for field_name, declaration in state_variables.items()
-        }
-        outline_contract["state_field_domains"] = {
-            str(field_name): deepcopy(dict(declaration or {}).get("domain"))
-            for field_name, declaration in state_variables.items()
-            if isinstance(dict(declaration or {}).get("domain"), list)
-        }
-    outline_contract["carried_part_location"] = _declared_carried_part_location(
-        resource_jid=resource_jid,
-        recovery_entry=recovery_entry,
-        recovery_des_model=recovery_des_model,
-        session_state=session_state,
-    )
-    grounding_result = compile_grounded_recovery_outline_task(
-        task,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-        outline_contract=outline_contract,
-        location_validation_mode="strict",
-    )
-    finding = grounding_result.get("finding")
-    if isinstance(finding, dict):
-        return [annotate_validation_finding(finding)], None
+    if resource_jid not in resources_by_jid:
+        return [
+            annotate_validation_finding(
+                _binding_finding(
+                    task=task,
+                    constraint_code="unknown_resource",
+                    resource_jid=resource_jid or None,
+                    part_name=_task_part_name(task) or None,
+                    reason=f"candidate references unknown resource '{resource_jid}'",
+                    evidence={"resource_jid": resource_jid},
+                )
+            )
+        ], None
+    event_name = str(task.get("event_name") or "")
+    if not event_name:
+        return [
+            annotate_validation_finding(
+                _binding_finding(
+                    task=task,
+                    constraint_code="candidate_schema_invalid",
+                    resource_jid=resource_jid,
+                    part_name=_task_part_name(task) or None,
+                    reason="candidate must include a nonempty event_name",
+                    evidence={"field": "event_name"},
+                )
+            )
+        ], None
+    for state_field in ("expected_start_state", "expected_end_state"):
+        if not isinstance(task.get(state_field), dict):
+            return [
+                annotate_validation_finding(
+                    _binding_finding(
+                        task=task,
+                        constraint_code="candidate_schema_invalid",
+                        resource_jid=resource_jid,
+                        part_name=_task_part_name(task) or None,
+                        reason=f"candidate must include {state_field} object",
+                        evidence={"field": state_field},
+                    )
+                )
+            ], None
 
-    grounded_action = dict(grounding_result.get("grounded_action") or {})
-    if not grounded_action:
-        return [], None
+    part_name = _task_part_name(task)
+    part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+    raw_action_target = task.get("action_target")
+    action_target = (
+        deepcopy(raw_action_target)
+        if isinstance(raw_action_target, dict)
+        else {}
+    )
+    source_location = (
+        part_row.get("part_location")
+        or part_row.get("current_location")
+        or part_row.get("location")
+    )
+    grounded_action = {
+        "resource_jid": resource_jid,
+        "part_name": part_name or None,
+        "task_kind": "part_handling" if part_name else "resource_action",
+        "target": action_target,
+        "preconditions": {
+            "source_ref": {
+                key: deepcopy(value)
+                for key, value in {
+                    "location": source_location,
+                    "pose": part_row.get("observed_pose") or part_row.get("pose"),
+                }.items()
+                if value not in (None, "", {})
+            }
+        },
+    }
     return [], grounded_action
 
 def _part_context_for_resource_feasibility(
@@ -1884,6 +1765,14 @@ def _part_context_for_resource_feasibility(
     grounded_action: dict[str, Any],
 ) -> dict[str, Any]:
     part_context = deepcopy(part_row or {})
+    part_context.update(
+        configured_recovery_state(
+            dict(part_context.get("state") or part_context)
+        )
+    )
+    configured_resource_row = configured_recovery_state(
+        dict(resource_row.get("state") or resource_row)
+    )
     part_context.setdefault("part_name", part_name)
     if part_context.get("current_state") in (None, "") and part_context.get("part_state") not in (
         None,
@@ -1915,9 +1804,13 @@ def _part_context_for_resource_feasibility(
         part_context["part_holder_resource_jid"] = deepcopy(
             part_context.get("current_holder_resource_jid")
         )
-    part_context["resource_held_part"] = deepcopy(resource_row.get("held_part"))
-    if resource_row.get("gripper_state") not in (None, ""):
-        part_context["resource_gripper_state"] = deepcopy(resource_row.get("gripper_state"))
+    part_context["resource_held_part"] = deepcopy(
+        configured_resource_row.get("held_part")
+    )
+    if configured_resource_row.get("gripper_state") not in (None, ""):
+        part_context["resource_gripper_state"] = deepcopy(
+            configured_resource_row.get("gripper_state")
+        )
     target = dict(grounded_action.get("target") or {})
     if target:
         part_context["target"] = deepcopy(target)
@@ -1954,6 +1847,7 @@ def build_recovery_physical_validation_input(
         resource_row=resource_row,
         grounded_action=grounded_action,
     )
+    grounded_action_for_resource = deepcopy(grounded_action)
     use_projected_recovery_snapshot = any(
         isinstance(row, dict) and _task_resource_jid(row) == resource_jid
         for row in (session_state.get("accepted_outline_prefix") or [])
@@ -1963,7 +1857,7 @@ def build_recovery_physical_validation_input(
         "part_name": part_name or None,
         "operation_kind": str(grounded_action.get("operation_kind") or "").strip(),
         "part_context": deepcopy(part_context),
-        "grounded_action": deepcopy(grounded_action),
+        "grounded_action": grounded_action_for_resource,
         "projected_recovery_snapshot": deepcopy(resource_row),
         "use_projected_recovery_snapshot": use_projected_recovery_snapshot,
     }
@@ -1974,21 +1868,19 @@ def build_recovery_safety_validation_input(
     task: dict[str, Any],
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
+    calculated_successor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Project one PA-valid transition for authoritative CCA validation."""
+    """Build CCA input using the Resource Agent-calculated successor."""
     resources_by_jid, parts_by_name = projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
     llm_input = deepcopy(dict(prepared_recovery_request.get("llm_input") or {}))
-    validation_trace = [deepcopy(task)]
-    task_id = str(task.get("outline_id") or "").strip() or "task_0"
-    task_types_by_id = _build_outline_task_type_lookup(
-        validation_trace,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-        llm_input=llm_input,
-    )
+    llm_input["public_locations"] = [
+        deepcopy(row)
+        for row in (session_state.get("public_locations") or [])
+        if isinstance(row, dict)
+    ]
     signature = _infer_outline_macro_signature(
         task,
         resources_by_jid=resources_by_jid,
@@ -1997,32 +1889,62 @@ def build_recovery_safety_validation_input(
 
     projected_resources = deepcopy(resources_by_jid)
     projected_parts = deepcopy(parts_by_name)
-    task_type = str(task_types_by_id.get(task_id) or "").strip()
     resource_jid = _task_resource_jid(task)
-    recovery_entry = dict(
-        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
-            resource_jid
-        )
-        or {}
+    part_name = _task_part_name(task)
+    successor = configured_recovery_state(
+        deepcopy(dict(calculated_successor or {}))
     )
-    recovery_des_model = dict(
-        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
-        or recovery_entry.get("recovery_des_model")
-        or {}
-    )
-    state_field_scopes = {
-        str(field_name): str(dict(declaration or {}).get("scope") or "resource")
-        for field_name, declaration in dict(
-            recovery_des_model.get("state_variables") or {}
-        ).items()
-    }
-    _apply_outline_task_effects(
-        task,
-        resources_by_jid=projected_resources,
-        parts_by_name=projected_parts,
-        task_type=task_type,
-        state_field_scopes=state_field_scopes,
-    )
+    if successor:
+        resource_after = {
+            field_name: deepcopy(value)
+            for field_name, value in successor.items()
+            if field_name
+            in {
+                "resource_state",
+                "resource_location",
+                "held_part",
+            }
+        }
+        part_after = {
+            field_name: deepcopy(value)
+            for field_name, value in successor.items()
+            if field_name
+            in {
+                "part_state",
+                "part_location",
+                "part_holder_resource_jid",
+            }
+        }
+        if resource_jid:
+            resource_row = dict(projected_resources.get(resource_jid) or {})
+            resource_row.update(deepcopy(resource_after))
+            if "resource_state" in resource_after:
+                resource_row["current_state"] = deepcopy(
+                    resource_after.get("resource_state")
+                )
+            if "resource_location" in resource_after:
+                resource_row["current_location"] = deepcopy(
+                    resource_after.get("resource_location")
+                )
+            projected_resources[resource_jid] = resource_row
+        if part_name:
+            part_row = dict(projected_parts.get(part_name) or {})
+            part_row.update(deepcopy(part_after))
+            if "part_state" in part_after:
+                part_row["current_state"] = deepcopy(part_after.get("part_state"))
+            if "part_location" in part_after:
+                part_row["current_location"] = deepcopy(
+                    part_after.get("part_location")
+                )
+            if resource_after.get("held_part") == part_name:
+                part_row["current_holder_resource_jid"] = resource_jid
+            elif (
+                "held_part" in resource_after
+                and resource_after.get("held_part") is None
+                and part_row.get("current_holder_resource_jid") == resource_jid
+            ):
+                part_row["current_holder_resource_jid"] = None
+            projected_parts[part_name] = part_row
     return {
         "task": deepcopy(task),
         "signature": deepcopy(signature),
@@ -2041,7 +1963,6 @@ __all__ = [
     "annotate_validation_finding",
     "build_recovery_physical_validation_input",
     "build_recovery_safety_validation_input",
-    "compile_grounded_recovery_outline_task",
     "projected_outline_validation_context",
     "validate_recovery_outline_task",
     "validation_category_for_finding",

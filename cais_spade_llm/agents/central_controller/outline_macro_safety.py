@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+from cais_spade_llm.resources.capability_engine import configured_recovery_state
 
 
 def _normalize_token(value: Any) -> str:
@@ -191,12 +192,101 @@ def _recovery_rule_labels(rules: list[dict[str, Any]]) -> set[str]:
     return labels
 
 
-def _part_location(row: dict[str, Any]) -> str:
-    return str(row.get("current_location") or row.get("location") or "").strip()
+def _location_area_rows(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
+    areas_by_location: dict[str, dict[str, Any]] = {}
+    for raw_resource in llm_input.get("public_locations") or []:
+        if not isinstance(raw_resource, dict):
+            continue
+        for raw_location in raw_resource.get("locations") or []:
+            if not isinstance(raw_location, dict):
+                continue
+            location = str(raw_location.get("location") or "").strip()
+            area = raw_location.get("area")
+            if not location or not isinstance(area, dict) or not area:
+                continue
+            normalized = deepcopy(area)
+            existing = areas_by_location.get(location)
+            if existing is not None and existing != normalized:
+                raise ValueError(
+                    f"public location area conflicts for '{location}'"
+                )
+            areas_by_location[location] = normalized
+    return [
+        {"location": location, "area": areas_by_location[location]}
+        for location in sorted(areas_by_location)
+    ]
 
 
-def _resource_location(row: dict[str, Any]) -> str:
-    return str(row.get("current_location") or row.get("location") or "").strip()
+def _pose_location_tokens(
+    value: Any,
+    *,
+    llm_input: dict[str, Any],
+) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    pose = dict(value)
+    frame = str(pose.get("frame") or "")
+    units = str(pose.get("units") or "")
+    if not frame or not units:
+        return set()
+    tokens: set[str] = set()
+    for row in _location_area_rows(llm_input):
+        area = dict(row.get("area") or {})
+        if (
+            str(area.get("frame") or "") != frame
+            or str(area.get("units") or "") != units
+        ):
+            continue
+        bounds = area.get("bounds")
+        if not isinstance(bounds, dict) or not bounds:
+            raise ValueError(
+                f"public location area is malformed for '{row['location']}'"
+            )
+        inside = True
+        for raw_field_name, raw_interval in sorted(bounds.items()):
+            field_name = str(raw_field_name or "")
+            interval = (
+                dict(raw_interval)
+                if isinstance(raw_interval, dict)
+                else {}
+            )
+            coordinate = pose.get(field_name)
+            minimum = interval.get("min")
+            maximum = interval.get("max")
+            if (
+                not field_name
+                or not isinstance(coordinate, (int, float))
+                or isinstance(coordinate, bool)
+                or not isinstance(minimum, (int, float))
+                or isinstance(minimum, bool)
+                or not isinstance(maximum, (int, float))
+                or isinstance(maximum, bool)
+                or float(coordinate) < float(minimum)
+                or float(coordinate) > float(maximum)
+            ):
+                inside = False
+                break
+        if inside:
+            tokens.add(str(row["location"]))
+    return tokens
+
+
+def _location_tokens(
+    value: Any,
+    *,
+    llm_input: dict[str, Any],
+) -> set[str]:
+    if isinstance(value, str) and value:
+        return {value}
+    return _pose_location_tokens(value, llm_input=llm_input)
+
+
+def _part_location(row: dict[str, Any]) -> Any:
+    return deepcopy(row.get("current_location") or row.get("location"))
+
+
+def _resource_location(row: dict[str, Any]) -> Any:
+    return deepcopy(row.get("current_location") or row.get("location"))
 
 
 def _selector_destination_tokens(
@@ -205,22 +295,41 @@ def _selector_destination_tokens(
     effective_part_name: str,
     projected_resources: dict[str, dict[str, Any]],
     projected_parts: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
 ) -> set[str]:
     action_target = dict(task.get("action_target") or {})
-    end_state = dict(task.get("expected_end_state") or {})
+    end_state = configured_recovery_state(
+        dict(task.get("expected_end_state") or {})
+    )
     tokens = {
-        str(action_target.get("target_location") or "").strip(),
-        str(end_state.get("location") or "").strip(),
-        str(end_state.get("current_location") or "").strip(),
-        str(end_state.get("part_location") or "").strip(),
+        str(value).strip()
+        for value in (
+            action_target.get("location"),
+            action_target.get("target_location"),
+            end_state.get("location"),
+            end_state.get("current_location"),
+            end_state.get("part_location"),
+            end_state.get("resource_location"),
+        )
+        if isinstance(value, str) and str(value).strip()
     }
     if effective_part_name:
         projected_part = dict(projected_parts.get(effective_part_name) or {})
-        tokens.add(_part_location(projected_part))
+        tokens.update(
+            _location_tokens(
+                _part_location(projected_part),
+                llm_input=llm_input,
+            )
+        )
     resource_jid = str(task.get("resource_jid") or "").strip()
     if resource_jid:
         projected_resource = dict(projected_resources.get(resource_jid) or {})
-        tokens.add(_resource_location(projected_resource))
+        tokens.update(
+            _location_tokens(
+                _resource_location(projected_resource),
+                llm_input=llm_input,
+            )
+        )
     return {token for token in tokens if token}
 
 
@@ -231,6 +340,7 @@ def _selector_matches_event(
     signature: dict[str, Any],
     projected_resources: dict[str, dict[str, Any]],
     projected_parts: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
 ) -> bool:
     mode = str(selector.get("mode") or "").strip()
     resource_jid = _normalize_token(task.get("resource_jid"))
@@ -243,6 +353,7 @@ def _selector_matches_event(
         effective_part_name=_effective_task_part_name(task, signature),
         projected_resources=projected_resources,
         projected_parts=projected_parts,
+        llm_input=llm_input,
     )
     if destination and destination not in destination_tokens:
         return False
@@ -264,6 +375,7 @@ def _selector_matches_state(
     *,
     resources_by_jid: dict[str, dict[str, Any]],
     parts_by_name: dict[str, dict[str, Any]],
+    llm_input: dict[str, Any],
 ) -> bool:
     mode = str(selector.get("mode") or "").strip()
     destination = str(selector.get("destination") or "").strip()
@@ -278,8 +390,11 @@ def _selector_matches_state(
                 continue
             row = dict(raw_row or {})
             current_state = _normalize_token(row.get("current_state") or row.get("state"))
-            current_location = _part_location(row)
-            if destination and current_location != destination:
+            current_locations = _location_tokens(
+                _part_location(row),
+                llm_input=llm_input,
+            )
+            if destination and destination not in current_locations:
                 continue
             if allowed_states and current_state not in allowed_states:
                 continue
@@ -290,7 +405,10 @@ def _selector_matches_state(
             if part_selector not in {"", "any"} and part_selector != _normalize_token(part_name):
                 continue
             row = dict(raw_row or {})
-            if destination and _part_location(row) != destination:
+            if destination and destination not in _location_tokens(
+                _part_location(row),
+                llm_input=llm_input,
+            ):
                 continue
             return True
         return False
@@ -300,7 +418,10 @@ def _selector_matches_state(
             if resource_selector not in {"", "any"} and resource_selector != resource_token:
                 continue
             row = dict(raw_row or {})
-            if destination and _resource_location(row) != destination:
+            if destination and destination not in _location_tokens(
+                _resource_location(row),
+                llm_input=llm_input,
+            ):
                 continue
             return True
         return False
@@ -348,6 +469,7 @@ def project_outline_macro_recovery_aps(
                 signature=signature,
                 projected_resources=projected_resources,
                 projected_parts=projected_parts,
+                llm_input=llm_input,
             ):
                 candidate_aps.append(label)
             elif full.startswith("ap_state/"):
@@ -355,12 +477,14 @@ def project_outline_macro_recovery_aps(
                     selector,
                     resources_by_jid=pre_resources,
                     parts_by_name=pre_parts,
+                    llm_input=llm_input,
                 ):
                     current_state_aps.append(label)
                 if _selector_matches_state(
                     selector,
                     resources_by_jid=projected_resources,
                     parts_by_name=projected_parts,
+                    llm_input=llm_input,
                 ):
                     predicted_state_aps.append(label)
     return {

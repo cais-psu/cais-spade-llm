@@ -15,9 +15,9 @@
         "part_location": "ur5e@localhost_gripper"
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "placed",
         "held_part": null,
-        "part_state": "misplaced",
+        "part_state": "ready",
         "part_location": "prusa-mk4-2"
       },
       "description": "Enabled because ur5e currently holds MCP and can reach prusa-mk4-2. This clears the gripper without entering the assembly board area, preserving SAFE_1 so LG can be recovered first, and it positions MCP at a known grounded location for later re-pick."
@@ -35,9 +35,9 @@
         "part_location": "ur5e@localhost_gripper"
       },
       "expected_end_state": {
-        "resource_state": "idle",
+        "resource_state": "placed",
         "held_part": null,
-        "part_state": "misplaced",
+        "part_state": "ready",
         "part_location": "prusa-mk3"
       },
       "description": "Also enabled because ur5e holds MCP and prusa-mk3 is reachable. This likewise frees ur5e to fetch LG first, satisfying the LG-before-MCP recovery guard while keeping MCP at a grounded reachable buffer location."
