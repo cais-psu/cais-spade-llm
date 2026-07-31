@@ -1721,8 +1721,6 @@ def _resource_capabilities_summary(recovery_resources: dict[str, Any]) -> str:
             f"- {resource_jid}: {manipulation}; known resource locations: "
             f"{known_resource_location_text}"
         )
-    if lines:
-        lines.append("- Location order is lexical and does not express a preference.")
     return "\n".join(lines) if lines else "(none advertised)"
 
 

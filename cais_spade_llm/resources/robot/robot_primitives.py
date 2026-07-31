@@ -379,7 +379,7 @@ def _robot_part_from_step(
 
 
 def _robot_gripper_location(resource_jid: str) -> str:
-    return f"{resource_jid}_gripper" if resource_jid else "resource_gripper"
+    return str(resource_jid or "").strip()
 
 
 def _robot_trace_fact_key(fact: str, part_name: str = "") -> tuple[str, str]:
@@ -743,7 +743,6 @@ def robot_primitive_sequence_validator(
         release_required
         and target_location
         and _robot_lower(target_location) != _robot_lower(gripper_location)
-        and not _robot_lower(target_location).endswith("_gripper")
     )
 
     primitive_catalog_by_name = {
@@ -1848,11 +1847,18 @@ def _stage_destination(
         ((prepared_recovery_request.get("grounding_context") or {}).get("parts") or {}).get(item_name)
         or {}
     )
+    recovery_resources = prepared_recovery_request.get("recovery_resources") or {}
+    resource_jids = {
+        str(candidate_jid or "").strip()
+        for candidate_jid in recovery_resources
+        if str(candidate_jid or "").strip()
+    }
+    if resource_jid:
+        resource_jids.add(resource_jid)
     for key in ("origin_resource_location", "last_known_location", "location"):
         token = str(part_context.get(key) or "").strip()
-        if token and not token.endswith("_gripper"):
+        if token and token not in resource_jids:
             return token
-    recovery_resources = prepared_recovery_request.get("recovery_resources") or {}
     resource_entry = dict((recovery_resources.get(resource_jid) or {}).get("recovery_snapshot") or {})
     manipulator = dict((resource_entry.get("resource_facets") or {}).get("manipulator") or {})
     token = str(
@@ -1881,7 +1887,7 @@ def _transition_from_event(
     location_to = str(part_delta.get("location_to", "") or destination_location or "").strip()
     completed: dict[str, Any] = {"state": part_to}
     if part_to == "in_gripper":
-        completed["location_template"] = "{resource_jid}_gripper"
+        completed["location_template"] = "{resource_jid}"
     elif location_to:
         completed["location_param"] = "destination_location"
     return out_state, {"completed": completed}

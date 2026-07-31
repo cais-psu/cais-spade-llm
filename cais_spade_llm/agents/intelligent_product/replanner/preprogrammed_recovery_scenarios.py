@@ -469,7 +469,7 @@ def _build_recover_lg_v1(prepared_recovery_request: dict[str, Any]) -> dict[str,
                     "part_transition": {
                         "completed": {
                             "state": "in_gripper",
-                            "location_template": "{resource_jid}_gripper",
+                            "location_template": "{resource_jid}",
                         }
                     },
                 },
@@ -589,7 +589,7 @@ def _build_recover_lg_v1(prepared_recovery_request: dict[str, Any]) -> dict[str,
                     "part_transition": {
                         "completed": {
                             "state": "in_gripper",
-                            "location_template": "{resource_jid}_gripper",
+                            "location_template": "{resource_jid}",
                         }
                     },
                 },

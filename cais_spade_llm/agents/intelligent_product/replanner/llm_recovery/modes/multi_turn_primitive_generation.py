@@ -1147,7 +1147,7 @@ def _active_destination_token(outline_event: dict[str, Any]) -> str:
         or dict(outline_event.get("expected_end_state") or {}).get("part_location")
         or ""
     ).strip()
-    if candidate.endswith("_gripper"):
+    if candidate == _outline_resource_jid(outline_event):
         return ""
     return candidate
 

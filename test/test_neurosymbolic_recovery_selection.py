@@ -362,7 +362,7 @@ def test_robot_task_program_backward_relevance_and_forward_enabledness() -> None
     resource_jid = "ur5e@localhost"
     part_name = "LG"
     destination = "assembly_board-v1"
-    carried_location = f"{resource_jid}_gripper"
+    carried_location = resource_jid
     descriptor = robot_recovery_des_descriptor(
         resource_jid=resource_jid,
         snapshot={
@@ -463,7 +463,7 @@ def test_arbitrary_bridge_labels_progress_only_through_structural_enabledness() 
     resource_jid = "ur5e@localhost"
     part_name = "LG"
     destination = "assembly_board-v1"
-    carried_location = f"{resource_jid}_gripper"
+    carried_location = resource_jid
     descriptor = robot_recovery_des_descriptor(
         resource_jid=resource_jid,
         snapshot={
@@ -592,13 +592,13 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
             "resource_state": "holding",
             "held_part": "LG",
             "part_state": "staged",
-            "part_location": "resource@localhost_gripper",
+            "part_location": "resource@localhost",
         },
         "expected_end_state": {
             "resource_state": "positioned",
             "held_part": "LG",
             "part_state": "in_transit",
-            "part_location": "resource@localhost_gripper",
+            "part_location": "resource@localhost",
         },
         "rationale": "Modeled continuation.",
     }
@@ -673,7 +673,7 @@ def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> No
     resource_jid = "ur5e@localhost"
     part_name = "LG"
     destination = "assembly_board-v1"
-    carried_location = f"{resource_jid}_gripper"
+    carried_location = resource_jid
     descriptor = robot_recovery_des_descriptor(
         resource_jid=resource_jid,
         snapshot={
@@ -1418,7 +1418,7 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
                         "resource_state": "acquired",
                         "held_part": "LG",
                         "part_state": "misplaced",
-                        "part_location": "ur5e@localhost_gripper",
+                        "part_location": "ur5e@localhost",
                     },
                     "selection_evidence": deepcopy(selection_evidence),
                 },
@@ -1452,9 +1452,7 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
     rows = compact["candidate_comparison"]
 
     assert rows[0]["expected_end_state"]["held_part"] == "LG"
-    assert rows[0]["expected_end_state"]["part_location"] == (
-        "ur5e@localhost_gripper"
-    )
+    assert rows[0]["expected_end_state"]["part_location"] == "ur5e@localhost"
     assert "part_name" not in rows[1]
     assert rows[1]["expected_end_state"]["resource_state"] == "failed"
     assert rows[2]["expected_end_state"]["job_state"] == "paused"
@@ -1487,7 +1485,7 @@ def test_no_progress_prompt_renders_goal_and_material_effect_feedback(
 ) -> None:
     resource_jid = "ur5e@localhost"
     part_name = "LG"
-    carried_location = f"{resource_jid}_gripper"
+    carried_location = resource_jid
     session_state = _session(parts={part_name: "misplaced"})
     session_state["symbolic_resources"] = {
         resource_jid: {
@@ -1762,6 +1760,45 @@ def test_incomplete_primitive_program_cannot_build_executable_proposal() -> None
     assert result["reason"] == "final output did not include accepted_primitive_program"
 
 
+def test_legacy_carried_location_archive_requires_fresh_session() -> None:
+    result = multi_turn.build_multi_turn_recovery_proposal(
+        final_output_payload={
+            "final_output_stage": "primitive_program_ready",
+            "transition_trace": [
+                {
+                    "outline_id": "recovery_1",
+                    "resource_jid": "resource@localhost",
+                    "event_name": "authored_pick",
+                    "part_name": "P",
+                    "expected_end_state": {
+                        "resource_state": "holding",
+                        "held_part": "P",
+                        "part_state": "in_gripper",
+                        "part_location": "resource@localhost_gripper",
+                    },
+                }
+            ],
+            "accepted_primitive_program": [
+                {
+                    "outline_id": "recovery_1",
+                    "resource_jid": "resource@localhost",
+                    "part_name": "P",
+                    "primitive_steps": [{"primitive": "close_gripper", "params": {}}],
+                }
+            ],
+            "primitive_program_complete": True,
+        },
+        prepared_recovery_request={"llm_input": {}},
+    )
+
+    assert result["accepted"] is False
+    assert result["recovery_proposal"] is None
+    assert result["reason"] == (
+        "transition trace entry 'recovery_1' expected_end_state.part_location "
+        "does not match its resource_jid; begin a fresh recovery session"
+    )
+
+
 def test_ra_declared_guard_enabling_candidate_progresses() -> None:
     session_state = _session(parts={"P": "faulted", "AUX": "held"})
     prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
@@ -1972,8 +2009,8 @@ def test_general_mocked_sequence_uses_cca_admissibility_then_converges() -> None
         {
             "part_holder_resource_jid": "handler@localhost",
             "current_holder_resource_jid": "handler@localhost",
-            "part_location": "handler@localhost_gripper",
-            "current_location": "handler@localhost_gripper",
+            "part_location": "handler@localhost",
+            "current_location": "handler@localhost",
         }
     )
     handler_model = _des_model(
@@ -2023,7 +2060,7 @@ def test_general_mocked_sequence_uses_cca_admissibility_then_converges() -> None
                 "resource_state": "loaded",
                 "held_part": "AUX",
                 "part_state": "in_gripper",
-                "part_location": "handler@localhost_gripper",
+                "part_location": "handler@localhost",
             },
             "expected_end_state": {
                 "resource_state": "idle",
@@ -2670,7 +2707,7 @@ def test_revision_targets_include_pa_and_ra_transition_rejections() -> None:
                     "resource_state": "idle",
                     "held_part": f"P{candidate_index}",
                     "part_state": "in_gripper",
-                    "part_location": "resource@localhost_gripper",
+                    "part_location": "resource@localhost",
                 },
             },
             "validation_findings": [
@@ -2730,7 +2767,7 @@ def test_revision_targets_include_pa_and_ra_transition_rejections() -> None:
                 "resource_state": "idle",
                 "held_part": "P0",
                 "part_state": "in_gripper",
-                "part_location": "resource@localhost_gripper",
+                "part_location": "resource@localhost",
             },
             "constraint_codes": ["constraint_0"],
         },
@@ -2743,7 +2780,7 @@ def test_revision_targets_include_pa_and_ra_transition_rejections() -> None:
                 "resource_state": "idle",
                 "held_part": "P1",
                 "part_state": "in_gripper",
-                "part_location": "resource@localhost_gripper",
+                "part_location": "resource@localhost",
             },
             "constraint_codes": ["constraint_1"],
         },
@@ -2864,7 +2901,7 @@ def test_pa_revision_targets_require_changed_effects_for_each_identity() -> None
                     "expected_end_state": {
                         "held_part": "LG",
                         "part_state": "in_gripper",
-                        "part_location": "ur5e@localhost_gripper",
+                        "part_location": "ur5e@localhost",
                     },
                 }
             ],
@@ -3042,7 +3079,7 @@ def _carrier_rejection(
 def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
     resource_jid = "ur5e@localhost"
     part_name = "LG"
-    carried_location = "ur5e@localhost_gripper"
+    carried_location = resource_jid
     session_state = {
         "symbolic_resources": {
             resource_jid: {
@@ -3151,9 +3188,8 @@ def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
         parts_by_name=deepcopy(session_state["symbolic_parts"]),
     )
     assert "part_relocation_without_carrier" not in summary
-    assert carried_location not in summary
+    assert "expected_carried_part_location" not in summary
     assert summary.count("resource and part custody facts disagree") == 1
-    assert "xarm6@localhost_gripper" not in summary
     assert "rejected_event_" not in summary
     assert "rejected rationale" not in summary
 

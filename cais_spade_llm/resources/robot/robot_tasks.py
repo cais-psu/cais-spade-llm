@@ -1148,7 +1148,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                 part_transition={
                     "completed": {
                         "state": "in_gripper",
-                        "location_template": "{resource_jid}_gripper",
+                        "location_template": "{resource_jid}",
                     }
                 },
                 entry_guards=(
@@ -1306,7 +1306,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                 part_transition={
                     "completed": {
                         "state": "in_transit",
-                        "location_template": "{resource_jid}_gripper",
+                        "location_template": "{resource_jid}",
                     }
                 },
                 entry_guards=(
@@ -1790,7 +1790,7 @@ def robot_recovery_des_descriptor(
     held_part = snapshot.get("held_part")
     resource_states: list[Any] = [current_state]
     part_states: list[Any] = [None]
-    part_locations: list[Any] = [None, f"{resource_jid}_gripper"]
+    part_locations: list[Any] = [None, resource_jid]
     locations: list[Any] = [current_location]
     locations.extend(reachable_locations or [])
     locations.extend(named_poses or [])

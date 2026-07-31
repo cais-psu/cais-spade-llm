@@ -55,8 +55,8 @@
     },
     "MCP": {
       "state": "in_gripper",
-      "location": "ur5e@localhost_gripper",
-      "last_known_location": "ur5e@localhost_gripper",
+      "location": "ur5e@localhost",
+      "last_known_location": "ur5e@localhost",
       "last_successful_task": "REQ_1_T2",
       "origin_resource_location": "prusa-mk4-2"
     }

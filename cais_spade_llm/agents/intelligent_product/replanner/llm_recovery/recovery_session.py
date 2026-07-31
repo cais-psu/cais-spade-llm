@@ -2525,9 +2525,9 @@ class RecoverySessionMixin:
             if (
                 not holder_resource_jid
                 and isinstance(current_location, str)
-                and current_location.endswith("_gripper")
+                and current_location in recovery_resources
             ):
-                holder_resource_jid = current_location.rsplit("_gripper", 1)[0]
+                holder_resource_jid = current_location
             part_facts.append(
                 {
                     "part_name": part_name,

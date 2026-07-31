@@ -4196,8 +4196,7 @@ class ProductRecoveryController:
             source_location = str(part_entry.get("location") or "").strip()
             if (
                 not source_location
-                or source_location == f"{resource_jid}_gripper"
-                or source_location.endswith("_gripper")
+                or source_location == resource_jid
             ):
                 continue
             if not self._resource_can_reach_location(resource_jid, source_location):
@@ -4460,7 +4459,7 @@ class ProductRecoveryController:
             "part_transition": {
                 "completed": {
                     "state": "in_gripper",
-                    "location_template": "{resource_jid}_gripper",
+                    "location_template": "{resource_jid}",
                 }
             },
             "part_name": part_name,
@@ -4484,7 +4483,7 @@ class ProductRecoveryController:
             },
             "projected_part_entry": {
                 "state": "in_gripper",
-                "location": f"{resource_jid}_gripper",
+                "location": resource_jid,
                 "model_name": model_name,
             },
             "repair_operator": "acquire_entity",
@@ -4825,7 +4824,7 @@ class ProductRecoveryController:
                     "part": {
                         "entity": part_name,
                         "state": "in_gripper",
-                        "location": f"{resource_jid}_gripper",
+                        "location": resource_jid,
                         "model_name": str(
                             dict(node.get("projected_part_entry") or {}).get("model_name") or ""
                         ).strip(),

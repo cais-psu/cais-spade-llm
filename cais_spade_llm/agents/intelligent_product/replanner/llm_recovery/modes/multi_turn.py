@@ -4073,13 +4073,22 @@ def _multi_turn_recovery_task_context(
     primitive_row: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    del prepared_recovery_request
     expected_start = dict(transition_event.get("expected_start_state") or {})
     expected_end = dict(transition_event.get("expected_end_state") or {})
     action_target = dict(transition_event.get("action_target") or {})
     part_name = str(
         primitive_row.get("part_name") or _task_part_name(transition_event) or ""
     ).strip()
+    resource_jid = _task_resource_jid(transition_event)
+    resource_jids = {
+        str(candidate_jid or "").strip()
+        for candidate_jid in dict(
+            prepared_recovery_request.get("recovery_resources") or {}
+        )
+        if str(candidate_jid or "").strip()
+    }
+    if resource_jid:
+        resource_jids.add(resource_jid)
     target_location = str(
         expected_end.get("task_ctx.destination_location")
         or action_target.get("target_location")
@@ -4088,6 +4097,8 @@ def _multi_turn_recovery_task_context(
         or expected_end.get("part_location")
         or ""
     ).strip()
+    if target_location in resource_jids:
+        target_location = ""
     origin_location = str(
         _task_source_ref(transition_event)
         or action_target.get("source_location")
@@ -4098,7 +4109,7 @@ def _multi_turn_recovery_task_context(
     task_params: dict[str, Any] = {}
     if target_location:
         task_params["destination_location"] = target_location
-    if origin_location and not origin_location.endswith("_gripper"):
+    if origin_location and origin_location not in resource_jids:
         task_params["origin_resource_location"] = origin_location
 
     task_metadata: dict[str, Any] = {
@@ -4118,7 +4129,7 @@ def _multi_turn_recovery_task_context(
     if end_held and end_held == part_name:
         transition = {
             "state": end_part_state,
-            "location_template": "{resource_jid}_gripper",
+            "location_template": "{resource_jid}",
         }
     elif target_location:
         task_metadata["required_context_keys"] = ["destination_location"]
@@ -4531,6 +4542,24 @@ def build_multi_turn_recovery_proposal(
             return result
         resource_jid = transition_resource_jid
         resource_jids.append(resource_jid)
+        part_name = str(
+            primitive_row.get("part_name") or _task_part_name(transition_event) or ""
+        ).strip()
+        for state_field in ("expected_start_state", "expected_end_state"):
+            transition_state = dict(transition_event.get(state_field) or {})
+            held_part = str(transition_state.get("held_part") or "").strip()
+            part_location = transition_state.get("part_location")
+            if (
+                part_name
+                and held_part == part_name
+                and part_location not in (None, "")
+                and str(part_location).strip() != resource_jid
+            ):
+                result["reason"] = (
+                    f"transition trace entry {outline_id!r} {state_field}.part_location "
+                    "does not match its resource_jid; begin a fresh recovery session"
+                )
+                return result
 
         task_params, task_metadata = _multi_turn_recovery_task_context(
             transition_event=transition_event,
@@ -4614,9 +4643,6 @@ def build_multi_turn_recovery_proposal(
                 f"transition trace entry {outline_id!r} expected start mismatch: {start_mismatch}"
             )
             return result
-        part_name = str(
-            primitive_row.get("part_name") or _task_part_name(transition_event) or ""
-        ).strip()
         target_ref = _task_target_ref(transition_event)
         description = _task_description(transition_event)
         _apply_part_transition_projection(
@@ -4999,7 +5025,7 @@ def _modeled_step_bindings(
                 end_state.get("resource_location"),
             )
             if value not in (None, "")
-            and not str(value).strip().endswith("_gripper")
+            and str(value).strip() != resource_jid
         ),
         None,
     )
@@ -5013,7 +5039,7 @@ def _modeled_step_bindings(
                 start_state.get("resource_location"),
             )
             if value not in (None, "")
-            and not str(value).strip().endswith("_gripper")
+            and str(value).strip() != resource_jid
         ),
         None,
     )

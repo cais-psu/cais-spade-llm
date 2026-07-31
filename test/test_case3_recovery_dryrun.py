@@ -1412,13 +1412,17 @@ def _normalized_observation_pose(payload: Any) -> dict[str, Any] | None:
     return {axis: float(pose[axis]) for axis in ("x", "y", "z")}
 
 
-def _holder_resource_jid_for_part_row(part_row: dict[str, Any]) -> str:
+def _holder_resource_jid_for_part_row(
+    part_row: dict[str, Any],
+    *,
+    resource_jids: set[str],
+) -> str:
     holder_resource_jid = str(part_row.get("current_holder_resource_jid") or "").strip()
     if holder_resource_jid:
         return holder_resource_jid
     current_location = str(part_row.get("current_location") or "").strip()
-    if current_location.endswith("_gripper"):
-        return current_location.rsplit("_gripper", 1)[0]
+    if current_location in resource_jids:
+        return current_location
     return ""
 
 
@@ -1446,7 +1450,10 @@ def _build_shared_grounding_observation_catalog(
         normalized_pose = _normalized_observation_pose(observation)
         if normalized_pose is None:
             normalized_pose = _normalized_observation_pose(part_row.get("observed_pose"))
-        holder_resource_jid = _holder_resource_jid_for_part_row(part_row)
+        holder_resource_jid = _holder_resource_jid_for_part_row(
+            part_row,
+            resource_jids=set(robots_by_jid),
+        )
         if normalized_pose is None and holder_resource_jid:
             holder_robot = robots_by_jid.get(holder_resource_jid)
             if holder_robot is not None:
@@ -2580,7 +2587,7 @@ def _novel_symbol_outline_responses() -> list[dict[str, Any]]:
                         "resource_state": "lg_secured",
                         "held_part": "LG",
                         "part_state": "lg_under_recovery_control",
-                        "part_location": "ur5e@localhost_gripper",
+                        "part_location": "ur5e@localhost",
                     },
                     "rationale": "Acquire LG using its observed pose.",
                 }
@@ -3060,8 +3067,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         ):
         assert private_model_token not in outline_message_text
     assert "gripper_state" not in first_outline_request
-    assert '"held_part_location": "xarm6@localhost_gripper"' not in outline_message_text
-    assert '"held_part_location": "ur5e@localhost_gripper"' in outline_message_text
+    assert '"held_part_location": "xarm6@localhost"' not in outline_message_text
+    assert '"held_part_location": "ur5e@localhost"' in outline_message_text
     expected_pose = dict(expected_lg_observation.get("pose") or {})
     assert '"observed_pose": {' in first_outline_request
     for axis in ("x", "y", "z"):
@@ -3088,7 +3095,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
         in outline_message_text
     )
-    assert "Location order is lexical and does not express a preference." in (
+    assert "Location order is lexical and does not express a preference." not in (
         outline_message_text
     )
     assert "named poses" not in outline_message_text
@@ -3267,6 +3274,29 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         ]
         for path in outline_result_paths
     ] == [2, 2, 2, 2, 0]
+    seq3 = next(row for row in trace if row["outline_id"] == "RECOVERY_SEQ3")
+    assert seq3["event_name"] == "pick_lg_from_observed_pose"
+    assert seq3["resource_jid"] == "ur5e@localhost"
+    assert seq3["part_name"] == "LG"
+    assert seq3["expected_end_state"]["held_part"] == "LG"
+    assert seq3["expected_end_state"]["part_location"] == "ur5e@localhost"
+    seq3_audit = next(
+        payload
+        for payload in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in outline_audit_paths
+        )
+        if payload.get("selected_transition_outline_id") == "RECOVERY_SEQ3"
+    )
+    seq3_evaluation = seq3_audit["candidate_evaluation_summary"][0]
+    seq3_transition_stage = next(
+        stage
+        for stage in seq3_evaluation["validation_stages"]
+        if stage["validation_category"] == "transition_feasibility"
+    )
+    assert seq3_transition_stage["validator_role"] == "RA"
+    assert seq3_transition_stage["status"] == "passed"
+    assert seq3_audit["selection_status"] == "selected"
     mcp_release_audit = json.loads(
         outline_audit_paths[1].read_text(encoding="utf-8")
     )
@@ -3306,7 +3336,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert "xarm6@localhost/LG" in post_release_message
     assert "place_mcp_to_prusa_mk4_2_temp" not in post_release_message
     assert "The only immediate blocker to recovering LG" not in post_release_message
-    assert '"held_part_location": "ur5e@localhost_gripper"' not in (
+    assert '"held_part_location": "ur5e@localhost"' not in (
         post_release_message
     )
     for stack_path in outline_stack_paths:
@@ -3564,7 +3594,7 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         "known resource locations: assembly_board-v1, home, prusa-mk3, prusa-mk4-1"
         in outline_prompt
     )
-    assert "Location order is lexical and does not express a preference." in (
+    assert "Location order is lexical and does not express a preference." not in (
         outline_prompt
     )
     assert "named poses" not in outline_prompt
@@ -3645,7 +3675,7 @@ def test_acquire_and_release_propagate_part_holder_and_location() -> None:
             "resource_state": "picked",
             "held_part": "LCP",
             "part_state": "in_gripper",
-            "part_location": "xarm6@localhost_gripper",
+            "part_location": "xarm6@localhost",
         },
     }
     release = {
@@ -3680,8 +3710,8 @@ def test_acquire_and_release_propagate_part_holder_and_location() -> None:
     acquired_part = session_state["symbolic_parts"]["LCP"]
     assert acquired_part["part_holder_resource_jid"] == "xarm6@localhost"
     assert acquired_part["current_holder_resource_jid"] == "xarm6@localhost"
-    assert acquired_part["part_location"] == "xarm6@localhost_gripper"
-    assert acquired_part["current_location"] == "xarm6@localhost_gripper"
+    assert acquired_part["part_location"] == "xarm6@localhost"
+    assert acquired_part["current_location"] == "xarm6@localhost"
 
     multi_turn_mode._apply_task_effects_to_symbolic_state(release, session_state)
     released_part = session_state["symbolic_parts"]["LCP"]
@@ -3705,7 +3735,7 @@ def test_acquire_and_release_propagate_part_holder_and_location() -> None:
         parts_by_name=projected_parts,
         task_type="part_handling",
     )
-    assert projected_parts["LCP"]["current_location"] == "xarm6@localhost_gripper"
+    assert projected_parts["LCP"]["current_location"] == "xarm6@localhost"
     multi_turn_outline_state._apply_outline_task_effects(
         release,
         resources_by_jid=projected_resources,
@@ -3946,7 +3976,7 @@ def test_production_cca_rejects_safe1_out_of_order_mcp_placement() -> None:
             "resource_state": "picked",
             "held_part": "MCP",
             "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
+            "part_location": "ur5e@localhost",
         },
         "expected_end_state": {
             "resource_state": "idle",
@@ -4012,7 +4042,7 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
     assert findings == []
     assert validated_stage["expected_start_state"] == {
         "held_part": "MCP",
-        "part_location": "ur5e@localhost_gripper",
+        "part_location": "ur5e@localhost",
         "part_state": "in_gripper",
         "resource_state": "picked",
     }
@@ -4040,7 +4070,7 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
             "resource_state": "lg_secured",
             "held_part": "LG",
             "part_state": "lg_under_recovery_control",
-            "part_location": "ur5e@localhost_gripper",
+            "part_location": "ur5e@localhost",
         },
         "rationale": "Acquire the observed part using its grounded pose.",
     }
@@ -4316,7 +4346,7 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
             "resource_location": None,
             "held_part": "LG",
             "part_state": "in_gripper",
-            "part_location": "xarm6@localhost_gripper",
+            "part_location": "xarm6@localhost",
         },
         "rationale": "Attempt the observed LG pose.",
     }
@@ -4330,7 +4360,7 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
             "resource_location": "home",
             "held_part": "MCP",
             "part_state": "in_gripper",
-            "part_location": "ur5e@localhost_gripper",
+            "part_location": "ur5e@localhost",
         },
         "rationale": "Retain MCP while moving to home.",
     }
@@ -4611,10 +4641,15 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
     assert findings[0]["evidence"] == {
         "field": "expected_end_state.part_location",
         "proposed_part_location": "prusa-mk4-1",
-        "expected_carried_part_location": "xarm6@localhost_gripper",
+        "expected_carried_part_location": "xarm6@localhost",
     }
 
     acquire["expected_end_state"]["part_location"] = "xarm6@localhost_gripper"
+    findings = _transition_findings(acquire)
+    assert findings[0]["constraint_code"] == "unknown_location_token"
+    assert findings[0]["validation_category"] == "transition_feasibility"
+
+    acquire["expected_end_state"]["part_location"] = "xarm6@localhost"
     assert _transition_findings(acquire) == []
 
     held_transport = deepcopy(acquire)
@@ -4632,18 +4667,14 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
 
     findings = _transition_findings(held_transport, active_session=held_session)
     assert findings[0]["constraint_code"] == "held_part_location_mismatch"
-    held_transport["expected_end_state"]["part_location"] = (
-        "xarm6@localhost_gripper"
-    )
+    held_transport["expected_end_state"]["part_location"] = "xarm6@localhost"
     assert _transition_findings(held_transport, active_session=held_session) == []
 
     duplicate_holder = deepcopy(acquire)
     duplicate_holder["outline_id"] = "duplicate_mcp_holder"
     duplicate_holder["part_name"] = "MCP"
     duplicate_holder["expected_end_state"]["held_part"] = "MCP"
-    duplicate_holder["expected_end_state"]["part_location"] = (
-        "xarm6@localhost_gripper"
-    )
+    duplicate_holder["expected_end_state"]["part_location"] = "xarm6@localhost"
     findings = _transition_findings(duplicate_holder)
     assert findings[0]["constraint_code"] == "part_traceability_violation"
     assert findings[0]["invariant_id"] == "part_traceability"
@@ -4764,7 +4795,7 @@ def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() 
         mismatch_session,
     )
     assert "held_part_location_mismatch" not in mismatch_prompt
-    assert "xarm6@localhost_gripper" not in mismatch_prompt
+    assert "expected_carried_part_location" not in mismatch_prompt
     assert "resource and part custody facts disagree" in mismatch_prompt
     assert "recover_pick" not in mismatch_prompt
     assert "Candidate Revision Targets" in mismatch_prompt
@@ -4952,7 +4983,7 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
             "resource_state": "invalid_hold",
             "held_part": "MCP",
             "part_state": "lg_under_recovery_control",
-            "part_location": "ur5e@localhost_gripper",
+            "part_location": "ur5e@localhost",
         },
         "rationale": "Invalid because held_part contradicts part_name.",
     }

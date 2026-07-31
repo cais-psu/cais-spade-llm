@@ -12,7 +12,7 @@
         "resource_state": "picked",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "expected_end_state": {
         "resource_state": "idle",
@@ -32,7 +32,7 @@
         "resource_state": "picked",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "expected_end_state": {
         "resource_state": "idle",
@@ -52,14 +52,14 @@
         "resource_state": "picked",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "expected_end_state": {
         "resource_state": "picked",
         "resource_location": "home",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "description": "Keep MCP under ur5e control at the grounded home location as an alternative staging transition."
     }
@@ -78,7 +78,7 @@
           "resource_state": "picked",
           "held_part": "MCP",
           "part_state": "in_gripper",
-          "part_location": "ur5e@localhost_gripper"
+          "part_location": "ur5e@localhost"
         },
         "expected_end_state": {
           "resource_state": "idle",
@@ -102,7 +102,7 @@
           "resource_state": "picked",
           "held_part": "MCP",
           "part_state": "in_gripper",
-          "part_location": "ur5e@localhost_gripper"
+          "part_location": "ur5e@localhost"
         },
         "expected_end_state": {
           "resource_state": "idle",
@@ -125,7 +125,7 @@
       "resource_state": "picked",
       "held_part": "MCP",
       "part_state": "in_gripper",
-      "part_location": "ur5e@localhost_gripper"
+      "part_location": "ur5e@localhost"
     },
     "expected_end_state": {
       "resource_state": "idle",
@@ -145,7 +145,7 @@
       "resource_state": "picked",
       "held_part": "MCP",
       "part_state": "in_gripper",
-      "part_location": "ur5e@localhost_gripper"
+      "part_location": "ur5e@localhost"
     },
     "expected_end_state": {
       "resource_state": "idle",
@@ -178,7 +178,7 @@
         "resource_state": "picked",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "expected_end_state": {
         "resource_state": "idle",

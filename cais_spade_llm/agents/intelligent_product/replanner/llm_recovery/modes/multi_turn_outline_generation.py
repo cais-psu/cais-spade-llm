@@ -1231,7 +1231,7 @@ def _recovery_event_instance_task(
         and "target_location" not in action_target
         and end_state.get("part_location") not in (None, "")
         and end_state.get("part_location") != start_state.get("part_location")
-        and not str(end_state.get("part_location") or "").endswith("_gripper")
+        and str(end_state.get("part_location") or "") != resource_jid
     ):
         action_target["target_location"] = deepcopy(end_state.get("part_location"))
 

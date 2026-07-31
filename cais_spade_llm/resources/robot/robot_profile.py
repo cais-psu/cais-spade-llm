@@ -95,7 +95,7 @@ def _sync_robot_pose(agent: Any, pose: Any) -> None:
 
 
 def _robot_carried_location(resource_jid: str, _snapshot: dict[str, Any] | None = None) -> str:
-    return f"{str(resource_jid or '').strip()}_gripper"
+    return str(resource_jid or "").strip()
 
 
 def _robot_snapshot_equivalence(

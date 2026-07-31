@@ -2327,7 +2327,7 @@ class ProcessRecoveryPlanner:
                 if failed_resource_jid and released_part_name == part_name:
                     entry["location"] = None
                     entry["last_known_location"] = (
-                        entry.get("last_known_location") or f"{failed_resource_jid}_gripper"
+                        entry.get("last_known_location") or failed_resource_jid
                     )
                     force_keys.add("location")
                 if force_keys:

@@ -18,7 +18,7 @@
         "resource_state": "idle",
         "held_part": "LG",
         "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "description": "Enabled now: ur5e is idle, holds no part in the authoritative DES state, and can reach LG's observed misplaced pose. This is the necessary first recovery action to clear SAFE_1 and reduce the gap to REQ_2 by putting LG under robot control for later placement to assembly_board-v1."
     },
@@ -38,7 +38,7 @@
         "resource_state": "idle",
         "held_part": "LG",
         "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "description": "Acquire LG from the same grounded observation as an alternative authored transition."
     },
@@ -58,7 +58,7 @@
         "resource_state": "idle",
         "held_part": "LG",
         "part_state": "misplaced",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "description": "Put LG under ur5e control from its supplied observed pose as another candidate."
     }
@@ -147,7 +147,7 @@
         "resource_state": "picked",
         "held_part": "MCP",
         "part_state": "in_gripper",
-        "part_location": "ur5e@localhost_gripper"
+        "part_location": "ur5e@localhost"
       },
       "expected_end_state": {
         "resource_state": "idle",
