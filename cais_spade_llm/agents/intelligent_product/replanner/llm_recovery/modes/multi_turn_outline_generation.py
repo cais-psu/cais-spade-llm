@@ -2840,158 +2840,6 @@ def _register_selection_revision(
     )
 
 
-def _pa_candidate_revision_targets(
-    *,
-    candidate_evaluations: list[dict[str, Any]],
-    candidate_bound: int,
-) -> list[dict[str, Any]]:
-    targets: list[dict[str, Any]] = []
-    for evaluation in sorted(
-        (
-            row
-            for row in candidate_evaluations
-            if isinstance(row, dict) and not bool(row.get("valid"))
-        ),
-        key=lambda row: int(row.get("candidate_index") or 0),
-    ):
-        rejected_stages = {
-            (
-                str(stage.get("validator_role") or "").strip(),
-                str(stage.get("validation_category") or "").strip(),
-            )
-            for stage in (evaluation.get("validation_stages") or [])
-            if isinstance(stage, dict)
-            and str(stage.get("status") or "").strip() == "rejected"
-        }
-        if not rejected_stages or not rejected_stages.issubset(
-            {
-                ("PA", SYNTAX_AND_GROUNDING_VALIDATION),
-                ("RA", TRANSITION_FEASIBILITY),
-            }
-        ):
-            continue
-        task = dict(evaluation.get("task") or {})
-        expected_end_state = dict(task.get("expected_end_state") or {})
-        resource_jid = str(task.get("resource_jid") or "").strip()
-        if not resource_jid or not expected_end_state:
-            continue
-        part_name = str(task.get("part_name") or "").strip()
-        constraint_codes = sorted(
-            {
-                str(finding.get("constraint_code") or "").strip()
-                for finding in (evaluation.get("validation_findings") or [])
-                if isinstance(finding, dict)
-                and str(finding.get("constraint_code") or "").strip()
-            }
-        )
-        if any(
-            code in {"expected_start_state_mismatch", "validation_state_stale"}
-            for code in constraint_codes
-        ):
-            continue
-        targets.append(
-            {
-                "candidate_id": str(evaluation.get("candidate_id") or "").strip(),
-                "candidate_index": int(evaluation.get("candidate_index") or 0),
-                "resource_jid": resource_jid,
-                **({"part_name": part_name} if part_name else {}),
-                "expected_end_state": deepcopy(expected_end_state),
-                "constraint_codes": constraint_codes,
-            }
-        )
-        if len(targets) >= max(1, int(candidate_bound)):
-            break
-    return targets
-
-
-def _active_candidate_revision_targets(
-    *,
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> list[dict[str, Any]]:
-    targets = [
-        deepcopy(row)
-        for row in (session_state.get("candidate_revision_targets") or [])
-        if isinstance(row, dict)
-    ]
-    if not targets:
-        return []
-    current_fingerprint = _pa_state_fingerprint(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    if (
-        str(session_state.get("candidate_revision_state_fingerprint") or "")
-        != current_fingerprint
-    ):
-        session_state["candidate_revision_targets"] = []
-        session_state["candidate_revision_state_fingerprint"] = ""
-        session_state["selection_revision_count"] = 0
-        session_state["selection_revision_fingerprint"] = ""
-        session_state["selection_repeated_failure_count"] = 0
-        session_state["selection_repeated_failure_fingerprint"] = ""
-        return []
-    return targets
-
-
-def _candidate_revision_requirement_findings(
-    *,
-    candidate_sequences: list[dict[str, Any]],
-    revision_targets: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    available_candidate_indexes = set(range(len(candidate_sequences)))
-    findings: list[dict[str, Any]] = []
-    for target in revision_targets:
-        target_resource_jid = str(target.get("resource_jid") or "").strip()
-        target_part_name = str(target.get("part_name") or "").strip()
-        rejected_end_state = dict(target.get("expected_end_state") or {})
-        matched_candidate_index: int | None = None
-        for candidate_index in sorted(available_candidate_indexes):
-            surface_events = list(
-                candidate_sequences[candidate_index].get("surface_events") or []
-            )
-            if len(surface_events) != 1 or not isinstance(surface_events[0], dict):
-                continue
-            candidate_task = dict(surface_events[0])
-            if (
-                str(candidate_task.get("resource_jid") or "").strip()
-                != target_resource_jid
-                or str(candidate_task.get("part_name") or "").strip()
-                != target_part_name
-            ):
-                continue
-            if dict(candidate_task.get("expected_end_state") or {}) == rejected_end_state:
-                continue
-            matched_candidate_index = candidate_index
-            break
-        if matched_candidate_index is not None:
-            available_candidate_indexes.remove(matched_candidate_index)
-            continue
-        findings.append(
-            _shared._candidate_schema_finding(
-                task={
-                    "outline_id": str(target.get("candidate_id") or ""),
-                    "resource_jid": target_resource_jid,
-                    **({"part_name": target_part_name} if target_part_name else {}),
-                },
-                reason=(
-                    "The response omitted a materially revised candidate for a "
-                    "prior PA-rejected resource/part identity."
-                ),
-                evidence={
-                    "candidate_id": str(target.get("candidate_id") or ""),
-                    "resource_jid": target_resource_jid,
-                    **({"part_name": target_part_name} if target_part_name else {}),
-                    "rejected_expected_end_state": deepcopy(rejected_end_state),
-                    "constraint_codes": deepcopy(
-                        target.get("constraint_codes") or []
-                    ),
-                },
-            )
-        )
-    return findings
-
-
 def _candidate_sequences_from_response(
     parsed_response: dict[str, Any],
     *,
@@ -3993,20 +3841,8 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         )
         return "need_revision", turn_entry
 
-    revision_targets = (
-        _active_candidate_revision_targets(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if recovery_selection_mode == "neurosymbolic"
-        else []
-    )
-    revision_requirement_findings = _candidate_revision_requirement_findings(
-        candidate_sequences=candidate_sequences,
-        revision_targets=revision_targets,
-    )
-    if revision_targets:
-        turn_entry["candidate_revision_targets"] = deepcopy(revision_targets)
+    session_state["candidate_revision_targets"] = []
+    session_state["candidate_revision_state_fingerprint"] = ""
 
     llm_selected_candidate_index = _llm_selected_candidate_index(parsed_response)
     if (
@@ -4074,79 +3910,22 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
         session_state["status"] = "paused_after_outline_turn"
         return "need_revision", turn_entry
 
-    if revision_requirement_findings:
-        product_jid, _, cca_jid = _validator_jids(planner)
-        state_fingerprint = _pa_state_fingerprint(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        candidate_evaluations = []
-        for candidate in candidate_sequences:
-            candidate_index = int(candidate.get("candidate_index") or 0)
-            surface_events = [
-                deepcopy(row)
-                for row in (candidate.get("surface_events") or [])
-                if isinstance(row, dict)
+    candidate_evaluations = list(
+        await asyncio.gather(
+            *[
+                _validate_candidate_sequence(
+                    candidate=dict(candidate),
+                    sequence_index=sequence_index,
+                    action_horizon=action_horizon,
+                    action_horizon_k=action_horizon_k,
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                    planner=planner,
+                )
+                for candidate in candidate_sequences
             ]
-            task = deepcopy(surface_events[0]) if surface_events else {}
-            validation_stages: list[dict[str, Any]] = []
-            _append_pa_validation_stages(
-                stages=validation_stages,
-                findings=revision_requirement_findings,
-                product_jid=product_jid,
-                state_fingerprint=state_fingerprint,
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=TRANSITION_FEASIBILITY,
-                    role="RA",
-                    jid=_shared._task_resource_jid(task),
-                )
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=PHYSICAL_FEASIBILITY,
-                    role="RA",
-                    jid=_shared._task_resource_jid(task),
-                )
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=SAFETY,
-                    role="CCA",
-                    jid=cca_jid,
-                )
-            )
-            candidate_evaluations.append(
-                {
-                    "candidate_index": candidate_index,
-                    "valid": False,
-                    "task": task,
-                    "surface_events": surface_events,
-                    "validation_findings": deepcopy(
-                        revision_requirement_findings
-                    ),
-                    "validation_stages": validation_stages,
-                    "pa_state_fingerprint": state_fingerprint,
-                }
-            )
-    else:
-        candidate_evaluations = list(
-            await asyncio.gather(
-                *[
-                    _validate_candidate_sequence(
-                        candidate=dict(candidate),
-                        sequence_index=sequence_index,
-                        action_horizon=action_horizon,
-                        action_horizon_k=action_horizon_k,
-                        session_state=session_state,
-                        prepared_recovery_request=prepared_recovery_request,
-                        planner=planner,
-                    )
-                    for candidate in candidate_sequences
-                ]
-            )
         )
+    )
 
     if recovery_selection_mode == "neurosymbolic":
         await _populate_agent_filtered_enabledness(
@@ -4290,6 +4069,8 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                     no_progress_comparison_evidence.append(
                         {
                             "candidate_id": str(row.get("candidate_id") or ""),
+                            "outline_id": str(task.get("outline_id") or "").strip(),
+                            "event_name": str(task.get("event_name") or "").strip(),
                             "selection_status": str(
                                 row.get("selection_status") or ""
                             ),
@@ -4329,28 +4110,6 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                         },
                     }
                 )
-
-            if revision_requirement_findings:
-                next_revision_targets = deepcopy(revision_targets)
-            else:
-                next_revision_targets = _pa_candidate_revision_targets(
-                    candidate_evaluations=candidate_evaluations,
-                    candidate_bound=candidate_bound,
-                )
-            session_state["candidate_revision_targets"] = deepcopy(
-                next_revision_targets
-            )
-            session_state["candidate_revision_state_fingerprint"] = (
-                _pa_state_fingerprint(
-                    session_state=session_state,
-                    prepared_recovery_request=prepared_recovery_request,
-                )
-                if next_revision_targets
-                else ""
-            )
-            turn_entry["candidate_revision_targets"] = deepcopy(
-                next_revision_targets
-            )
 
             feedback_rows = _shared._merge_applicable_candidate_feedback(
                 session_state=session_state,

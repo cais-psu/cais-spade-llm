@@ -32,7 +32,6 @@ from cais_spade_llm.resources.resource_primitives import (
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     get_resource_profile_for_agent,
-    resource_snapshot_carried_entity_location,
 )
 
 _logger = logging.getLogger(__name__)
@@ -1967,55 +1966,6 @@ def _candidate_feedback_rows(
     return rows
 
 
-def _declared_carried_part_location(
-    *,
-    resource_jid: str,
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> str:
-    """Return an RA-owned carried-part location only when its DES domain permits it."""
-    jid = str(resource_jid or "").strip()
-    if not jid:
-        return ""
-    recovery_entry = dict(
-        dict(prepared_recovery_request.get("recovery_resources") or {}).get(jid)
-        or {}
-    )
-    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
-    recovery_snapshot.update(
-        deepcopy(dict(dict(session_state.get("symbolic_resources") or {}).get(jid) or {}))
-    )
-    resource_type = str(
-        recovery_entry.get("resource_type")
-        or recovery_snapshot.get("resource_type")
-        or dict(recovery_snapshot.get("resource_core") or {}).get("resource_type")
-        or "resource"
-    ).strip()
-    profile = get_resource_profile(resource_type)
-    carried_location = resource_snapshot_carried_entity_location(
-        resource_jid=jid,
-        snapshot=recovery_snapshot,
-        profile=profile,
-    )
-    if not carried_location:
-        return ""
-
-    descriptor = dict(
-        dict(session_state.get("recovery_des_models") or {}).get(jid)
-        or recovery_entry.get("recovery_des_model")
-        or {}
-    )
-    declaration = dict(
-        dict(descriptor.get("state_variables") or {}).get("part_location") or {}
-    )
-    if str(declaration.get("scope") or "").strip() != "part":
-        return ""
-    domain = declaration.get("domain")
-    if not isinstance(domain, list) or carried_location not in domain:
-        return ""
-    return carried_location
-
-
 def _feedback_row_findings(row: dict[str, Any]) -> list[dict[str, Any]]:
     if str(row.get("constraint_code") or "").strip():
         return [deepcopy(row)]
@@ -2047,9 +1997,8 @@ def _enrich_feedback_finding(
     finding: dict[str, Any],
     *,
     task: dict[str, Any],
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
 ) -> dict[str, Any]:
+    """Add candidate identity without changing RA-owned finding evidence."""
     enriched = deepcopy(finding)
     resource_jid = str(
         enriched.get("resource_jid") or _task_resource_jid(task) or ""
@@ -2059,27 +2008,6 @@ def _enrich_feedback_finding(
         enriched["resource_jid"] = resource_jid
     if part_name:
         enriched["part_name"] = part_name
-    constraint_code = str(enriched.get("constraint_code") or "").strip().lower()
-    if constraint_code in {
-        "held_part_location_mismatch",
-        "missing_acquisition_location",
-        "part_relocation_without_carrier",
-    }:
-        carried_location = _declared_carried_part_location(
-            resource_jid=resource_jid,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        evidence = deepcopy(dict(enriched.get("evidence") or {}))
-        evidence.pop("target_ref", None)
-        evidence.pop("target_location", None)
-        if carried_location:
-            evidence["carried_part_location"] = carried_location
-            if constraint_code != "part_relocation_without_carrier":
-                evidence["expected_carried_part_location"] = carried_location
-        else:
-            evidence.pop("carried_part_location", None)
-        enriched["evidence"] = evidence
     return enriched
 
 
@@ -2093,30 +2021,7 @@ def _candidate_feedback_finding_key(
         finding.get("resource_jid") or _task_resource_jid(task) or ""
     ).strip()
     part_name = str(finding.get("part_name") or _task_part_name(task) or "").strip()
-    evidence = dict(finding.get("evidence") or {})
-    if constraint_code == "part_relocation_without_carrier":
-        relevant_evidence: Any = evidence.get("carried_part_location")
-    elif constraint_code in {
-        "held_part_location_mismatch",
-        "missing_acquisition_location",
-    }:
-        relevant_evidence = {
-            "expected_carried_part_location": evidence.get(
-                "expected_carried_part_location"
-            ),
-            "proposed_part_location": evidence.get("proposed_part_location"),
-        }
-    elif constraint_code == "workspace_unreachable":
-        relevant_evidence = {
-            "checked_pose": evidence.get("checked_pose") or finding.get("checked_pose"),
-            "workspace_bounds": evidence.get("workspace_bounds")
-            or finding.get("workspace_bounds"),
-        }
-    else:
-        relevant_evidence = {
-            "field": evidence.get("field"),
-            "token": evidence.get("token"),
-        }
+    relevant_evidence: Any = dict(finding.get("evidence") or {})
     return (
         constraint_code,
         resource_jid,
@@ -2144,8 +2049,6 @@ def _merge_applicable_candidate_feedback(
                 finding = _enrich_feedback_finding(
                     raw_finding,
                     task=task,
-                    session_state=session_state,
-                    prepared_recovery_request=prepared_recovery_request,
                 )
                 if retain_only_applicable and not _finding_still_unresolved(
                     finding,

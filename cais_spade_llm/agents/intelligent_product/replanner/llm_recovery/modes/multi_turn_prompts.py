@@ -678,15 +678,6 @@ _PROMPT_PERSISTENT_FINDING_CODES = {
     "unknown_resource_binding",
 }
 
-_CUSTODY_CONSISTENCY_CODES = {
-    "held_part_location_mismatch",
-    "missing_acquisition_location",
-    "missing_release_destination",
-    "part_relocation_without_carrier",
-    "part_traceability_violation",
-}
-
-
 def _feedback_render_style_token(session_state: dict[str, Any]) -> str:
     return "des_event_diagnostic"
 
@@ -937,14 +928,6 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
             ),
         }
 
-    if constraint_code in _CUSTODY_CONSISTENCY_CODES:
-        return {
-            "event_status": "disabled",
-            "diagnosis": "transition_feasibility_rejected",
-            "guard_or_condition": "resource and part custody facts disagree",
-            "re_enablement": "revise the symbolic expected_end_state",
-        }
-
     if constraint_code in {
         "candidate_schema_violation",
         "disallowed_outline_state_field",
@@ -1039,19 +1022,24 @@ def _render_des_event_diagnostic(
         finding.get("constraint_code") or "validation_rejected"
     ).strip()
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
-    normalized_constraint_code = constraint_code.lower()
-    if normalized_constraint_code in _CUSTODY_CONSISTENCY_CODES:
-        return (
-            f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
-            " | transition_feasibility: rejected"
-            " | reason=resource and part custody facts disagree"
-        )
     line = (
         f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
         f" | constraint_code={constraint_code}"
         f" | reason={reason}"
-        f" | state_evidence={_finding_state_evidence_text(task=task, finding=finding, resources_by_jid=resources_by_jid, parts_by_name=parts_by_name)}"
     )
+    evidence = dict(finding.get("evidence") or {})
+    if evidence:
+        line += f" | evidence={_inline_json(evidence)}"
+    else:
+        line += (
+            " | state_evidence="
+            + _finding_state_evidence_text(
+                task=task,
+                finding=finding,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            )
+        )
     if _finding_durable(finding):
         line += " | persistence=diagnosis persists until the relevant projected state facts change"
     return line
@@ -1073,11 +1061,16 @@ def _candidate_diagnostic_signature(
     resource_jid = str(task.get("resource_jid") or finding.get("resource_jid") or "").strip()
     part_name = str(task.get("part_name") or finding.get("part_name") or "").strip()
     target_ref = _task_target_ref(task, finding=finding)
-    evidence_text = _finding_state_evidence_text(
-        task=task,
-        finding=finding,
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
+    finding_evidence = dict(finding.get("evidence") or {})
+    evidence_text = (
+        _inline_json(finding_evidence)
+        if finding_evidence
+        else _finding_state_evidence_text(
+            task=task,
+            finding=finding,
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+        )
     )
     return (
         resource_jid,
@@ -1130,12 +1123,6 @@ def _outline_validation_summary(
 
         label_parts = [item for item in (task_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "validation finding"
-        if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
-            lines.append(
-                f"- {label} [transition_feasibility: rejected]: "
-                "resource and part custody facts disagree"
-            )
-            continue
         code_label = constraint_code
         if stage:
             code_label = f"{stage}:{constraint_code}" if constraint_code else stage
@@ -1253,6 +1240,48 @@ def _outline_task_sequence_summary(
     return "\n".join(lines) if lines else "(none)"
 
 
+def _accepted_transition_prefix_for_prompt(
+    tasks: list[dict[str, Any]],
+    *,
+    recovery_des_models: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return exact accepted public transition fields for prompt history."""
+    prompt_rows: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        resource_jid = str(task.get("resource_jid") or "").strip()
+        descriptor = dict(recovery_des_models.get(resource_jid) or {})
+        state_variables = dict(descriptor.get("state_variables") or {})
+        public_state_fields = {
+            str(field_name)
+            for field_name, declaration in state_variables.items()
+            if dict(declaration or {}).get("private") is not True
+        }
+        row: dict[str, Any] = {}
+        for field_name in ("outline_id", "event_name", "resource_jid", "part_name"):
+            if field_name not in task:
+                continue
+            field_value = task.get(field_name)
+            if field_name == "part_name" and not str(field_value or "").strip():
+                continue
+            row[field_name] = deepcopy(field_value)
+        for state_field in ("expected_start_state", "expected_end_state"):
+            if not isinstance(task.get(state_field), dict):
+                continue
+            state = dict(task.get(state_field) or {})
+            if public_state_fields:
+                state = {
+                    field_name: deepcopy(field_value)
+                    for field_name, field_value in state.items()
+                    if str(field_name) in public_state_fields
+                }
+            row[state_field] = state
+        if row:
+            prompt_rows.append(row)
+    return prompt_rows
+
+
 def _outline_rejection_history_summary(history: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     for row in history:
@@ -1330,52 +1359,72 @@ def _compact_selection_feedback_evidence(row: dict[str, Any]) -> dict[str, Any]:
     for candidate in evidence.get("candidate_comparison") or []:
         if not isinstance(candidate, dict):
             continue
-        selection_evidence = dict(candidate.get("selection_evidence") or {})
-        comparison_row = {
-            "candidate_id": str(candidate.get("candidate_id") or ""),
-            "selection_status": str(candidate.get("selection_status") or ""),
-            "cleared_recovery_obligation_ids": deepcopy(
-                selection_evidence.get("cleared_recovery_obligation_ids") or []
-            ),
-            "open_recovery_obligation_ids_after": deepcopy(
-                selection_evidence.get("open_recovery_obligation_ids_after") or []
-            ),
-        }
         if is_no_progress:
             part_name = str(candidate.get("part_name") or "").strip()
-            comparison_row.update(
-                {
-                    "resource_jid": str(
-                        candidate.get("resource_jid") or ""
-                    ).strip(),
-                    **({"part_name": part_name} if part_name else {}),
-                    "expected_end_state": deepcopy(
-                        candidate.get("expected_end_state") or {}
-                    ),
-                    "open_recovery_obligation_ids_before": deepcopy(
-                        selection_evidence.get(
-                            "open_recovery_obligation_ids_before"
-                        )
-                        or []
-                    ),
-                    "introduced_recovery_obligation_ids": deepcopy(
-                        selection_evidence.get(
-                            "introduced_recovery_obligation_ids"
-                        )
-                        or []
-                    ),
-                    "safety_dfa_states_before": deepcopy(
-                        selection_evidence.get("safety_dfa_states_before") or {}
-                    ),
-                    "safety_dfa_states_after": deepcopy(
-                        selection_evidence.get("safety_dfa_states_after") or {}
-                    ),
-                }
-            )
+            comparison_row = {
+                "event_name": str(candidate.get("event_name") or "").strip(),
+                "resource_jid": str(candidate.get("resource_jid") or "").strip(),
+                **({"part_name": part_name} if part_name else {}),
+                "selection_status": str(candidate.get("selection_status") or ""),
+                "selection_constraint_codes": deepcopy(
+                    candidate.get("selection_constraint_codes") or []
+                ),
+                "expected_end_state": deepcopy(candidate.get("expected_end_state") or {}),
+            }
+        else:
+            selection_evidence = dict(candidate.get("selection_evidence") or {})
+            comparison_row = {
+                "candidate_id": str(candidate.get("candidate_id") or ""),
+                "selection_status": str(candidate.get("selection_status") or ""),
+                "cleared_recovery_obligation_ids": deepcopy(
+                    selection_evidence.get("cleared_recovery_obligation_ids") or []
+                ),
+                "open_recovery_obligation_ids_after": deepcopy(
+                    selection_evidence.get("open_recovery_obligation_ids_after") or []
+                ),
+            }
         comparison.append(comparison_row)
     if comparison:
         compact["candidate_comparison"] = comparison
     return compact
+
+
+def _no_progress_selection_feedback_summary(row: dict[str, Any]) -> str:
+    """Render actionable candidate effects without internal selector state."""
+    lines = [
+        "- model_based_selection [no_progressing_candidate]: "
+        "validated candidates made no recovery progress"
+    ]
+    evidence = dict(row.get("evidence") or {})
+    for candidate in evidence.get("candidate_comparison") or []:
+        if not isinstance(candidate, dict):
+            continue
+        event_name = str(
+            candidate.get("event_name") or candidate.get("outline_id") or "anonymous_event"
+        ).strip()
+        resource_jid = str(candidate.get("resource_jid") or "").strip()
+        part_name = str(candidate.get("part_name") or "").strip()
+        selection_status = str(candidate.get("selection_status") or "").strip()
+        constraint_codes = [
+            str(code).strip()
+            for code in (candidate.get("selection_constraint_codes") or [])
+            if str(code).strip()
+        ]
+        fields = [f"candidate_event={event_name}"]
+        if resource_jid:
+            fields.append(f"resource_jid={resource_jid}")
+        if part_name:
+            fields.append(f"part_name={part_name}")
+        if selection_status:
+            fields.append(f"selection_status={selection_status}")
+        if constraint_codes:
+            fields.append("constraint_codes=" + ",".join(constraint_codes))
+        fields.append(
+            "expected_end_state="
+            + _inline_json(dict(candidate.get("expected_end_state") or {}))
+        )
+        lines.append("  - " + " | ".join(fields))
+    return "\n".join(lines)
 
 
 def _candidate_rejection_learning_summary(  # noqa: C901
@@ -1429,11 +1478,12 @@ def _candidate_rejection_learning_summary(  # noqa: C901
                 continue
             if str(row.get("constraint_code") or "").strip():
                 constraint_code = str(row.get("constraint_code") or "").strip()
-                if constraint_code in {
-                    "no_progressing_candidate",
-                    "selection_ambiguous",
-                    "selection_unresolved",
-                }:
+                if constraint_code == "no_progressing_candidate":
+                    line_by_key[("", "", "", constraint_code, "", "")] = (
+                        _no_progress_selection_feedback_summary(row)
+                    )
+                    continue
+                if constraint_code in {"selection_ambiguous", "selection_unresolved"}:
                     line_by_key[("", "", "", constraint_code, "", "")] = (
                         f"- model_based_selection [{constraint_code}]: "
                         f"{str(row.get('reason') or '').strip()} | evidence="
@@ -1487,19 +1537,6 @@ def _candidate_rejection_learning_summary(  # noqa: C901
             reason = str(finding.get("reason") or "").strip()
             if not constraint_code and not reason:
                 continue
-            if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
-                key = (
-                    resource_jid,
-                    part_name,
-                    target_ref,
-                    "transition_feasibility",
-                    "resource and part custody facts disagree",
-                )
-                line_by_key[key] = (
-                    f"- {label} [transition_feasibility: rejected]: "
-                    "resource and part custody facts disagree"
-                )
-                continue
             key = (resource_jid, part_name, target_ref, constraint_code, reason)
             sentence = f"- {label}"
             if turn_index is not None:
@@ -1538,11 +1575,11 @@ def _candidate_rejection_learning_summary(  # noqa: C901
             continue
         if str(row.get("constraint_code") or "").strip():
             constraint_code = str(row.get("constraint_code") or "").strip()
-            if constraint_code in {
-                "no_progressing_candidate",
-                "selection_ambiguous",
-                "selection_unresolved",
-            }:
+            if constraint_code == "no_progressing_candidate":
+                key = ("", "", "", constraint_code, "")
+                line_by_key[key] = _no_progress_selection_feedback_summary(row)
+                continue
+            if constraint_code in {"selection_ambiguous", "selection_unresolved"}:
                 key = ("", "", "", constraint_code, str(row.get("reason") or ""))
                 line_by_key[key] = (
                     f"- candidate [{constraint_code}]: "
@@ -3001,32 +3038,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         for row in (session_state.get("candidate_rejection_feedback") or [])
         if isinstance(row, dict)
     ]
-    candidate_revision_targets = [
-        {
-            "candidate_id": str(row.get("candidate_id") or "").strip(),
-            "resource_jid": str(row.get("resource_jid") or "").strip(),
-            **(
-                {"part_name": str(row.get("part_name") or "").strip()}
-                if str(row.get("part_name") or "").strip()
-                else {}
-            ),
-            "expected_end_state": deepcopy(row.get("expected_end_state") or {}),
-            **(
-                {
-                    "validation": "transition_feasibility: rejected",
-                    "reason": "resource and part custody facts disagree",
-                }
-                if any(
-                    str(code or "").strip().lower() in _CUSTODY_CONSISTENCY_CODES
-                    for code in (row.get("constraint_codes") or [])
-                )
-                else {"constraint_codes": deepcopy(row.get("constraint_codes") or [])}
-            ),
-        }
-        for row in (session_state.get("candidate_revision_targets") or [])
-        if isinstance(row, dict)
-        and str(row.get("resource_jid") or "").strip()
-    ]
     primitive_escalation_diagnostics = [
         deepcopy(row)
         for row in (session_state.get("primitive_escalation_diagnostics") or [])
@@ -3173,17 +3184,35 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         role_text,
     ]
 
-    if not is_single_pass and not is_candidate_mode and accepted_prefix:
-        sections.extend(
-            [
-                "",
-                "Accepted Transition Prefix (keep exactly, do not modify)",
-                _outline_task_sequence_summary(
-                    accepted_prefix,
-                    include_descriptions=not is_candidate_mode,
-                ),
-            ]
-        )
+    if not is_single_pass and accepted_prefix:
+        if is_candidate_mode:
+            sections.extend(
+                [
+                    "",
+                    "Accepted Transition Prefix (already applied; do not repeat)",
+                    _compact_json(
+                        _accepted_transition_prefix_for_prompt(
+                            accepted_prefix,
+                            recovery_des_models=dict(
+                                session_state.get("recovery_des_models") or {}
+                            ),
+                        )
+                    ),
+                    "- These transitions have already been applied. Do not propose them again.",
+                    "- Use Current DES State below as the exact start point for the next candidate.",
+                ]
+            )
+        else:
+            sections.extend(
+                [
+                    "",
+                    "Accepted Transition Prefix (keep exactly, do not modify)",
+                    _outline_task_sequence_summary(
+                        accepted_prefix,
+                        include_descriptions=True,
+                    ),
+                ]
+            )
 
     sections.extend(
         _top_validation_feedback_section(
@@ -3191,27 +3220,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             label="Validation Feedback",
         )
     )
-
-    if is_candidate_mode and candidate_revision_targets:
-        sections.extend(
-            [
-                "",
-                "Candidate Revision Targets",
-                _compact_json(candidate_revision_targets),
-                (
-                    "- Include one materially revised candidate for every listed "
-                    "target, up to the candidate bound."
-                ),
-                (
-                    "- Keep each target's resource_jid and part_name unchanged; "
-                    "change expected_end_state to address its reported validation result."
-                ),
-                (
-                    "- Changing only event_name, outline_id, or rationale does not "
-                    "satisfy a revision target. Other candidate slots remain free."
-                ),
-            ]
-        )
 
     if primitive_escalation_diagnostics:
         sections.extend(

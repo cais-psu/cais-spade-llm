@@ -3334,7 +3334,12 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     post_release_message = post_release_request.split("Response Format", maxsplit=1)[0]
     assert "workspace_unreachable" in post_release_message
     assert "xarm6@localhost/LG" in post_release_message
-    assert "place_mcp_to_prusa_mk4_2_temp" not in post_release_message
+    assert "Accepted Transition Prefix (already applied; do not repeat)" in (
+        post_release_message
+    )
+    assert '"event_name": "place_mcp_to_prusa_mk4_2_temp"' in (
+        post_release_message
+    )
     assert "The only immediate blocker to recovering LG" not in post_release_message
     assert '"held_part_location": "ur5e@localhost"' not in (
         post_release_message
@@ -3920,7 +3925,7 @@ def test_candidate_prompt_has_no_numeric_selected_index_example() -> None:
     assert schema["properties"]["candidate_events"]["maxItems"] == 3
 
 
-def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anchoring() -> None:
+def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbols() -> None:
     accepted_event_name = "previously_authored_event"
     prompt = _render_non_case3_candidate_prompt(
         accepted_outline_prefix=[
@@ -3937,8 +3942,12 @@ def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anch
         ]
     )
 
-    assert "Accepted Transition Prefix" not in prompt
-    assert accepted_event_name not in prompt
+    assert "Accepted Transition Prefix (already applied; do not repeat)" in prompt
+    assert accepted_event_name in prompt
+    assert '"outline_id": "RECOVERY_SEQ1"' in prompt
+    assert '"resource_state": "failed"' in prompt
+    assert '"resource_state": "new_clear_state"' in prompt
+    assert "These transitions have already been applied" in prompt
     assert "You may author a new `event_name`" in prompt
     assert "optional new `resource_state` or `part_state` values" in prompt
     assert "A new state name has no meaning by itself" in prompt
@@ -3950,7 +3959,10 @@ def test_candidate_prompt_allows_new_event_and_state_symbols_without_prefix_anch
     )
     assert "named poses" not in prompt
     assert "Outline Candidate Contract" not in prompt
-    assert "expected_start_state" not in prompt
+    assert '"expected_start_state"' in prompt
+
+    initial_prompt = _render_non_case3_candidate_prompt()
+    assert "Accepted Transition Prefix" not in initial_prompt
 
 
 def test_production_cca_rejects_safe1_out_of_order_mcp_placement() -> None:
@@ -4536,7 +4548,7 @@ def test_exact_no_op_passes_validators_and_is_excluded_by_selection() -> None:
         ("physical_feasibility", "passed"),
         ("safety", "passed"),
     ]
-    assert turn_entry["candidate_revision_targets"] == []
+    assert "candidate_revision_targets" not in turn_entry
 
 
 def test_transition_feasibility_checks_only_successor_custody_consistency() -> None:
@@ -4794,14 +4806,17 @@ def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() 
         prepared_recovery_request,
         mismatch_session,
     )
-    assert "held_part_location_mismatch" not in mismatch_prompt
-    assert "expected_carried_part_location" not in mismatch_prompt
-    assert "resource and part custody facts disagree" in mismatch_prompt
-    assert "recover_pick" not in mismatch_prompt
-    assert "Candidate Revision Targets" in mismatch_prompt
-    assert "one materially revised candidate for every listed target" in (
+    assert "held_part_location_mismatch" in mismatch_prompt
+    assert "expected_carried_part_location" in mismatch_prompt
+    assert '"proposed_part_location": "prusa-mk4-1"' in mismatch_prompt
+    assert '"expected_carried_part_location": "xarm6@localhost"' in mismatch_prompt
+    assert "held_part and part_location do not describe the same ResourceAgent transition" in (
         mismatch_prompt
     )
+    assert "resource and part custody facts disagree" not in mismatch_prompt
+    assert "recover_pick" not in mismatch_prompt
+    assert "Candidate Revision Targets" not in mismatch_prompt
+    assert "one materially revised candidate for every listed target" not in mismatch_prompt
 
 
 def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> None:
@@ -5114,7 +5129,7 @@ def test_candidate_validation_feedback_is_rendered_once() -> None:
     assert "Disabled And Blocked Candidate Events" not in prompt
 
 
-def test_custody_feedback_hides_internal_constraint_details() -> None:
+def test_ra_feedback_preserves_exact_constraint_details() -> None:
     reason = "Task releases 'LCP' without specifying a concrete grounded destination."
     prompt = _render_non_case3_candidate_prompt(
         candidate_rejection_feedback=[
@@ -5133,15 +5148,21 @@ def test_custody_feedback_hides_internal_constraint_details() -> None:
                         "reason": reason,
                         "resource_jid": "xarm6@localhost",
                         "part_name": "LCP",
+                        "evidence": {
+                            "field": "expected_end_state.part_location",
+                            "proposed_part_location": None,
+                        },
                     }
                 ],
             }
         ]
     )
 
-    assert "missing_release_destination" not in prompt
-    assert reason not in prompt
-    assert prompt.count("resource and part custody facts disagree") == 1
+    assert "missing_release_destination" in prompt
+    assert reason in prompt
+    assert '"field": "expected_end_state.part_location"' in prompt
+    assert '"proposed_part_location": null' in prompt
+    assert "resource and part custody facts disagree" not in prompt
     assert "no_progressing_candidate" not in prompt
 
 

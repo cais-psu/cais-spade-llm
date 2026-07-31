@@ -1270,6 +1270,109 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
     assert findings[0]["constraint_code"] == "candidate_schema_violation"
 
 
+def test_candidate_prompt_renders_mixed_ra_accepted_public_state_fields() -> None:
+    printer_jid = "printer@localhost"
+    robot_jid = "robot@localhost"
+    printer_state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["printing", "paused"]},
+        "job_state": {"scope": "resource", "domain": ["printing", "paused"]},
+        "maintenance_code": {
+            "scope": "resource",
+            "domain": ["M1"],
+            "private": True,
+        },
+    }
+    robot_state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["failed", "idle"]},
+        "held_part": {"scope": "resource", "domain": [None]},
+    }
+    session_state = _session(parts={})
+    session_state["recovery_des_models"] = {
+        printer_jid: {"state_variables": deepcopy(printer_state_variables)},
+        robot_jid: {"state_variables": deepcopy(robot_state_variables)},
+    }
+    session_state["symbolic_resources"] = {
+        printer_jid: {
+            "resource_jid": printer_jid,
+            "resource_state": "paused",
+            "job_state": "paused",
+        },
+        robot_jid: {
+            "resource_jid": robot_jid,
+            "resource_state": "idle",
+            "held_part": None,
+        },
+    }
+    session_state["accepted_outline_prefix"] = [
+        {
+            "outline_id": "RECOVERY_SEQ1",
+            "event_name": "pause_job",
+            "resource_jid": printer_jid,
+            "expected_start_state": {
+                "resource_state": "printing",
+                "job_state": "printing",
+                "maintenance_code": "M1",
+            },
+            "expected_end_state": {
+                "resource_state": "paused",
+                "job_state": "paused",
+                "maintenance_code": "M1",
+            },
+        },
+        {
+            "outline_id": "RECOVERY_SEQ2",
+            "event_name": "clear_failure",
+            "resource_jid": robot_jid,
+            "expected_start_state": {
+                "resource_state": "failed",
+                "held_part": None,
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": None,
+            },
+        },
+    ]
+    llm_input = {
+        "observed_runtime_state": {
+            "resources": list(deepcopy(session_state["symbolic_resources"]).values())
+        },
+        "part_facts": [],
+        "goal_conditions": [],
+        "loaded_safety_rules": [],
+    }
+    recovery_resources = {
+        printer_jid: {
+            "recovery_des_model": {
+                "state_variables": deepcopy(printer_state_variables)
+            }
+        },
+        robot_jid: {
+            "recovery_des_model": {"state_variables": deepcopy(robot_state_variables)}
+        },
+    }
+
+    prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input=llm_input,
+            session_state=session_state,
+            recovery_resources=recovery_resources,
+        )
+    )
+
+    assert "Accepted Transition Prefix (already applied; do not repeat)" in prompt
+    assert '"outline_id": "RECOVERY_SEQ1"' in prompt
+    assert '"event_name": "pause_job"' in prompt
+    assert '"job_state": "printing"' in prompt
+    assert '"job_state": "paused"' in prompt
+    assert '"outline_id": "RECOVERY_SEQ2"' in prompt
+    assert '"event_name": "clear_failure"' in prompt
+    assert '"held_part": null' in prompt
+    assert "maintenance_code" not in prompt
+    assert "You may author a new `event_name`" in prompt
+
+
 def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:
     prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
     session_state = _session(parts={"P": "faulted"})
@@ -1384,7 +1487,7 @@ def test_neurosymbolic_prompt_assigns_only_candidate_generation_to_llm() -> None
     assert "You must choose the best candidate" not in prompt
 
 
-def test_no_progress_feedback_preserves_declared_effects_without_event_names() -> None:
+def test_no_progress_feedback_preserves_declared_effects_without_internal_selector_state() -> None:
     selection_evidence = {
         "open_recovery_obligation_ids_before": ["condition_open"],
         "cleared_recovery_obligation_ids": [],
@@ -1413,6 +1516,7 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
                     "resource_jid": "ur5e@localhost",
                     "part_name": "LG",
                     "event_name": "place_insert",
+                    "selection_constraint_codes": ["label_only_state_change"],
                     "rationale": "recommended transition",
                     "expected_end_state": {
                         "resource_state": "acquired",
@@ -1426,6 +1530,8 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
                     "candidate_id": "candidate_resource",
                     "selection_status": "excluded_no_progress",
                     "resource_jid": "xarm6@localhost",
+                    "event_name": "move_home",
+                    "selection_constraint_codes": ["no_state_change"],
                     "expected_end_state": {
                         "resource_state": "failed",
                         "resource_location": "assembly_board-v1",
@@ -1437,6 +1543,8 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
                     "selection_status": "excluded_no_progress",
                     "resource_jid": "printer@localhost",
                     "part_name": "P",
+                    "event_name": "pause_job",
+                    "selection_constraint_codes": ["no_state_change"],
                     "expected_end_state": {
                         "resource_state": "paused",
                         "job_state": "paused",
@@ -1457,11 +1565,12 @@ def test_no_progress_feedback_preserves_declared_effects_without_event_names() -
     assert rows[1]["expected_end_state"]["resource_state"] == "failed"
     assert rows[2]["expected_end_state"]["job_state"] == "paused"
     assert rows[2]["expected_end_state"]["part_quality"] == "unknown"
-    assert rows[0]["safety_dfa_states_before"] == {"SAFE_1": "1"}
-    assert rows[0]["safety_dfa_states_after"] == {"SAFE_1": "1"}
-    assert rows[0]["open_recovery_obligation_ids_before"] == ["condition_open"]
-    assert rows[0]["open_recovery_obligation_ids_after"] == ["condition_open"]
-    assert "place_insert" not in str(compact)
+    assert rows[0]["event_name"] == "place_insert"
+    assert rows[0]["selection_constraint_codes"] == ["label_only_state_change"]
+    assert "candidate_part" not in str(compact)
+    assert "condition_open" not in str(compact)
+    assert "safety_dfa_states_before" not in str(compact)
+    assert "safety_dfa_states_after" not in str(compact)
     assert "recommended transition" not in str(compact)
     assert "admissible_recovery_enabled_event_ids" not in str(compact)
     assert "cca_admissible_goal_recovery_event_ids" not in str(compact)
@@ -1581,6 +1690,7 @@ def test_no_progress_prompt_renders_goal_and_material_effect_feedback(
         if row.get("constraint_code") == "no_progressing_candidate"
     )
     comparison = model_finding["evidence"]["candidate_comparison"][0]
+    candidate_id = comparison["candidate_id"]
     assert comparison["resource_jid"] == resource_jid
     assert comparison["part_name"] == part_name
     assert comparison["expected_end_state"] == event["expected_end_state"]
@@ -1598,15 +1708,18 @@ def test_no_progress_prompt_renders_goal_and_material_effect_feedback(
     assert "Modeled Continuation Gap" not in prompt
     assert "Recovery Goals" in prompt
     assert "restore LG to assembly_board-v1" in prompt
-    assert '"expected_end_state"' in prompt
+    assert "expected_end_state=" in prompt
     assert f'"part_location": "{carried_location}"' in prompt
     assert "revise its symbolic expected_end_state" in prompt
     assert "Changing only event_name, outline_id, or rationale" in prompt
-    assert "move_with_part_to_assembly_board-v1" not in prompt
+    assert "move_with_part_to_assembly_board-v1" in prompt
     assert "old candidate rationale" not in prompt
     assert "place_insert" not in prompt
     assert "admissible_recovery_enabled_event_ids" not in prompt
     assert "recovery_des_model" not in prompt
+    assert "goal_lg_location" not in prompt
+    assert "safety_dfa_states_before" not in prompt
+    assert candidate_id not in prompt
 
 
 def test_unique_condition_clearing_candidate_is_selected_independent_of_names_and_order() -> None:
@@ -2686,237 +2799,7 @@ def test_six_materially_different_handler_attempts_are_selection_unresolved(
     assert session_state["selection_repeated_failure_count"] == 1
 
 
-def test_revision_targets_include_pa_and_ra_transition_rejections() -> None:
-    def _evaluation_row(
-        *,
-        candidate_index: int,
-        validator_role: str,
-        validation_category: str,
-        valid: bool = False,
-        selection_status: str = "excluded_invalid",
-    ) -> dict[str, Any]:
-        return {
-            "candidate_index": candidate_index,
-            "candidate_id": f"candidate_{candidate_index}",
-            "valid": valid,
-            "selection_status": selection_status,
-            "task": {
-                "resource_jid": "resource@localhost",
-                "part_name": f"P{candidate_index}",
-                "expected_end_state": {
-                    "resource_state": "idle",
-                    "held_part": f"P{candidate_index}",
-                    "part_state": "in_gripper",
-                    "part_location": "resource@localhost",
-                },
-            },
-            "validation_findings": [
-                {"constraint_code": f"constraint_{candidate_index}"}
-            ],
-            "validation_stages": [
-                {
-                    "validator_role": validator_role,
-                    "validation_category": validation_category,
-                    "status": "rejected",
-                }
-            ],
-        }
-
-    evaluations = [
-        _evaluation_row(
-            candidate_index=0,
-            validator_role="PA",
-            validation_category="syntax_and_grounding_validation",
-        ),
-        _evaluation_row(
-            candidate_index=1,
-            validator_role="RA",
-            validation_category="transition_feasibility",
-        ),
-        _evaluation_row(
-            candidate_index=2,
-            validator_role="RA",
-            validation_category="physical_feasibility",
-        ),
-        _evaluation_row(
-            candidate_index=3,
-            validator_role="CCA",
-            validation_category="safety",
-        ),
-        _evaluation_row(
-            candidate_index=4,
-            validator_role="PA",
-            validation_category="syntax_and_grounding_validation",
-            valid=True,
-            selection_status="excluded_no_progress",
-        ),
-    ]
-
-    targets = multi_turn_outline_generation._pa_candidate_revision_targets(
-        candidate_evaluations=evaluations,
-        candidate_bound=5,
-    )
-
-    assert targets == [
-        {
-            "candidate_id": "candidate_0",
-            "candidate_index": 0,
-            "resource_jid": "resource@localhost",
-            "part_name": "P0",
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": "P0",
-                "part_state": "in_gripper",
-                "part_location": "resource@localhost",
-            },
-            "constraint_codes": ["constraint_0"],
-        },
-        {
-            "candidate_id": "candidate_1",
-            "candidate_index": 1,
-            "resource_jid": "resource@localhost",
-            "part_name": "P1",
-            "expected_end_state": {
-                "resource_state": "idle",
-                "held_part": "P1",
-                "part_state": "in_gripper",
-                "part_location": "resource@localhost",
-            },
-            "constraint_codes": ["constraint_1"],
-        },
-    ]
-
-
-def test_plant_state_change_clears_revision_targets_and_both_counters() -> None:
-    session_state = _session(parts={"P": "faulted"})
-    prepared = _prepared(_condition("goal_P", part_name="P", expected="restored"))
-    session_state.update(
-        {
-            "candidate_revision_targets": [
-                {
-                    "candidate_id": "candidate_p",
-                    "resource_jid": "resource@localhost",
-                    "part_name": "P",
-                    "expected_end_state": {"part_state": "restored"},
-                    "constraint_codes": ["expected_start_state_mismatch"],
-                }
-            ],
-            "candidate_revision_state_fingerprint": (
-                multi_turn_outline_generation._pa_state_fingerprint(
-                    session_state=session_state,
-                    prepared_recovery_request=prepared,
-                )
-            ),
-            "selection_revision_count": 4,
-            "selection_revision_fingerprint": "old-state",
-            "selection_repeated_failure_count": 2,
-            "selection_repeated_failure_fingerprint": "old-failure",
-        }
-    )
-    session_state["symbolic_parts"]["P"].update(
-        {"part_state": "observed_elsewhere", "current_state": "observed_elsewhere"}
-    )
-
-    targets = multi_turn_outline_generation._active_candidate_revision_targets(
-        session_state=session_state,
-        prepared_recovery_request=prepared,
-    )
-
-    assert targets == []
-    assert session_state["candidate_revision_targets"] == []
-    assert session_state["candidate_revision_state_fingerprint"] == ""
-    assert session_state["selection_revision_count"] == 0
-    assert session_state["selection_revision_fingerprint"] == ""
-    assert session_state["selection_repeated_failure_count"] == 0
-    assert session_state["selection_repeated_failure_fingerprint"] == ""
-
-
-def test_pa_revision_targets_require_changed_effects_for_each_identity() -> None:
-    targets = [
-        {
-            "candidate_id": "candidate_lg",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "LG",
-            "expected_end_state": {
-                "held_part": "LG",
-                "part_state": "in_gripper",
-                "part_location": "prusa-mk4-2",
-            },
-            "constraint_codes": ["held_part_location_mismatch"],
-        },
-        {
-            "candidate_id": "candidate_mcp",
-            "resource_jid": "ur5e@localhost",
-            "part_name": "MCP",
-            "expected_end_state": {
-                "held_part": None,
-                "part_state": "placed",
-                "part_location": "prusa-mk4-2",
-            },
-            "constraint_codes": ["held_part_location_mismatch"],
-        },
-    ]
-    candidate_sequences = [
-        {
-            "candidate_index": 0,
-            "surface_events": [
-                {
-                    "outline_id": "renamed_mcp",
-                    "event_name": "renamed_mcp_event",
-                    "resource_jid": "ur5e@localhost",
-                    "part_name": "MCP",
-                    "expected_end_state": {
-                        "held_part": None,
-                        "part_state": "waiting",
-                        "part_location": "prusa-mk4-2",
-                    },
-                }
-            ],
-        }
-    ]
-
-    findings = (
-        multi_turn_outline_generation._candidate_revision_requirement_findings(
-            candidate_sequences=candidate_sequences,
-            revision_targets=targets,
-        )
-    )
-
-    assert len(findings) == 1
-    assert findings[0]["constraint_code"] == "candidate_schema_violation"
-    assert findings[0]["resource_jid"] == "ur5e@localhost"
-    assert findings[0]["part_name"] == "LG"
-    assert findings[0]["evidence"]["candidate_id"] == "candidate_lg"
-
-    corrected_sequences = [
-        *candidate_sequences,
-        {
-            "candidate_index": 1,
-            "surface_events": [
-                {
-                    "outline_id": "corrected_lg",
-                    "event_name": "corrected_lg_event",
-                    "resource_jid": "ur5e@localhost",
-                    "part_name": "LG",
-                    "expected_end_state": {
-                        "held_part": "LG",
-                        "part_state": "in_gripper",
-                        "part_location": "ur5e@localhost",
-                    },
-                }
-            ],
-        },
-    ]
-    assert (
-        multi_turn_outline_generation._candidate_revision_requirement_findings(
-            candidate_sequences=corrected_sequences,
-            revision_targets=targets,
-        )
-        == []
-    )
-
-
-def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
+def test_prior_revision_targets_do_not_block_fresh_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_state = _session(parts={"P": "faulted", "Q": "faulted"})
@@ -2942,13 +2825,33 @@ def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
         )
     )
 
-    async def validation_must_not_run(**_kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("candidate validation ran before revision continuity")
+    validation_calls = 0
+
+    async def validate_candidate(**kwargs: Any) -> dict[str, Any]:
+        nonlocal validation_calls
+        validation_calls += 1
+        task = deepcopy(kwargs["candidate"]["surface_events"][0])
+        return {
+            "candidate_index": 0,
+            "valid": False,
+            "task": task,
+            "surface_events": [deepcopy(task)],
+            "validation_findings": [
+                {
+                    "validation_category": "syntax_and_grounding_validation",
+                    "constraint_code": "candidate_schema_violation",
+                    "reason": "fresh candidate feedback",
+                    "resource_jid": task["resource_jid"],
+                    "part_name": task["part_name"],
+                }
+            ],
+            "validation_stages": [],
+        }
 
     monkeypatch.setattr(
         multi_turn_outline_generation,
         "_validate_candidate_sequence",
-        validation_must_not_run,
+        validate_candidate,
     )
     decision, turn_entry = asyncio.run(
         multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
@@ -2970,25 +2873,14 @@ def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
     )
 
     assert decision == "need_revision"
-    evaluation = turn_entry["candidate_evaluations"][0]
-    assert evaluation["valid"] is False
-    assert {
-        finding["constraint_code"]
-        for finding in evaluation["validation_findings"]
-    } == {"candidate_schema_violation"}
-    assert [
-        (stage["validator_role"], stage["status"])
-        for stage in evaluation["validation_stages"]
-    ] == [
-        ("PA", "rejected"),
-        ("RA", "skipped"),
-        ("RA", "skipped"),
-        ("CCA", "skipped"),
-    ]
-    assert session_state["candidate_revision_targets"][0]["part_name"] == "P"
+    assert validation_calls == 1
+    assert turn_entry["candidate_evaluations"][0]["task"]["part_name"] == "Q"
+    assert "candidate_revision_targets" not in turn_entry
+    assert session_state["candidate_revision_targets"] == []
+    assert session_state["candidate_revision_state_fingerprint"] == ""
 
 
-def test_candidate_prompt_requires_pa_revision_targets_without_action_hints() -> None:
+def test_candidate_prompt_does_not_render_mandatory_revision_targets() -> None:
     session_state = _session(parts={"LG": "misplaced", "MCP": "in_gripper"})
     session_state["candidate_revision_targets"] = [
         {
@@ -3014,6 +2906,28 @@ def test_candidate_prompt_requires_pa_revision_targets_without_action_hints() ->
             "constraint_codes": ["held_part_location_mismatch"],
         },
     ]
+    session_state["candidate_rejection_feedback"] = [
+        {
+            "candidate_index": 0,
+            "task": {
+                "resource_jid": "ur5e@localhost",
+                "part_name": "LG",
+            },
+            "validation_findings": [
+                {
+                    "constraint_code": "held_part_location_mismatch",
+                    "reason": "held_part and part_location do not describe the same ResourceAgent transition",
+                    "resource_jid": "ur5e@localhost",
+                    "part_name": "LG",
+                    "evidence": {
+                        "field": "expected_end_state.part_location",
+                        "proposed_part_location": "prusa-mk4-2",
+                        "expected_carried_part_location": "ur5e@localhost",
+                    },
+                }
+            ],
+        }
+    ]
     prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
         multi_turn_prompts.build_multi_turn_phase_prompt_input(
             phase="outline",
@@ -3028,11 +2942,12 @@ def test_candidate_prompt_requires_pa_revision_targets_without_action_hints() ->
         )
     )
 
-    assert "Candidate Revision Targets" in prompt
-    assert "candidate_lg" in prompt
-    assert "candidate_mcp" in prompt
-    assert "one materially revised candidate for every listed target" in prompt
-    assert "Changing only event_name, outline_id, or rationale" in prompt
+    assert "Candidate Revision Targets" not in prompt
+    assert "candidate_lg" not in prompt
+    assert "candidate_mcp" not in prompt
+    assert "one materially revised candidate for every listed target" not in prompt
+    assert "held_part_location_mismatch" in prompt
+    assert "expected_carried_part_location" in prompt
     assert "place_insert" not in prompt
     assert "move_home" not in prompt
 
@@ -3070,6 +2985,8 @@ def _carrier_rejection(
                 "evidence": {
                     "field": "part_motion",
                     "changed_fields": ["part_location"],
+                    "proposed_part_location": destination,
+                    "expected_carried_part_location": resource_jid,
                 },
             }
         ],
@@ -3178,7 +3095,7 @@ def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
         for row in feedback
         for finding in row.get("validation_findings") or []
     ]
-    assert codes.count("part_relocation_without_carrier") == 1
+    assert codes.count("part_relocation_without_carrier") == 3
     assert codes.count("workspace_unreachable") == 1
     summary = multi_turn_prompts._candidate_rejection_learning_summary(
         history=[],
@@ -3187,9 +3104,10 @@ def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
         resources_by_jid=deepcopy(session_state["symbolic_resources"]),
         parts_by_name=deepcopy(session_state["symbolic_parts"]),
     )
-    assert "part_relocation_without_carrier" not in summary
-    assert "expected_carried_part_location" not in summary
-    assert summary.count("resource and part custody facts disagree") == 1
+    assert summary.count("part_relocation_without_carrier") == 3
+    assert summary.count("expected_carried_part_location") == 3
+    assert summary.count(resource_jid) >= 3
+    assert "resource and part custody facts disagree" not in summary
     assert "rejected_event_" not in summary
     assert "rejected rationale" not in summary
 
@@ -3233,7 +3151,7 @@ def test_atomic_custody_feedback_uses_only_the_responsible_ra_token() -> None:
     ) == []
 
 
-def test_custody_correction_fails_closed_without_a_declared_location() -> None:
+def test_feedback_does_not_invent_or_remove_ra_evidence() -> None:
     row = _carrier_rejection(
         candidate_index=0,
         resource_jid="printer@localhost",
@@ -3280,6 +3198,9 @@ def test_custody_correction_fails_closed_without_a_declared_location() -> None:
     )
     finding = feedback[0]["validation_findings"][0]
     assert "carried_part_location" not in finding["evidence"]
+    assert finding["evidence"]["expected_carried_part_location"] == (
+        "printer@localhost"
+    )
     summary = multi_turn_prompts._candidate_rejection_learning_summary(
         history=[],
         feedback_rows=feedback,
@@ -3288,90 +3209,55 @@ def test_custody_correction_fails_closed_without_a_declared_location() -> None:
     assert "First establish custody in a separate transition" not in summary
 
 
-def test_non_robot_custody_correction_uses_its_exact_declared_token() -> None:
-    resource_type = "fixture_handler_test"
-    resource_jid = "fixture@localhost"
-    carried_location = "fixture@localhost_fixture_slot"
-    register_resource_profile(
-        ResourceProfile(
-            resource_type=resource_type,
-            carried_entity_field="payload",
-            carried_entity_location_builder=(
-                lambda jid, _snapshot: f"{jid}_fixture_slot"
-            ),
-        )
-    )
+def test_ra_feedback_preserves_non_robot_evidence_without_rewriting() -> None:
+    resource_jid = "printer@localhost"
     session_state = {
         "symbolic_resources": {
             resource_jid: {
                 "resource_jid": resource_jid,
-                "resource_state": "idle",
-                "payload": None,
+                "resource_state": "paused",
+                "job_state": "paused",
             }
         },
-        "symbolic_parts": {
-            "P": {
-                "part_name": "P",
-                "part_location": None,
-                "current_holder_resource_jid": None,
-            }
-        },
-        "recovery_des_models": {
-            resource_jid: {
-                "state_variables": {
-                    "part_location": {
-                        "scope": "part",
-                        "domain": [None, carried_location],
-                    }
-                }
-            }
-        },
+        "symbolic_parts": {},
         "candidate_rejection_feedback": [],
     }
-    prepared = {
-        "recovery_resources": {
-            resource_jid: {
-                "resource_type": resource_type,
-                "recovery_snapshot": {"resource_type": resource_type},
-            }
-        }
+    prepared = {"recovery_resources": {resource_jid: {}}}
+    finding = {
+        "validation_category": "transition_feasibility",
+        "constraint_owner": "resource",
+        "constraint_code": "job_state_mismatch",
+        "resource_jid": resource_jid,
+        "reason": "job_state does not match the current printer declaration",
+        "evidence": {
+            "field": "expected_start_state.job_state",
+            "proposed_job_state": "idle",
+            "expected_job_state": "paused",
+        },
     }
     feedback = multi_turn._merge_applicable_candidate_feedback(
         session_state=session_state,
         prepared_recovery_request=prepared,
         current_feedback_rows=[
-            _carrier_rejection(
-                candidate_index=0,
-                resource_jid=resource_jid,
-                part_name="P",
-                destination="station",
-            )
+            {
+                "candidate_index": 0,
+                "task": {"resource_jid": resource_jid},
+                "validation_findings": [deepcopy(finding)],
+            }
         ],
         prune_current=False,
     )
-    finding = feedback[0]["validation_findings"][0]
-    assert finding["evidence"]["carried_part_location"] == carried_location
-
-    session_state["candidate_rejection_feedback"] = []
-    session_state["recovery_des_models"][resource_jid]["state_variables"][
-        "part_location"
-    ]["domain"] = [None]
-    feedback = multi_turn._merge_applicable_candidate_feedback(
-        session_state=session_state,
-        prepared_recovery_request=prepared,
-        current_feedback_rows=[
-            _carrier_rejection(
-                candidate_index=0,
-                resource_jid=resource_jid,
-                part_name="P",
-                destination="station",
-            )
-        ],
-        prune_current=False,
+    preserved = feedback[0]["validation_findings"][0]
+    assert preserved["constraint_code"] == "job_state_mismatch"
+    assert preserved["reason"] == finding["reason"]
+    assert preserved["evidence"] == finding["evidence"]
+    summary = multi_turn_prompts._candidate_rejection_learning_summary(
+        history=[],
+        feedback_rows=feedback,
+        feedback_render_style="des_event_diagnostic",
     )
-    assert "carried_part_location" not in feedback[0]["validation_findings"][0][
-        "evidence"
-    ]
+    assert "job_state_mismatch" in summary
+    assert '"expected_job_state": "paused"' in summary
 
 
 def test_non_robot_custody_validation_uses_its_declared_carried_location() -> None:
