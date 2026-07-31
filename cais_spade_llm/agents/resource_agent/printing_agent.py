@@ -36,6 +36,62 @@ class PrintingAgent(ResourceAgent):
             "bed_state": getattr(self, "_bed_state", None),
         }
 
+    def recovery_des_model(
+        self,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the printer's private task-level recovery DES model."""
+        from cais_spade_llm.resources.resource_primitives import (
+            build_recovery_des_model,
+        )
+
+        live_snapshot = dict(snapshot or self.get_recovery_snapshot())
+        current_state = live_snapshot.get("current_state")
+        raw_descriptor = {
+            "state_variables": {
+                "resource_state": {
+                    "scope": "resource",
+                    "domain": [current_state, "idle", "printing", "paused"],
+                },
+            },
+            "current_valuation": {
+                "resource_state": current_state,
+            },
+            "events": [
+                {
+                    "event_name": "pause_job",
+                    "controllable": True,
+                    "observable": True,
+                    "guards": {"resource_state": {"equals": "printing"}},
+                    "updates": {"resource_state": {"set": "paused"}},
+                },
+                {
+                    "event_name": "resume_job",
+                    "controllable": True,
+                    "observable": True,
+                    "guards": {"resource_state": {"equals": "paused"}},
+                    "updates": {"resource_state": {"set": "printing"}},
+                },
+                {
+                    "event_name": "cancel_job",
+                    "controllable": True,
+                    "observable": True,
+                    "guards": {"resource_state": {"not_equals": "idle"}},
+                    "updates": {"resource_state": {"set": "idle"}},
+                },
+            ],
+            "marked_state_conditions": list(
+                self.static_capabilities.get("recovery_marked_state_conditions")
+                or []
+            ),
+        }
+        return build_recovery_des_model(
+            self,
+            snapshot=live_snapshot,
+            descriptor=raw_descriptor,
+        )
+
     # ------------------------------------------------------------------
     # Recovery primitives — YAML frontmatter MUST come first in docstring
     # for FunctionAnalyzer._extract_yaml_frontmatter() to parse it.

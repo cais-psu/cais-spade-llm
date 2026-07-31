@@ -17,6 +17,7 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
 )
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+    multi_turn_outline_generation,
     multi_turn_prompts,
 )
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
@@ -26,9 +27,6 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
     RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
     recovery_validation_fingerprint,
     recovery_validation_reply_matches,
-)
-from cais_spade_llm.resources.capability_engine import (
-    bind_configured_capabilities,
 )
 
 
@@ -417,69 +415,10 @@ def test_ra_rejects_wrong_resource_and_robot_specific_physical_conflicts() -> No
 def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() -> None:
     class _Owner:
         jid = "xarm6@localhost"
-        static_capabilities = {
-            "state_variables": {
-                "resource_state": {
-                    "scope": "resource",
-                    "domain": ["failed", "idle"],
-                },
-                "resource_location": {
-                    "scope": "resource",
-                    "domain": ["assembly_board-v1", "home"],
-                },
-                "held_part": {
-                    "scope": "resource",
-                    "domain": [None, "LG"],
-                },
-            },
-            "events": [
-                {
-                    "event_name": "validate",
-                    "guards": {},
-                    "updates": {},
-                }
-            ],
-        }
-        capability_runtime_fact_names = ResourceAgent.capability_runtime_fact_names
-        capability_runtime_facts = ResourceAgent.capability_runtime_facts
-        capability_state_valuation = ResourceAgent.capability_state_valuation
-        _executable_required_runtime_facts = staticmethod(
-            ResourceAgent._executable_required_runtime_facts
-        )
-        _executable_runtime_fact_names = staticmethod(
-            ResourceAgent._executable_runtime_fact_names
-        )
-        _configured_event_required_runtime_facts = (
-            ResourceAgent._configured_event_required_runtime_facts
-        )
-        _capability_execution_arguments = (
-            ResourceAgent._capability_execution_arguments
-        )
-        _capability_atomic_transition = (
-            ResourceAgent._capability_atomic_transition
-        )
-        _evaluate_capability_transition = (
-            ResourceAgent._evaluate_capability_transition
-        )
-        _resolve_generated_capability = (
-            ResourceAgent._resolve_generated_capability
-        )
-        _generated_successor_from_action_target = (
-            ResourceAgent._generated_successor_from_action_target
-        )
-        _grounded_action_from_atomic_transitions = (
-            ResourceAgent._grounded_action_from_atomic_transitions
-        )
 
         def __init__(self) -> None:
             self.snapshot_calls = 0
             self.validation_snapshots: list[dict[str, Any]] = []
-            self._configured_capability_declarations = deepcopy(
-                self.static_capabilities
-            )
-            self.executables = {
-                "validate": lambda: {"success": True},
-            }
 
         def get_recovery_snapshot(self) -> dict[str, Any]:
             self.snapshot_calls += 1
@@ -494,20 +433,6 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
                 self, resource_jid
             )
 
-        def _bind_capabilities(
-            self,
-            *,
-            snapshot: dict[str, Any],
-        ) -> dict[str, Any]:
-            del snapshot
-            return bind_configured_capabilities(
-                SimpleNamespace(
-                    jid=self.jid,
-                    static_capabilities=self.static_capabilities,
-                ),
-                capabilities=self._configured_capability_declarations,
-            )
-
         def check_recovery_physical_feasibility(self, **kwargs: Any) -> dict[str, Any]:
             self.validation_snapshots.append(deepcopy(kwargs["recovery_snapshot"]))
             return {"allowed": True, "reason": "owner accepted"}
@@ -517,20 +442,7 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
         "candidates": [
             {
                 "candidate_index": 0,
-                "task": {
-                    "event_name": "validate",
-                    "resource_jid": "xarm6@localhost",
-                    "expected_start_state": {
-                        "resource_state": "failed",
-                        "resource_location": "assembly_board-v1",
-                        "held_part": None,
-                    },
-                    "expected_end_state": {
-                        "resource_state": "failed",
-                        "resource_location": "assembly_board-v1",
-                        "held_part": None,
-                    },
-                },
+                "task": {"resource_jid": "xarm6@localhost"},
                 "physical_input": {
                     "use_projected_recovery_snapshot": False,
                     "projected_recovery_snapshot": {
@@ -542,20 +454,7 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
             },
             {
                 "candidate_index": 1,
-                "task": {
-                    "event_name": "validate",
-                    "resource_jid": "xarm6@localhost",
-                    "expected_start_state": {
-                        "resource_state": "idle",
-                        "resource_location": "home",
-                        "held_part": "LG",
-                    },
-                    "expected_end_state": {
-                        "resource_state": "idle",
-                        "resource_location": "home",
-                        "held_part": "LG",
-                    },
-                },
+                "task": {"resource_jid": "xarm6@localhost"},
                 "physical_input": {
                     "use_projected_recovery_snapshot": True,
                     "projected_recovery_snapshot": {
@@ -598,6 +497,9 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
     assert result["results"][2]["findings"][0]["constraint_code"] == (
         "wrong_resource_validator"
     )
+    assert result["snapshot_fingerprint"] == recovery_validation_fingerprint(
+        result["snapshot"]
+    )
 
 
 def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
@@ -607,7 +509,7 @@ def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
             "use_projected_recovery_snapshot": True,
             "projected_recovery_snapshot": {"held_part": None},
         },
-        bound_capabilities={
+        recovery_des_model={
             "state_variables": {
                 "held_part": {"scope": "resource"},
             }
@@ -619,7 +521,7 @@ def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
             "use_projected_recovery_snapshot": True,
             "projected_recovery_snapshot": {"held_part": "LG"},
         },
-        bound_capabilities={
+        recovery_des_model={
             "state_variables": {
                 "held_part": {"scope": "resource"},
             }
@@ -630,14 +532,28 @@ def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
     assert acquired["gripper_state"] == "closed"
 
 
-def test_production_ra_reply_exposes_results_without_private_capabilities() -> None:
+def test_production_ra_reply_includes_recovery_des_descriptor() -> None:
     async def _run() -> dict[str, Any]:
+        descriptor = {
+            "model_type": "extended_finite_automaton",
+            "resource_jid": "xarm6@localhost",
+            "state_variables": {
+                "resource_state": {
+                    "scope": "resource",
+                    "domain": ["idle"],
+                }
+            },
+            "current_valuation": {"resource_state": "idle"},
+            "events": [],
+            "descriptor_fingerprint": "descriptor-fingerprint",
+        }
         validation = {
             "validator_jid": "xarm6@localhost",
             "snapshot": {"resource_state": "idle"},
+            "snapshot_fingerprint": "snapshot-fingerprint",
+            "recovery_des_model": deepcopy(descriptor),
+            "recovery_des_model_fingerprint": "descriptor-fingerprint",
             "results": [],
-            "enabled_capability_results": [],
-            "enabled_event_ids": [],
         }
         owner = SimpleNamespace(
             jid="xarm6@localhost",
@@ -684,13 +600,41 @@ def test_production_ra_reply_exposes_results_without_private_capabilities() -> N
         return json.loads(sent_messages[0].body)
 
     response = asyncio.run(_run())
-    assert response["results"] == []
-    assert response["enabled_capability_results"] == []
-    assert "snapshot" not in response
-    assert "snapshot_fingerprint" not in response
-    assert "configured_capabilities_fingerprint" not in response
-    assert "state_variables" not in response
-    assert "events" not in response
+    assert response["recovery_des_model"]["resource_jid"] == "xarm6@localhost"
+    assert response["recovery_des_model_fingerprint"] == "descriptor-fingerprint"
+
+
+def test_first_ra_transition_uses_live_snapshot_for_staleness() -> None:
+    task = {
+        "outline_id": "candidate",
+        "resource_jid": "xarm6@localhost",
+        "expected_start_state": {
+            "resource_state": "idle",
+            "resource_location": "home",
+            "held_part": None,
+        },
+    }
+    snapshot = {
+        "resource_state": "failed",
+        "resource_location": "assembly_board-v1",
+        "held_part": None,
+    }
+    findings = multi_turn_outline_generation._ra_snapshot_staleness_findings(
+        task=task,
+        snapshot=snapshot,
+        session_state={"accepted_outline_prefix": []},
+    )
+    assert findings[0]["constraint_code"] == "validation_state_stale"
+
+    assert multi_turn_outline_generation._ra_snapshot_staleness_findings(
+        task=task,
+        snapshot=snapshot,
+        session_state={
+            "accepted_outline_prefix": [
+                {"resource_jid": "xarm6@localhost"}
+            ]
+        },
+    ) == []
 
 
 def test_outline_state_schema_matches_pa_candidate_validator() -> None:
@@ -699,22 +643,15 @@ def test_outline_state_schema_matches_pa_candidate_validator() -> None:
         action_horizon="1",
     )
     state_schema = schema["schema"]["$defs"]["outline_state"]
-    assert state_schema["additionalProperties"] == {
-        "type": ["string", "number", "boolean", "null"],
-    }
-    assert state_schema["minProperties"] == 1
-    assert "required" not in state_schema
+    assert state_schema["additionalProperties"] is False
+    assert state_schema["required"] == ["resource_state"]
     assert set(state_schema["properties"]) == {
         "resource_state",
+        "resource_location",
+        "held_part",
         "part_state",
+        "part_location",
     }
-    assert (
-        state_schema["properties"]["resource_state"]["properties"][
-            "condition"
-        ]["type"]
-        == ["string", "null"]
-    )
-    assert "enum" not in json.dumps(state_schema)
 
 
 def test_cca_candidate_validation_allows_when_no_safety_rules_are_active() -> None:

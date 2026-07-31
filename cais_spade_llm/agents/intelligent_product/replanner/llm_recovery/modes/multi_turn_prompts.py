@@ -6,7 +6,6 @@ import json
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.resources.capability_engine import configured_recovery_state
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
 )
@@ -42,9 +41,7 @@ def _task_part_name(task: dict[str, Any]) -> str:
 
 def _task_target_ref(task: dict[str, Any]) -> str:
     action_target = dict(task.get("action_target") or {})
-    end_state = configured_recovery_state(
-        dict(task.get("expected_end_state") or {})
-    )
+    end_state = dict(task.get("expected_end_state") or {})
     return str(
         task.get("target_ref")
         or action_target.get("target_ref")
@@ -56,9 +53,7 @@ def _task_target_ref(task: dict[str, Any]) -> str:
 
 def _task_source_ref(task: dict[str, Any]) -> str:
     action_target = dict(task.get("action_target") or {})
-    start_state = configured_recovery_state(
-        dict(task.get("expected_start_state") or {})
-    )
+    start_state = dict(task.get("expected_start_state") or {})
     return str(
         task.get("source_ref")
         or action_target.get("source_ref")
@@ -99,27 +94,17 @@ def _outline_task_view(task: dict[str, Any]) -> dict[str, Any]:
 # Response schemas
 # ---------------------------------------------------------------------------
 
-_COMPOUND_STATE_VALUE_SCHEMA: dict[str, Any] = {
+_OUTLINE_STATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "condition": {"type": ["string", "null"]},
-        "location": {"type": ["string", "null"]},
+        "resource_state": {"type": "string", "minLength": 1},
+        "resource_location": {"type": ["string", "null"]},
+        "held_part": {"type": ["string", "null"]},
+        "part_state": {"type": "string", "minLength": 1},
+        "part_location": {"type": ["string", "null"]},
     },
-    "minProperties": 1,
-}
-
-
-_OUTLINE_STATE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "resource_state": deepcopy(_COMPOUND_STATE_VALUE_SCHEMA),
-        "part_state": deepcopy(_COMPOUND_STATE_VALUE_SCHEMA),
-    },
-    "additionalProperties": {
-        "type": ["string", "number", "boolean", "null"],
-    },
-    "minProperties": 1,
+    "required": ["resource_state"],
 }
 
 
@@ -131,10 +116,6 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "event_name": {"type": "string", "minLength": 1},
         "resource_jid": {"type": "string"},
         "part_name": {"type": "string"},
-        "action_target": {
-            "type": "object",
-            "additionalProperties": True,
-        },
         "expected_end_state": deepcopy(_OUTLINE_STATE_SCHEMA),
         "rationale": {"type": "string"},
     },
@@ -145,134 +126,73 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "expected_end_state",
         "rationale",
     ],
+    "allOf": [
+        {
+            "if": {"required": ["part_name"]},
+            "then": {
+                "properties": {
+                    "expected_end_state": {
+                        "required": [
+                            "resource_state",
+                            "held_part",
+                            "part_state",
+                            "part_location",
+                        ]
+                    },
+                }
+            },
+        }
+    ],
 }
 
 
-def _resource_action_target_schemas(
-    *,
-    public_action_targets: list[dict[str, Any]] | None,
-    public_locations: list[dict[str, Any]] | None,
-) -> dict[str, dict[str, Any]]:
-    """Build exact action-target alternatives for each resource contract."""
-    location_values_by_resource: dict[str, list[str]] = {}
-    for raw_row in public_locations or []:
-        if not isinstance(raw_row, dict):
-            continue
-        resource_jid = str(raw_row.get("resource_jid") or "").strip()
-        if not resource_jid:
-            continue
-        values = location_values_by_resource.setdefault(resource_jid, [])
-        for raw_location in raw_row.get("locations") or []:
-            if not isinstance(raw_location, dict):
-                continue
-            location = str(raw_location.get("location") or "").strip()
-            if location and location not in values:
-                values.append(location)
-
-    contracts_by_resource = {
-        str(row.get("resource_jid") or "").strip(): dict(
-            row.get("action_target") or {}
-        )
-        for row in public_action_targets or []
-        if isinstance(row, dict)
-        and str(row.get("resource_jid") or "").strip()
-        and isinstance(row.get("action_target"), dict)
-    }
-    schemas: dict[str, dict[str, Any]] = {}
-    for resource_jid in sorted(
-        set(location_values_by_resource) | set(contracts_by_resource)
-    ):
-        alternatives: list[dict[str, Any]] = []
-        named_locations = location_values_by_resource.get(resource_jid) or []
-        if named_locations:
-            alternatives.append(
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "enum": named_locations,
-                        }
-                    },
-                    "required": ["location"],
-                }
-            )
-        contract = contracts_by_resource.get(resource_jid) or {}
-        fields = dict(contract.get("fields") or {})
-        required = [
-            str(field_name)
-            for field_name in (contract.get("required") or [])
-            if str(field_name)
-        ]
-        if fields and required:
-            alternatives.append(
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        str(field_name): {
-                            "type": str(
-                                dict(declaration or {}).get("type")
-                                or "string"
-                            )
-                        }
-                        for field_name, declaration in fields.items()
-                    },
-                    "required": required,
-                }
-            )
-        if alternatives:
-            schemas[resource_jid] = (
-                alternatives[0]
-                if len(alternatives) == 1
-                else {"oneOf": alternatives}
-            )
-    return schemas
+def _json_schema_types_for_domain(domain: list[Any]) -> list[str]:
+    types: set[str] = set()
+    for value in domain:
+        if value is None:
+            types.add("null")
+        elif isinstance(value, bool):
+            types.add("boolean")
+        elif isinstance(value, int):
+            types.add("integer")
+        elif isinstance(value, float):
+            types.add("number")
+        elif isinstance(value, dict):
+            types.add("object")
+        elif isinstance(value, list):
+            types.add("array")
+        else:
+            types.add("string")
+    return sorted(types) or ["string", "number", "boolean", "object", "array", "null"]
 
 
 def _outline_symbolic_event_schema(
-    *,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
+    declared_state_variables: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
+    if not declared_state_variables:
+        return deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
+    state_schema = deepcopy(_OUTLINE_STATE_SCHEMA)
+    for field_name, declaration in sorted(declared_state_variables.items()):
+        token = str(field_name or "").strip()
+        if not token:
+            continue
+        domain = list(dict(declaration or {}).get("domain") or [])
+        field_schema: dict[str, Any] = {
+            "type": _json_schema_types_for_domain(domain)
+        }
+        if token in {"resource_state", "part_state"}:
+            field_schema["minLength"] = 1
+        state_schema["properties"][token] = field_schema
     event_schema = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
-    action_target_schemas = _resource_action_target_schemas(
-        public_action_targets=public_action_targets,
-        public_locations=public_locations,
-    )
-    if action_target_schemas:
-        event_schema["allOf"] = [
-            {
-                "if": {
-                    "properties": {
-                        "resource_jid": {"const": resource_jid}
-                    },
-                    "required": ["resource_jid"],
-                },
-                "then": {
-                    "properties": {
-                        "action_target": deepcopy(action_target_schema)
-                    }
-                },
-            }
-            for resource_jid, action_target_schema in sorted(
-                action_target_schemas.items()
-            )
-        ]
+    event_schema["properties"]["expected_end_state"] = deepcopy(state_schema)
     return event_schema
 
 
 def _outline_candidate_schema_definitions(
-    *,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
+    declared_state_variables: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
     """Return shared candidate schemas without repeating state declarations."""
-    expanded_event = _outline_symbolic_event_schema(
-        public_action_targets=public_action_targets,
-        public_locations=public_locations,
-    )
+    expanded_event = _outline_symbolic_event_schema(declared_state_variables)
     state_schema = deepcopy(expanded_event["properties"]["expected_end_state"])
     event_schema = deepcopy(expanded_event)
     event_schema["properties"]["expected_end_state"] = {
@@ -284,15 +204,7 @@ def _outline_candidate_schema_definitions(
     }
 
 
-def _outline_incremental_response_schema(
-    *,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    event_schema = _outline_symbolic_event_schema(
-        public_action_targets=public_action_targets,
-        public_locations=public_locations,
-    )
+def _outline_incremental_response_schema() -> dict[str, Any]:
     return {
         "name": "multi_turn_outline_response",
         "strict": False,
@@ -300,10 +212,10 @@ def _outline_incremental_response_schema(
             "type": "object",
             "properties": {
                 "thought": {"type": "string"},
-                "next_transition": deepcopy(event_schema),
+                "next_transition": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 "transition_suffix": {
                     "type": "array",
-                    "items": deepcopy(event_schema),
+                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 },
             },
             "required": ["thought", "next_transition"],
@@ -319,8 +231,7 @@ def _outline_candidates_response_schema(
     action_horizon: str = "1",
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
     normalized_candidate_count: int | str
@@ -364,8 +275,7 @@ def _outline_candidates_response_schema(
     else:
         normalized_horizon_k = max(1, int(action_horizon_k or 3))
     schema_definitions = _outline_candidate_schema_definitions(
-        public_action_targets=public_action_targets,
-        public_locations=public_locations,
+        declared_state_variables
     )
     candidate_item_schema = {"$ref": "#/$defs/outline_event"}
     required = ["thought"]
@@ -427,15 +337,7 @@ def _outline_candidates_response_schema(
     }
 
 
-def _outline_single_pass_response_schema(
-    *,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    event_schema = _outline_symbolic_event_schema(
-        public_action_targets=public_action_targets,
-        public_locations=public_locations,
-    )
+def _outline_single_pass_response_schema() -> dict[str, Any]:
     return {
         "name": "multi_turn_outline_single_pass_response",
         "strict": False,
@@ -445,7 +347,7 @@ def _outline_single_pass_response_schema(
                 "thought": {"type": "string"},
                 "transition_trace": {
                     "type": "array",
-                    "items": deepcopy(event_schema),
+                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
                 },
             },
             "required": ["thought", "transition_trace"],
@@ -557,17 +459,13 @@ def multi_turn_phase_response_schema(  # noqa: PLR0913
     action_horizon: str = "1",
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
-    public_action_targets: list[dict[str, Any]] | None = None,
-    public_locations: list[dict[str, Any]] | None = None,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
     normalized = phase.strip().lower()
     if normalized == "outline":
         if outline_mode == "single_pass":
-            return _outline_single_pass_response_schema(
-                public_action_targets=public_action_targets,
-                public_locations=public_locations,
-            )
+            return _outline_single_pass_response_schema()
         if outline_mode == "incremental_candidates_validated":
             return _outline_candidates_response_schema(
                 candidate_bound=max(1, int(candidate_bound or _DEFAULT_CANDIDATE_BOUND)),
@@ -576,13 +474,9 @@ def multi_turn_phase_response_schema(  # noqa: PLR0913
                 action_horizon=action_horizon,
                 action_horizon_steps=action_horizon_steps,
                 action_horizon_k=action_horizon_k,
-                public_action_targets=public_action_targets,
-                public_locations=public_locations,
+                declared_state_variables=declared_state_variables,
             )
-        return _outline_incremental_response_schema(
-            public_action_targets=public_action_targets,
-            public_locations=public_locations,
-        )
+        return _outline_incremental_response_schema()
     if normalized == "grounding":
         return _grounding_response_schema()
     if normalized == "primitive_generation":
@@ -676,58 +570,6 @@ def _compact_safety_rules(llm_input: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
-def _compact_action_targets(
-    public_action_targets: list[dict[str, Any]],
-    public_locations: list[dict[str, Any]],
-) -> str:
-    """Render each resource's authorable action_target forms from its contract.
-
-    The alternatives are derived from what the resource declares, so a resource
-    whose target is not a pose publishes its own field names without any
-    change here.
-    """
-    named_by_resource: dict[str, list[str]] = {}
-    for row in public_locations:
-        if not isinstance(row, dict):
-            continue
-        resource_jid = str(row.get("resource_jid") or "").strip()
-        if not resource_jid:
-            continue
-        named_by_resource[resource_jid] = [
-            str(entry.get("location") or "").strip()
-            for entry in (row.get("locations") or [])
-            if isinstance(entry, dict) and str(entry.get("location") or "").strip()
-        ]
-
-    lines: list[str] = []
-    for row in public_action_targets:
-        if not isinstance(row, dict):
-            continue
-        resource_jid = str(row.get("resource_jid") or "").strip()
-        contract = dict(row.get("action_target") or {})
-        fields = dict(contract.get("fields") or {})
-        if not resource_jid or not fields:
-            continue
-        alternatives: list[str] = []
-        named_locations = named_by_resource.get(resource_jid) or []
-        if named_locations:
-            alternatives.append(
-                '{"location": one of ' + ", ".join(named_locations) + "}"
-            )
-        declared = ", ".join(
-            f'"{field_name}": {str(dict(declaration or {}).get("type") or "")}'
-            for field_name, declaration in fields.items()
-        )
-        qualifiers = " ".join(
-            f"{key}={str(contract.get(key))}"
-            for key in ("frame", "units")
-            if str(contract.get(key) or "")
-        )
-        alternatives.append("{" + declared + "}" + (f" [{qualifiers}]" if qualifiers else ""))
-        lines.append(f"- {resource_jid}: " + " or ".join(alternatives))
-    return "\n".join(lines) if lines else "(none)"
-
-
 def _compact_assembly_requirements(llm_input: dict[str, Any]) -> str:
     """Extract summary lines from assembly requirements."""
     reqs = llm_input.get("relevant_assembly_requirements") or []
@@ -747,7 +589,9 @@ def _compact_recovery_goals(
     llm_input: dict[str, Any],
     *,
     projected_parts: list[dict[str, Any]],
+    current_recovery_blockers: list[dict[str, Any]],
 ) -> str:
+    del current_recovery_blockers
     parts_by_name: dict[str, dict[str, Any]] = {}
     for row in projected_parts:
         if not isinstance(row, dict):
@@ -872,9 +716,7 @@ def _task_target_ref(task: dict[str, Any], finding: dict[str, Any] | None = None
         ).strip()
         if target:
             return target
-    end_state = configured_recovery_state(
-        dict(task.get("expected_end_state") or {})
-    )
+    end_state = dict(task.get("expected_end_state") or {})
     direct_target = str(end_state.get("part_location") or "").strip()
     if direct_target:
         return direct_target
@@ -962,22 +804,6 @@ def _finding_state_evidence_text(
     if changed_fields:
         facts.append("changed_fields=" + ",".join(changed_fields))
 
-    rejected_state_fields = [
-        str(field).strip()
-        for field in (evidence.get("state_fields") or [])
-        if str(field).strip()
-    ]
-    if rejected_state_fields:
-        facts.append(
-            "state_fields=" + ",".join(rejected_state_fields)
-        )
-
-    rejected_field = str(evidence.get("field") or "").strip()
-    if rejected_field:
-        facts.append(f"field={rejected_field}")
-    if "value" in evidence:
-        facts.append(f"value={_inline_json(evidence.get('value'))}")
-
     condition_ids = [
         str(item).strip()
         for item in (evidence.get("condition_ids") or finding.get("condition_ids") or [])
@@ -1000,11 +826,7 @@ def _finding_state_evidence_text(
             if not field_name:
                 continue
             expected_text = _inline_json(item.get("expected"))
-            available = (
-                bool(item.get("available"))
-                if "available" in item
-                else "actual" in item
-            )
+            available = bool(item.get("available"))
             actual_text = _inline_json(item.get("actual")) if available else "<unavailable>"
             mismatch_parts.append(f"{field_name}(expected={expected_text}, actual={actual_text})")
         if mismatch_parts:
@@ -1134,7 +956,7 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
                 "candidate event uses fields outside the recovery candidate rules"
             ),
             "re_enablement": (
-                "use the candidate state shape and scalar relation fields"
+                "author only the allowed state fields shown in Recovery Candidate Rules"
             ),
         }
 
@@ -1217,6 +1039,13 @@ def _render_des_event_diagnostic(
         finding.get("constraint_code") or "validation_rejected"
     ).strip()
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
+    normalized_constraint_code = constraint_code.lower()
+    if normalized_constraint_code in _CUSTODY_CONSISTENCY_CODES:
+        return (
+            f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
+            " | transition_feasibility: rejected"
+            " | reason=resource and part custody facts disagree"
+        )
     line = (
         f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
         f" | constraint_code={constraint_code}"
@@ -1301,6 +1130,12 @@ def _outline_validation_summary(
 
         label_parts = [item for item in (task_id, resource_jid, part_name) if item]
         label = " / ".join(label_parts) if label_parts else "validation finding"
+        if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
+            lines.append(
+                f"- {label} [transition_feasibility: rejected]: "
+                "resource and part custody facts disagree"
+            )
+            continue
         code_label = constraint_code
         if stage:
             code_label = f"{stage}:{constraint_code}" if constraint_code else stage
@@ -1514,6 +1349,9 @@ def _compact_selection_feedback_evidence(row: dict[str, Any]) -> dict[str, Any]:
                         candidate.get("resource_jid") or ""
                     ).strip(),
                     **({"part_name": part_name} if part_name else {}),
+                    "expected_end_state": deepcopy(
+                        candidate.get("expected_end_state") or {}
+                    ),
                     "open_recovery_obligation_ids_before": deepcopy(
                         selection_evidence.get(
                             "open_recovery_obligation_ids_before"
@@ -1648,6 +1486,19 @@ def _candidate_rejection_learning_summary(  # noqa: C901
             constraint_code = str(finding.get("constraint_code") or "").strip()
             reason = str(finding.get("reason") or "").strip()
             if not constraint_code and not reason:
+                continue
+            if constraint_code.lower() in _CUSTODY_CONSISTENCY_CODES:
+                key = (
+                    resource_jid,
+                    part_name,
+                    target_ref,
+                    "transition_feasibility",
+                    "resource and part custody facts disagree",
+                )
+                line_by_key[key] = (
+                    f"- {label} [transition_feasibility: rejected]: "
+                    "resource and part custody facts disagree"
+                )
                 continue
             key = (resource_jid, part_name, target_ref, constraint_code, reason)
             sentence = f"- {label}"
@@ -2667,142 +2518,6 @@ def _projected_outline_parts(
     return [deepcopy(parts_by_name[name]) for name in sorted(parts_by_name)]
 
 
-def _public_capability_state_projections(
-    *,
-    session_state: dict[str, Any],
-    recovery_resources: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Render only Resource-Agent-owned public capability state values."""
-    session_projections = [
-        deepcopy(row)
-        for row in (
-            session_state.get("public_capability_state_projections") or []
-        )
-        if isinstance(row, dict)
-    ]
-    if session_projections:
-        projections = session_projections
-    else:
-        projections = [
-            deepcopy(row)
-            for resource_jid in sorted(recovery_resources)
-            for row in (
-                dict(recovery_resources.get(resource_jid) or {}).get(
-                    "public_capability_state_projections"
-                )
-                or []
-            )
-            if isinstance(row, dict)
-        ]
-    return sorted(
-        projections,
-        key=lambda row: (
-            str(row.get("resource_jid") or ""),
-            str(row.get("part_name") or ""),
-        ),
-    )
-
-
-def _current_des_state_projection_sections(
-    projections: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Separate resource and part projections without repeating shared values."""
-    resource_rows: list[dict[str, Any]] = []
-    resource_fields_by_jid: dict[str, set[str]] = {}
-    for raw_projection in projections:
-        projection = dict(raw_projection or {})
-        resource_jid = str(projection.get("resource_jid") or "").strip()
-        part_name = str(projection.get("part_name") or "").strip()
-        state = dict(projection.get("state") or {})
-        if not resource_jid or part_name:
-            continue
-        resource_fields_by_jid[resource_jid] = set(state)
-        resource_row = {
-            "resource_jid": resource_jid,
-            "state": deepcopy(state),
-        }
-        workspace_bounds = projection.get("workspace_bounds")
-        if isinstance(workspace_bounds, dict):
-            resource_row["workspace_bounds"] = deepcopy(workspace_bounds)
-        pose = projection.get("pose")
-        if isinstance(pose, dict):
-            resource_row["pose"] = deepcopy(pose)
-        resource_rows.append(resource_row)
-
-    part_states_by_name: dict[str, dict[str, Any]] = {}
-    observed_pose_by_name: dict[str, dict[str, Any]] = {}
-    pose_by_name: dict[str, dict[str, Any]] = {}
-    for raw_projection in projections:
-        projection = dict(raw_projection or {})
-        resource_jid = str(projection.get("resource_jid") or "").strip()
-        part_name = str(projection.get("part_name") or "").strip()
-        if not part_name:
-            continue
-        state = {
-            field_name: deepcopy(value)
-            for field_name, value in dict(
-                projection.get("state") or {}
-            ).items()
-            if field_name not in resource_fields_by_jid.get(
-                resource_jid,
-                set(),
-            )
-        }
-        merged_state = part_states_by_name.setdefault(part_name, {})
-        for field_name, value in state.items():
-            if (
-                field_name in merged_state
-                and merged_state.get(field_name) != value
-            ):
-                raise ValueError(
-                    "Resource Agent public capability-state projections "
-                    f"disagree for part_name '{part_name}' field "
-                    f"'{field_name}'"
-                )
-            merged_state[field_name] = deepcopy(value)
-        observed_pose = projection.get("observed_pose")
-        if isinstance(observed_pose, dict):
-            existing_pose = observed_pose_by_name.get(part_name)
-            if existing_pose is not None and existing_pose != observed_pose:
-                raise ValueError(
-                    "Resource Agent public capability-state projections "
-                    f"disagree for part_name '{part_name}' observed_pose"
-                )
-            observed_pose_by_name[part_name] = deepcopy(observed_pose)
-        pose = projection.get("pose")
-        if isinstance(pose, dict):
-            existing_pose = pose_by_name.get(part_name)
-            if existing_pose is not None and existing_pose != pose:
-                raise ValueError(
-                    "Resource Agent public capability-state projections "
-                    f"disagree for part_name '{part_name}' pose"
-                )
-            pose_by_name[part_name] = deepcopy(pose)
-
-    part_rows = [
-        {
-            "part_name": part_name,
-            "state": deepcopy(part_states_by_name[part_name]),
-            **(
-                {
-                    "observed_pose": deepcopy(
-                        observed_pose_by_name[part_name]
-                    )
-                }
-                if part_name in observed_pose_by_name
-                else {}
-            ),
-            **(
-                {"pose": deepcopy(pose_by_name[part_name])}
-                if part_name in pose_by_name
-                else {}
-            ),
-        }
-        for part_name in sorted(part_states_by_name)
-    ]
-    return resource_rows, part_rows
-
-
 def _slim_fault_event(fault_event: dict[str, Any]) -> dict[str, Any]:
     """Drop resource_state_after (redundant with resource facts)."""
     return {k: v for k, v in dict(fault_event or {}).items() if k != "resource_state_after"}
@@ -2847,35 +2562,6 @@ def _slim_part_facts(parts: list[Any]) -> list[dict[str, Any]]:
         {k: v for k, v in dict(row).items() if k in _keep} for row in parts if isinstance(row, dict)
     ]
     return sorted(rows, key=lambda row: str(row.get("part_name") or ""))
-
-
-def _slim_public_locations(
-    public_locations: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Publish location names without their configured poses or areas.
-
-    A named location and an `action_target` pose are alternative ways to state
-    the same target, and the Resource Agent rejects a candidate that supplies
-    both. Withholding the geometry keeps the choice exclusive by construction:
-    the only coordinates the prompt still carries are a part's `observed_pose`,
-    which has no name to compete with.
-    """
-    dropped = {"pose", "area"}
-    slimmed: list[dict[str, Any]] = []
-    for row in public_locations:
-        if not isinstance(row, dict):
-            continue
-        location_rows = [
-            {
-                key: deepcopy(value)
-                for key, value in dict(entry).items()
-                if key not in dropped
-            }
-            for entry in (row.get("locations") or [])
-            if isinstance(entry, dict)
-        ]
-        slimmed.append({**deepcopy(row), "locations": location_rows})
-    return slimmed
 
 
 def _prompt_outline_resource_view(resource: dict[str, Any]) -> dict[str, Any]:
@@ -2976,6 +2662,7 @@ def _render_grounding_prompt(payload: dict[str, Any]) -> str:
                 for row in (llm_input.get("part_facts") or [])
                 if isinstance(row, dict)
             ],
+            current_recovery_blockers=[],
         ),
     ]
 
@@ -3292,6 +2979,11 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
     previous_lookahead = list(session_state.get("outline_lookahead") or [])
     pruned_actions = list(session_state.get("pruned_actions") or [])
+    current_recovery_blockers = [
+        deepcopy(row)
+        for row in (payload.get("current_recovery_blockers") or [])
+        if isinstance(row, dict)
+    ]
     outline_validation_findings = list(session_state.get("outline_validation_findings") or [])
     rejection_history = _outline_rejection_history(session_state)
     projected_resources = _projected_outline_resources(
@@ -3304,42 +2996,6 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     )
     prompt_projected_resources = _outline_prompt_resource_facts(projected_resources)
     prompt_projected_parts = _outline_prompt_part_facts(projected_parts)
-    public_capability_state_projections = (
-        _public_capability_state_projections(
-            session_state=session_state,
-            recovery_resources=recovery_resources,
-        )
-    )
-    (
-        current_des_resource_state,
-        current_des_part_state,
-    ) = _current_des_state_projection_sections(
-        public_capability_state_projections
-    )
-    public_state_values = sorted(
-        (
-            deepcopy(row)
-            for row in (session_state.get("public_state_values") or [])
-            if isinstance(row, dict)
-        ),
-        key=lambda row: str(row.get("resource_jid") or ""),
-    )
-    public_locations = sorted(
-        (
-            deepcopy(row)
-            for row in (session_state.get("public_locations") or [])
-            if isinstance(row, dict)
-        ),
-        key=lambda row: str(row.get("resource_jid") or ""),
-    )
-    public_action_targets = sorted(
-        (
-            deepcopy(row)
-            for row in (session_state.get("public_action_targets") or [])
-            if isinstance(row, dict)
-        ),
-        key=lambda row: str(row.get("resource_jid") or ""),
-    )
     resources_by_jid = _finding_resources_by_jid(prompt_projected_resources)
     parts_by_name = _finding_parts_by_name(prompt_projected_parts)
     candidate_rejection_feedback = [
@@ -3356,6 +3012,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 if str(row.get("part_name") or "").strip()
                 else {}
             ),
+            "expected_end_state": deepcopy(row.get("expected_end_state") or {}),
             **(
                 {
                     "validation": "transition_feasibility: rejected",
@@ -3478,10 +3135,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             "Accepted events extend the recovery trace toward safe nominal resumption.\n"
             f"{horizon_text}\n"
             f"{selection_owner_text}\n"
-            "Return authored symbolic rows only. Product validates candidate "
-            "syntax, exact state values, named locations, and action-target "
-            "shape; the responsible "
-            "ResourceAgent validates transition and physical feasibility."
+            "Return authored symbolic rows only; Product validates the stated transition."
         )
         if candidate_rejection_feedback:
             role_text += (
@@ -3570,12 +3224,20 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             ]
         )
 
-    if is_candidate_mode and history_pruned_actions != "(none)":
+    if is_candidate_mode:
+        if history_pruned_actions != "(none)":
+            sections.extend(
+                [
+                    "",
+                    "Persistently Disabled Candidate Events",
+                    history_pruned_actions,
+                ]
+            )
         sections.extend(
             [
                 "",
-                "Persistently Disabled Candidate Events",
-                history_pruned_actions,
+                "Resource Capabilities",
+                _resource_capabilities_summary(recovery_resources),
             ]
         )
     elif outline_validation_findings:
@@ -3614,24 +3276,18 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         [
             "",
             "Current DES State",
-            _compact_json(
-                {
-                    "resources": current_des_resource_state,
-                    "parts": current_des_part_state,
-                }
-            ),
+            "`Current DES State` is the authoritative exact propagated state after applying the accepted transition prefix. Code binds each candidate to this state.",
+            "Resources",
+            _compact_json(prompt_projected_resources),
             "",
-            "State Values",
-            _compact_json(public_state_values),
-            "",
-            "Locations",
-            _compact_json(_slim_public_locations(public_locations)),
-            "",
-            "Action Target",
-            _compact_action_targets(public_action_targets, public_locations),
-            "",
+            "Parts",
+            _compact_json(prompt_projected_parts),
             "Recovery Goals",
-            _compact_recovery_goals(llm_input, projected_parts=projected_parts),
+            _compact_recovery_goals(
+                llm_input,
+                projected_parts=projected_parts,
+                current_recovery_blockers=current_recovery_blockers,
+            ),
         ]
     )
 
@@ -3644,23 +3300,66 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     )
 
     if is_candidate_mode:
+        candidate_property_name = (
+            "`candidate_events`" if action_horizon == "1" else "`candidate_traces`"
+        )
+        if recovery_selection_mode == "neurosymbolic":
+            candidate_budget = max(
+                1,
+                int(
+                    session_state.get("candidate_proposal_budget")
+                    or session_state.get("candidate_bound")
+                    or _DEFAULT_CANDIDATE_BOUND
+                ),
+            )
+            response_rule = (
+                f"- Return one JSON object with `thought` and {candidate_property_name}; "
+                "do not return `selected_candidate_index`."
+            )
+            count_rules = [
+                f"- `candidate_events` must contain one to {candidate_budget} materially distinct candidates without padding."
+            ]
+        else:
+            response_rule = (
+                f"- Return one JSON object with `thought`, {candidate_property_name}, and "
+                "an integer `selected_candidate_index` pointing at your chosen candidate."
+            )
+            count_rules = (
+                ["- `candidate_events` must contain exactly three candidates."]
+                if action_horizon == "1"
+                else []
+            )
         sections.extend(
             [
                 "",
-                "Candidate Rules",
-                "- Propose 1 to 5 distinct candidates.",
+                "Recovery Candidate Rules",
+                response_rule,
+                *count_rules,
                 (
-                    "- Use one listed resource per candidate and include "
-                    "part_name when the candidate changes or references a part."
+                    "- Each candidate is one physical action by one listed resource with "
+                    "`outline_id`, `event_name`, `resource_jid`, `expected_end_state`, "
+                    "and `rationale`."
                 ),
                 (
-                    "- Use exact condition values and named locations shown "
-                    "above. Condition and location values are fixed and must "
-                    "not be invented; event_name may be new. Omitted state "
-                    "fields retain their Current DES State values. Author "
-                    "action_target as one of the forms listed under Action "
-                    "Target for that resource, and only when the target has "
-                    "no named location."
+                    "- Resource-only actions may include `resource_state`, "
+                    "`resource_location`, and `held_part` in `expected_end_state`."
+                ),
+                (
+                    "- A candidate with `part_name` must include `held_part`, `part_state`, "
+                    "and `part_location` in `expected_end_state`. A custody-changing end state "
+                    "must use an exact supplied, non-null `part_location`."
+                ),
+                (
+                    "- You may author a new `event_name` and optional new `resource_state` "
+                    "or `part_state` values."
+                ),
+                (
+                    "- A new state name has no meaning by itself and must accompany a concrete "
+                    "state effect or satisfy a listed recovery condition."
+                ),
+                (
+                    "- Use only supplied resources, parts, known resource locations, "
+                    "predicates, and resource-specific values."
                 ),
             ]
         )
@@ -3684,7 +3383,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "- Each transition is one symbolic recovery row by one resource.",
                 "- Each transition must include outline_id, event_name, resource_jid, expected_end_state, and rationale.",
                 "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
-                "- Author expected_end_state in outline mode; the responsible ResourceAgent binds and validates the transition.",
+                "- Author expected_end_state in outline mode; code binds the transition to Current DES State.",
+                "- If part_name is present, include held_part, part_state, and part_location in expected_end_state; a custody-changing end state requires an exact supplied, non-null part_location.",
+                "- If part_name is absent, do not emit part-specific state keys.",
                 "- Bind only entities and location tokens grounded in the current plant state.",
                 "- Rationale should explain enabledness or which recovery goal is advanced.",
             ]

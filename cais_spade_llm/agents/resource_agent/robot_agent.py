@@ -16,7 +16,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.failure_context import 
     load_failure_scenario_config,
 )
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
-from cais_spade_llm.resources.capability_engine import configured_recovery_state
 from cais_spade_llm.resources.robot import (
     UR5eGazeboController,
     UR5eHardwareController,
@@ -32,34 +31,6 @@ from cais_spade_llm.resources.robot.robot_tasks import (
 )
 
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC = "/ur5e_joint_trajectory_controller/joint_trajectory"
-_WORKSPACE_BOUND_FIELDS = (
-    "x_min_m",
-    "x_max_m",
-    "y_min_m",
-    "y_max_m",
-    "z_min_m",
-    "z_max_m",
-)
-
-
-def _public_xyz_pose(value: Any) -> dict[str, float] | None:
-    """Return an exact public XYZ pose or fail on malformed pose data."""
-    if value in (None, "", {}):
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("observed_pose must be an XYZ object")
-    pose: dict[str, float] = {}
-    for axis in ("x", "y", "z"):
-        raw_axis = value.get(axis)
-        if isinstance(raw_axis, bool):
-            raise ValueError(f"observed_pose.{axis} must be numeric")
-        try:
-            pose[axis] = float(raw_axis)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"observed_pose.{axis} must be numeric"
-            ) from exc
-    return pose
 
 
 class RobotAgent(ResourceAgent):
@@ -181,648 +152,6 @@ class RobotAgent(ResourceAgent):
             )
         )
 
-    @classmethod
-    def capability_runtime_fact_names(cls) -> set[str]:
-        """Return exact runtime facts published by RobotAgent."""
-        return {
-            "resource_jid",
-            "part_name",
-            "origin_resource_location",
-            "destination_location",
-            "release_destination_location",
-            "part_goal_location",
-            "carried_part_location",
-            "current_pose_ref",
-        }
-
-    def capability_runtime_facts(
-        self,
-        *,
-        task: dict[str, Any],
-        resource_snapshot: dict[str, Any],
-        part_context: dict[str, Any],
-        grounded_action: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return one trusted robot fact table for direct execution helpers."""
-        table_provider = getattr(
-            self,
-            "capability_runtime_fact_tables",
-            None,
-        )
-        fact_tables = (
-            table_provider(
-                task=task,
-                resource_snapshot=resource_snapshot,
-                part_context=part_context,
-                grounded_action=grounded_action,
-            )
-            if callable(table_provider)
-            else RobotAgent.capability_runtime_fact_tables(
-                self,
-                task=task,
-                resource_snapshot=resource_snapshot,
-                part_context=part_context,
-                grounded_action=grounded_action,
-            )
-        )
-        requested_destination = str(
-            task.get("destination_location") or ""
-        ).strip()
-        requested_origin = str(
-            task.get("origin_resource_location") or ""
-        ).strip()
-        for fact_table in fact_tables:
-            if (
-                requested_destination
-                and fact_table.get("destination_location")
-                != requested_destination
-            ):
-                continue
-            if (
-                requested_origin
-                and fact_table.get("origin_resource_location")
-                != requested_origin
-            ):
-                continue
-            return deepcopy(fact_table)
-        return deepcopy(fact_tables[0]) if fact_tables else {}
-
-    def capability_runtime_fact_tables(
-        self,
-        *,
-        task: dict[str, Any],
-        resource_snapshot: dict[str, Any],
-        part_context: dict[str, Any],
-        grounded_action: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Publish ordered robot facts from trusted configuration and context."""
-        del grounded_action
-
-        resource_jid = str(
-            resource_snapshot.get("resource_jid")
-            or self.jid
-            or ""
-        ).strip()
-        part_name = str(
-            part_context.get("part_name")
-            or task.get("part_name")
-            or ""
-        ).strip()
-        current_part_location = (
-            part_context.get("part_location")
-            if part_context.get("part_location") not in (None, "")
-            else part_context.get("current_location")
-        )
-        current_holder = str(
-            part_context.get("current_holder_resource_jid")
-            or part_context.get("part_holder_resource_jid")
-            or ""
-        ).strip()
-        origin_available = not current_holder or current_holder == resource_jid
-        origin_locations: list[Any] = []
-
-        def append_exact(values: list[Any], value: Any) -> None:
-            if value in (None, "", {}):
-                return
-            if not any(
-                type(existing) is type(value) and existing == value
-                for existing in values
-            ):
-                values.append(deepcopy(value))
-
-        if origin_available:
-            append_exact(origin_locations, current_part_location)
-        observed_pose = part_context.get("observed_pose")
-        if (
-            origin_available
-            and isinstance(observed_pose, dict)
-            and all(axis in observed_pose for axis in ("x", "y", "z"))
-        ):
-            append_exact(origin_locations, "observed_pose")
-        if origin_available:
-            append_exact(
-                origin_locations,
-                part_context.get("origin_location"),
-            )
-
-        goal_location = part_context.get("goal_location")
-        destination_locations: list[Any] = []
-        append_exact(destination_locations, goal_location)
-        append_exact(
-            destination_locations,
-            part_context.get("destination_location"),
-        )
-        append_exact(
-            destination_locations,
-            part_context.get("target_location"),
-        )
-        staging_areas = dict(
-            self.static_capabilities.get("staging_areas") or {}
-        )
-        for staging_location in staging_areas:
-            append_exact(destination_locations, staging_location)
-
-        base_facts = {
-            "resource_jid": resource_jid,
-            **({"part_name": part_name} if part_name else {}),
-            **(
-                {"part_goal_location": deepcopy(goal_location)}
-                if goal_location not in (None, "", {})
-                else {}
-            ),
-            "carried_part_location": deepcopy(
-                resource_snapshot.get("carried_entity_location")
-                or (f"{resource_jid}_gripper" if resource_jid else None)
-            ),
-            "current_pose_ref": deepcopy(
-                resource_snapshot.get("current_pose_ref")
-                or resource_snapshot.get("current_location")
-            ),
-        }
-        base_facts = {
-            fact_name: value
-            for fact_name, value in base_facts.items()
-            if value not in (None, "", {})
-        }
-        origin_variants = origin_locations or [None]
-        destination_variants = destination_locations or [None]
-        fact_tables: list[dict[str, Any]] = []
-        for origin_location in origin_variants:
-            for destination_location in destination_variants:
-                facts = deepcopy(base_facts)
-                if origin_location not in (None, "", {}):
-                    facts["origin_resource_location"] = deepcopy(
-                        origin_location
-                    )
-                if destination_location not in (None, "", {}):
-                    facts["destination_location"] = deepcopy(
-                        destination_location
-                    )
-                    if destination_location in staging_areas:
-                        facts["release_destination_location"] = deepcopy(
-                            destination_location
-                        )
-                fact_tables.append(facts)
-        return fact_tables
-
-    def public_resource_state_context(
-        self,
-        *,
-        resource_snapshot: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Expose configured robot workspace boundaries without reachability hints."""
-        del resource_snapshot
-        raw_bounds = self.static_capabilities.get("workspace_bounds")
-        if not isinstance(raw_bounds, dict):
-            raise ValueError("workspace_bounds capability data is unavailable")
-        bounds: dict[str, float] = {}
-        for field_name in _WORKSPACE_BOUND_FIELDS:
-            raw_value = raw_bounds.get(field_name)
-            if isinstance(raw_value, bool):
-                raise ValueError(
-                    f"workspace_bounds.{field_name} must be numeric"
-                )
-            try:
-                bounds[field_name] = float(raw_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"workspace_bounds.{field_name} must be numeric"
-                ) from exc
-        return {"workspace_bounds": bounds}
-
-    def public_locations(
-        self,
-        *,
-        resource_snapshot: dict[str, Any],
-        part_contexts: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Return robot locations with configured poses and destination areas."""
-        public = ResourceAgent.public_locations(
-            self,
-            resource_snapshot=resource_snapshot,
-            part_contexts=part_contexts,
-        )
-        staging_areas = dict(
-            self.static_capabilities.get("staging_areas") or {}
-        )
-        action_target = dict(
-            self.static_capabilities.get("action_target") or {}
-        )
-        frame = str(action_target.get("frame") or "")
-        units = str(action_target.get("units") or "")
-        for row in public.get("locations") or []:
-            if not isinstance(row, dict):
-                continue
-            location = str(row.get("location") or "")
-            staging = dict(staging_areas.get(location) or {})
-            anchor_pose = _public_xyz_pose(staging.get("anchor_pose"))
-            if anchor_pose is not None:
-                row["pose"] = {
-                    **({"frame": frame} if frame else {}),
-                    **({"units": units} if units else {}),
-                    **anchor_pose,
-                }
-        return public
-
-    def public_part_state_context(
-        self,
-        *,
-        resource_snapshot: dict[str, Any],
-        part_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Expose a current unheld part observation without transition hints."""
-        del resource_snapshot
-        observed_pose = _public_xyz_pose(part_context.get("observed_pose"))
-        if observed_pose is None:
-            return {}
-        current_holder = str(
-            part_context.get("current_holder_resource_jid")
-            or part_context.get("part_holder_resource_jid")
-            or ""
-        ).strip()
-        current_location = part_context.get("part_location")
-        if current_location in (None, ""):
-            current_location = part_context.get("current_location")
-        if current_holder or current_location not in (
-            None,
-            "",
-            "observed_pose",
-        ):
-            return {}
-        return {"observed_pose": observed_pose}
-
-    def capability_state_valuation(
-        self,
-        *,
-        capabilities: dict[str, Any],
-        resource_snapshot: dict[str, Any],
-        part_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Project configured robot fields from resource and part snapshots."""
-        aliases = {
-            "resource_state": ("resource_state", "current_state"),
-            "resource_location": (
-                "resource_location",
-                "current_location",
-                "current_pose_ref",
-            ),
-            "part_state": ("part_state", "current_state"),
-            "part_location": ("part_location", "current_location"),
-            "part_holder_resource_jid": (
-                "part_holder_resource_jid",
-                "current_holder_resource_jid",
-            ),
-        }
-        valuation: dict[str, Any] = {}
-        for field_name, declaration in dict(
-            capabilities.get("state_variables") or {}
-        ).items():
-            source = (
-                part_context
-                if str(dict(declaration or {}).get("scope") or "resource")
-                == "part"
-                else resource_snapshot
-            )
-            value = None
-            for source_field in aliases.get(
-                str(field_name),
-                (str(field_name),),
-            ):
-                if source_field in source:
-                    value = deepcopy(source.get(source_field))
-                    break
-            if (
-                str(field_name) == "part_location"
-                and value in (None, "")
-                and not str(
-                    part_context.get("current_holder_resource_jid")
-                    or part_context.get("part_holder_resource_jid")
-                    or ""
-                ).strip()
-                and _public_xyz_pose(part_context.get("observed_pose"))
-                is not None
-            ):
-                value = "observed_pose"
-            valuation[str(field_name)] = value
-        return valuation
-
-    def capability_goal_requirements(
-        self,
-        *,
-        capabilities: dict[str, Any],
-        goal_conditions: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Bind product goal fields to exact RobotAgent capability fields."""
-        state_variables = dict(capabilities.get("state_variables") or {})
-        field_bindings = {
-            ("part", "state"): "part_state",
-            ("part", "location"): "part_location",
-            ("resource", "state"): "resource_state",
-            ("resource", "location"): "resource_location",
-        }
-        bound_conditions: list[dict[str, Any]] = []
-        for condition in goal_conditions:
-            entity_kind = str(
-                condition.get("entity_kind") or ""
-            ).strip().lower()
-            source_field = str(condition.get("field") or "").strip()
-            field_name = field_bindings.get(
-                (entity_kind, source_field),
-                source_field,
-            )
-            if field_name not in state_variables:
-                continue
-            bound_condition = deepcopy(condition)
-            bound_condition["field"] = field_name
-            bound_conditions.append(bound_condition)
-        return ResourceAgent.capability_goal_requirements(
-            self,
-            capabilities=capabilities,
-            goal_conditions=bound_conditions,
-        )
-
-    def _generated_successor_from_action_target(
-        self,
-        *,
-        task: dict[str, Any],
-        initial_valuation: dict[str, Any],
-        successor: dict[str, Any],
-        runtime_fact_tables: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """Ground a configured named location or Cartesian robot target."""
-        action_target = task.get("action_target")
-        completed = deepcopy(successor)
-
-        target_location: Any = None
-        if isinstance(action_target, dict) and action_target:
-            contract = dict(
-                self.static_capabilities.get("action_target") or {}
-            )
-            fields = dict(contract.get("fields") or {})
-            required = [
-                str(name or "") for name in contract.get("required") or []
-            ]
-            target_keys = set(action_target)
-            named_location = action_target.get("location")
-            if target_keys == {"location"} and isinstance(
-                named_location, str
-            ):
-                configured_locations = {
-                    value
-                    for value in (
-                        dict(
-                            dict(
-                                self.static_capabilities.get(
-                                    "state_variables"
-                                )
-                                or {}
-                            ).get("resource_location")
-                            or {}
-                        ).get("domain")
-                        or []
-                    )
-                    if isinstance(value, str) and value
-                }
-                if named_location not in configured_locations:
-                    return deepcopy(successor), {
-                        "constraint_code": "unknown_location_token",
-                        "reason": (
-                            f"location '{named_location}' is not configured "
-                            f"for resource '{str(self.jid)}'"
-                        ),
-                        "evidence": {"location": named_location},
-                    }
-                target_location = named_location
-            else:
-                if (
-                    not fields
-                    or not required
-                    or target_keys != set(fields)
-                    or any(name not in action_target for name in required)
-                ):
-                    return deepcopy(successor), {
-                        "constraint_code": "unsupported_resource_target",
-                        "reason": (
-                            "action_target does not match the robot contract"
-                        ),
-                        "evidence": {"fields": sorted(target_keys)},
-                    }
-                for field_name, declaration in fields.items():
-                    field_type = str(
-                        dict(declaration or {}).get("type") or ""
-                    )
-                    value = action_target.get(field_name)
-                    if field_type == "number" and (
-                        not isinstance(value, (int, float))
-                        or isinstance(value, bool)
-                    ):
-                        return deepcopy(successor), {
-                            "constraint_code": "unsupported_resource_target",
-                            "reason": (
-                                f"action_target.{field_name} must be numeric"
-                            ),
-                            "evidence": {"field": field_name},
-                        }
-                if set(fields) != {"x", "y", "z"}:
-                    return deepcopy(successor), {
-                        "constraint_code": "unsupported_resource_target",
-                        "reason": (
-                            "robot Cartesian target fields are unavailable"
-                        ),
-                        "evidence": {"fields": sorted(fields)},
-                    }
-                frame = str(contract.get("frame") or "")
-                units = str(contract.get("units") or "")
-                if not frame or not units:
-                    return deepcopy(successor), {
-                        "constraint_code": "resource_validation_unavailable",
-                        "reason": (
-                            "robot action_target frame or units are "
-                            "unavailable"
-                        ),
-                        "evidence": {},
-                    }
-                target_location = {
-                    "frame": frame,
-                    "units": units,
-                    "x": deepcopy(action_target.get("x")),
-                    "y": deepcopy(action_target.get("y")),
-                    "z": deepcopy(action_target.get("z")),
-                }
-
-        expected_end_state = configured_recovery_state(
-            dict(task.get("expected_end_state") or {})
-        )
-
-        def _assign_location(field_name: str) -> dict[str, Any] | None:
-            authored = expected_end_state.get(field_name)
-            # An explicit null leaves the location unspecified rather than
-            # asserting a competing one, so the action_target grounds it.
-            if (
-                field_name in expected_end_state
-                and authored is not None
-                and authored != target_location
-            ):
-                return {
-                    "constraint_code": "conflicting_location_grounding",
-                    "reason": (
-                        f"expected_end_state.{field_name} conflicts with "
-                        "action_target"
-                    ),
-                    "evidence": {
-                        "field": f"expected_end_state.{field_name}",
-                        "value": deepcopy(authored),
-                    },
-                }
-            completed[field_name] = deepcopy(target_location)
-            return None
-
-        if target_location is not None:
-            conflict = _assign_location("resource_location")
-            if conflict is not None:
-                return deepcopy(successor), conflict
-
-        part_name = str(task.get("part_name") or "").strip()
-        held_before = str(initial_valuation.get("held_part") or "").strip()
-        held_after = str(completed.get("held_part") or "").strip()
-        releases_part = bool(
-            part_name
-            and held_before == part_name
-            and held_after != part_name
-        )
-        if releases_part and target_location is not None:
-            conflict = _assign_location("part_location")
-            if conflict is not None:
-                return deepcopy(successor), conflict
-
-        if part_name and held_after == part_name:
-            carried_locations = {
-                str(row.get("carried_part_location") or "").strip()
-                for row in runtime_fact_tables
-                if str(row.get("carried_part_location") or "").strip()
-            }
-            if len(carried_locations) != 1:
-                return deepcopy(successor), {
-                    "constraint_code": "runtime_fact_unavailable",
-                    "reason": (
-                        "the carried-part location is unavailable or "
-                        "conflicting"
-                    ),
-                    "evidence": {"part_name": part_name},
-                }
-            carried_part_location = next(iter(carried_locations))
-            authored_part_location = expected_end_state.get("part_location")
-            if (
-                "part_location" in expected_end_state
-                and authored_part_location is not None
-                and authored_part_location != carried_part_location
-            ):
-                return deepcopy(successor), {
-                    "constraint_code": "conflicting_location_grounding",
-                    "reason": (
-                        "expected_end_state.part_location conflicts with "
-                        "the resource-owned carried-part location"
-                    ),
-                    "evidence": {
-                        "field": "expected_end_state.part_location",
-                        "value": deepcopy(authored_part_location),
-                    },
-                }
-            completed["part_location"] = carried_part_location
-        return completed, None
-
-    def _generated_successor_consistency_finding(
-        self,
-        *,
-        capabilities: dict[str, Any],
-        task: dict[str, Any],
-        initial_valuation: dict[str, Any],
-        successor: dict[str, Any],
-        runtime_fact_tables: list[dict[str, Any]],
-        grounded_action: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Return robot-local holder inconsistency for a generated successor."""
-        base_finding = (
-            ResourceAgent._generated_successor_consistency_finding(
-                self,
-                capabilities=capabilities,
-                task=task,
-                initial_valuation=initial_valuation,
-                successor=successor,
-                runtime_fact_tables=runtime_fact_tables,
-                grounded_action=grounded_action,
-            )
-        )
-        if base_finding is not None:
-            return base_finding
-
-        part_name = str(task.get("part_name") or "").strip()
-        if not part_name:
-            return None
-        carried_part_location = next(
-            (
-                str(row.get("carried_part_location") or "").strip()
-                for row in runtime_fact_tables
-                if str(row.get("carried_part_location") or "").strip()
-            ),
-            "",
-        )
-        end_held_part = str(successor.get("held_part") or "").strip()
-        end_part_location = successor.get("part_location")
-        if end_held_part == part_name and (
-            not carried_part_location
-            or end_part_location != carried_part_location
-        ):
-            return {
-                "constraint_code": "held_part_location_mismatch",
-                "reason": (
-                    f"held_part '{part_name}' requires the dynamically "
-                    "retrieved carried-part location"
-                ),
-                "evidence": {
-                    "part_name": part_name,
-                    "part_location": deepcopy(end_part_location),
-                    "carried_part_location": carried_part_location or None,
-                },
-            }
-        if (
-            carried_part_location
-            and end_part_location == carried_part_location
-            and end_held_part != part_name
-        ):
-            return {
-                "constraint_code": "part_traceability_violation",
-                "reason": (
-                    f"part '{part_name}' is at this resource's carried-part "
-                    "location but held_part does not match"
-                ),
-                "evidence": {
-                    "part_name": part_name,
-                    "held_part": end_held_part or None,
-                    "carried_part_location": carried_part_location,
-                },
-            }
-        initial_held_part = str(
-            initial_valuation.get("held_part") or ""
-        ).strip()
-        if (
-            initial_held_part
-            and end_held_part
-            and initial_held_part != end_held_part
-        ):
-            return {
-                "constraint_code": "gripper_occupancy_conflict",
-                "reason": (
-                    f"resource already holds '{initial_held_part}' and cannot "
-                    f"also acquire '{end_held_part}'"
-                ),
-                "evidence": {
-                    "held_part_before": initial_held_part,
-                    "held_part_after": end_held_part,
-                },
-            }
-        return None
-
     async def teardown(self) -> None:
         """Clean up controller and prewarm task when the agent stops."""
         # Cancel any in-progress prewarm task.
@@ -897,97 +226,6 @@ class RobotAgent(ResourceAgent):
     ) -> dict[str, Any]:
         """Execute a registry-backed robot task through the generic DSL runtime."""
         return await execute_robot_task(self, task_name, **kwargs)
-
-    def configured_execution_successor(
-        self,
-        *,
-        event_name: str,
-        execution_arguments: dict[str, Any],
-        runtime_state: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Calculate post-motion resource state from configured event updates."""
-        from cais_spade_llm.resources.capability_engine import (
-            configured_event_successor,
-        )
-
-        configured_event = next(
-            (
-                event
-                for event in (
-                    self._configured_capability_declarations.get("events")
-                    or []
-                )
-                if isinstance(event, dict)
-                and str(event.get("event_name") or "") == event_name
-            ),
-            None,
-        )
-        if configured_event is None:
-            return None
-        resource_snapshot = {
-            "resource_jid": str(self.jid),
-            "current_state": deepcopy(
-                runtime_state.get("_current_state")
-            ),
-            "current_location": deepcopy(
-                runtime_state.get("_recovery_pose_ref")
-            ),
-            "current_pose_ref": deepcopy(
-                runtime_state.get("_recovery_pose_ref")
-            ),
-            "held_part": deepcopy(runtime_state.get("_held_part")),
-            "gripper_state": deepcopy(
-                runtime_state.get("_gripper_state")
-            ),
-            "carried_entity_location": f"{self.jid}_gripper",
-        }
-        part_context = {
-            "part_name": deepcopy(execution_arguments.get("part_name")),
-            "current_state": deepcopy(
-                execution_arguments.get("part_state")
-            ),
-            "current_location": deepcopy(
-                execution_arguments.get("part_location")
-            ),
-            "origin_location": deepcopy(
-                execution_arguments.get("origin_resource_location")
-            ),
-            "destination_location": deepcopy(
-                execution_arguments.get("destination_location")
-            ),
-            "goal_location": deepcopy(
-                execution_arguments.get("part_goal_location")
-            ),
-        }
-        task = {
-            "event_name": event_name,
-            "resource_jid": str(self.jid),
-            **deepcopy(execution_arguments),
-        }
-        runtime_facts = self.capability_runtime_facts(
-            task=task,
-            resource_snapshot=resource_snapshot,
-            part_context=part_context,
-            grounded_action={},
-        )
-        capabilities = self._bind_capabilities()
-        valuation = self.capability_state_valuation(
-            capabilities=capabilities,
-            resource_snapshot=resource_snapshot,
-            part_context=part_context,
-        )
-        successor_result = configured_event_successor(
-            configured_event,
-            valuation,
-            state_variables=dict(
-                capabilities.get("state_variables") or {}
-            ),
-            runtime_facts=runtime_facts,
-            evaluate_guards=False,
-        )
-        if successor_result.get("enabled") is not True:
-            return None
-        return deepcopy(successor_result.get("successor") or {})
 
     @staticmethod
     def _normalize_failure_scenario_bindings(raw_bindings: Any) -> list[dict[str, Any]]:
@@ -2004,10 +1242,6 @@ class RobotAgent(ResourceAgent):
         task_id: str | None = None,
         in_state: str | None = None,
         out_state: str | None = None,
-        event_name: str = "",
-        part_name: str | None = None,
-        outline_expected_start_state: dict[str, Any] | None = None,
-        expected_end_state: dict[str, Any] | None = None,
         **context: Any,
     ) -> dict[str, Any]:
         """Execute a recovery-generated recovery macro as an ordered primitive sequence.
@@ -2041,124 +1275,6 @@ class RobotAgent(ResourceAgent):
             self._current_state,
             expected_start_state,
         )
-
-        configured_event_name = str(event_name or "").strip()
-        if configured_event_name:
-            current_snapshot = get_resource_recovery_snapshot(self)
-            configured_task = deepcopy(context)
-            configured_task.update(
-                {
-                    "event_name": configured_event_name,
-                    "resource_jid": str(self.jid),
-                    "expected_start_state": deepcopy(
-                        outline_expected_start_state or {}
-                    ),
-                    "expected_end_state": deepcopy(expected_end_state or {}),
-                }
-            )
-            if part_name:
-                configured_task["part_name"] = str(part_name)
-            configured_part_context = deepcopy(
-                dict(context.get("part_context") or {})
-            )
-            for state_field, value in dict(
-                outline_expected_start_state or {}
-            ).items():
-                declaration = dict(
-                    self._configured_capability_declarations.get(
-                        "state_variables",
-                        {},
-                    ).get(state_field)
-                    or {}
-                )
-                if (
-                    str(declaration.get("scope") or "resource") == "part"
-                    and state_field not in configured_part_context
-                ):
-                    configured_part_context[state_field] = deepcopy(value)
-            if part_name:
-                configured_part_context.setdefault(
-                    "part_name",
-                    str(part_name),
-                )
-            transition = self._evaluate_capability_transition(
-                task=configured_task,
-                resource_snapshot=current_snapshot,
-                part_context=configured_part_context,
-            )
-            if transition.get("allowed") is not True:
-                return {
-                    "status": "revalidation_required",
-                    "content": (
-                        f"Recovery macro '{macro_name}' requires ResourceAgent "
-                        "revalidation: "
-                        + str(
-                            transition.get("reason")
-                            or transition.get("constraint_code")
-                            or "transition feasibility changed"
-                        )
-                    ),
-                    "observations": {
-                        "macro_name": macro_name,
-                        "constraint_code": str(
-                            transition.get("constraint_code") or ""
-                        ),
-                    },
-                }
-
-            results: list[dict[str, Any]] = []
-            atomic_transitions = [
-                deepcopy(row)
-                for row in (transition.get("_atomic_transitions") or [])
-                if isinstance(row, dict)
-            ]
-            for step_index, transition_row in enumerate(atomic_transitions):
-                atomic_event_name = str(
-                    transition_row.get("event_name") or ""
-                )
-                execution_arguments = deepcopy(
-                    dict(transition_row.get("execution_arguments") or {})
-                )
-                configured_successor = deepcopy(
-                    transition_row.get("after") or {}
-                )
-                result = await execute_robot_task(
-                    self,
-                    atomic_event_name,
-                    **execution_arguments,
-                    _configured_successor=configured_successor,
-                )
-                results.append(
-                    {
-                        "event_name": atomic_event_name,
-                        "result": deepcopy(result),
-                    }
-                )
-                if str(result.get("status") or "") != "completed":
-                    return {
-                        "status": "failed",
-                        "content": (
-                            f"Recovery macro '{macro_name}' failed configured "
-                            f"event {step_index}: {atomic_event_name}"
-                        ),
-                        "observations": {
-                            "macro_name": macro_name,
-                            "completed_events": step_index,
-                            "results": results,
-                        },
-                    }
-            return {
-                "status": "completed",
-                "content": (
-                    f"Recovery macro '{macro_name}' completed configured "
-                    "capability sequence"
-                ),
-                "observations": {
-                    "macro_name": macro_name,
-                    "completed_events": len(results),
-                    "results": results,
-                },
-            }
 
         # Validate start state if specified.
         if expected_start_state and self._current_state != expected_start_state:
@@ -2484,6 +1600,48 @@ class RobotAgent(ResourceAgent):
             )
         return deepcopy(self._recovery_synthesis_primitive_catalog_cache)
 
+    def recovery_des_model(
+        self,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the robot's private task-level recovery DES model."""
+        from cais_spade_llm.resources.resource_primitives import (
+            build_recovery_des_model,
+        )
+        from cais_spade_llm.resources.robot.robot_tasks import (
+            robot_recovery_des_descriptor,
+        )
+
+        live_snapshot = deepcopy(snapshot or self.get_recovery_snapshot())
+        task_names = self.resolve_registered_function_names(
+            static_capabilities=self.static_capabilities,
+            named_positions=self.named_positions,
+            controller_config=self.controller_config,
+        )
+        raw_descriptor = robot_recovery_des_descriptor(
+            resource_jid=str(self.jid),
+            snapshot=live_snapshot,
+            task_names=task_names,
+            reachable_locations=list(
+                live_snapshot.get("reachable_locations")
+                or self.static_capabilities.get("reachability")
+                or []
+            ),
+            named_poses=list(
+                live_snapshot.get("named_poses") or self.named_positions or []
+            ),
+            marked_state_conditions=list(
+                self.static_capabilities.get("recovery_marked_state_conditions")
+                or []
+            ),
+        )
+        return build_recovery_des_model(
+            self,
+            snapshot=live_snapshot,
+            descriptor=raw_descriptor,
+        )
+
     def _cached_primitive_catalog(self) -> list:
         """Return the cached primitive catalog, building it on first access."""
         return self.recovery_execution_primitive_catalog()
@@ -2611,7 +1769,7 @@ class RobotAgent(ResourceAgent):
         *,
         live_snapshot: dict[str, Any],
         physical_input: dict[str, Any],
-        bound_capabilities: dict[str, Any] | None = None,
+        recovery_des_model: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build RobotAgent-owned evidence for projected outline validation.
 
@@ -2623,7 +1781,7 @@ class RobotAgent(ResourceAgent):
         validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
             live_snapshot=live_snapshot,
             physical_input=physical_input,
-            bound_capabilities=bound_capabilities,
+            recovery_des_model=recovery_des_model,
         )
         projected_snapshot = physical_input.get("projected_recovery_snapshot")
         if (
@@ -2708,6 +1866,7 @@ class RobotAgent(ResourceAgent):
             .lower()
         )
         part_name = str(part_name or grounded_action.get("part_name") or "").strip() or None
+        expected_resource = dict(expected_effect.get("resource") or {})
         expected_part = dict(expected_effect.get("part") or {})
         part_affecting = bool(
             effect_scope in {"part_only", "resource_and_part"}
@@ -2788,11 +1947,57 @@ class RobotAgent(ResourceAgent):
         )
         current_holder = str(part_context.get("current_holder_resource_jid") or "").strip()
         resource_jid = str(getattr(self, "jid", "") or "")
+        desired_resource_state = str(expected_resource.get("current_state") or "").strip()
+        desired_resource_location = str(expected_resource.get("location") or "").strip()
+        supported_recovery_states = {
+            str(token).strip()
+            for token in (
+                recovery_snapshot.get("supported_recovery_states")
+                or self.static_capabilities.get("supported_recovery_states")
+                or []
+            )
+            if str(token).strip()
+        }
+        allows_abstract_idle_recovery = (
+            effect_scope == "resource_only" and desired_resource_state.lower() == "idle"
+        )
         requires_part_acquisition = bool(
             part_name
             and part_affecting
             and bool(part_preconditions.get("requires_acquisition"))
         )
+        if (
+            effect_scope == "resource_only"
+            and desired_resource_state
+            and not allows_abstract_idle_recovery
+            and not (
+                named_pose
+                or target_info.get("pose")
+                or target_info.get("slot_pose")
+                or desired_resource_location
+            )
+            and (
+                not supported_recovery_states
+                or desired_resource_state not in supported_recovery_states
+            )
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "unsupported_resource_target",
+                "guard": {
+                    "kind": "unsupported_resource_target",
+                    "resource_jid": resource_jid,
+                    "resource_state": desired_resource_state,
+                },
+                "reason": (
+                    f"resource-only transition targets state '{desired_resource_state}' "
+                    "without a concrete supported recovery pose or advertised recovery target"
+                ),
+                "evidence": {
+                    **evidence,
+                    "supported_recovery_states": sorted(supported_recovery_states),
+                },
+            }
         if requires_part_acquisition and part_name:
             if held_part and held_part != str(part_name).strip():
                 return {
@@ -2902,13 +2107,6 @@ class RobotAgent(ResourceAgent):
                 }
         if target_pose is None:
             target_pose = target_info.get("slot_pose") or target_info.get("pose") or None
-        if target_pose is None and all(
-            axis in target_info for axis in ("x", "y", "z")
-        ):
-            target_pose = {
-                axis: deepcopy(target_info.get(axis))
-                for axis in ("x", "y", "z")
-            }
 
         if target_pose is None:
             return {

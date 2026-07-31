@@ -19,6 +19,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_v
     TRANSITION_FEASIBILITY,
     build_recovery_physical_validation_input,
     build_recovery_safety_validation_input,
+    compile_grounded_recovery_outline_task,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     projected_outline_validation_context as _service_projected_outline_validation_context,
@@ -477,36 +478,25 @@ def _unresolved_condition_ids(
     }
 
 
-def _unresolved_conditions(
+def _recovery_des_models(
     *,
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Return exact nominal conditions not satisfied by projected state."""
-    return [
-        deepcopy(condition)
-        for condition in _shared._active_continuation_conditions(
-            prepared_recovery_request
-        )
-        if not _shared._continuation_condition_satisfied(
-            condition,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-    ]
-
-
-def _latest_enabled_capability_results(
-    *,
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-) -> list[dict[str, Any]]:
-    del prepared_recovery_request
-    return [
-        deepcopy(row)
-        for row in (session_state.get("latest_enabled_capability_results") or [])
-        if isinstance(row, dict)
-    ]
+) -> dict[str, dict[str, Any]]:
+    models = {
+        str(resource_jid): deepcopy(dict(descriptor or {}))
+        for resource_jid, descriptor in dict(
+            session_state.get("recovery_des_models") or {}
+        ).items()
+        if str(resource_jid) and isinstance(descriptor, dict)
+    }
+    for resource_jid, raw_entry in dict(
+        prepared_recovery_request.get("recovery_resources") or {}
+    ).items():
+        descriptor = dict(dict(raw_entry or {}).get("recovery_des_model") or {})
+        if descriptor:
+            models.setdefault(str(resource_jid), deepcopy(descriptor))
+    return models
 
 
 def _recovery_relevant_resource_ids(
@@ -535,6 +525,232 @@ def _recovery_relevant_resource_ids(
     if has_part_or_supervisor_obligation:
         exact_resources.update(resource_ids)
     return exact_resources or set(resource_ids)
+
+
+def _recovery_condition_requirement(
+    condition: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    field_name = str(condition.get("field") or "").strip()
+    if not field_name:
+        return None
+    entity_kind = str(condition.get("entity_kind") or "").strip().lower()
+    if entity_kind == "part":
+        field_name = {
+            "state": "part_state",
+            "location": "part_location",
+        }.get(field_name, field_name)
+    elif entity_kind == "resource":
+        field_name = {
+            "state": "resource_state",
+            "location": "resource_location",
+        }.get(field_name, field_name)
+    expected = deepcopy(condition.get("expected"))
+    if isinstance(expected, dict) and set(expected) == {"not"}:
+        return field_name, {"not_equals": deepcopy(expected.get("not"))}
+    return field_name, {"equals": expected}
+
+
+def _recovery_update_can_satisfy(
+    update: Any,
+    requirement: dict[str, Any],
+) -> bool:
+    if not isinstance(update, dict):
+        return False
+    if "set" in update:
+        value = update.get("set")
+        if requirement.get("exists") is True:
+            return value not in (None, "")
+        if "equals" in requirement:
+            return value == requirement.get("equals")
+        if "not_equals" in requirement:
+            return value != requirement.get("not_equals")
+        if "equals_from_param" in requirement:
+            return value not in (None, "")
+        if "not_equals_from_param" in requirement:
+            return True
+        return False
+    has_parameter_value = bool(
+        str(update.get("set_from_param") or "").strip()
+        or [
+            item
+            for item in (update.get("set_from_param_any_of") or [])
+            if str(item).strip()
+        ]
+    )
+    if not has_parameter_value:
+        return False
+    if "equals" in requirement and requirement.get("equals") in (None, ""):
+        return False
+    return True
+
+
+def _recovery_relevant_event_ids(
+    *,
+    models: dict[str, dict[str, Any]],
+    relevant_resource_ids: set[str],
+    prepared_recovery_request: dict[str, Any],
+    unresolved_condition_ids: set[str],
+) -> set[str]:
+    requirements: list[tuple[str, dict[str, Any]]] = []
+    for condition in _shared._active_continuation_conditions(
+        prepared_recovery_request
+    ):
+        if _exact_condition_identifier(condition) not in unresolved_condition_ids:
+            continue
+        requirement = _recovery_condition_requirement(condition)
+        if requirement is not None and requirement not in requirements:
+            requirements.append(requirement)
+
+    event_rows: list[tuple[str, dict[str, Any]]] = []
+    for resource_jid in sorted(relevant_resource_ids):
+        for event in dict(models.get(resource_jid) or {}).get("events") or []:
+            if not isinstance(event, dict) or event.get("controllable") is not True:
+                continue
+            event_id = json.dumps(
+                {
+                    "resource_jid": resource_jid,
+                    "event_name": str(event.get("event_name") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            event_rows.append((event_id, event))
+
+    selected: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for event_id, event in event_rows:
+            if event_id in selected:
+                continue
+            updates = dict(event.get("updates") or {})
+            if not any(
+                field_name in updates
+                and _recovery_update_can_satisfy(
+                    updates.get(field_name),
+                    requirement,
+                )
+                for field_name, requirement in requirements
+            ):
+                continue
+            selected.add(event_id)
+            for field_name, guard in dict(event.get("guards") or {}).items():
+                requirement = (str(field_name), deepcopy(dict(guard or {})))
+                if requirement not in requirements:
+                    requirements.append(requirement)
+            changed = True
+
+    if not selected:
+        # Non-robot descriptors may expose only an RA-local bridge while the
+        # product obligation names no RA-local field. Preserve that existing
+        # descriptor-driven fallback without inspecting event names or values.
+        relevant_fields = {
+            str(field_name)
+            for _event_id, event in event_rows
+            for field_name in dict(event.get("guards") or {})
+        }
+        changed = True
+        while changed:
+            changed = False
+            for event_id, event in event_rows:
+                if event_id in selected:
+                    continue
+                update_fields = set(dict(event.get("updates") or {}))
+                if not update_fields & relevant_fields:
+                    continue
+                selected.add(event_id)
+                relevant_fields.update(dict(event.get("guards") or {}))
+                changed = True
+    return selected
+
+
+def _efa_guard_is_satisfied(condition: Any, actual: Any) -> bool:
+    if not isinstance(condition, dict):
+        return True
+    if condition.get("exists") is True and actual in (None, ""):
+        return False
+    if "equals" in condition and actual != condition.get("equals"):
+        return False
+    return not (
+        "not_equals" in condition and actual == condition.get("not_equals")
+    )
+
+
+def _recovery_event_parameter_value(
+    *,
+    event: dict[str, Any],
+    parameter_name: str,
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> tuple[bool, Any]:
+    explicit_parameters = dict(parameters or {})
+    if (
+        parameter_name in explicit_parameters
+        and explicit_parameters.get(parameter_name) not in (None, "")
+    ):
+        return True, deepcopy(explicit_parameters.get(parameter_name))
+    if parameter_name == "part_name" and part_name:
+        return True, part_name
+    if parameter_name in {"resource_jid", "holder_resource_jid"}:
+        return True, resource_jid
+
+    binding = dict(
+        dict(event.get("parameter_bindings") or {}).get(parameter_name) or {}
+    )
+    location_type = str(binding.get("location_type") or "").strip()
+    if location_type == "part_location":
+        value = _exact_state_field_value(part_row, "part_location")
+        return (value not in (None, "")), deepcopy(value)
+    if location_type == "current_location":
+        value = _exact_state_field_value(resource_row, "resource_location")
+        return (value not in (None, "")), deepcopy(value)
+    if location_type == "reachable_location":
+        value = part_row.get("goal_location")
+        return (value not in (None, "")), deepcopy(value)
+
+    for row in (part_row, resource_row):
+        if parameter_name in row and row.get(parameter_name) not in (None, ""):
+            return True, deepcopy(row.get(parameter_name))
+    return False, None
+
+
+def _recovery_event_guard_is_satisfied(
+    *,
+    event: dict[str, Any],
+    condition: Any,
+    actual: Any,
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> bool:
+    if not isinstance(condition, dict):
+        return True
+    resolved = deepcopy(condition)
+    for source_key, target_key in (
+        ("equals_from_param", "equals"),
+        ("not_equals_from_param", "not_equals"),
+    ):
+        parameter_name = str(resolved.pop(source_key, "") or "").strip()
+        if not parameter_name:
+            continue
+        available, value = _recovery_event_parameter_value(
+            event=event,
+            parameter_name=parameter_name,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+            parameters=parameters,
+        )
+        if not available:
+            return False
+        resolved[target_key] = value
+    return _efa_guard_is_satisfied(resolved, actual)
 
 
 def _nominal_reentry_event_id(task: dict[str, Any]) -> str:
@@ -651,7 +867,10 @@ def _nominal_reentry_event_rows(
         for row in (prepared_recovery_request.get("tools_catalog") or [])
         if isinstance(row, dict)
     ]
-    del session_state
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
     rows: list[dict[str, Any]] = []
     for requirement_id in sorted(pending_requirement_ids):
         requirement_tasks = tasks_by_requirement.get(requirement_id) or []
@@ -692,7 +911,18 @@ def _nominal_reentry_event_rows(
                 task=task,
                 tools_catalog=tools_catalog,
             )
-            if not tool_row:
+            resource_model = dict(models.get(resource_jid) or {})
+            exact_ra_event = next(
+                (
+                    deepcopy(event)
+                    for event in (resource_model.get("events") or [])
+                    if isinstance(event, dict)
+                    and str(event.get("event_name") or "").strip()
+                    == str(task.get("function_name") or "").strip()
+                ),
+                {},
+            )
+            if not tool_row or not exact_ra_event:
                 continue
             params = dict(task.get("params") or {})
             context_mapping = dict(tool_row.get("context_mapping") or {})
@@ -712,6 +942,7 @@ def _nominal_reentry_event_rows(
                     "event_id": _nominal_reentry_event_id(task),
                     "task": deepcopy(task),
                     "tool": deepcopy(tool_row),
+                    "ra_event": exact_ra_event,
                     "safety_task": safety_task,
                     "safety_signature": {
                         "inferable_primary_part": part_name,
@@ -726,7 +957,7 @@ def _nominal_reentry_event_rows(
                     },
                 }
             )
-    return rows
+    return sorted(rows, key=lambda row: str(row.get("event_id") or ""))
 
 
 def _admissible_recovery_enabled_event_ids(
@@ -737,15 +968,96 @@ def _admissible_recovery_enabled_event_ids(
 ) -> set[str]:
     if not unresolved_condition_ids:
         return set()
-    return {
-        str(row.get("event_id") or "").strip()
-        for row in _latest_enabled_capability_results(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if row.get("allowed") is True
-        and str(row.get("event_id") or "").strip()
-    }
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    if not models:
+        return set()
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    relevant_resources = _recovery_relevant_resource_ids(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        resource_ids=set(models),
+    )
+    relevant_event_ids = _recovery_relevant_event_ids(
+        models=models,
+        relevant_resource_ids=relevant_resources,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
+    relevant_parts = _recovery_relevant_part_names(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        available_part_names=set(parts_by_name),
+    )
+    enabled: set[str] = set()
+    for resource_jid in sorted(relevant_resources):
+        resource_row = dict(resources_by_jid.get(resource_jid) or {})
+        resource_model = dict(models.get(resource_jid) or {})
+        state_variables = dict(resource_model.get("state_variables") or {})
+        for raw_event in resource_model.get("events") or []:
+            if not isinstance(raw_event, dict) or raw_event.get("controllable") is not True:
+                continue
+            event = dict(raw_event)
+            event_id = json.dumps(
+                {
+                    "resource_jid": resource_jid,
+                    "event_name": str(event.get("event_name") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if event_id not in relevant_event_ids:
+                continue
+            part_bindings = (
+                sorted(relevant_parts)
+                if _recovery_event_requires_part_binding(
+                    event=event,
+                    state_variables=state_variables,
+                )
+                else [""]
+            )
+            for part_name in part_bindings:
+                part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+                if all(
+                    _recovery_event_guard_is_satisfied(
+                        event=event,
+                        condition=condition,
+                        actual=_exact_state_field_value(
+                            part_row
+                            if str(
+                                dict(state_variables.get(str(field_name)) or {}).get(
+                                    "scope"
+                                )
+                                or "resource"
+                            ).strip()
+                            == "part"
+                            else resource_row,
+                            str(field_name),
+                        ),
+                        resource_jid=resource_jid,
+                        part_name=part_name,
+                        resource_row=resource_row,
+                        part_row=part_row,
+                    )
+                    for field_name, condition in dict(event.get("guards") or {}).items()
+                ):
+                    enabled.add(
+                        json.dumps(
+                            {
+                                "resource_jid": resource_jid,
+                                "event_name": str(event.get("event_name") or ""),
+                                **({"part_name": part_name} if part_name else {}),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+    return enabled
 
 
 def _recovery_relevant_part_names(
@@ -766,6 +1078,280 @@ def _recovery_relevant_part_names(
     return relevant or set(available_part_names)
 
 
+def _recovery_event_requires_part_binding(
+    *,
+    event: dict[str, Any],
+    state_variables: dict[str, Any],
+) -> bool:
+    if event.get("requires_part_binding") is True:
+        return True
+    for field_name in set(dict(event.get("guards") or {})) | set(
+        dict(event.get("updates") or {})
+    ):
+        declaration = dict(state_variables.get(str(field_name)) or {})
+        if str(declaration.get("scope") or "resource").strip() == "part":
+            return True
+    held_part_update = dict(dict(event.get("updates") or {}).get("held_part") or {})
+    if bool(
+        str(held_part_update.get("set_from_param") or "").strip() == "part_name"
+        or "part_name" in (held_part_update.get("set_from_param_any_of") or [])
+    ):
+        return True
+    return any(
+        str(dict(condition or {}).get("equals_from_param") or "").strip()
+        == "part_name"
+        or str(dict(condition or {}).get("not_equals_from_param") or "").strip()
+        == "part_name"
+        for condition in dict(event.get("guards") or {}).values()
+    )
+
+
+def _recovery_event_update_value(
+    *,
+    field_name: str,
+    update: Any,
+    event: dict[str, Any],
+    resource_jid: str,
+    part_name: str,
+    resource_row: dict[str, Any],
+    part_row: dict[str, Any],
+) -> tuple[bool, Any]:
+    if not isinstance(update, dict):
+        return False, None
+    if "set" in update:
+        return True, deepcopy(update.get("set"))
+    parameter_names: list[str] = []
+    if str(update.get("set_from_param") or "").strip():
+        parameter_names.append(str(update.get("set_from_param") or "").strip())
+    parameter_names.extend(
+        str(item).strip()
+        for item in (update.get("set_from_param_any_of") or [])
+        if str(item).strip()
+    )
+    for parameter_name in parameter_names:
+        available, value = _recovery_event_parameter_value(
+            event=event,
+            parameter_name=parameter_name,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+        )
+        if available:
+            return True, value
+        if field_name in {"part_location", "resource_location"}:
+            for source_name in (
+                "goal_location",
+                "current_location",
+                "origin_location",
+            ):
+                fallback = part_row.get(source_name)
+                if fallback not in (None, ""):
+                    return True, deepcopy(fallback)
+    return False, None
+
+
+def _recovery_event_instance_task(
+    *,
+    event_id: str,
+    resource_jid: str,
+    event: dict[str, Any],
+    resource_row: dict[str, Any],
+    part_name: str,
+    part_row: dict[str, Any],
+    state_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    start_state: dict[str, Any] = {}
+    end_state: dict[str, Any] = {}
+    for field_name, raw_declaration in state_variables.items():
+        declaration = dict(raw_declaration or {})
+        scope = str(declaration.get("scope") or "resource").strip()
+        if scope == "part" and not part_name:
+            continue
+        source_row = part_row if scope == "part" else resource_row
+        value = _exact_state_field_value(source_row, str(field_name))
+        start_state[str(field_name)] = deepcopy(value)
+        end_state[str(field_name)] = deepcopy(value)
+
+    if "resource_state" not in start_state:
+        start_state["resource_state"] = _exact_state_field_value(
+            resource_row, "resource_state"
+        )
+        end_state["resource_state"] = deepcopy(start_state["resource_state"])
+    if "held_part" not in start_state:
+        start_state["held_part"] = deepcopy(resource_row.get("held_part"))
+        end_state["held_part"] = deepcopy(resource_row.get("held_part"))
+    if part_name:
+        if "part_state" not in start_state:
+            start_state["part_state"] = _exact_state_field_value(
+                part_row, "part_state"
+            )
+            end_state["part_state"] = deepcopy(start_state["part_state"])
+        if "part_location" not in start_state:
+            start_state["part_location"] = _exact_state_field_value(
+                part_row, "part_location"
+            )
+            end_state["part_location"] = deepcopy(start_state["part_location"])
+
+    applied_update = False
+    for field_name, update in dict(event.get("updates") or {}).items():
+        resolved, value = _recovery_event_update_value(
+            field_name=str(field_name),
+            update=update,
+            event=event,
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+        )
+        if not resolved:
+            continue
+        end_state[str(field_name)] = deepcopy(value)
+        applied_update = True
+    if not applied_update:
+        return None
+
+    start_held_part = str(start_state.get("held_part") or "").strip()
+    end_held_part = str(end_state.get("held_part") or "").strip()
+    action_target: dict[str, Any] = {}
+    if part_name and start_held_part != part_name and end_held_part == part_name:
+        if dict(part_row.get("observed_pose") or {}):
+            action_target["source_location"] = "observed_pose"
+        elif part_row.get("current_location") not in (None, ""):
+            action_target["source_location"] = deepcopy(
+                part_row.get("current_location")
+            )
+    if part_name and start_held_part == part_name and end_held_part != part_name:
+        if end_state.get("part_location") not in (None, ""):
+            action_target["target_location"] = deepcopy(
+                end_state.get("part_location")
+            )
+    if (
+        part_name
+        and "target_location" not in action_target
+        and end_state.get("part_location") not in (None, "")
+        and end_state.get("part_location") != start_state.get("part_location")
+        and not str(end_state.get("part_location") or "").endswith("_gripper")
+    ):
+        action_target["target_location"] = deepcopy(end_state.get("part_location"))
+
+    task: dict[str, Any] = {
+        "outline_id": f"enabledness_{recovery_validation_fingerprint(event_id)[:16]}",
+        "event_name": str(event.get("event_name") or "").strip(),
+        "resource_jid": resource_jid,
+        "expected_start_state": start_state,
+        "expected_end_state": end_state,
+        "rationale": "Modeled continuation from the registered RobotTaskProgram.",
+    }
+    if part_name:
+        task["part_name"] = part_name
+    if action_target:
+        task["action_target"] = action_target
+    return task
+
+
+def _goal_relevant_recovery_event_rows(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    unresolved_condition_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not unresolved_condition_ids:
+        return []
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    relevant_resources = _recovery_relevant_resource_ids(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        resource_ids=set(models),
+    )
+    relevant_event_ids = _recovery_relevant_event_ids(
+        models=models,
+        relevant_resource_ids=relevant_resources,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
+    relevant_parts = _recovery_relevant_part_names(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        available_part_names=set(parts_by_name),
+    )
+    rows: list[dict[str, Any]] = []
+    for resource_jid in sorted(relevant_resources):
+        resource_row = dict(resources_by_jid.get(resource_jid) or {})
+        resource_model = dict(models.get(resource_jid) or {})
+        state_variables = dict(resource_model.get("state_variables") or {})
+        for raw_event in resource_model.get("events") or []:
+            if not isinstance(raw_event, dict) or raw_event.get("controllable") is not True:
+                continue
+            event = dict(raw_event)
+            base_event_id = json.dumps(
+                {
+                    "resource_jid": resource_jid,
+                    "event_name": str(event.get("event_name") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if base_event_id not in relevant_event_ids:
+                continue
+            part_bindings = (
+                sorted(relevant_parts)
+                if _recovery_event_requires_part_binding(
+                    event=event,
+                    state_variables=state_variables,
+                )
+                else [""]
+            )
+            for part_name in part_bindings:
+                part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+                event_id = json.dumps(
+                    {
+                        "resource_jid": resource_jid,
+                        "event_name": str(event.get("event_name") or ""),
+                        **({"part_name": part_name} if part_name else {}),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                task = _recovery_event_instance_task(
+                    event_id=event_id,
+                    resource_jid=resource_jid,
+                    event=event,
+                    resource_row=resource_row,
+                    part_name=part_name,
+                    part_row=part_row,
+                    state_variables=state_variables,
+                )
+                if task is None:
+                    continue
+                update_fields = set(dict(event.get("updates") or {}))
+                rows.append(
+                    {
+                        "event_id": event_id,
+                        "task": task,
+                        "signature": {
+                            "inferable_primary_part": part_name,
+                            "task_kind": (
+                                "part_handling" if part_name else "resource_action"
+                            ),
+                            "changes_part_world": bool(
+                                part_name
+                                and update_fields
+                                & {"held_part", "part_state", "part_location"}
+                            ),
+                        },
+                    }
+                )
+    return sorted(rows, key=lambda row: str(row.get("event_id") or ""))
+
+
 def _symbolically_enabled_recovery_event_instances(
     *,
     session_state: dict[str, Any],
@@ -774,23 +1360,242 @@ def _symbolically_enabled_recovery_event_instances(
 ) -> list[dict[str, Any]]:
     if not unresolved_condition_ids:
         return []
-    return [
-        {
-            "event_id": str(row.get("event_id") or ""),
-            "resource_jid": str(dict(row.get("task") or {}).get("resource_jid") or ""),
-            "part_name": dict(row.get("task") or {}).get("part_name"),
-            "task": deepcopy(dict(row.get("task") or {})),
-            "transition_feasibility": deepcopy(
-                row.get("transition_feasibility") or {}
-            ),
-            "physical_feasibility": deepcopy(row.get("physical_feasibility") or {}),
-        }
-        for row in _latest_enabled_capability_results(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        if row.get("allowed") is True
-    ]
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    relevant_resources = _recovery_relevant_resource_ids(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        resource_ids=set(models),
+    )
+    relevant_event_ids = _recovery_relevant_event_ids(
+        models=models,
+        relevant_resource_ids=relevant_resources,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
+    relevant_parts = _recovery_relevant_part_names(
+        unresolved_condition_ids=unresolved_condition_ids,
+        prepared_recovery_request=prepared_recovery_request,
+        available_part_names=set(parts_by_name),
+    )
+    instances: list[dict[str, Any]] = []
+    for resource_jid in sorted(relevant_resources):
+        resource_row = dict(resources_by_jid.get(resource_jid) or {})
+        resource_model = dict(models.get(resource_jid) or {})
+        state_variables = dict(resource_model.get("state_variables") or {})
+        for raw_event in resource_model.get("events") or []:
+            if not isinstance(raw_event, dict) or raw_event.get("controllable") is not True:
+                continue
+            event = dict(raw_event)
+            base_event_id = json.dumps(
+                {
+                    "resource_jid": resource_jid,
+                    "event_name": str(event.get("event_name") or ""),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if base_event_id not in relevant_event_ids:
+                continue
+            part_bindings = (
+                sorted(relevant_parts)
+                if _recovery_event_requires_part_binding(
+                    event=event,
+                    state_variables=state_variables,
+                )
+                else [""]
+            )
+            for part_name in part_bindings:
+                part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+                guards = dict(event.get("guards") or {})
+                if not all(
+                    _recovery_event_guard_is_satisfied(
+                        event=event,
+                        condition=condition,
+                        actual=_exact_state_field_value(
+                            part_row
+                            if str(
+                                dict(state_variables.get(str(field_name)) or {}).get(
+                                    "scope"
+                                )
+                                or "resource"
+                            ).strip()
+                            == "part"
+                            else resource_row,
+                            str(field_name),
+                        ),
+                        resource_jid=resource_jid,
+                        part_name=part_name,
+                        resource_row=resource_row,
+                        part_row=part_row,
+                    )
+                    for field_name, condition in guards.items()
+                ):
+                    continue
+                event_id = json.dumps(
+                    {
+                        "resource_jid": resource_jid,
+                        "event_name": str(event.get("event_name") or ""),
+                        **({"part_name": part_name} if part_name else {}),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                task = _recovery_event_instance_task(
+                    event_id=event_id,
+                    resource_jid=resource_jid,
+                    event=event,
+                    resource_row=resource_row,
+                    part_name=part_name,
+                    part_row=part_row,
+                    state_variables=state_variables,
+                )
+                if task is None:
+                    continue
+                grounding = compile_grounded_recovery_outline_task(
+                    task,
+                    resources_by_jid=resources_by_jid,
+                    parts_by_name=parts_by_name,
+                    location_validation_mode="relaxed",
+                )
+                grounded_action = dict(grounding.get("grounded_action") or {})
+                if not grounded_action:
+                    continue
+                physical_input = build_recovery_physical_validation_input(
+                    task=task,
+                    grounded_action=grounded_action,
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                )
+                physical_input["use_projected_recovery_snapshot"] = True
+                instances.append(
+                    {
+                        "event_id": event_id,
+                        "resource_jid": resource_jid,
+                        "part_name": part_name or None,
+                        "task": task,
+                        "grounded_action": grounded_action,
+                        "physical_input": physical_input,
+                        "safety_input": build_recovery_safety_validation_input(
+                            task=task,
+                            session_state=session_state,
+                            prepared_recovery_request=prepared_recovery_request,
+                        ),
+                        "recovery_visible_steps": deepcopy(
+                            event.get("recovery_visible_steps") or []
+                        ),
+                    }
+                )
+    return sorted(instances, key=lambda row: str(row.get("event_id") or ""))
+
+
+def _exact_state_field_value(row: dict[str, Any], field_name: str) -> Any:
+    aliases = {
+        "resource_state": "current_state",
+        "resource_location": "current_location",
+        "part_state": "current_state",
+        "part_location": "current_location",
+    }
+    if field_name in row:
+        return row.get(field_name)
+    return row.get(aliases.get(field_name, field_name))
+
+
+def _resource_reachable_location_tokens(resource_row: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for field_name in ("reachability", "reachable_locations", "known_locations"):
+        raw_value = resource_row.get(field_name)
+        if isinstance(raw_value, (dict, list, tuple, set)):
+            tokens.update(
+                str(token).strip() for token in raw_value if str(token).strip()
+            )
+    return tokens
+
+
+def _nominal_reentry_guard_is_enabled(
+    *,
+    row: dict[str, Any],
+    resources_by_jid: dict[str, dict[str, Any]],
+    parts_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    task = dict(row.get("task") or {})
+    tool = dict(row.get("tool") or {})
+    ra_event = dict(row.get("ra_event") or {})
+    resource_jid = str(task.get("resource_jid") or "").strip()
+    part_name = str(task.get("part_name") or "").strip()
+    resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    part_row = dict(parts_by_name.get(part_name) or {}) if part_name else {}
+    if not resource_jid or not resource_row:
+        return False
+
+    required_resource_state = str(tool.get("in_state") or "").strip()
+    actual_resource_state = str(
+        _exact_state_field_value(resource_row, "resource_state") or ""
+    ).strip()
+    if (
+        required_resource_state
+        and required_resource_state.lower() != "any"
+        and actual_resource_state != required_resource_state
+    ):
+        return False
+    required_part_state = str(tool.get("part_in_state") or "").strip()
+    if required_part_state and (
+        not part_name
+        or str(
+            _exact_state_field_value(part_row, "part_state") or ""
+        ).strip()
+        != required_part_state
+    ):
+        return False
+
+    params = dict(task.get("params") or {})
+    context_mapping = dict(tool.get("context_mapping") or {})
+    location_param = str(context_mapping.get("location_param") or "").strip()
+    location_type = str(context_mapping.get("location_type") or "").strip()
+    location_value = params.get(location_param) if location_param else None
+    if location_param and location_value not in (None, ""):
+        if location_type == "part_location":
+            if not part_name or _exact_state_field_value(
+                part_row, "part_location"
+            ) != location_value:
+                return False
+        elif location_type == "current_location":
+            if _exact_state_field_value(
+                resource_row, "resource_location"
+            ) != location_value:
+                return False
+        elif (
+            location_type == "reachable_location"
+            and str(location_value)
+            not in _resource_reachable_location_tokens(resource_row)
+        ):
+            return False
+
+    state_variables = dict(row.get("state_variables") or {})
+    for field_name, condition in dict(ra_event.get("guards") or {}).items():
+        scope = str(
+            dict(state_variables.get(str(field_name)) or {}).get("scope")
+            or ("part" if str(field_name).startswith("part_") else "resource")
+        ).strip()
+        source_row = part_row if scope == "part" else resource_row
+        if not _recovery_event_guard_is_satisfied(
+            event=ra_event,
+            condition=condition,
+            actual=_exact_state_field_value(source_row, str(field_name)),
+            resource_jid=resource_jid,
+            part_name=part_name,
+            resource_row=resource_row,
+            part_row=part_row,
+            parameters=params,
+        ):
+            return False
+    return True
 
 
 def _admissible_nominal_reentry_event_ids(
@@ -799,15 +1604,36 @@ def _admissible_nominal_reentry_event_ids(
     prepared_recovery_request: dict[str, Any],
     cca_admissible_event_ids: set[str],
 ) -> set[str]:
-    nominal_ids = {
-        str(row.get("event_id") or "").strip()
-        for row in _nominal_reentry_event_rows(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
+    resources_by_jid, parts_by_name = _projected_outline_validation_context(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    enabled: set[str] = set()
+    for row in _nominal_reentry_event_rows(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    ):
+        event_id = str(row.get("event_id") or "").strip()
+        resource_jid = str(dict(row.get("task") or {}).get("resource_jid") or "").strip()
+        enriched_row = deepcopy(row)
+        enriched_row["state_variables"] = deepcopy(
+            dict(dict(models.get(resource_jid) or {}).get("state_variables") or {})
         )
-        if str(row.get("event_id") or "").strip()
-    }
-    return nominal_ids & set(cca_admissible_event_ids)
+        if (
+            event_id
+            and event_id in cca_admissible_event_ids
+            and _nominal_reentry_guard_is_enabled(
+                row=enriched_row,
+                resources_by_jid=resources_by_jid,
+                parts_by_name=parts_by_name,
+            )
+        ):
+            enabled.add(event_id)
+    return enabled
 
 
 async def _agent_filtered_recovery_enabledness(
@@ -817,23 +1643,26 @@ async def _agent_filtered_recovery_enabledness(
     unresolved_condition_ids: set[str],
     planner: Any,
 ) -> dict[str, Any]:
-    """Return capability instances admitted by Resource Agents and CCA."""
+    """Return recovery events admitted by symbolic, RA, and CCA validation."""
+    instances = _symbolically_enabled_recovery_event_instances(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
+    )
     result: dict[str, Any] = {
-        "symbolically_enabled_event_ids": [],
+        "symbolically_enabled_event_ids": [
+            str(row.get("event_id") or "") for row in instances
+        ],
         "ra_admissible_event_ids": [],
         "cca_admissible_event_ids": [],
         "admissible_event_ids": [],
-        "admissible_nominal_reentry_event_ids": [],
-        "resource_enabled_goal_recovery_event_ids": [],
-        "cca_admissible_goal_recovery_event_ids": [],
-        "admissible_goal_recovery_event_ids": [],
-        "enabled_capability_results": [],
         "event_evaluations": [],
+        "ra_snapshot_fingerprints": {},
+        "ra_descriptor_fingerprints": {},
         "safety_rule_fingerprint": "",
         "live_safety_dfa_state_fingerprint": "",
-        "future_goal_query_complete": True,
     }
-    if not unresolved_condition_ids:
+    if not instances:
         return result
 
     product_agent = getattr(planner, "product_agent", None)
@@ -844,7 +1673,17 @@ async def _agent_filtered_recovery_enabledness(
         product_agent, "request_recovery_outline_safety_validation", None
     )
     if not callable(request_physical) or not callable(request_safety):
-        result["unavailable_reason"] = "recovery validation transport is unavailable"
+        result["event_evaluations"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "resource_jid": str(row.get("resource_jid") or ""),
+                "part_name": row.get("part_name"),
+                "ra_status": "unavailable",
+                "cca_status": "skipped",
+                "constraint_codes": ["resource_validation_unavailable"],
+            }
+            for row in instances
+        ]
         return result
 
     recovery_session_id = str(
@@ -864,66 +1703,30 @@ async def _agent_filtered_recovery_enabledness(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    resources_by_jid, parts_by_name = _projected_outline_validation_context(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-    )
-    configured_resource_ids = {
-        str(resource_jid)
-        for resource_jid in dict(
-            prepared_recovery_request.get("recovery_resources") or {}
-        )
-        if str(resource_jid)
-    }
-    relevant_resources = _recovery_relevant_resource_ids(
-        unresolved_condition_ids=unresolved_condition_ids,
-        prepared_recovery_request=prepared_recovery_request,
-        resource_ids=configured_resource_ids,
-    )
-    relevant_parts = _recovery_relevant_part_names(
-        unresolved_condition_ids=unresolved_condition_ids,
-        prepared_recovery_request=prepared_recovery_request,
-        available_part_names=set(parts_by_name),
-    )
-    goal_conditions = [
-        {
-            **deepcopy(condition),
-            "condition_id": _exact_condition_identifier(condition),
-        }
-        for condition in _unresolved_conditions(
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-    ]
+    instances_by_resource: dict[str, list[dict[str, Any]]] = {}
+    for index, instance in enumerate(instances):
+        instance["enabledness_index"] = index
+        instances_by_resource.setdefault(
+            str(instance.get("resource_jid") or ""), []
+        ).append(instance)
 
     async def validate_resource_group(
         resource_jid: str,
+        rows: list[dict[str, Any]],
     ) -> tuple[str, dict[str, Any] | Exception]:
-        part_contexts = [
-            {
-                "part_name": part_name,
-                **deepcopy(dict(parts_by_name.get(part_name) or {})),
-            }
-            for part_name in sorted(relevant_parts)
-        ]
         payload = {
             "recovery_session_id": recovery_session_id,
             "turn_index": turn_index,
             "state_fingerprint": state_fingerprint,
-            "candidates": [],
-            "enabledness_query": {
-                "projected_resource_snapshot": deepcopy(
-                    resources_by_jid.get(resource_jid) or {}
-                ),
-                "part_contexts": deepcopy(part_contexts),
-            },
-            "future_goal_query": {
-                "projected_resource_snapshot": deepcopy(
-                    resources_by_jid.get(resource_jid) or {}
-                ),
-                "part_contexts": deepcopy(part_contexts),
-                "goal_conditions": deepcopy(goal_conditions),
-            },
+            "candidates": [
+                {
+                    "candidate_index": int(row.get("enabledness_index") or 0),
+                    "event_id": str(row.get("event_id") or ""),
+                    "task": deepcopy(row.get("task") or {}),
+                    "physical_input": deepcopy(row.get("physical_input") or {}),
+                }
+                for row in rows
+            ],
         }
         try:
             reply = await request_physical(
@@ -937,175 +1740,137 @@ async def _agent_filtered_recovery_enabledness(
 
     ra_replies = await asyncio.gather(
         *[
-            validate_resource_group(resource_jid)
-            for resource_jid in sorted(relevant_resources)
+            validate_resource_group(resource_jid, rows)
+            for resource_jid, rows in sorted(instances_by_resource.items())
         ]
     )
-    evaluations_by_event_id: dict[str, dict[str, Any]] = {}
+    evaluations_by_event_id = {
+        str(row.get("event_id") or ""): {
+            "event_id": str(row.get("event_id") or ""),
+            "resource_jid": str(row.get("resource_jid") or ""),
+            "part_name": row.get("part_name"),
+            "ra_status": "unavailable",
+            "cca_status": "skipped",
+            "constraint_codes": [],
+        }
+        for row in instances
+    }
     ra_admissible_instances: list[dict[str, Any]] = []
-    future_goal_instances: list[dict[str, Any]] = []
-    seen_future_goal_event_ids: set[str] = set()
-    instance_by_index: dict[int, dict[str, Any]] = {}
-    next_enabledness_index = 0
+    instance_by_index = {
+        int(row.get("enabledness_index") or 0): row for row in instances
+    }
+    expected_models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
     for resource_jid, reply_or_error in ra_replies:
+        resource_instances = instances_by_resource.get(resource_jid) or []
         if isinstance(reply_or_error, Exception):
-            result["future_goal_query_complete"] = False
-            result["event_evaluations"].append(
-                {
-                    "resource_jid": resource_jid,
-                    "ra_status": "unavailable",
-                    "cca_status": "skipped",
-                    "constraint_codes": ["resource_validation_unavailable"],
-                    "reason": str(reply_or_error),
-                }
-            )
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = str(reply_or_error)
             continue
         reply = dict(reply_or_error or {})
-        if not isinstance(
-            reply.get("future_goal_capability_results"),
-            list,
+        snapshot = dict(reply.get("snapshot") or {})
+        snapshot_fingerprint = str(reply.get("snapshot_fingerprint") or "").strip()
+        if (
+            not snapshot_fingerprint
+            or snapshot_fingerprint != recovery_validation_fingerprint(snapshot)
         ):
-            result["future_goal_query_complete"] = False
-        for raw_row in reply.get("enabled_capability_results") or []:
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = "ResourceAgent enabledness snapshot fingerprint is invalid"
+            continue
+        expected_descriptor_fingerprint = str(
+            dict(expected_models.get(resource_jid) or {}).get("descriptor_fingerprint")
+            or ""
+        ).strip()
+        try:
+            _, descriptor_fingerprint = _verified_recovery_des_model(
+                ra_reply=reply,
+                expected_fingerprint=expected_descriptor_fingerprint,
+            )
+        except Exception as exc:  # noqa: BLE001 - descriptor mismatch fails closed
+            for instance in resource_instances:
+                evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+                evaluation["constraint_codes"] = ["resource_validation_unavailable"]
+                evaluation["reason"] = str(exc)
+            continue
+        result["ra_snapshot_fingerprints"][resource_jid] = snapshot_fingerprint
+        result["ra_descriptor_fingerprints"][resource_jid] = descriptor_fingerprint
+        for raw_row in reply.get("results") or []:
             if not isinstance(raw_row, dict):
                 continue
             row = dict(raw_row)
-            task = deepcopy(dict(row.get("task") or {}))
-            if str(task.get("resource_jid") or "") != resource_jid:
+            instance = instance_by_index.get(int(row.get("candidate_index") or 0))
+            if not instance or str(instance.get("resource_jid") or "") != resource_jid:
                 continue
-            event_id = str(row.get("event_id") or "")
-            if not event_id:
-                continue
-            transition_feasibility = deepcopy(
-                dict(row.get("transition_feasibility") or {})
-            )
-            atomic_transitions = [
-                deepcopy(transition_row)
-                for transition_row in (
-                    row.get("_cca_atomic_transitions") or []
-                )
-                if isinstance(transition_row, dict)
+            event_id = str(instance.get("event_id") or "")
+            evaluation = evaluations_by_event_id[event_id]
+            findings = [
+                dict(item)
+                for item in (row.get("findings") or [])
+                if isinstance(item, dict)
             ]
-            public_row = {
-                key: deepcopy(value)
-                for key, value in row.items()
-                if not str(key).startswith("_")
-            }
-            instance = {
-                **public_row,
-                "enabledness_index": next_enabledness_index,
-                "resource_jid": resource_jid,
-                "part_name": task.get("part_name"),
-                "task": task,
-                "_cca_atomic_transitions": atomic_transitions,
-                "safety_input": build_recovery_safety_validation_input(
-                    task=task,
-                    session_state=session_state,
-                    prepared_recovery_request=prepared_recovery_request,
-                    calculated_successor=deepcopy(
-                        transition_feasibility.get(
-                            "calculated_successor"
-                        )
-                        or {}
-                    ),
-                ),
-            }
-            instance_by_index[next_enabledness_index] = instance
-            next_enabledness_index += 1
-            result["enabled_capability_results"].append(
-                {
-                    key: deepcopy(value)
-                    for key, value in instance.items()
-                    if not str(key).startswith("_")
-                    and key != "safety_input"
-                }
-            )
-            transition_allowed = bool(
-                dict(row.get("transition_feasibility") or {}).get("allowed")
-            )
-            if transition_allowed:
-                result["symbolically_enabled_event_ids"].append(event_id)
-            evaluation = {
-                "event_id": event_id,
-                "resource_jid": resource_jid,
-                "part_name": task.get("part_name"),
-                "ra_status": "passed" if bool(row.get("allowed")) else "rejected",
-                "cca_status": "skipped",
-                "constraint_codes": sorted(
-                    {
-                        str(
-                            dict(row.get(result_name) or {}).get(
-                                "constraint_code"
-                            )
-                            or ""
-                        ).strip()
-                        for result_name in (
-                            "transition_feasibility",
-                            "physical_feasibility",
-                        )
-                        if str(
-                            dict(row.get(result_name) or {}).get(
-                                "constraint_code"
-                            )
-                            or ""
-                        ).strip()
-                    }
-                ),
-            }
-            evaluations_by_event_id[event_id] = evaluation
             evaluation["ra_status"] = "passed" if bool(row.get("allowed")) else "rejected"
             evaluation["ra_mocked"] = bool(reply.get("mocked"))
+            evaluation["constraint_codes"] = sorted(
+                {
+                    str(item.get("constraint_code") or "").strip()
+                    for item in findings
+                    if str(item.get("constraint_code") or "").strip()
+                }
+            )
+            if findings:
+                evaluation["findings"] = [
+                    {
+                        key: deepcopy(finding.get(key))
+                        for key in (
+                            "validation_category",
+                            "constraint_code",
+                            "constraint_owner",
+                            "resource_jid",
+                            "part_name",
+                            "reason",
+                        )
+                        if finding.get(key) not in (None, "", [], {})
+                    }
+                    | (
+                        {
+                            "evidence": {
+                                evidence_key: deepcopy(
+                                    dict(finding.get("evidence") or {}).get(
+                                        evidence_key
+                                    )
+                                )
+                                for evidence_key in (
+                                    "checked_pose",
+                                    "workspace_bounds",
+                                )
+                                if dict(finding.get("evidence") or {}).get(
+                                    evidence_key
+                                )
+                                not in (None, "", [], {})
+                            }
+                        }
+                        if any(
+                            dict(finding.get("evidence") or {}).get(evidence_key)
+                            not in (None, "", [], {})
+                            for evidence_key in ("checked_pose", "workspace_bounds")
+                        )
+                        else {}
+                    )
+                    for finding in findings
+                ]
             if bool(row.get("allowed")):
                 ra_admissible_instances.append(instance)
-        for raw_row in reply.get("future_goal_capability_results") or []:
-            if not isinstance(raw_row, dict):
-                continue
-            row = dict(raw_row)
-            task = deepcopy(dict(row.get("task") or {}))
-            if str(task.get("resource_jid") or "") != resource_jid:
-                continue
-            event_id = str(row.get("event_id") or "").strip()
-            if not event_id or event_id in seen_future_goal_event_ids:
-                continue
-            seen_future_goal_event_ids.add(event_id)
-            future_instance = {
-                "enabledness_index": next_enabledness_index,
-                "query_kind": "future_goal",
-                "event_id": event_id,
-                "resource_jid": resource_jid,
-                "part_name": task.get("part_name"),
-                "task": task,
-                "resource_enabled": bool(
-                    row.get("resource_enabled") is True
-                ),
-                "signature": deepcopy(row.get("signature") or {}),
-                "_cca_atomic_transitions": [
-                    deepcopy(transition_row)
-                    for transition_row in (
-                        row.get("_cca_atomic_transitions") or []
-                    )
-                    if isinstance(transition_row, dict)
-                ],
-            }
-            instance_by_index[next_enabledness_index] = future_instance
-            next_enabledness_index += 1
-            future_goal_instances.append(future_instance)
 
-    result["symbolically_enabled_event_ids"] = sorted(
-        set(result["symbolically_enabled_event_ids"])
-    )
     result["ra_admissible_event_ids"] = sorted(
         {str(row.get("event_id") or "") for row in ra_admissible_instances}
     )
-    result["resource_enabled_goal_recovery_event_ids"] = sorted(
-        {
-            str(row.get("event_id") or "")
-            for row in future_goal_instances
-            if row.get("resource_enabled") is True
-            and str(row.get("event_id") or "")
-        }
-    )
-    if not ra_admissible_instances and not future_goal_instances:
+    if not ra_admissible_instances:
         result["event_evaluations"] = [
             evaluations_by_event_id[event_id]
             for event_id in sorted(evaluations_by_event_id)
@@ -1115,6 +1880,11 @@ async def _agent_filtered_recovery_enabledness(
     nominal_reentry_events = _nominal_reentry_event_rows(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
+    )
+    goal_recovery_events = _goal_relevant_recovery_event_rows(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+        unresolved_condition_ids=unresolved_condition_ids,
     )
     cca_candidates: list[dict[str, Any]] = []
     for instance in ra_admissible_instances:
@@ -1128,15 +1898,21 @@ async def _agent_filtered_recovery_enabledness(
             for row in nominal_reentry_events
             if str(row.get("event_id") or "")
         ]
+        safety_input.setdefault("llm_input", {})["goal_recovery_events"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "task": deepcopy(row.get("task") or {}),
+                "signature": deepcopy(row.get("signature") or {}),
+            }
+            for row in goal_recovery_events
+            if str(row.get("event_id") or "")
+        ]
         cca_candidates.append(
             {
                 "candidate_index": int(instance.get("enabledness_index") or 0),
                 "event_id": str(instance.get("event_id") or ""),
                 "task": deepcopy(instance.get("task") or {}),
                 "safety_input": safety_input,
-                "_cca_atomic_transitions": deepcopy(
-                    instance.get("_cca_atomic_transitions") or []
-                ),
                 **(
                     {
                         "safety_dfa_states_before": deepcopy(
@@ -1172,41 +1948,6 @@ async def _agent_filtered_recovery_enabledness(
                 ),
             }
         )
-    for instance in future_goal_instances:
-        task = deepcopy(instance.get("task") or {})
-        safety_input = build_recovery_safety_validation_input(
-            task=task,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
-            calculated_successor=deepcopy(
-                dict(task.get("expected_end_state") or {})
-            ),
-        )
-        cca_candidates.append(
-            {
-                "candidate_index": int(
-                    instance.get("enabledness_index") or 0
-                ),
-                "event_id": str(instance.get("event_id") or ""),
-                "task": task,
-                "safety_input": safety_input,
-                "_cca_atomic_transitions": deepcopy(
-                    instance.get("_cca_atomic_transitions") or []
-                ),
-                **(
-                    {
-                        "safety_dfa_states_before": deepcopy(
-                            session_state.get(
-                                "projected_safety_dfa_states"
-                            )
-                            or {}
-                        )
-                    }
-                    if session_state.get("projected_safety_dfa_states")
-                    else {}
-                ),
-            }
-        )
     try:
         cca_reply = await request_safety(
             payload={
@@ -1218,7 +1959,6 @@ async def _agent_filtered_recovery_enabledness(
             timeout_s=10.0,
         )
     except Exception as exc:  # noqa: BLE001 - enabledness must fail closed
-        result["future_goal_query_complete"] = False
         for instance in ra_admissible_instances:
             evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
             evaluation["cca_status"] = "unavailable"
@@ -1240,8 +1980,6 @@ async def _agent_filtered_recovery_enabledness(
         cca_reply.get("live_safety_dfa_state_fingerprint") or ""
     ).strip()
     cca_admissible: set[str] = set()
-    nominal_reentry_admissible: set[str] = set()
-    goal_recovery_admissible: set[str] = set()
     for raw_row in cca_reply.get("results") or []:
         if not isinstance(raw_row, dict):
             continue
@@ -1250,10 +1988,6 @@ async def _agent_filtered_recovery_enabledness(
         if not instance:
             continue
         event_id = str(instance.get("event_id") or "")
-        if instance.get("query_kind") == "future_goal":
-            if bool(row.get("is_safe")):
-                goal_recovery_admissible.add(event_id)
-            continue
         evaluation = evaluations_by_event_id[event_id]
         findings = [
             dict(item)
@@ -1267,15 +2001,6 @@ async def _agent_filtered_recovery_enabledness(
         )
         evaluation["safety_dfa_states_after"] = deepcopy(
             row.get("safety_dfa_states_after") or {}
-        )
-        nominal_reentry_admissible.update(
-            str(event_id)
-            for event_id in (
-                row.get("admissible_nominal_reentry_event_ids_after")
-                or row.get("admissible_nominal_reentry_event_ids")
-                or []
-            )
-            if str(event_id)
         )
         if findings:
             evaluation["findings"] = deepcopy(
@@ -1308,16 +2033,6 @@ async def _agent_filtered_recovery_enabledness(
             cca_admissible.add(event_id)
 
     result["cca_admissible_event_ids"] = sorted(cca_admissible)
-    result["admissible_nominal_reentry_event_ids"] = sorted(
-        nominal_reentry_admissible
-    )
-    result["cca_admissible_goal_recovery_event_ids"] = sorted(
-        goal_recovery_admissible
-    )
-    result["admissible_goal_recovery_event_ids"] = sorted(
-        set(result["resource_enabled_goal_recovery_event_ids"])
-        & goal_recovery_admissible
-    )
     result["admissible_event_ids"] = sorted(
         set(result["symbolically_enabled_event_ids"])
         & set(result["ra_admissible_event_ids"])
@@ -1378,9 +2093,6 @@ async def _populate_agent_filtered_enabledness(
             )
         )
     current = await current_task
-    session_state["latest_enabled_capability_results"] = deepcopy(
-        current.get("enabled_capability_results") or []
-    )
     for evaluation, task in after_tasks:
         after = await task
         evaluation["agent_filtered_enabledness"] = True
@@ -1392,36 +2104,14 @@ async def _populate_agent_filtered_enabledness(
         )
         evaluation["recovery_enabledness_validation_before"] = deepcopy(current)
         evaluation["recovery_enabledness_validation_after"] = deepcopy(after)
-        evaluation["admissible_nominal_reentry_event_ids_before"] = deepcopy(
-            current.get("admissible_nominal_reentry_event_ids") or []
-        )
-        evaluation["admissible_nominal_reentry_event_ids_after"] = deepcopy(
-            after.get("admissible_nominal_reentry_event_ids") or []
-        )
-        evaluation["cca_admissible_goal_recovery_event_ids_before"] = deepcopy(
-            current.get("cca_admissible_goal_recovery_event_ids") or []
-        )
-        evaluation["cca_admissible_goal_recovery_event_ids_after"] = deepcopy(
-            after.get("cca_admissible_goal_recovery_event_ids") or []
-        )
-        evaluation["admissible_goal_recovery_event_ids_before"] = deepcopy(
-            current.get("admissible_goal_recovery_event_ids") or []
-        )
-        evaluation["admissible_goal_recovery_event_ids_after"] = deepcopy(
-            after.get("admissible_goal_recovery_event_ids") or []
-        )
-        evaluation["future_goal_evaluation_complete"] = bool(
-            current.get("future_goal_query_complete") is True
-            and after.get("future_goal_query_complete") is True
-        )
 
 
 def _candidate_realizer_event_ids(
     *,
     candidate: dict[str, Any],
-    evaluation: dict[str, Any],
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
 ) -> set[str]:
-    del evaluation
     surface_events = [
         dict(row) for row in (candidate.get("surface_events") or []) if isinstance(row, dict)
     ]
@@ -1429,22 +2119,59 @@ def _candidate_realizer_event_ids(
         return set()
     task = surface_events[0]
     resource_jid = str(task.get("resource_jid") or "").strip()
-    part_name = str(task.get("part_name") or "").strip()
-    if not resource_jid:
+    end_state = dict(task.get("expected_end_state") or {})
+    if not resource_jid or not end_state:
         return set()
-    event_names = {str(task.get("event_name") or "").strip()}
-    return {
-        json.dumps(
-            {
-                "resource_jid": resource_jid,
-                "event_name": event_name,
-                **({"part_name": part_name} if part_name else {}),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for event_name in event_names
-    }
+    models = _recovery_des_models(
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    realized: set[str] = set()
+    for event in dict(models.get(resource_jid) or {}).get("events") or []:
+        if not isinstance(event, dict) or event.get("controllable") is not True:
+            continue
+        matched_update = False
+        incompatible_update = False
+        for field_name, update in dict(event.get("updates") or {}).items():
+            if str(field_name) == "current_state":
+                continue
+            candidate_field = {
+                "current_location": "resource_location",
+            }.get(str(field_name), str(field_name))
+            if candidate_field not in end_state or not isinstance(update, dict):
+                continue
+            expected_value: Any = object()
+            if "set" in update:
+                expected_value = update.get("set")
+            elif "set_from_param" in update:
+                expected_value = task.get(str(update.get("set_from_param") or ""))
+            elif "set_from_param_any_of" in update:
+                expected_value = next(
+                    (
+                        task.get(str(param_name))
+                        for param_name in (update.get("set_from_param_any_of") or [])
+                        if task.get(str(param_name)) not in (None, "")
+                    ),
+                    object(),
+                )
+            if type(expected_value) is object:
+                continue
+            if end_state.get(candidate_field) != expected_value:
+                incompatible_update = True
+                break
+            matched_update = True
+        if matched_update and not incompatible_update:
+            realized.add(
+                json.dumps(
+                    {
+                        "resource_jid": resource_jid,
+                        "event_name": str(event.get("event_name") or ""),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+    return realized
 
 
 def _candidate_effect_identifier(candidate: dict[str, Any]) -> str:
@@ -1483,24 +2210,11 @@ def _candidate_authored_delta_fields(
     task = surface_events[0]
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
-    delta_fields: list[str] = []
-    for field_name, value in end_state.items():
-        if field_name in {"resource_state", "part_state"} and isinstance(
-            value,
-            dict,
-        ):
-            start_components = dict(start_state.get(field_name) or {})
-            for component_name, component_value in value.items():
-                if (
-                    component_name not in start_components
-                    or start_components.get(component_name)
-                    != component_value
-                ):
-                    delta_fields.append(f"{field_name}.{component_name}")
-            continue
-        if field_name not in start_state or start_state.get(field_name) != value:
-            delta_fields.append(field_name)
-    return sorted(delta_fields)
+    return sorted(
+        field_name
+        for field_name, value in end_state.items()
+        if field_name not in start_state or start_state.get(field_name) != value
+    )
 
 
 def _classify_candidate_selection_progress(
@@ -1516,14 +2230,7 @@ def _classify_candidate_selection_progress(
     if progressing:
         return True, []
     if all(
-        field_name
-        in {
-            "resource_state",
-            "resource_state.condition",
-            "current_state",
-            "part_state",
-            "part_state.condition",
-        }
+        field_name in {"resource_state", "current_state", "part_state"}
         for field_name in delta_fields
     ):
         return False, ["label_only_state_change"]
@@ -1641,15 +2348,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
         )
         if str(item).strip()
     }
-    current_admissible_goal_recovery_events = {
-        str(item).strip()
-        for row in candidate_evaluations
-        if isinstance(row, dict) and bool(row.get("valid"))
-        for item in (
-            row.get("admissible_goal_recovery_event_ids_before") or []
-        )
-        if str(item).strip()
-    }
     candidate_by_index = {
         int(row.get("candidate_index") or 0): row for row in candidate_sequences
     }
@@ -1711,14 +2409,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
             )
             if str(item).strip()
         }
-        admissible_goal_recovery_events_after = {
-            str(item).strip()
-            for item in (
-                evaluation.get("admissible_goal_recovery_event_ids_after")
-                or []
-            )
-            if str(item).strip()
-        }
         newly_enabled = enabled_events_after - current_enabled_events
         disabled_events = current_enabled_events - enabled_events_after
         newly_enabled_nominal_reentry_events = (
@@ -1727,26 +2417,11 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
         newly_cca_admissible_goal_recovery_events = (
             cca_goal_recovery_events_after - current_cca_goal_recovery_events
         )
-        newly_admissible_goal_recovery_events = (
-            admissible_goal_recovery_events_after
-            - current_admissible_goal_recovery_events
-        )
-        future_goal_evaluation_complete = bool(
-            evaluation.get("future_goal_evaluation_complete") is True
-        )
         realizer_events = _candidate_realizer_event_ids(
             candidate=candidate,
-            evaluation=evaluation,
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
         )
-        authored_delta_fields = set(
-            _candidate_authored_delta_fields(candidate, evaluation)
-        )
-        understood_effect_fields = authored_delta_fields & {
-            "held_part",
-            "part_holder_resource_jid",
-            "resource_state.location",
-            "part_state.location",
-        }
         continuation_enabled_events_before = current_enabled_events - realizer_events
         progressing_candidate = (
             remaining < current_unresolved and not introduced
@@ -1755,11 +2430,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
             and bool(newly_enabled)
         ) or (
             remaining == current_unresolved
-            and future_goal_evaluation_complete
-            and bool(newly_admissible_goal_recovery_events)
-        ) or (
-            remaining == current_unresolved
-            and future_goal_evaluation_complete
             and bool(newly_cca_admissible_goal_recovery_events)
         ) or (
             remaining == current_unresolved
@@ -1793,9 +2463,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
             ),
             "newly_enabled_recovery_event_ids": sorted(newly_enabled),
             "disabled_recovery_event_ids": sorted(disabled_events),
-            "understood_effect_fields": sorted(
-                understood_effect_fields
-            ),
             "cca_admissible_goal_recovery_event_ids_before": sorted(
                 current_cca_goal_recovery_events
             ),
@@ -1804,18 +2471,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
             ),
             "newly_cca_admissible_goal_recovery_event_ids": sorted(
                 newly_cca_admissible_goal_recovery_events
-            ),
-            "admissible_goal_recovery_event_ids_before": sorted(
-                current_admissible_goal_recovery_events
-            ),
-            "admissible_goal_recovery_event_ids_after": sorted(
-                admissible_goal_recovery_events_after
-            ),
-            "newly_admissible_goal_recovery_event_ids": sorted(
-                newly_admissible_goal_recovery_events
-            ),
-            "future_goal_evaluation_complete": (
-                future_goal_evaluation_complete
             ),
             "admissible_nominal_reentry_event_ids_after": sorted(
                 nominal_reentry_events_after
@@ -1839,9 +2494,6 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
         )
         evaluation["cca_admissible_goal_recovery_event_ids_after"] = sorted(
             cca_goal_recovery_events_after
-        )
-        evaluation["admissible_goal_recovery_event_ids_after"] = sorted(
-            admissible_goal_recovery_events_after
         )
         evaluation["admissible_nominal_reentry_event_ids_after"] = sorted(
             nominal_reentry_events_after
@@ -1880,42 +2532,14 @@ def _apply_neurosymbolic_comparison(  # noqa: C901
         if candidate not in obligation_preferred:
             candidate["selection_status"] = "dominated_open_obligations"
 
-    goal_enabled_preferred: list[dict[str, Any]] = []
-    for candidate in obligation_preferred:
-        candidate_events = set(
-            candidate.get("admissible_goal_recovery_event_ids_after") or []
-        )
-        dominators = [
-            other
-            for other in obligation_preferred
-            if other is not candidate
-            and set(
-                other.get("admissible_goal_recovery_event_ids_after") or []
-            )
-            > candidate_events
-        ]
-        candidate["dominated_by_candidate_ids"] = sorted(
-            {
-                str(other.get("candidate_id") or "")
-                for other in dominators
-                if str(other.get("candidate_id") or "")
-            }
-        )
-        if dominators:
-            candidate["selection_status"] = (
-                "dominated_goal_recovery_enabledness"
-            )
-        else:
-            goal_enabled_preferred.append(candidate)
-
     recovery_preferred: list[dict[str, Any]] = []
-    for candidate in goal_enabled_preferred:
+    for candidate in obligation_preferred:
         candidate_events = set(
             candidate.get("admissible_recovery_enabled_event_ids_after") or []
         )
         dominators = [
             other
-            for other in goal_enabled_preferred
+            for other in obligation_preferred
             if other is not candidate
             and set(other.get("admissible_recovery_enabled_event_ids_after") or [])
             > candidate_events
@@ -2079,6 +2703,15 @@ def _selection_revision_fingerprint(
     prepared_recovery_request: dict[str, Any],
     candidate_evaluations: list[dict[str, Any]],
 ) -> str:
+    descriptor_fingerprints = {
+        str(resource_jid): str(
+            dict(descriptor or {}).get("descriptor_fingerprint") or ""
+        )
+        for resource_jid, descriptor in _recovery_des_models(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+        ).items()
+    }
     safety_rule_fingerprints, live_dfa_fingerprints = (
         _selection_revision_cca_fingerprints(
             session_state=session_state,
@@ -2091,6 +2724,7 @@ def _selection_revision_fingerprint(
                 session_state=session_state,
                 prepared_recovery_request=prepared_recovery_request,
             ),
+            "recovery_des_model_fingerprints": descriptor_fingerprints,
             "safety_rule_fingerprints": safety_rule_fingerprints,
             "live_safety_dfa_state_fingerprints": live_dfa_fingerprints,
             "projected_safety_dfa_states": deepcopy(
@@ -2485,6 +3119,12 @@ def _append_pa_validation_stages(
         if str(row.get("validation_category") or "").strip()
         == SYNTAX_AND_GROUNDING_VALIDATION
     ]
+    transition_findings = [
+        deepcopy(row)
+        for row in findings
+        if str(row.get("validation_category") or "").strip()
+        != SYNTAX_AND_GROUNDING_VALIDATION
+    ]
     stages.append(
         recovery_validation_stage(
             validation_category=SYNTAX_AND_GROUNDING_VALIDATION,
@@ -2495,6 +3135,106 @@ def _append_pa_validation_stages(
             state_fingerprint=state_fingerprint,
         )
     )
+    stages.append(
+        recovery_validation_stage(
+            validation_category=TRANSITION_FEASIBILITY,
+            validator_role="PA",
+            validator_jid=product_jid,
+            status=(
+                "skipped"
+                if syntax_findings
+                else "rejected" if transition_findings else "passed"
+            ),
+            findings=transition_findings,
+            state_fingerprint=state_fingerprint,
+        )
+    )
+
+
+def _ra_snapshot_staleness_findings(
+    *,
+    task: dict[str, Any],
+    snapshot: dict[str, Any],
+    session_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    resource_jid = _shared._task_resource_jid(task)
+    if any(
+        isinstance(row, dict)
+        and _shared._task_resource_jid(row) == resource_jid
+        for row in (session_state.get("accepted_outline_prefix") or [])
+    ):
+        return []
+    start_state = dict(task.get("expected_start_state") or {})
+    occupancy = dict(snapshot.get("occupancy") or {})
+    actual_by_field = {
+        "resource_state": (
+            snapshot.get("resource_state")
+            if "resource_state" in snapshot
+            else snapshot.get("current_state")
+        ),
+        "resource_location": (
+            snapshot.get("resource_location")
+            if "resource_location" in snapshot
+            else snapshot.get("current_location")
+            if "current_location" in snapshot
+            else occupancy.get("location")
+        ),
+        "held_part": snapshot.get("held_part"),
+    }
+    mismatches = [
+        {
+            "field": field_name,
+            "expected": deepcopy(start_state.get(field_name)),
+            "actual": deepcopy(actual_by_field.get(field_name)),
+        }
+        for field_name in ("resource_state", "resource_location", "held_part")
+        if field_name in start_state
+        and actual_by_field.get(field_name) != start_state.get(field_name)
+    ]
+    if not mismatches:
+        return []
+    return [
+        _shared.annotate_validation_finding(
+            {
+                "task_id": str(task.get("outline_id") or "").strip(),
+                "resource_jid": _shared._task_resource_jid(task) or None,
+                "part_name": _shared._task_part_name(task) or None,
+                "validation_category": TRANSITION_FEASIBILITY,
+                "constraint_owner": "product",
+                "constraint_family": "transition_staleness",
+                "constraint_code": "validation_state_stale",
+                "reason": "ResourceAgent live state changed after the PA projection.",
+                "evidence": {"mismatches": mismatches},
+                "retriable": True,
+            }
+        )
+    ]
+
+
+def _verified_recovery_des_model(
+    *,
+    ra_reply: dict[str, Any],
+    expected_fingerprint: str = "",
+) -> tuple[dict[str, Any], str]:
+    """Verify one live RA descriptor without changing any formal token."""
+    recovery_des_model = dict(ra_reply.get("recovery_des_model") or {})
+    reply_fingerprint = str(
+        ra_reply.get("recovery_des_model_fingerprint") or ""
+    ).strip()
+    descriptor_payload = deepcopy(recovery_des_model)
+    embedded_fingerprint = str(
+        descriptor_payload.pop("descriptor_fingerprint", "") or ""
+    ).strip()
+    if (
+        not recovery_des_model
+        or not reply_fingerprint
+        or reply_fingerprint != embedded_fingerprint
+        or reply_fingerprint != recovery_validation_fingerprint(descriptor_payload)
+    ):
+        raise RuntimeError("ResourceAgent recovery DES descriptor is unavailable or invalid")
+    if expected_fingerprint and reply_fingerprint != str(expected_fingerprint).strip():
+        raise RuntimeError("ResourceAgent recovery DES descriptor fingerprint changed")
+    return recovery_des_model, reply_fingerprint
 
 
 async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
@@ -2516,6 +3256,8 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         "surface_events": deepcopy(surface_events),
         "event_count": len(surface_events),
         "action_horizon": action_horizon,
+        "recovery_des_models": {},
+        "recovery_des_model_fingerprints": {},
     }
     if surface_events:
         evaluation["surface_task"] = deepcopy(surface_events[0])
@@ -2559,13 +3301,6 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             state_fingerprint=state_fingerprint,
         )
         resource_jid = _shared._task_resource_jid(task)
-        validation_stages.append(
-            _skipped_validation_stage(
-                category=TRANSITION_FEASIBILITY,
-                role="RA",
-                jid=resource_jid,
-            )
-        )
         validation_stages.append(
             _skipped_validation_stage(
                 category=PHYSICAL_FEASIBILITY,
@@ -2670,13 +3405,6 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             resource_jid = _shared._task_resource_jid(validated_task)
             validation_stages.append(
                 _skipped_validation_stage(
-                    category=TRANSITION_FEASIBILITY,
-                    role="RA",
-                    jid=resource_jid,
-                )
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
                     category=PHYSICAL_FEASIBILITY,
                     role="RA",
                     jid=resource_jid,
@@ -2739,30 +3467,53 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             )
             if ra_result is None:
                 raise RuntimeError("ResourceAgent reply omitted the candidate result")
+            ra_snapshot = dict(ra_reply.get("snapshot") or {})
+            snapshot_fingerprint = str(
+                ra_reply.get("snapshot_fingerprint") or ""
+            ).strip()
+            if not snapshot_fingerprint or snapshot_fingerprint != (
+                recovery_validation_fingerprint(ra_snapshot)
+            ):
+                raise RuntimeError("ResourceAgent reply snapshot fingerprint is invalid")
+            expected_recovery_des_model_fingerprint = str(
+                dict(
+                    _recovery_des_models(
+                        session_state=session_state,
+                        prepared_recovery_request=prepared_recovery_request,
+                    ).get(resource_jid)
+                    or {}
+                ).get("descriptor_fingerprint")
+                or ""
+            ).strip()
+            recovery_des_model, recovery_des_model_fingerprint = (
+                _verified_recovery_des_model(
+                    ra_reply=ra_reply,
+                    expected_fingerprint=expected_recovery_des_model_fingerprint,
+                )
+            )
+            evaluation["recovery_des_models"][resource_jid] = deepcopy(
+                recovery_des_model
+            )
+            evaluation["recovery_des_model_fingerprints"][resource_jid] = (
+                recovery_des_model_fingerprint
+            )
         except Exception as exc:  # noqa: BLE001 - validator transport must fail closed
             ra_finding = _unavailable_validation_finding(
                 task=validated_task,
-                validation_category=TRANSITION_FEASIBILITY,
+                validation_category=PHYSICAL_FEASIBILITY,
                 validator_role="RA",
                 constraint_code="resource_validation_unavailable",
                 reason=str(exc),
             )
             validation_stages.append(
                 recovery_validation_stage(
-                    validation_category=TRANSITION_FEASIBILITY,
+                    validation_category=PHYSICAL_FEASIBILITY,
                     validator_role="RA",
                     validator_jid=resource_jid,
                     status="unavailable",
                     findings=[ra_finding],
                     latency_ms=(time.perf_counter() - ra_started_at) * 1000.0,
                     state_fingerprint=state_fingerprint,
-                )
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=PHYSICAL_FEASIBILITY,
-                    role="RA",
-                    jid=resource_jid,
                 )
             )
             validation_stages.append(
@@ -2774,62 +3525,9 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             evaluation["failed_event_index"] = event_index
             return evaluation
 
-        transition_findings = [
+        ra_findings = [
             _shared.annotate_validation_finding(row)
-            for row in (ra_result.get("transition_findings") or [])
-            if isinstance(row, dict)
-        ]
-        validation_stages.append(
-            recovery_validation_stage(
-                validation_category=TRANSITION_FEASIBILITY,
-                validator_role="RA",
-                validator_jid=str(ra_reply.get("validator_jid") or resource_jid),
-                status=(
-                    "passed"
-                    if bool(
-                        dict(
-                            ra_result.get("transition_feasibility") or {}
-                        ).get("allowed")
-                    )
-                    else "rejected"
-                ),
-                findings=transition_findings,
-                request_id=str(ra_reply.get("request_id") or ""),
-                latency_ms=ra_reply.get("latency_ms"),
-                state_fingerprint=state_fingerprint,
-                mocked=bool(ra_reply.get("mocked")),
-            )
-        )
-        if transition_findings or not bool(
-            dict(ra_result.get("transition_feasibility") or {}).get(
-                "allowed"
-            )
-        ):
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=PHYSICAL_FEASIBILITY,
-                    role="RA",
-                    jid=resource_jid,
-                    mocked=bool(ra_reply.get("mocked")),
-                )
-            )
-            validation_stages.append(
-                _skipped_validation_stage(
-                    category=SAFETY,
-                    role="CCA",
-                    jid=cca_jid,
-                    mocked=bool(ra_reply.get("mocked")),
-                )
-            )
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(transition_findings)
-            evaluation["validation_stages"] = deepcopy(validation_stages)
-            evaluation["failed_event_index"] = event_index
-            return evaluation
-
-        physical_findings = [
-            _shared.annotate_validation_finding(row)
-            for row in (ra_result.get("physical_findings") or [])
+            for row in (ra_result.get("findings") or [])
             if isinstance(row, dict)
         ]
         validation_stages.append(
@@ -2837,25 +3535,16 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 validation_category=PHYSICAL_FEASIBILITY,
                 validator_role="RA",
                 validator_jid=str(ra_reply.get("validator_jid") or resource_jid),
-                status=(
-                    "passed"
-                    if bool(
-                        dict(
-                            ra_result.get("physical_feasibility") or {}
-                        ).get("allowed")
-                    )
-                    else "rejected"
-                ),
-                findings=physical_findings,
+                status="passed" if bool(ra_result.get("allowed")) else "rejected",
+                findings=ra_findings,
                 request_id=str(ra_reply.get("request_id") or ""),
                 latency_ms=ra_reply.get("latency_ms"),
                 state_fingerprint=state_fingerprint,
+                snapshot_fingerprint=str(ra_reply.get("snapshot_fingerprint") or ""),
                 mocked=bool(ra_reply.get("mocked")),
             )
         )
-        if physical_findings or not bool(
-            dict(ra_result.get("physical_feasibility") or {}).get("allowed")
-        ):
+        if ra_findings or not bool(ra_result.get("allowed")):
             validation_stages.append(
                 _skipped_validation_stage(
                     category=SAFETY,
@@ -2865,36 +3554,44 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 )
             )
             evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(physical_findings)
+            evaluation["validation_findings"] = deepcopy(ra_findings)
             evaluation["validation_stages"] = deepcopy(validation_stages)
             evaluation["failed_event_index"] = event_index
             return evaluation
 
-        transition_feasibility = dict(
-            ra_result.get("transition_feasibility") or {}
+        stale_findings = _ra_snapshot_staleness_findings(
+            task=validated_task,
+            snapshot=ra_snapshot,
+            session_state=working_session_state,
         )
-        calculated_successor = deepcopy(
-            dict(
-                transition_feasibility.get("calculated_successor")
-                or {}
+        if stale_findings:
+            validation_stages.append(
+                recovery_validation_stage(
+                    validation_category=TRANSITION_FEASIBILITY,
+                    validator_role="PA",
+                    validator_jid=product_jid,
+                    status="rejected",
+                    findings=stale_findings,
+                    state_fingerprint=state_fingerprint,
+                    snapshot_fingerprint=str(
+                        ra_reply.get("snapshot_fingerprint") or ""
+                    ),
+                    mocked=bool(ra_reply.get("mocked")),
+                )
             )
-        )
-        resource_validated_task = deepcopy(validated_task)
-        resource_validated_task["expected_end_state"] = deepcopy(
-            calculated_successor
-        )
-        atomic_transitions = [
-            deepcopy(transition_row)
-            for transition_row in (
-                ra_result.get("_cca_atomic_transitions") or []
+            validation_stages.append(
+                _skipped_validation_stage(category=SAFETY, role="CCA", jid=cca_jid)
             )
-            if isinstance(transition_row, dict)
-        ]
+            evaluation["valid"] = False
+            evaluation["validation_findings"] = deepcopy(stale_findings)
+            evaluation["validation_stages"] = deepcopy(validation_stages)
+            evaluation["failed_event_index"] = event_index
+            return evaluation
+
         safety_input = build_recovery_safety_validation_input(
-            task=resource_validated_task,
+            task=validated_task,
             session_state=working_session_state,
             prepared_recovery_request=prepared_recovery_request,
-            calculated_successor=calculated_successor,
         )
         nominal_reentry_events = _nominal_reentry_event_rows(
             session_state=working_session_state,
@@ -2909,19 +3606,35 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             for row in nominal_reentry_events
             if str(row.get("event_id") or "")
         ]
+        goal_recovery_events = _goal_relevant_recovery_event_rows(
+            session_state=working_session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            unresolved_condition_ids=_unresolved_condition_ids(
+                session_state=working_session_state,
+                prepared_recovery_request=prepared_recovery_request,
+            ),
+        )
+        safety_input.setdefault("llm_input", {})["goal_recovery_events"] = [
+            {
+                "event_id": str(row.get("event_id") or ""),
+                "task": deepcopy(row.get("task") or {}),
+                "signature": deepcopy(row.get("signature") or {}),
+            }
+            for row in goal_recovery_events
+            if str(row.get("event_id") or "")
+        ]
         safety_request = {
             "recovery_session_id": recovery_session_id,
             "turn_index": turn_index,
             "candidate_index": candidate_index,
             "state_fingerprint": state_fingerprint,
-            "candidate_task": deepcopy(resource_validated_task),
+            "candidate_task": deepcopy(validated_task),
             "grounded_action": deepcopy(grounded_action or {}),
             "candidates": [
                 {
                     "candidate_index": candidate_index,
-                    "task": deepcopy(resource_validated_task),
+                    "task": deepcopy(validated_task),
                     "safety_input": safety_input,
-                    "_cca_atomic_transitions": atomic_transitions,
                     **(
                         {
                             "safety_dfa_states_before": deepcopy(
@@ -3056,6 +3769,9 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 request_id=str(cca_reply.get("request_id") or ""),
                 latency_ms=cca_reply.get("latency_ms"),
                 state_fingerprint=state_fingerprint,
+                snapshot_fingerprint=str(
+                    cca_reply.get("safety_rule_fingerprint") or ""
+                ),
                 mocked=bool(cca_reply.get("mocked")),
             )
         )
@@ -3147,7 +3863,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         )
 
         committed_event = _shared._commit_selected_candidate_task(
-            task=dict(resource_validated_task or {}),
+            task=dict(validated_task or {}),
             sequence_index=sequence_index + event_index,
         )
         accepted_prefix = list(working_session_state.get("accepted_outline_prefix") or [])
@@ -3158,7 +3874,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             committed_event,
             working_session_state,
         )
-        validated_events.append(deepcopy(resource_validated_task))
+        validated_events.append(deepcopy(validated_task))
         committed_events.append(deepcopy(committed_event))
 
     remaining_findings, remaining_conditions = _shared._remaining_blocked_issue_counts(
@@ -4059,18 +4775,17 @@ async def _handle_outline_phase(
     return decision, turn_entry
 
 
-def _modeled_candidate_row(instance: dict[str, Any]) -> dict[str, Any]:
+def _modeled_candidate_row(task: dict[str, Any]) -> dict[str, Any]:
     """Keep the same candidate surface used for LLM-authored bridge actions."""
-    task = dict(instance.get("task") or {})
-    event_id = str(instance.get("event_id") or "").strip()
     row = {
-        "outline_id": str(task.get("outline_id") or event_id).strip(),
-        "event_name": deepcopy(task.get("event_name")),
-        "resource_jid": deepcopy(task.get("resource_jid")),
-        "expected_end_state": deepcopy(task.get("expected_end_state") or {}),
-        "rationale": str(
-            task.get("rationale") or "Configured enabled continuation."
-        ),
+        key: deepcopy(task.get(key))
+        for key in (
+            "outline_id",
+            "event_name",
+            "resource_jid",
+            "expected_end_state",
+            "rationale",
+        )
     }
     part_name = str(task.get("part_name") or "").strip()
     if part_name:
@@ -4083,7 +4798,7 @@ def _attach_modeled_task_steps(
     session_state: dict[str, Any],
     turn_entry: dict[str, Any],
     instance_by_outline_id: dict[str, dict[str, Any]],
-) -> str:
+) -> None:
     selected_candidate = dict(turn_entry.get("selected_candidate_task") or {})
     source_outline_id = str(selected_candidate.get("outline_id") or "").strip()
     instance = dict(instance_by_outline_id.get(source_outline_id) or {})
@@ -4092,11 +4807,8 @@ def _attach_modeled_task_steps(
         for row in (instance.get("recovery_visible_steps") or [])
         if isinstance(row, dict)
     ]
-    candidate_source = (
-        "robot_task_program"
-        if modeled_task_steps
-        else "configured_capability"
-    )
+    if not modeled_task_steps:
+        return
 
     selected_outline_ids = {
         str(row.get("outline_id") or "").strip()
@@ -4108,28 +4820,17 @@ def _attach_modeled_task_steps(
             continue
         if str(row.get("outline_id") or "").strip() not in selected_outline_ids:
             continue
-        row["candidate_source"] = candidate_source
-        row["llm_called"] = False
-        if modeled_task_steps:
-            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
-    for key in (
-        "selected_candidate_task",
-        "selected_transition",
-        "next_transition",
-    ):
+        row["candidate_source"] = "robot_task_program"
+        row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+    for key in ("selected_transition", "next_transition"):
         row = turn_entry.get(key)
         if isinstance(row, dict):
-            row["candidate_source"] = candidate_source
-            row["llm_called"] = False
-            if modeled_task_steps:
-                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
+            row["candidate_source"] = "robot_task_program"
+            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
     for row in turn_entry.get("selected_transition_sequence") or []:
         if isinstance(row, dict):
-            row["candidate_source"] = candidate_source
-            row["llm_called"] = False
-            if modeled_task_steps:
-                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
-    return candidate_source
+            row["candidate_source"] = "robot_task_program"
+            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
 
 
 async def _try_handle_modeled_continuation(
@@ -4160,18 +4861,13 @@ async def _try_handle_modeled_continuation(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    enabledness = await _agent_filtered_recovery_enabledness(
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
-        unresolved_condition_ids=unresolved_condition_ids,
-        planner=planner,
-    )
-    admissible_ids = set(enabledness.get("admissible_event_ids") or [])
     instances = [
         row
-        for row in (enabledness.get("enabled_capability_results") or [])
-        if isinstance(row, dict)
-        and str(row.get("event_id") or "") in admissible_ids
+        for row in _symbolically_enabled_recovery_event_instances(
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            unresolved_condition_ids=unresolved_condition_ids,
+        )
         if str(row.get("resource_jid") or "").strip()
         == binding["resource_jid"]
         and str(row.get("part_name") or "").strip() == binding["part_name"]
@@ -4185,17 +4881,15 @@ async def _try_handle_modeled_continuation(
         int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND),
     )
     instances = instances[:candidate_bound]
-    modeled_candidates = [
-        _modeled_candidate_row(dict(instance)) for instance in instances
-    ]
-    parsed_response = {"candidate_events": modeled_candidates}
+    parsed_response = {
+        "candidate_events": [
+            _modeled_candidate_row(dict(instance.get("task") or {}))
+            for instance in instances
+        ]
+    }
     instance_by_outline_id = {
-        str(candidate.get("outline_id") or "").strip(): instance
-        for candidate, instance in zip(
-            modeled_candidates,
-            instances,
-            strict=True,
-        )
+        str(dict(instance.get("task") or {}).get("outline_id") or "").strip(): instance
+        for instance in instances
     }
     working_state = deepcopy(session_state)
     configured_candidate_count = working_state.get("candidate_count", "auto")
@@ -4209,37 +4903,14 @@ async def _try_handle_modeled_continuation(
     if decision not in {"need_next_task", "outline_ready"}:
         session_state["modeled_continuation_binding"] = {}
         return None
-    selection_evidence = dict(turn_entry.get("selection_evidence") or {})
-    unique_nondominated = (
-        len(turn_entry.get("nondominated_candidate_ids") or []) == 1
-        and dict(turn_entry.get("tie_representative_evidence") or {}).get(
-            "used"
-        )
-        is not True
-    )
-    goal_advancing = bool(
-        selection_evidence.get("cleared_recovery_obligation_ids")
-        or selection_evidence.get(
-            "newly_admissible_goal_recovery_event_ids"
-        )
-        or selection_evidence.get(
-            "newly_cca_admissible_goal_recovery_event_ids"
-        )
-        or selection_evidence.get(
-            "newly_enabled_nominal_reentry_event_ids"
-        )
-    )
-    if not unique_nondominated or not goal_advancing:
-        session_state["modeled_continuation_binding"] = {}
-        return None
 
-    candidate_source = _attach_modeled_task_steps(
+    _attach_modeled_task_steps(
         session_state=working_state,
         turn_entry=turn_entry,
         instance_by_outline_id=instance_by_outline_id,
     )
     working_state["candidate_count"] = configured_candidate_count
-    turn_entry["candidate_source"] = candidate_source
+    turn_entry["candidate_source"] = "robot_task_program"
     turn_entry["llm_called"] = False
     session_state.clear()
     session_state.update(working_state)

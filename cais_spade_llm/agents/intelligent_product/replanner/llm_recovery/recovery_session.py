@@ -1105,21 +1105,14 @@ class RecoverySessionMixin:
         default_resource_state: str,
         part_states: dict[str, Any],
         part_locations: dict[str, Any],
-        part_context_entries: dict[str, Any] | None = None,
-    ) -> tuple[
-        list[dict[str, Any]] | None,
-        dict[str, Any] | None,
-        dict[str, dict[str, Any]],
-    ]:
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, dict[str, dict[str, Any]]]:
         focused_resource = self._resource_by_jid(target_jid)
         if focused_resource is None:
-            raise RuntimeError(
-                "Responsible Resource Agent is unavailable before LLM generation: "
-                f"{target_jid}"
-            )
+            return None, None, {}
 
         from cais_spade_llm.resources.resource_primitives import (
             build_execution_primitive_catalog,
+            build_recovery_des_model,
             build_synthesis_primitive_catalog,
         )
         from cais_spade_llm.resources.robot.robot_primitives import (
@@ -1129,31 +1122,6 @@ class RecoverySessionMixin:
         focused_primitive_catalog: list[dict[str, Any]] | None = None
         focused_recovery_snapshot: dict[str, Any] | None = None
         recovery_resources: dict[str, dict[str, Any]] = {}
-        part_contexts: list[dict[str, Any]] = []
-        for part_name in sorted(
-            {
-                str(raw_part_name or "").strip()
-                for raw_part_name in (
-                    list(part_states)
-                    + list(part_locations)
-                    + list(part_context_entries or {})
-                )
-                if str(raw_part_name or "").strip()
-            }
-        ):
-            raw_context = dict(
-                dict(part_context_entries or {}).get(part_name) or {}
-            )
-            raw_context["part_name"] = part_name
-            raw_context.setdefault(
-                "part_state",
-                deepcopy(part_states.get(part_name)),
-            )
-            raw_context.setdefault(
-                "part_location",
-                deepcopy(part_locations.get(part_name)),
-            )
-            part_contexts.append(raw_context)
 
         try:
             for resource in self.resource_agents:
@@ -1189,100 +1157,6 @@ class RecoverySessionMixin:
                     resource_type=resource_type,
                     snapshot=raw_recovery_snapshot,
                     modeled_state=modeled_state,
-                )
-                projection_method = getattr(
-                    resource,
-                    "public_capability_state_projections",
-                    None,
-                )
-                if not callable(projection_method):
-                    raise RuntimeError(
-                        "Resource Agent public capability-state projection is "
-                        f"unavailable for {resource_jid}"
-                    )
-                projection_value = await asyncio.to_thread(
-                    projection_method,
-                    resource_snapshot=deepcopy(recovery_snapshot),
-                    part_contexts=deepcopy(part_contexts),
-                )
-                public_capability_state_projections = [
-                    deepcopy(row)
-                    for row in (projection_value or [])
-                    if isinstance(row, dict)
-                ]
-                if not public_capability_state_projections:
-                    raise RuntimeError(
-                        "Resource Agent public capability-state projection is "
-                        f"empty for {resource_jid}"
-                    )
-                state_values_method = getattr(
-                    resource,
-                    "public_state_values",
-                    None,
-                )
-                if not callable(state_values_method):
-                    raise RuntimeError(
-                        "Resource Agent public state values are "
-                        f"unavailable for {resource_jid}"
-                    )
-                state_values_value = await asyncio.to_thread(
-                    state_values_method,
-                    resource_snapshot=deepcopy(recovery_snapshot),
-                    part_contexts=deepcopy(part_contexts),
-                )
-                public_state_values = (
-                    deepcopy(state_values_value)
-                    if isinstance(state_values_value, dict)
-                    else {}
-                )
-                if not dict(public_state_values.get("state_values") or {}):
-                    raise RuntimeError(
-                        "Resource Agent public state values are "
-                        f"empty for {resource_jid}"
-                    )
-                locations_method = getattr(
-                    resource,
-                    "public_locations",
-                    None,
-                )
-                if not callable(locations_method):
-                    raise RuntimeError(
-                        "Resource Agent public locations are "
-                        f"unavailable for {resource_jid}"
-                    )
-                locations_value = await asyncio.to_thread(
-                    locations_method,
-                    resource_snapshot=deepcopy(recovery_snapshot),
-                    part_contexts=deepcopy(part_contexts),
-                )
-                public_locations = (
-                    deepcopy(locations_value)
-                    if isinstance(locations_value, dict)
-                    else {}
-                )
-                if not str(public_locations.get("resource_jid") or "").strip():
-                    raise RuntimeError(
-                        "Resource Agent public locations are "
-                        f"malformed for {resource_jid}"
-                    )
-                action_target_method = getattr(
-                    resource,
-                    "public_action_target",
-                    None,
-                )
-                if not callable(action_target_method):
-                    raise RuntimeError(
-                        "Resource Agent public action_target is "
-                        f"unavailable for {resource_jid}"
-                    )
-                action_target_value = await asyncio.to_thread(
-                    action_target_method,
-                    resource_snapshot=deepcopy(recovery_snapshot),
-                )
-                public_action_target = (
-                    deepcopy(action_target_value)
-                    if isinstance(action_target_value, dict)
-                    else {}
                 )
                 execution_catalog_method = getattr(
                     resource,
@@ -1323,33 +1197,34 @@ class RecoverySessionMixin:
                     resource_type,
                     primitive_catalog=execution_primitive_catalog,
                 )
-                recovery_visible_static_capabilities = {
-                    str(key): deepcopy(value)
-                    for key, value in static_capabilities.items()
-                    if str(key)
-                    not in {
-                        "state_variables",
-                        "events",
-                    }
-                }
+                recovery_des_model_method = getattr(resource, "recovery_des_model", None)
+                if callable(recovery_des_model_method):
+                    recovery_des_model = await asyncio.to_thread(
+                        recovery_des_model_method,
+                        snapshot=recovery_snapshot,
+                    )
+                else:
+                    recovery_des_model = build_recovery_des_model(
+                        resource,
+                        snapshot=recovery_snapshot,
+                    )
                 recovery_resources[resource_jid] = {
                     "resource_jid": resource_jid,
                     "resource_type": resource_type,
                     "recovery_adapter": adapter_capabilities,
                     "primitive_catalog": primitive_catalog,
                     "execution_primitive_catalog": execution_primitive_catalog,
+                    "recovery_des_model": deepcopy(recovery_des_model),
+                    "recovery_des_model_fingerprint": str(
+                        dict(recovery_des_model or {}).get("descriptor_fingerprint")
+                        or ""
+                    ),
                     "recovery_snapshot": recovery_snapshot or {},
                     "resource_core": deepcopy(recovery_snapshot.get("resource_core") or {}),
                     "resource_facets": deepcopy(recovery_snapshot.get("resource_facets") or {}),
                     "modeled_state": modeled_state,
                     "pending_tasks": deepcopy(self._pending_resource_tasks(resource_jid)),
-                    "static_capabilities": recovery_visible_static_capabilities,
-                    "public_capability_state_projections": (
-                        public_capability_state_projections
-                    ),
-                    "public_state_values": public_state_values,
-                    "public_locations": public_locations,
-                    "public_action_target": public_action_target,
+                    "static_capabilities": static_capabilities,
                 }
                 if resource_jid == target_jid:
                     focused_primitive_catalog = (
@@ -1360,15 +1235,12 @@ class RecoverySessionMixin:
                     focused_recovery_snapshot = recovery_snapshot or None
 
             return focused_primitive_catalog, focused_recovery_snapshot, recovery_resources
-        except Exception as exc:
+        except Exception:
             self.logger.exception(
                 "[Planner] Failed to build whole-system primitive recovery context for %s",
                 target_jid,
             )
-            raise RuntimeError(
-                "Resource Agent recovery context is unavailable before LLM "
-                "generation"
-            ) from exc
+            return None, None, {}
 
     def _recovery_effective_part_facts(
         self,
@@ -2953,7 +2825,6 @@ class RecoverySessionMixin:
             default_resource_state=str(default_resource_state or "").strip(),
             part_states=deepcopy(part_states),
             part_locations=deepcopy(part_locations),
-            part_context_entries=deepcopy(part_tracker),
         )
         recovery_resources = self._trim_pending_tasks(
             recovery_resources=deepcopy(recovery_resources or {}),

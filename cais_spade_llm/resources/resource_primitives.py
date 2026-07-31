@@ -6,12 +6,17 @@ import inspect
 from copy import deepcopy
 from typing import Any
 
+from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
+    recovery_resource_adapter,
+)
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    recovery_validation_fingerprint,
+)
 from cais_spade_llm.function_analyzer import FunctionAnalyzer
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile_for_agent,
     resource_event_fact_contract,
     resource_snapshot_availability,
-    resource_snapshot_carried_entity_location,
     resource_snapshot_field_value,
 )
 
@@ -22,7 +27,6 @@ def primitive_summary(
     preconditions: dict[str, Any],
     effects: dict[str, Any],
 ) -> str:
-    """Return a compact description of one recovery primitive."""
     base = description or "Recovery primitive"
     pre_keys = ", ".join(sorted(str(key) for key in preconditions)) if preconditions else ""
     effect_keys = ", ".join(sorted(str(key) for key in effects)) if effects else ""
@@ -107,10 +111,6 @@ def _resource_type_for_agent(
     *,
     snapshot: dict[str, Any] | None = None,
 ) -> str:
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
-        recovery_resource_adapter,
-    )
-
     static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
     return recovery_resource_adapter.resolve_recovery_resource_type(
         resource=resource_agent,
@@ -207,6 +207,158 @@ def build_primitive_catalog(resource_agent: Any) -> list[dict[str, Any]]:
     return build_execution_primitive_catalog(resource_agent)
 
 
+def _descriptor_domain_values(*values: Any) -> list[Any]:
+    """Return stable exact values for one finite EFA variable declaration."""
+    unique: dict[str, Any] = {}
+    for value in values:
+        key = recovery_validation_fingerprint(value)
+        unique.setdefault(key, deepcopy(value))
+    return [unique[key] for key in sorted(unique)]
+
+
+def build_recovery_des_model(
+    resource_agent: Any,
+    *,
+    snapshot: dict[str, Any] | None = None,
+    descriptor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and bind an explicit RA-owned recovery-level DES descriptor.
+
+    The base resource never derives a DES alphabet from execution primitives.
+    Resource subclasses may pass a task-level descriptor, while simpler
+    resources may declare one under ``static_capabilities.recovery_des_model``.
+    Missing or malformed descriptors fail closed.
+    """
+    if resource_agent is None:
+        return {}
+    live_snapshot = (
+        deepcopy(snapshot)
+        if isinstance(snapshot, dict)
+        else get_resource_recovery_snapshot(resource_agent)
+    )
+    static_capabilities = deepcopy(
+        getattr(resource_agent, "static_capabilities", {}) or {}
+    )
+    raw_descriptor = deepcopy(
+        descriptor
+        if isinstance(descriptor, dict)
+        else static_capabilities.get("recovery_des_model") or {}
+    )
+    raw_state_variables = raw_descriptor.get("state_variables")
+    raw_events = raw_descriptor.get("events")
+    if not isinstance(raw_state_variables, dict) or not isinstance(raw_events, list):
+        return {}
+
+    state_variables: dict[str, dict[str, Any]] = {}
+    current_valuation: dict[str, Any] = {}
+    configured_valuation = dict(raw_descriptor.get("current_valuation") or {})
+    for raw_field_name in sorted(raw_state_variables):
+        field_name = str(raw_field_name or "").strip()
+        declaration = raw_state_variables.get(raw_field_name)
+        if not field_name or not isinstance(declaration, dict):
+            return {}
+        scope = str(declaration.get("scope") or "resource").strip()
+        domain = declaration.get("domain")
+        if scope not in {"resource", "part"} or not isinstance(domain, list):
+            return {}
+        snapshot_field = {
+            "resource_state": "current_state",
+            "resource_location": "current_location",
+        }.get(field_name, field_name)
+        if field_name in live_snapshot:
+            current_value = deepcopy(live_snapshot.get(field_name))
+        elif snapshot_field in live_snapshot:
+            current_value = deepcopy(live_snapshot.get(snapshot_field))
+        else:
+            current_value = deepcopy(configured_valuation.get(field_name))
+        state_variables[field_name] = {
+            "scope": scope,
+            "domain": _descriptor_domain_values(
+                current_value,
+                *domain,
+            ),
+        }
+        if declaration.get("private") is True:
+            state_variables[field_name]["private"] = True
+        if scope == "resource":
+            current_valuation[field_name] = current_value
+
+    events: list[dict[str, Any]] = []
+    for raw_event in raw_events:
+        if not isinstance(raw_event, dict):
+            return {}
+        event_name = str(raw_event.get("event_name") or "").strip()
+        guards = raw_event.get("guards") or {}
+        updates = raw_event.get("updates") or {}
+        if (
+            not event_name
+            or not isinstance(guards, dict)
+            or not isinstance(updates, dict)
+            or any(field_name not in state_variables for field_name in guards)
+            or any(field_name not in state_variables for field_name in updates)
+            or any(not isinstance(value, dict) for value in guards.values())
+            or any(not isinstance(value, dict) for value in updates.values())
+        ):
+            return {}
+        event = {
+            "event_name": event_name,
+            "controllable": bool(raw_event.get("controllable", True)),
+            "observable": bool(raw_event.get("observable", True)),
+            "guards": deepcopy(guards),
+            "updates": deepcopy(updates),
+        }
+        for key in (
+            "parameter_bindings",
+            "requires_part_binding",
+            "recovery_visible_steps",
+            "source",
+        ):
+            if key in raw_event:
+                event[key] = deepcopy(raw_event.get(key))
+        events.append(event)
+    if not events:
+        return {}
+
+    resource_jid = str(
+        getattr(resource_agent, "jid", "")
+        or live_snapshot.get("resource_jid")
+        or live_snapshot.get("agent_name")
+        or ""
+    ).strip()
+    bound_descriptor = {
+        "model_type": "extended_finite_automaton",
+        "resource_jid": resource_jid,
+        "state_variables": state_variables,
+        "current_valuation": current_valuation,
+        "local_event_alphabet": [row["event_name"] for row in events],
+        "controllable_event_alphabet": [
+            row["event_name"] for row in events if row["controllable"]
+        ],
+        "observable_event_alphabet": [
+            row["event_name"] for row in events if row["observable"]
+        ],
+        "events": events,
+        "marked_state_conditions": deepcopy(
+            raw_descriptor.get("marked_state_conditions")
+            or static_capabilities.get("recovery_marked_state_conditions")
+            or []
+        ),
+    }
+    bound_descriptor["descriptor_fingerprint"] = recovery_validation_fingerprint(
+        bound_descriptor
+    )
+    return bound_descriptor
+
+
+def recovery_des_declared_state_fields(descriptor: dict[str, Any] | None) -> set[str]:
+    """Return exact transition-state fields declared by one RA descriptor."""
+    return {
+        str(field_name)
+        for field_name in dict((descriptor or {}).get("state_variables") or {})
+        if str(field_name)
+    }
+
+
 def build_primitive_reference_card(primitive_catalog: list[dict[str, Any]] | None) -> str:
     """Render a compact human-readable reference card for prompt builders."""
     lines: list[str] = []
@@ -217,9 +369,7 @@ def build_primitive_reference_card(primitive_catalog: list[dict[str, Any]] | Non
         description = str(entry.get("description") or entry.get("semantic_summary") or "").strip()
         params = dict(entry.get("params") or {})
         required = {
-            str(item).strip()
-            for item in (entry.get("required_params") or [])
-            if str(item).strip()
+            str(item).strip() for item in (entry.get("required_params") or []) if str(item).strip()
         }
         param_tokens: list[str] = []
         for param_name, schema in params.items():
@@ -263,10 +413,6 @@ def _execution_catalog_for_snapshot(resource_agent: Any) -> list[dict[str, Any]]
 
 def get_resource_recovery_snapshot(resource_agent: Any) -> dict[str, Any]:
     """Build the canonical recovery snapshot for a resource without recursion."""
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
-        recovery_resource_adapter,
-    )
-
     if resource_agent is None:
         return {}
     profile = get_resource_profile_for_agent(resource_agent)
@@ -281,13 +427,6 @@ def get_resource_recovery_snapshot(resource_agent: Any) -> dict[str, Any]:
         snapshot=raw_snapshot,
         modeled_state={},
     )
-    carried_entity_location = resource_snapshot_carried_entity_location(
-        resource_jid=resource_jid,
-        snapshot=adapted_resource,
-        profile=profile,
-    )
-    if carried_entity_location:
-        adapted_resource["carried_entity_location"] = carried_entity_location
     execution_catalog = _execution_catalog_for_snapshot(resource_agent)
     adapted_resource["recovery_adapter"] = (
         recovery_resource_adapter.recovery_resource_capabilities(
@@ -326,6 +465,7 @@ def sync_agent_from_recovery_snapshot(resource_agent: Any, snapshot: dict[str, A
 
 
 __all__ = [
+    "build_recovery_des_model",
     "build_execution_primitive_catalog",
     "build_primitive_catalog",
     "build_primitive_reference_card",
@@ -333,5 +473,6 @@ __all__ = [
     "filter_synthesis_primitive_catalog",
     "get_resource_recovery_snapshot",
     "primitive_summary",
+    "recovery_des_declared_state_fields",
     "sync_agent_from_recovery_snapshot",
 ]

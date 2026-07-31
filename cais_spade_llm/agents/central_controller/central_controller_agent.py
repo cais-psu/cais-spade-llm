@@ -1444,6 +1444,7 @@ class CentralControllerAgent(LlmAgent):
             for rule in self.safety_rules
             if isinstance(rule, dict) and str(rule.get("id", "")).strip()
         }
+        trigger_event = str((event or {}).get("function_name") or "").strip()
         trigger_resource = self.safety_monitor._resource_short_name(
             str((event or {}).get("resource_jid") or "").strip()
         )
@@ -2220,180 +2221,22 @@ class CentralControllerAgent(LlmAgent):
                     projected_dfa_states = candidate.get("safety_dfa_states_before")
                     if not isinstance(projected_dfa_states, dict):
                         projected_dfa_states = deepcopy(live_safety_dfa_states)
-                    atomic_transitions = [
-                        deepcopy(transition_row)
-                        for transition_row in (
-                            candidate.get("_cca_atomic_transitions")
-                            or validation_input.get("_cca_atomic_transitions")
-                            or []
-                        )
-                        if isinstance(transition_row, dict)
-                    ]
-                    if atomic_transitions:
-                        base_task = deepcopy(validation_input.get("task") or {})
-                        resource_jid = str(
-                            base_task.get("resource_jid") or ""
-                        ).strip()
-                        part_name = str(base_task.get("part_name") or "").strip()
-                        atomic_pre_resources = deepcopy(
+                    result = validate_outline_macro_recovery_safety(
+                        task=deepcopy(validation_input.get("task") or {}),
+                        signature=deepcopy(validation_input.get("signature") or {}),
+                        pre_resources=deepcopy(
                             validation_input.get("pre_resources") or {}
-                        )
-                        atomic_pre_parts = deepcopy(
-                            validation_input.get("pre_parts") or {}
-                        )
-                        atomic_dfa_states = deepcopy(projected_dfa_states)
-                        atomic_results: list[dict[str, Any]] = []
-                        aggregate_findings: list[dict[str, Any]] = []
-                        for transition_index, transition_row in enumerate(
-                            atomic_transitions
-                        ):
-                            atomic_task = deepcopy(base_task)
-                            atomic_task["event_name"] = str(
-                                transition_row.get("event_name") or ""
-                            )
-                            atomic_task["expected_start_state"] = deepcopy(
-                                transition_row.get("before") or {}
-                            )
-                            atomic_task["expected_end_state"] = deepcopy(
-                                transition_row.get("after") or {}
-                            )
-                            atomic_projected_resources = deepcopy(
-                                atomic_pre_resources
-                            )
-                            atomic_projected_parts = deepcopy(atomic_pre_parts)
-                            after = dict(transition_row.get("after") or {})
-                            resource_row = dict(
-                                atomic_projected_resources.get(resource_jid) or {}
-                            )
-                            resource_field_aliases = {
-                                "resource_state": "current_state",
-                                "resource_location": "current_location",
-                                "held_part": "held_part",
-                            }
-                            for state_field, row_field in (
-                                resource_field_aliases.items()
-                            ):
-                                if state_field in after:
-                                    resource_row[row_field] = deepcopy(
-                                        after.get(state_field)
-                                    )
-                            if resource_jid:
-                                atomic_projected_resources[resource_jid] = (
-                                    resource_row
-                                )
-                            part_row = dict(
-                                atomic_projected_parts.get(part_name) or {}
-                            )
-                            for state_field, row_field in (
-                                ("part_state", "current_state"),
-                                ("part_location", "current_location"),
-                            ):
-                                if state_field in after:
-                                    part_row[row_field] = deepcopy(
-                                        after.get(state_field)
-                                    )
-                            if part_name:
-                                if after.get("held_part") == part_name:
-                                    part_row["current_holder_resource_jid"] = (
-                                        resource_jid
-                                    )
-                                elif (
-                                    "held_part" in after
-                                    and after.get("held_part") is None
-                                    and part_row.get(
-                                        "current_holder_resource_jid"
-                                    )
-                                    == resource_jid
-                                ):
-                                    part_row["current_holder_resource_jid"] = None
-                                atomic_projected_parts[part_name] = part_row
-                            before = dict(transition_row.get("before") or {})
-                            atomic_signature = deepcopy(
-                                validation_input.get("signature") or {}
-                            )
-                            atomic_signature["inferable_primary_part"] = (
-                                part_name or None
-                            )
-                            atomic_signature["task_kind"] = (
-                                "part_handling"
-                                if part_name
-                                else "resource_action"
-                            )
-                            atomic_signature["changes_part_world"] = bool(
-                                part_name
-                                and any(
-                                    before.get(field_name)
-                                    != after.get(field_name)
-                                    for field_name in (
-                                        "held_part",
-                                        "part_state",
-                                        "part_location",
-                                    )
-                                )
-                            )
-                            atomic_result = (
-                                validate_outline_macro_recovery_safety(
-                                    task=atomic_task,
-                                    signature=atomic_signature,
-                                    pre_resources=atomic_pre_resources,
-                                    pre_parts=atomic_pre_parts,
-                                    projected_resources=(
-                                        atomic_projected_resources
-                                    ),
-                                    projected_parts=atomic_projected_parts,
-                                    llm_input=llm_input,
-                                    safety_dfa_states_before=atomic_dfa_states,
-                                )
-                            )
-                            atomic_result["atomic_transition_index"] = (
-                                transition_index
-                            )
-                            atomic_result["event_name"] = atomic_task["event_name"]
-                            atomic_results.append(atomic_result)
-                            aggregate_findings.extend(
-                                deepcopy(atomic_result.get("findings") or [])
-                            )
-                            if not bool(atomic_result.get("is_safe")):
-                                break
-                            atomic_pre_resources = atomic_projected_resources
-                            atomic_pre_parts = atomic_projected_parts
-                            atomic_dfa_states = deepcopy(
-                                atomic_result.get("safety_dfa_states_after")
-                                or {}
-                            )
-                        result = deepcopy(atomic_results[-1])
-                        result["is_safe"] = (
-                            len(atomic_results) == len(atomic_transitions)
-                            and all(
-                                bool(atomic_result.get("is_safe"))
-                                for atomic_result in atomic_results
-                            )
-                        )
-                        result["findings"] = aggregate_findings
-                        result["atomic_validation_results"] = atomic_results
-                    else:
-                        result = validate_outline_macro_recovery_safety(
-                            task=deepcopy(validation_input.get("task") or {}),
-                            signature=deepcopy(
-                                validation_input.get("signature") or {}
-                            ),
-                            pre_resources=deepcopy(
-                                validation_input.get("pre_resources") or {}
-                            ),
-                            pre_parts=deepcopy(
-                                validation_input.get("pre_parts") or {}
-                            ),
-                            projected_resources=deepcopy(
-                                validation_input.get("projected_resources") or {}
-                            ),
-                            projected_parts=deepcopy(
-                                validation_input.get("projected_parts") or {}
-                            ),
-                            llm_input=llm_input,
-                            safety_dfa_states_before=deepcopy(
-                                projected_dfa_states
-                            ),
-                        )
+                        ),
+                        pre_parts=deepcopy(validation_input.get("pre_parts") or {}),
+                        projected_resources=deepcopy(
+                            validation_input.get("projected_resources") or {}
+                        ),
+                        projected_parts=deepcopy(
+                            validation_input.get("projected_parts") or {}
+                        ),
+                        llm_input=llm_input,
+                        safety_dfa_states_before=deepcopy(projected_dfa_states),
+                    )
                 except Exception as exc:
                     agent.logger.exception(
                         "[CCA] Recovery outline safety validation failed for candidate=%d.",

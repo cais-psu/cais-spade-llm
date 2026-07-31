@@ -526,7 +526,7 @@ def _build_runtime_state(agent: Any) -> dict[str, Any]:
 
 
 def _commit_runtime_state(agent: Any, runtime_state: dict[str, Any]) -> None:
-    for state_field in (
+    for field in (
         "_held_part",
         "_current_state",
         "_position",
@@ -534,7 +534,7 @@ def _commit_runtime_state(agent: Any, runtime_state: dict[str, Any]) -> None:
         "_recovery_pose_ref",
         "_task_ctx",
     ):
-        setattr(agent, state_field, deepcopy(runtime_state.get(state_field)))
+        setattr(agent, field, deepcopy(runtime_state.get(field)))
 
 
 def _primitive_payload_from_result(
@@ -745,34 +745,10 @@ async def execute_robot_task(
         return {"status": "failed", "content": f"unknown robot task '{task_name}'"}
 
     args = deepcopy(dict(kwargs or {}))
-    configured_successor = args.pop("_configured_successor", None)
-    configured_transition_authorized = isinstance(configured_successor, dict)
     runtime_state = _build_runtime_state(agent)
     step_outputs: dict[str, Any] = {}
-    if not configured_transition_authorized:
-        successor_provider = getattr(
-            agent,
-            "configured_execution_successor",
-            None,
-        )
-        configured_successor = (
-            successor_provider(
-                event_name=task.name,
-                execution_arguments=deepcopy(args),
-                runtime_state=deepcopy(runtime_state),
-            )
-            if callable(successor_provider)
-            else None
-        )
-        if not isinstance(configured_successor, dict):
-            return {
-                "status": "blocked",
-                "content": (
-                    f"{task.name} configured successor is unavailable"
-                ),
-            }
 
-    for guard in (() if configured_transition_authorized else task.program.entry_guards):
+    for guard in task.program.entry_guards:
         if _evaluate_guard(
             guard,
             agent=agent,
@@ -896,18 +872,6 @@ async def execute_robot_task(
         if should_apply:
             _apply_effect(effect, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
 
-    configured_runtime_fields = {
-        "resource_state": "_current_state",
-        "resource_location": "_recovery_pose_ref",
-        "held_part": "_held_part",
-        "gripper_state": "_gripper_state",
-    }
-    for state_field, runtime_field in configured_runtime_fields.items():
-        if state_field in configured_successor:
-            runtime_state[runtime_field] = deepcopy(
-                configured_successor.get(state_field)
-            )
-
     _commit_runtime_state(agent, runtime_state)
     response = _resolve_value(
         task.program.success_response,
@@ -936,6 +900,15 @@ def _register_robot_task(task: RobotTaskDefinition) -> RobotTaskDefinition:
     handler.__doc__ = task.rendered_docstring()
     handler.__tool_spec__ = task
     return task
+
+
+_TASK_ORDER = (
+    "pick_approach",
+    "pick_grasp",
+    "place_approach",
+    "move_home",
+    "place_insert",
+)
 
 
 _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
@@ -1094,6 +1067,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "start_z": _step_output("pick_targets", "start_z"),
                         },
                     ),
+                    RobotTaskEffect(target="current_state", action="set", value="at_pick"),
                     RobotTaskEffect(
                         target="position",
                         action="set",
@@ -1103,6 +1077,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "z": _step_output("pick_targets", "pick_z"),
                         },
                     ),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value=None),
                 ),
                 success_response={
                     "status": "completed",
@@ -1252,6 +1227,11 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         note="Positive dz lift/retreat after grasp.",
                         failure_observations={"part_name": _arg("part_name")},
                     ),
+                ),
+                effects=(
+                    RobotTaskEffect(target="held_part", action="set", value=_arg("part_name")),
+                    RobotTaskEffect(target="current_state", action="set", value="picked"),
+                    RobotTaskEffect(target="gripper_state", action="set", value="closed"),
                 ),
                 success_response={
                     "status": "completed",
@@ -1427,6 +1407,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                         },
                         skip_empty_values=True,
                     ),
+                    RobotTaskEffect(target="current_state", action="set", value="positioned"),
                     RobotTaskEffect(
                         target="position",
                         action="set",
@@ -1436,6 +1417,7 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                             "z": _step_output("place_targets", "place_z"),
                         },
                     ),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value=None),
                 ),
                 success_response={
                     "status": "completed",
@@ -1620,6 +1602,9 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                     ),
                 ),
                 effects=(
+                    RobotTaskEffect(target="held_part", action="clear"),
+                    RobotTaskEffect(target="current_state", action="set", value="placed"),
+                    RobotTaskEffect(target="gripper_state", action="set", value="open"),
                     RobotTaskEffect(target="task_ctx", action="clear"),
                 ),
                 success_response={
@@ -1642,159 +1627,6 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                 notes=(
                     "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches and snaps/settles in simulation, then lifts away.",
                     "open_gripper and detach_part are hidden from synthesis; use release_part as the visible composite.",
-                ),
-            ),
-        )
-    ),
-    _register_robot_task(
-        RobotTaskDefinition(
-            name="place_release",
-            description="Release the currently held part at a staging destination.",
-            arguments=(
-                RobotTaskArgument(
-                    name="destination_location",
-                    type="string",
-                    description="Configured staging location for the part.",
-                    required=True,
-                ),
-                RobotTaskArgument(
-                    name="part_name",
-                    type="string",
-                    description="Name of the part being released.",
-                    required=True,
-                ),
-                RobotTaskArgument(
-                    name="product_jid",
-                    type="string",
-                    description="JID of the ProductAgent that owns this task.",
-                ),
-                RobotTaskArgument(name="task_id", type="string"),
-            ),
-            program=RobotTaskProgram(
-                entry_state="positioned",
-                success_state="placed",
-                part_in_state="in_transit",
-                required_context_keys=("destination",),
-                context_mapping={
-                    "location_param": "destination_location",
-                    "location_type": "current_location",
-                },
-                part_transition={
-                    "completed": {
-                        "state": "ready",
-                        "location_param": "destination_location",
-                    }
-                },
-                entry_guards=(
-                    RobotTaskGuard(
-                        predicate="held_part_exists",
-                        message="No part currently held; run pick_grasp first.",
-                        description="held_part exists",
-                        condition={
-                            "field": "held_part",
-                            "operator": "equals",
-                            "value": _arg("part_name"),
-                        },
-                    ),
-                    RobotTaskGuard(
-                        predicate="always",
-                        message="place_approach has not established this staging context.",
-                        description="place_approach already positioned the robot at the staging pose",
-                        condition={
-                            "field": "task_ctx.destination_location",
-                            "operator": "equals",
-                            "value": _arg("destination_location"),
-                        },
-                    ),
-                ),
-                steps=(
-                    RobotTaskStep(
-                        id="delay_before_release",
-                        op="delay",
-                        executor="primitive",
-                        exposed=False,
-                        params={"duration_sec": 0.25},
-                    ),
-                    RobotTaskStep(
-                        id="release_part",
-                        op="release_part",
-                        executor="primitive",
-                        exposed=True,
-                        params={
-                            "model_name": _state("_task_ctx", "model_name"),
-                            "part_name": _state("_held_part"),
-                        },
-                        public_params={
-                            "model_name": "<MODEL_NAME_FROM_PART_TARGET>",
-                            "part_name": _arg("part_name"),
-                        },
-                        failure_observations={
-                            "part_name": _state("_held_part"),
-                            "destination_location": _arg("destination_location"),
-                        },
-                    ),
-                    RobotTaskStep(
-                        id="delay_after_release",
-                        op="delay",
-                        executor="primitive",
-                        exposed=False,
-                        params={"duration_sec": 0.25},
-                    ),
-                    RobotTaskStep(
-                        id="lift",
-                        op="move_relative",
-                        executor="primitive",
-                        exposed=True,
-                        params={
-                            "dx": 0.0,
-                            "dy": 0.0,
-                            "dz": _sub(
-                                _state("_task_ctx", "travel_z"),
-                                _state("_position", "z"),
-                            ),
-                            "speed": 0.45,
-                        },
-                        public_params={
-                            "dx": 0.0,
-                            "dy": 0.0,
-                            "dz": 0.08,
-                            "speed": 0.45,
-                        },
-                        note="Positive dz retreat after release.",
-                        failure_observations={
-                            "part_name": _state("_held_part"),
-                            "destination_location": _arg("destination_location"),
-                        },
-                    ),
-                ),
-                effects=(
-                    RobotTaskEffect(target="task_ctx", action="clear"),
-                ),
-                success_response={
-                    "status": "completed",
-                    "content": _format(
-                        "Released {placed} at {destination_location}.",
-                        placed=_first(
-                            _arg("part_name"),
-                            _state("_held_part"),
-                        ),
-                        destination_location=_arg("destination_location"),
-                    ),
-                    "placed_location": _arg("destination_location"),
-                },
-                dry_run_description=_format(
-                    "Releasing {held_part} at staging location {destination_location}",
-                    held_part=_state("_held_part"),
-                    destination_location=_arg("destination_location"),
-                ),
-                dry_run_duration=5.0,
-                failure_part=_first(
-                    _arg("part_name"),
-                    _state("_held_part"),
-                ),
-                notes=(
-                    "RobotAgent.place_release releases the part at the staging pose established by place_approach, then lifts away.",
-                    "This task does not perform assembly insertion or simulation slot snapping.",
                 ),
             ),
         )
@@ -1856,11 +1688,13 @@ _ROBOT_TASKS: tuple[RobotTaskDefinition, ...] = (
                     ),
                 ),
                 effects=(
+                    RobotTaskEffect(target="current_state", action="set", value="idle"),
                     RobotTaskEffect(
                         target="position",
                         action="set",
                         value={"x": 0.0, "y": 0.0, "z": 445.0},
                     ),
+                    RobotTaskEffect(target="recovery_pose_ref", action="set", value="home"),
                     RobotTaskEffect(target="task_ctx", action="clear"),
                 ),
                 success_response={
@@ -1884,7 +1718,236 @@ def robot_task_registry() -> dict[str, RobotTaskDefinition]:
 
 
 def robot_task_names() -> tuple[str, ...]:
-    return tuple(task.name for task in _ROBOT_TASKS)
+    registry = robot_task_registry()
+    ordered = [name for name in _TASK_ORDER if name in registry]
+    ordered.extend(task.name for task in _ROBOT_TASKS if task.name not in ordered)
+    return tuple(ordered)
+
+
+def _recovery_condition_descriptor(
+    guard: RobotTaskGuard,
+) -> tuple[str, dict[str, Any]] | None:
+    condition = dict(guard.condition or {})
+    field_name = str(condition.get("field") or "").strip()
+    if not field_name:
+        return None
+    operator = str(condition.get("operator") or "equals").strip()
+    if operator == "exists":
+        return field_name, {"exists": True}
+    value = condition.get("value")
+    if isinstance(value, dict) and str(value.get("$arg") or "").strip():
+        parameter_name = str(value.get("$arg") or "").strip()
+        key = "not_equals_from_param" if operator == "not_equals" else "equals_from_param"
+        return field_name, {key: parameter_name}
+    key = "not_equals" if operator == "not_equals" else "equals"
+    return field_name, {key: deepcopy(value)}
+
+
+def _recovery_update_descriptor(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        parameter_name = str(value.get("$arg") or "").strip()
+        if parameter_name:
+            return {"set_from_param": parameter_name}
+        if any(str(key).startswith("$") for key in value):
+            return None
+    return {"set": deepcopy(value)}
+
+
+def _robot_task_context_fields(tasks: list[RobotTaskDefinition]) -> set[str]:
+    fields: set[str] = set()
+    for task in tasks:
+        for guard in task.program.entry_guards:
+            field_name = str(dict(guard.condition or {}).get("field") or "").strip()
+            if field_name.startswith("task_ctx."):
+                fields.add(field_name)
+        for effect in task.program.effects:
+            if effect.target != "task_ctx" or not isinstance(effect.value, dict):
+                continue
+            for key, value in effect.value.items():
+                if _recovery_update_descriptor(value) is not None:
+                    fields.add(f"task_ctx.{key}")
+    return fields
+
+
+def robot_recovery_des_descriptor(
+    *,
+    resource_jid: str,
+    snapshot: dict[str, Any],
+    task_names: tuple[str, ...] | list[str] | None = None,
+    reachable_locations: list[Any] | tuple[Any, ...] | None = None,
+    named_poses: list[Any] | tuple[Any, ...] | None = None,
+    marked_state_conditions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compile the robot task registry into the private recovery DES view."""
+    registry = robot_task_registry()
+    selected_names = tuple(task_names or robot_task_names())
+    selected_tasks = [registry[name] for name in selected_names if name in registry]
+    if not selected_tasks:
+        return {}
+
+    current_state = snapshot.get("current_state")
+    current_location = snapshot.get("current_location")
+    held_part = snapshot.get("held_part")
+    resource_states: list[Any] = [current_state]
+    part_states: list[Any] = [None]
+    part_locations: list[Any] = [None, f"{resource_jid}_gripper"]
+    locations: list[Any] = [current_location]
+    locations.extend(reachable_locations or [])
+    locations.extend(named_poses or [])
+    events: list[dict[str, Any]] = []
+    task_context_fields = _robot_task_context_fields(selected_tasks)
+
+    for task in selected_tasks:
+        program = task.program
+        resource_states.extend((program.entry_state, program.success_state))
+        guards: dict[str, dict[str, Any]] = {}
+        if program.part_in_state:
+            part_states.append(program.part_in_state)
+        for guard in program.entry_guards:
+            compiled_guard = _recovery_condition_descriptor(guard)
+            if compiled_guard is not None:
+                field_name, condition = compiled_guard
+                guards[field_name] = condition
+
+        updates: dict[str, dict[str, Any]] = {
+            "resource_state": {"set": program.success_state}
+        }
+        for effect in program.effects:
+            if effect.target == "current_state" and effect.action == "set":
+                compiled_update = _recovery_update_descriptor(effect.value)
+                if compiled_update is not None:
+                    updates["resource_state"] = compiled_update
+            elif effect.target == "held_part":
+                if effect.action == "clear":
+                    updates["held_part"] = {"set": None}
+                else:
+                    compiled_update = _recovery_update_descriptor(effect.value)
+                    if compiled_update is not None:
+                        updates["held_part"] = compiled_update
+            elif (
+                effect.target == "recovery_pose_ref"
+                and effect.action == "set"
+                and effect.value is not None
+            ):
+                compiled_update = _recovery_update_descriptor(effect.value)
+                if compiled_update is not None:
+                    updates["resource_location"] = compiled_update
+            elif effect.target == "task_ctx":
+                if effect.action == "clear":
+                    for field_name in task_context_fields:
+                        updates[field_name] = {"set": None}
+                elif isinstance(effect.value, dict):
+                    for key, value in effect.value.items():
+                        compiled_update = _recovery_update_descriptor(value)
+                        if compiled_update is not None:
+                            updates[f"task_ctx.{key}"] = compiled_update
+
+        context_mapping = dict(program.context_mapping or {})
+        context_location_param = str(
+            context_mapping.get("location_param") or ""
+        ).strip()
+        if context_location_param:
+            updates["resource_location"] = {
+                "set_from_param": context_location_param
+            }
+
+        completed_part_transition = dict(
+            dict(program.part_transition or {}).get("completed") or {}
+        )
+        if completed_part_transition:
+            part_state = completed_part_transition.get("state")
+            if part_state not in (None, ""):
+                updates["part_state"] = {"set": deepcopy(part_state)}
+                part_states.append(deepcopy(part_state))
+            location_template = str(
+                completed_part_transition.get("location_template") or ""
+            ).strip()
+            part_location_param = str(
+                completed_part_transition.get("location_param") or ""
+            ).strip()
+            if location_template:
+                resolved_location = location_template.replace(
+                    "{resource_jid}", resource_jid
+                )
+                updates["part_location"] = {"set": resolved_location}
+                part_locations.append(resolved_location)
+            elif part_location_param:
+                updates["part_location"] = {
+                    "set_from_param": part_location_param
+                }
+
+        events.append(
+            {
+                "event_name": task.name,
+                "controllable": True,
+                "observable": True,
+                "guards": guards,
+                "updates": updates,
+                "parameter_bindings": (
+                    {
+                        context_location_param: {
+                            "location_type": str(
+                                context_mapping.get("location_type") or ""
+                            ).strip()
+                        }
+                    }
+                    if context_location_param
+                    else {}
+                ),
+                "requires_part_binding": any(
+                    argument.name == "part_name" for argument in task.arguments
+                ),
+                "recovery_visible_steps": program.render_recovery_steps(),
+                "source": task.source,
+            }
+        )
+
+    def _domain(values: list[Any]) -> list[Any]:
+        result: list[Any] = []
+        for value in values:
+            if value not in result:
+                result.append(deepcopy(value))
+        return result
+
+    state_variables: dict[str, dict[str, Any]] = {
+        "resource_state": {
+            "scope": "resource",
+            "domain": _domain(resource_states),
+        },
+        "resource_location": {
+            "scope": "resource",
+            "domain": _domain(locations),
+        },
+        "held_part": {
+            "scope": "resource",
+            "domain": _domain([held_part, None]),
+        },
+        "part_state": {"scope": "part", "domain": _domain(part_states)},
+        "part_location": {
+            "scope": "part",
+            "domain": _domain(part_locations + locations),
+        },
+    }
+    for field_name in sorted(task_context_fields):
+        state_variables[field_name] = {
+            "scope": "resource",
+            "domain": _domain([None, *locations]),
+            "private": True,
+        }
+
+    current_valuation = {
+        "resource_state": current_state,
+        "resource_location": current_location,
+        "held_part": held_part,
+    }
+    current_valuation.update({field_name: None for field_name in task_context_fields})
+
+    return {
+        "state_variables": state_variables,
+        "current_valuation": current_valuation,
+        "events": events,
+        "marked_state_conditions": deepcopy(marked_state_conditions or []),
+    }
 
 
 def robot_task_capability_context(
