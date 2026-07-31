@@ -10,11 +10,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.mult
     _build_outline_task_type_lookup,
     _infer_outline_macro_signature,
 )
-from cais_spade_llm.resources.resource_profile import (
-    get_resource_profile,
-    resource_snapshot_carried_entity_location,
-    resource_type_from_value,
-)
 
 SYNTAX_AND_GROUNDING_VALIDATION = "syntax_and_grounding_validation"
 TRANSITION_FEASIBILITY = "transition_feasibility"
@@ -1532,6 +1527,7 @@ def compile_grounded_recovery_outline_task(
     parts_by_name: dict[str, dict[str, Any]],
     outline_contract: dict[str, Any] | None = None,
     location_validation_mode: str = "strict",
+    validate_binding_tokens: bool = True,
 ) -> dict[str, Any]:
     task_id = str(task.get("outline_id") or "").strip()
     resource_jid = _task_resource_jid(task)
@@ -1626,25 +1622,26 @@ def compile_grounded_recovery_outline_task(
             "candidate_bindings": candidate_bindings,
             "finding": deepcopy(outline_contract_finding),
         }
-    binding_token_findings = _binding_token_findings(
-        task=task,
-        task_kind=task_kind,
-        resource_jid=resource_jid,
-        resource_row=resource_row,
-        part_name=effective_part_name,
-        part_row=dict(parts_by_name.get(effective_part_name) or {}),
-        resources_by_jid=resources_by_jid,
-        parts_by_name=parts_by_name,
-        outline_contract=outline_contract,
-        location_validation_mode=location_validation_mode,
-    )
-    if binding_token_findings:
-        return {
-            "status": "binding_token_unresolved",
-            "grounded_action": None,
-            "candidate_bindings": candidate_bindings,
-            "finding": deepcopy(binding_token_findings[0]),
-        }
+    if validate_binding_tokens:
+        binding_token_findings = _binding_token_findings(
+            task=task,
+            task_kind=task_kind,
+            resource_jid=resource_jid,
+            resource_row=resource_row,
+            part_name=effective_part_name,
+            part_row=dict(parts_by_name.get(effective_part_name) or {}),
+            resources_by_jid=resources_by_jid,
+            parts_by_name=parts_by_name,
+            outline_contract=outline_contract,
+            location_validation_mode=location_validation_mode,
+        )
+        if binding_token_findings:
+            return {
+                "status": "binding_token_unresolved",
+                "grounded_action": None,
+                "candidate_bindings": candidate_bindings,
+                "finding": deepcopy(binding_token_findings[0]),
+            }
     grounded_action = _grounded_action(
         task,
         resource_jid=resource_jid,
@@ -1774,47 +1771,6 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
     return resources_by_jid, parts_by_name
 
 
-def _declared_carried_part_location(
-    *,
-    resource_jid: str,
-    recovery_entry: dict[str, Any],
-    recovery_des_model: dict[str, Any],
-    session_state: dict[str, Any],
-) -> str:
-    """Return the RA-owned carried-part token only when its DES domain permits it."""
-    jid = str(resource_jid or "").strip()
-    if not jid:
-        return ""
-    recovery_snapshot = deepcopy(dict(recovery_entry.get("recovery_snapshot") or {}))
-    recovery_snapshot.update(
-        deepcopy(dict(dict(session_state.get("symbolic_resources") or {}).get(jid) or {}))
-    )
-    resource_type = resource_type_from_value(
-        recovery_entry.get("resource_type")
-        or recovery_snapshot.get("resource_type")
-        or dict(recovery_snapshot.get("resource_core") or {}).get("resource_type")
-    )
-    carried_part_location = resource_snapshot_carried_entity_location(
-        resource_jid=jid,
-        snapshot=recovery_snapshot,
-        profile=get_resource_profile(resource_type),
-    )
-    if not carried_part_location:
-        return ""
-    declaration = dict(
-        dict(recovery_des_model.get("state_variables") or {}).get("part_location")
-        or {}
-    )
-    domain = declaration.get("domain")
-    if (
-        str(declaration.get("scope") or "").strip() != "part"
-        or not isinstance(domain, list)
-        or carried_part_location not in domain
-    ):
-        return ""
-    return carried_part_location
-
-
 def validate_recovery_outline_task(
     *,
     planner: Any,
@@ -1822,50 +1778,19 @@ def validate_recovery_outline_task(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Run only ProductAgent-owned syntax, grounding, and transition validation."""
+    """Run only ProductAgent-owned syntax, binding, and routing validation."""
     del planner
     prepared_recovery_request = deepcopy(prepared_recovery_request)
     resources_by_jid, parts_by_name = projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    resource_jid = _task_resource_jid(task)
-    recovery_entry = dict(
-        dict(prepared_recovery_request.get("recovery_resources") or {}).get(
-            resource_jid
-        )
-        or {}
-    )
-    recovery_des_model = dict(
-        dict(session_state.get("recovery_des_models") or {}).get(resource_jid)
-        or recovery_entry.get("recovery_des_model")
-        or {}
-    )
-    state_variables = dict(recovery_des_model.get("state_variables") or {})
-    outline_contract = deepcopy(_OUTLINE_VALIDATION_CONTRACT)
-    if state_variables:
-        outline_contract["allowed_state_fields"] = sorted(state_variables)
-        outline_contract["state_field_scopes"] = {
-            str(field_name): str(dict(declaration or {}).get("scope") or "resource")
-            for field_name, declaration in state_variables.items()
-        }
-        outline_contract["state_field_domains"] = {
-            str(field_name): deepcopy(dict(declaration or {}).get("domain"))
-            for field_name, declaration in state_variables.items()
-            if isinstance(dict(declaration or {}).get("domain"), list)
-        }
-    outline_contract["carried_part_location"] = _declared_carried_part_location(
-        resource_jid=resource_jid,
-        recovery_entry=recovery_entry,
-        recovery_des_model=recovery_des_model,
-        session_state=session_state,
-    )
     grounding_result = compile_grounded_recovery_outline_task(
         task,
         resources_by_jid=resources_by_jid,
         parts_by_name=parts_by_name,
-        outline_contract=outline_contract,
-        location_validation_mode="strict",
+        outline_contract=None,
+        validate_binding_tokens=False,
     )
     finding = grounding_result.get("finding")
     if isinstance(finding, dict):

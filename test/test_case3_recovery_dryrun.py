@@ -78,6 +78,9 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (  
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (  # noqa: E402
     write_recovery_artifacts,
 )
+from cais_spade_llm.agents.resource_agent.resource_agent import (  # noqa: E402
+    ResourceAgent,
+)
 from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent  # noqa: E402
 from cais_spade_llm.agents.shared_information import llm_agent as llm_agent_module  # noqa: E402
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (  # noqa: E402
@@ -412,71 +415,16 @@ class FakeProductAgent:
         resource = self._mock_recovery_validation_resources.get(resource_jid)
         if resource is None:
             raise RuntimeError(f"mocked RA '{resource_jid}' is unavailable")
-        snapshot = resource.get_recovery_snapshot()
-        recovery_des_model = resource.recovery_des_model(snapshot=snapshot)
-        results: list[dict[str, Any]] = []
-        for row in payload.get("candidates") or []:
-            candidate = dict(row or {})
-            task = dict(candidate.get("task") or {})
-            physical_input = dict(candidate.get("physical_input") or {})
-            validation_snapshot = resource.recovery_physical_validation_snapshot(
-                live_snapshot=snapshot,
-                physical_input=physical_input,
-                recovery_des_model=recovery_des_model,
-            )
-            result = resource.check_recovery_physical_feasibility(
-                part_context=deepcopy(physical_input.get("part_context") or {}),
-                recovery_snapshot=validation_snapshot,
-                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
-                operation_kind=str(physical_input.get("operation_kind") or ""),
-                part_name=physical_input.get("part_name"),
-            )
-            findings = []
-            if not bool(result.get("allowed")):
-                findings.append(
-                    {
-                        "validation_category": "physical_feasibility",
-                        "constraint_owner": "resource",
-                        "constraint_family": "resource_feasibility",
-                        "constraint_code": str(
-                            result.get("constraint_code") or "resource_blocked"
-                        ),
-                        "reason": str(result.get("reason") or "mocked RA rejected"),
-                        "resource_jid": str(task.get("resource_jid") or resource_jid),
-                        "part_name": task.get("part_name"),
-                        "evidence": deepcopy(result.get("evidence") or {}),
-                    }
-                )
-            results.append(
-                {
-                    "candidate_index": int(candidate.get("candidate_index") or 0),
-                    "event_id": str(candidate.get("event_id") or "").strip(),
-                    "allowed": bool(result.get("allowed")),
-                    "findings": findings,
-                    "resource_result": deepcopy(result),
-                }
-            )
+        validation = ResourceAgent.validate_recovery_outline_physical_candidates(
+            resource,
+            payload,
+        )
         return {
             "request_id": str(payload.get("request_id") or "mocked-ra-request"),
             "recovery_session_id": str(payload.get("recovery_session_id") or ""),
             "turn_index": int(payload.get("turn_index") or 0),
             "state_fingerprint": str(payload.get("state_fingerprint") or ""),
-            "validator_jid": resource_jid,
-            "snapshot": deepcopy(snapshot),
-            "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
-            "recovery_des_model": deepcopy(recovery_des_model),
-            "recovery_des_model_fingerprint": str(
-                recovery_des_model.get("descriptor_fingerprint") or ""
-            ),
-            "results": results,
-            "enabled_event_ids": sorted(
-                {
-                    str(row.get("event_id") or "").strip()
-                    for row in results
-                    if bool(row.get("allowed"))
-                    and str(row.get("event_id") or "").strip()
-                }
-            ),
+            **deepcopy(validation),
             "latency_ms": 0.0,
             "mocked": True,
         }
@@ -762,6 +710,9 @@ class FakeRecoveryRobot:
     )
     recovery_des_model = RobotAgent.recovery_des_model
     resolve_registered_function_names = RobotAgent.resolve_registered_function_names
+    recovery_validation_resource_matches = (
+        ResourceAgent.recovery_validation_resource_matches
+    )
 
     def __init__(
         self,
@@ -3167,7 +3118,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         stages = list(evaluation.get("validation_stages") or [])
         assert [stage["validator_role"] for stage in stages] == [
             "PA",
-            "PA",
+            "RA",
             "RA",
             "CCA",
         ]
@@ -3181,7 +3132,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         "validation_stages"
     ]
     assert audit_stages[0]["mocked"] is False
-    assert audit_stages[1]["mocked"] is False
+    assert audit_stages[1]["mocked"] is True
     assert audit_stages[2]["mocked"] is True
     assert audit_stages[3]["mocked"] is True
     first_selection_evidence = dict(
@@ -3438,6 +3389,17 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     assert trace[4]["candidate_source"] == "robot_task_program"
     assert trace[4]["expected_end_state"]["part_state"] == "assembled"
     assert "semantic_state_history" not in session_state
+    final_outline_turn = next(
+        turn
+        for turn in reversed(result["turns"])
+        if isinstance(turn, dict) and turn.get("phase") == "outline"
+    )
+    final_outline_result = _load_json(
+        Path(final_outline_turn["outline_result_artifact_path"])
+    )
+    assert isinstance(final_outline_result, dict)
+    assert final_outline_result["selection_status"] == "selected"
+    assert final_outline_result["remaining_blocked_issue_count"] == 0
     assert session_state["status"] == "ready_for_primitive_generation"
     assert result["llm_response_source"] == "mocked_scripted_fixture"
 
@@ -4558,21 +4520,37 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         "z": 1.035,
     }
 
-    def _pa_findings(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        validated, schema_findings = multi_turn_mode._derive_candidate_outline_task(
-            candidate_task=deepcopy(candidate),
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
+    def _transition_findings(
+        candidate: dict[str, Any],
+        *,
+        active_session: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        _decision, turn_entry = asyncio.run(
+            multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+                session_state=deepcopy(active_session or session_state),
+                parsed_response={
+                    "thought": "exercise ResourceAgent transition consistency",
+                    "candidate_events": [deepcopy(candidate)],
+                },
+                prepared_recovery_request=prepared_recovery_request,
+                planner=planner,
+            )
         )
-        assert schema_findings == []
-        assert validated is not None
-        findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
-            planner=planner,
-            task=validated,
-            session_state=session_state,
-            prepared_recovery_request=prepared_recovery_request,
+        stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
+        pa_stage = next(
+            stage
+            for stage in stages
+            if stage["validation_category"] == "syntax_and_grounding_validation"
         )
-        return findings
+        assert pa_stage["validator_role"] == "PA"
+        assert pa_stage["findings"] == []
+        transition_stage = next(
+            stage
+            for stage in stages
+            if stage["validation_category"] == "transition_feasibility"
+        )
+        assert transition_stage["validator_role"] == "RA"
+        return list(transition_stage["findings"])
 
     release = {
         "outline_id": "release_with_explicit_successor",
@@ -4587,10 +4565,10 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         },
         "rationale": "Release the held part.",
     }
-    assert _pa_findings(release) == []
+    assert _transition_findings(release) == []
 
     release["expected_end_state"]["part_location"] = "prusa-mk4-2"
-    assert _pa_findings(release) == []
+    assert _transition_findings(release) == []
 
     direct_relocation = {
         "outline_id": "direct_relocation_without_custody",
@@ -4605,7 +4583,7 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         },
         "rationale": "Relocate without declaring custody.",
     }
-    assert _pa_findings(direct_relocation) == []
+    assert _transition_findings(direct_relocation) == []
 
     acquire = {
         "outline_id": "acquire_with_explicit_successor",
@@ -4620,13 +4598,13 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         },
         "rationale": "Acquire the affected part.",
     }
-    findings = _pa_findings(acquire)
+    findings = _transition_findings(acquire)
     assert findings[0]["constraint_code"] == "held_part_location_mismatch"
     assert findings[0]["validation_category"] == "transition_feasibility"
     assert findings[0]["invariant_id"] == "part_traceability"
 
     acquire["expected_end_state"]["part_location"] = "prusa-mk4-1"
-    findings = _pa_findings(acquire)
+    findings = _transition_findings(acquire)
     assert findings[0]["constraint_code"] == "held_part_location_mismatch"
     assert findings[0]["validation_category"] == "transition_feasibility"
     assert findings[0]["invariant_id"] == "part_traceability"
@@ -4637,7 +4615,7 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
     }
 
     acquire["expected_end_state"]["part_location"] = "xarm6@localhost_gripper"
-    assert _pa_findings(acquire) == []
+    assert _transition_findings(acquire) == []
 
     held_transport = deepcopy(acquire)
     held_transport["outline_id"] = "transport_while_holding"
@@ -4650,29 +4628,14 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
     }
     held_session = deepcopy(session_state)
     multi_turn_mode._apply_task_effects_to_symbolic_state(acquire, held_session)
+    held_session["accepted_outline_prefix"] = [deepcopy(acquire)]
 
-    def _held_pa_findings(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        validated, schema_findings = multi_turn_mode._derive_candidate_outline_task(
-            candidate_task=deepcopy(candidate),
-            session_state=held_session,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        assert schema_findings == []
-        assert validated is not None
-        candidate_findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
-            planner=planner,
-            task=validated,
-            session_state=held_session,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        return candidate_findings
-
-    findings = _held_pa_findings(held_transport)
+    findings = _transition_findings(held_transport, active_session=held_session)
     assert findings[0]["constraint_code"] == "held_part_location_mismatch"
     held_transport["expected_end_state"]["part_location"] = (
         "xarm6@localhost_gripper"
     )
-    assert _held_pa_findings(held_transport) == []
+    assert _transition_findings(held_transport, active_session=held_session) == []
 
     duplicate_holder = deepcopy(acquire)
     duplicate_holder["outline_id"] = "duplicate_mcp_holder"
@@ -4681,9 +4644,62 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
     duplicate_holder["expected_end_state"]["part_location"] = (
         "xarm6@localhost_gripper"
     )
-    findings = _pa_findings(duplicate_holder)
+    findings = _transition_findings(duplicate_holder)
     assert findings[0]["constraint_code"] == "part_traceability_violation"
     assert findings[0]["invariant_id"] == "part_traceability"
+
+
+def test_pa_rejects_malformed_candidate_without_contacting_ra() -> None:
+    _fixture, product_agent, planner, prepared_recovery_request = asyncio.run(
+        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+    )
+    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    ra_calls = 0
+    request_ra = product_agent.request_recovery_outline_physical_validation
+
+    async def _count_ra_calls(**kwargs: Any) -> dict[str, Any]:
+        nonlocal ra_calls
+        ra_calls += 1
+        return await request_ra(**kwargs)
+
+    product_agent.request_recovery_outline_physical_validation = _count_ra_calls
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "submit one malformed candidate",
+                "candidate_events": [
+                    {
+                        "outline_id": "unknown_resource_binding",
+                        "event_name": "generated_event_name",
+                        "resource_jid": "new_robot@localhost",
+                        "expected_end_state": {
+                            "resource_state": "generated_resource_state"
+                        },
+                        "rationale": "This candidate has an unknown resource_jid.",
+                    }
+                ],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+
+    assert decision == "need_revision"
+    assert ra_calls == 0
+    stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
+    assert [stage["status"] for stage in stages] == [
+        "rejected",
+        "skipped",
+        "skipped",
+        "skipped",
+    ]
+    assert [stage["validator_role"] for stage in stages] == [
+        "PA",
+        "RA",
+        "RA",
+        "CCA",
+    ]
 
 
 def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() -> None:
@@ -4819,13 +4835,27 @@ def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> No
         prepared_recovery_request=prepared_recovery_request,
     )
     assert findings == []
-    validation_findings, _grounded_action = multi_turn_mode._validate_single_outline_task(
-        planner=planner,
-        task=dict(validated or {}),
-        session_state=session_state,
-        prepared_recovery_request=prepared_recovery_request,
+    decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=session_state,
+            parsed_response={
+                "thought": "exercise ResourceAgent location consistency",
+                "candidate_events": [unknown_location],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
     )
-    assert validation_findings[0]["constraint_code"] == "unknown_location_token"
+    assert decision == "need_revision"
+    transition_stage = next(
+        stage
+        for stage in turn_entry["candidate_evaluations"][0]["validation_stages"]
+        if stage["validation_category"] == "transition_feasibility"
+    )
+    assert transition_stage["validator_role"] == "RA"
+    assert transition_stage["findings"][0]["constraint_code"] == (
+        "unknown_location_token"
+    )
 
 
 def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() -> None:
@@ -4860,15 +4890,34 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         "held_part": None,
         "resource_location": None,
     }
-    _validated, findings = multi_turn_mode._derive_candidate_outline_task(
+    validated, findings = multi_turn_mode._derive_candidate_outline_task(
         candidate_task=ambiguous_named_pose,
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    assert findings
-    assert findings[0]["constraint_code"] == "candidate_schema_violation"
-    assert "resource_location" in str(findings[0].get("reason") or "")
-    assert "home" in str(findings[0].get("reason") or "")
+    assert findings == []
+    assert validated is not None
+    _decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={
+                "thought": "exercise ResourceAgent named-pose consistency",
+                "candidate_events": [ambiguous_named_pose],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=_planner,
+        )
+    )
+    transition_stage = next(
+        stage
+        for stage in turn_entry["candidate_evaluations"][0]["validation_stages"]
+        if stage["validation_category"] == "transition_feasibility"
+    )
+    assert transition_stage["validator_role"] == "RA"
+    assert transition_stage["status"] == "rejected"
+    assert "resource location do not match" in str(
+        transition_stage["findings"][0].get("reason") or ""
+    )
 
     missing_part_name = {
         "outline_id": "missing_part_name",
@@ -4907,13 +4956,34 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         },
         "rationale": "Invalid because held_part contradicts part_name.",
     }
-    _validated, findings = multi_turn_mode._derive_candidate_outline_task(
+    validated, findings = multi_turn_mode._derive_candidate_outline_task(
         candidate_task=inconsistent_held_part,
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
-    assert findings
-    assert "contradicts part_name slot" in str(findings[0].get("reason") or "")
+    assert findings == []
+    assert validated is not None
+    _decision, turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={
+                "thought": "exercise ResourceAgent custody consistency",
+                "candidate_events": [inconsistent_held_part],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=_planner,
+        )
+    )
+    transition_stage = next(
+        stage
+        for stage in turn_entry["candidate_evaluations"][0]["validation_stages"]
+        if stage["validation_category"] == "transition_feasibility"
+    )
+    assert transition_stage["validator_role"] == "RA"
+    assert transition_stage["status"] == "rejected"
+    assert "contradicts the candidate part_name" in str(
+        transition_stage["findings"][0].get("reason") or ""
+    )
 
 
 def test_grounding_schema_contains_only_structural_decision_fields() -> None:

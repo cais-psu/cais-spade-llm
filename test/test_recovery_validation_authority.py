@@ -428,6 +428,30 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
                 "held_part": None,
             }
 
+        def recovery_des_model(
+            self,
+            *,
+            snapshot: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del snapshot
+            return {
+                "state_variables": {
+                    "resource_state": {
+                        "scope": "resource",
+                        "domain": ["failed", "idle"],
+                    },
+                    "resource_location": {
+                        "scope": "resource",
+                        "domain": ["assembly_board-v1", "home"],
+                    },
+                    "held_part": {
+                        "scope": "resource",
+                        "domain": [None],
+                    },
+                },
+                "descriptor_fingerprint": "test-descriptor",
+            }
+
         def recovery_validation_resource_matches(self, resource_jid: str) -> bool:
             return ResourceAgent.recovery_validation_resource_matches(
                 self, resource_jid
@@ -442,7 +466,19 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
         "candidates": [
             {
                 "candidate_index": 0,
-                "task": {"resource_jid": "xarm6@localhost"},
+                "task": {
+                    "resource_jid": "xarm6@localhost",
+                    "expected_start_state": {
+                        "resource_state": "failed",
+                        "resource_location": "assembly_board-v1",
+                        "held_part": None,
+                    },
+                    "expected_end_state": {
+                        "resource_state": "generated_clear_state",
+                        "resource_location": "assembly_board-v1",
+                        "held_part": None,
+                    },
+                },
                 "physical_input": {
                     "use_projected_recovery_snapshot": False,
                     "projected_recovery_snapshot": {
@@ -454,7 +490,19 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
             },
             {
                 "candidate_index": 1,
-                "task": {"resource_jid": "xarm6@localhost"},
+                "task": {
+                    "resource_jid": "xarm6@localhost",
+                    "expected_start_state": {
+                        "resource_state": "idle",
+                        "resource_location": "home",
+                        "held_part": "LG",
+                    },
+                    "expected_end_state": {
+                        "resource_state": "generated_transport_state",
+                        "resource_location": "home",
+                        "held_part": "LG",
+                    },
+                },
                 "physical_input": {
                     "use_projected_recovery_snapshot": True,
                     "projected_recovery_snapshot": {
@@ -497,9 +545,170 @@ def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() ->
     assert result["results"][2]["findings"][0]["constraint_code"] == (
         "wrong_resource_validator"
     )
+    assert result["results"][2]["findings"][0]["validation_category"] == (
+        "transition_feasibility"
+    )
     assert result["snapshot_fingerprint"] == recovery_validation_fingerprint(
         result["snapshot"]
     )
+
+
+def test_ra_retrieves_dynamic_capabilities_and_snapshot_on_every_request() -> None:
+    class _Owner:
+        jid = "xarm6@localhost"
+
+        def __init__(self) -> None:
+            self.snapshot_calls = 0
+            self.model_calls = 0
+            self.current_state = "failed"
+            self.location_domain = ["home"]
+
+        def get_recovery_snapshot(self) -> dict[str, Any]:
+            self.snapshot_calls += 1
+            return {
+                "resource_state": self.current_state,
+                "resource_location": "home",
+                "held_part": None,
+                "named_poses": {"home": "home"},
+            }
+
+        def recovery_des_model(
+            self,
+            *,
+            snapshot: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            self.model_calls += 1
+            descriptor = {
+                "state_variables": {
+                    "resource_state": {
+                        "scope": "resource",
+                        "domain": [dict(snapshot or {}).get("resource_state")],
+                    },
+                    "resource_location": {
+                        "scope": "resource",
+                        "domain": deepcopy(self.location_domain),
+                    },
+                    "held_part": {"scope": "resource", "domain": [None]},
+                }
+            }
+            descriptor["descriptor_fingerprint"] = recovery_validation_fingerprint(
+                descriptor
+            )
+            return descriptor
+
+        def recovery_validation_resource_matches(self, resource_jid: str) -> bool:
+            return ResourceAgent.recovery_validation_resource_matches(
+                self, resource_jid
+            )
+
+        def check_recovery_physical_feasibility(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"allowed": True, "reason": "physical feasibility passed"}
+
+    owner = _Owner()
+    payload = {
+        "candidates": [
+            {
+                "candidate_index": 0,
+                "task": {
+                    "outline_id": "dynamic-capability",
+                    "event_name": "generated_transition_name",
+                    "resource_jid": "xarm6@localhost",
+                    "expected_start_state": {
+                        "resource_state": "failed",
+                        "resource_location": "home",
+                        "held_part": None,
+                    },
+                    "expected_end_state": {
+                        "resource_state": "generated_resource_state",
+                        "resource_location": "station",
+                        "held_part": None,
+                    },
+                },
+                "physical_input": {},
+            }
+        ]
+    }
+
+    first = ResourceAgent.validate_recovery_outline_physical_candidates(
+        owner, payload
+    )
+    assert first["results"][0]["transition_feasibility"]["allowed"] is False
+    assert first["results"][0]["findings"][0]["constraint_code"] == (
+        "unknown_location_token"
+    )
+
+    owner.location_domain = ["home", "station"]
+    second = ResourceAgent.validate_recovery_outline_physical_candidates(
+        owner, payload
+    )
+    assert second["results"][0]["allowed"] is True
+
+    owner.current_state = "idle"
+    third = ResourceAgent.validate_recovery_outline_physical_candidates(
+        owner, payload
+    )
+    assert third["results"][0]["transition_feasibility"]["allowed"] is False
+    assert third["results"][0]["findings"][0]["constraint_code"] == (
+        "validation_state_stale"
+    )
+    assert owner.snapshot_calls == 3
+    assert owner.model_calls == 3
+
+
+def test_ra_capability_and_malformed_result_fail_closed() -> None:
+    class _Owner:
+        jid = "xarm6@localhost"
+
+        def get_recovery_snapshot(self) -> dict[str, Any]:
+            return {
+                "resource_state": "failed",
+                "resource_location": "home",
+                "held_part": None,
+            }
+
+        def recovery_des_model(
+            self,
+            *,
+            snapshot: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            del snapshot
+            return {}
+
+        def recovery_validation_resource_matches(self, resource_jid: str) -> bool:
+            return ResourceAgent.recovery_validation_resource_matches(
+                self, resource_jid
+            )
+
+    payload = {
+        "candidates": [
+            {
+                "candidate_index": 0,
+                "task": {
+                    "resource_jid": "xarm6@localhost",
+                    "expected_start_state": {"resource_state": "failed"},
+                    "expected_end_state": {"resource_state": "generated_state"},
+                },
+                "physical_input": {},
+            }
+        ]
+    }
+    result = ResourceAgent.validate_recovery_outline_physical_candidates(
+        _Owner(), payload
+    )
+    candidate = result["results"][0]
+    assert candidate["allowed"] is False
+    assert candidate["transition_feasibility"]["constraint_code"] == (
+        "resource_validation_unavailable"
+    )
+    assert candidate["physical_feasibility"]["skipped"] is True
+
+    with pytest.raises(RuntimeError, match="unavailable or invalid"):
+        multi_turn_outline_generation._verified_recovery_des_model(
+            ra_reply={
+                "recovery_des_model": {"state_variables": {}},
+                "recovery_des_model_fingerprint": "malformed-fingerprint",
+            }
+        )
 
 
 def test_robotagent_owns_projected_gripper_evidence_from_held_part() -> None:
@@ -604,12 +813,17 @@ def test_production_ra_reply_includes_recovery_des_descriptor() -> None:
     assert response["recovery_des_model_fingerprint"] == "descriptor-fingerprint"
 
 
-def test_first_ra_transition_uses_live_snapshot_for_staleness() -> None:
+def test_ra_transition_uses_its_snapshot_for_start_state_consistency() -> None:
     task = {
         "outline_id": "candidate",
         "resource_jid": "xarm6@localhost",
         "expected_start_state": {
             "resource_state": "idle",
+            "resource_location": "home",
+            "held_part": None,
+        },
+        "expected_end_state": {
+            "resource_state": "generated_recovery_state",
             "resource_location": "home",
             "held_part": None,
         },
@@ -619,22 +833,38 @@ def test_first_ra_transition_uses_live_snapshot_for_staleness() -> None:
         "resource_location": "assembly_board-v1",
         "held_part": None,
     }
-    findings = multi_turn_outline_generation._ra_snapshot_staleness_findings(
+    descriptor = {
+        "state_variables": {
+            "resource_state": {"scope": "resource", "domain": ["failed", "idle"]},
+            "resource_location": {
+                "scope": "resource",
+                "domain": ["assembly_board-v1", "home"],
+            },
+            "held_part": {"scope": "resource", "domain": [None]},
+        }
+    }
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="xarm6@localhost", static_capabilities={}),
         task=task,
-        snapshot=snapshot,
-        session_state={"accepted_outline_prefix": []},
+        recovery_snapshot=snapshot,
+        part_context={},
+        recovery_des_model=descriptor,
     )
-    assert findings[0]["constraint_code"] == "validation_state_stale"
+    assert result["allowed"] is False
+    assert result["constraint_code"] == "validation_state_stale"
 
-    assert multi_turn_outline_generation._ra_snapshot_staleness_findings(
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="xarm6@localhost", static_capabilities={}),
         task=task,
-        snapshot=snapshot,
-        session_state={
-            "accepted_outline_prefix": [
-                {"resource_jid": "xarm6@localhost"}
-            ]
+        recovery_snapshot={
+            "resource_state": "idle",
+            "resource_location": "home",
+            "held_part": None,
         },
-    ) == []
+        part_context={},
+        recovery_des_model=descriptor,
+    )
+    assert result["allowed"] is True
 
 
 def test_outline_state_schema_matches_pa_candidate_validator() -> None:

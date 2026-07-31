@@ -2440,65 +2440,6 @@ def _generated_candidate_start_state(
     ]
 
 
-def _candidate_state_consistency_findings(
-    *,
-    candidate_task: dict[str, Any],
-    part_name: str,
-    end_state: dict[str, Any],
-) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    if part_name and "held_part" in end_state:
-        held = end_state.get("held_part")
-        if held not in (None, "", part_name):
-            findings.append(
-                _candidate_schema_finding(
-                    task=candidate_task,
-                    reason=(
-                        f"expected_end_state.held_part '{held}' contradicts "
-                        f"part_name slot '{part_name}' (must equal part_name or null)"
-                    ),
-                    evidence={
-                        "field": "expected_end_state.held_part",
-                        "held_part": held,
-                        "part_name": part_name,
-                    },
-                )
-            )
-    return findings
-
-
-def _candidate_named_pose_location_findings(
-    *,
-    candidate_task: dict[str, Any],
-    resource_row: dict[str, Any],
-    end_state: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Require named-pose end states to preserve their concrete location token."""
-    end_resource_state = str(end_state.get("resource_state") or "").strip()
-    if not end_resource_state:
-        return []
-    if end_resource_state not in _candidate_named_pose_tokens(resource_row):
-        return []
-    end_resource_location = end_state.get("resource_location")
-    if end_resource_location == end_resource_state:
-        return []
-    return [
-        _candidate_schema_finding(
-            task=candidate_task,
-            reason=(
-                "expected_end_state.resource_location must preserve named-pose "
-                f"token '{end_resource_state}' when expected_end_state.resource_state "
-                "uses that named pose"
-            ),
-            evidence={
-                "field": "expected_end_state.resource_location",
-                "resource_state": end_resource_state,
-                "resource_location": deepcopy(end_resource_location),
-            },
-        )
-    ]
-
-
 def _derive_candidate_outline_task(
     *,
     candidate_task: dict[str, Any],
@@ -2628,22 +2569,6 @@ def _derive_candidate_outline_task(
     )
     if completeness_findings:
         return None, completeness_findings
-
-    consistency_findings = _candidate_state_consistency_findings(
-        candidate_task=candidate_task,
-        part_name=part_name,
-        end_state=end_state,
-    )
-    if consistency_findings:
-        return None, consistency_findings
-
-    named_pose_location_findings = _candidate_named_pose_location_findings(
-        candidate_task=candidate_task,
-        resource_row=dict(resources_by_jid.get(resource_jid) or {}),
-        end_state=end_state,
-    )
-    if named_pose_location_findings:
-        return None, named_pose_location_findings
 
     start_state, start_state_findings = _generated_candidate_start_state(
         candidate_task=candidate_task,

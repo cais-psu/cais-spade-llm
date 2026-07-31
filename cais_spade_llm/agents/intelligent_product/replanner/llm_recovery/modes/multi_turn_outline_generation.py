@@ -2061,6 +2061,8 @@ async def _populate_agent_filtered_enabledness(
         for row in candidate_evaluations
         if isinstance(row, dict) and bool(row.get("valid"))
     ]
+    if not valid_rows:
+        return
     current_task = asyncio.create_task(
         _agent_filtered_recovery_enabledness(
             session_state=session_state,
@@ -2852,13 +2854,21 @@ def _pa_candidate_revision_targets(
         ),
         key=lambda row: int(row.get("candidate_index") or 0),
     ):
-        rejected_roles = {
-            str(stage.get("validator_role") or "").strip()
+        rejected_stages = {
+            (
+                str(stage.get("validator_role") or "").strip(),
+                str(stage.get("validation_category") or "").strip(),
+            )
             for stage in (evaluation.get("validation_stages") or [])
             if isinstance(stage, dict)
             and str(stage.get("status") or "").strip() == "rejected"
         }
-        if rejected_roles != {"PA"}:
+        if not rejected_stages or not rejected_stages.issubset(
+            {
+                ("PA", SYNTAX_AND_GROUNDING_VALIDATION),
+                ("RA", TRANSITION_FEASIBILITY),
+            }
+        ):
             continue
         task = dict(evaluation.get("task") or {})
         expected_end_state = dict(task.get("expected_end_state") or {})
@@ -3113,18 +3123,7 @@ def _append_pa_validation_stages(
     product_jid: str,
     state_fingerprint: str,
 ) -> None:
-    syntax_findings = [
-        deepcopy(row)
-        for row in findings
-        if str(row.get("validation_category") or "").strip()
-        == SYNTAX_AND_GROUNDING_VALIDATION
-    ]
-    transition_findings = [
-        deepcopy(row)
-        for row in findings
-        if str(row.get("validation_category") or "").strip()
-        != SYNTAX_AND_GROUNDING_VALIDATION
-    ]
+    syntax_findings = [deepcopy(row) for row in findings]
     stages.append(
         recovery_validation_stage(
             validation_category=SYNTAX_AND_GROUNDING_VALIDATION,
@@ -3135,80 +3134,6 @@ def _append_pa_validation_stages(
             state_fingerprint=state_fingerprint,
         )
     )
-    stages.append(
-        recovery_validation_stage(
-            validation_category=TRANSITION_FEASIBILITY,
-            validator_role="PA",
-            validator_jid=product_jid,
-            status=(
-                "skipped"
-                if syntax_findings
-                else "rejected" if transition_findings else "passed"
-            ),
-            findings=transition_findings,
-            state_fingerprint=state_fingerprint,
-        )
-    )
-
-
-def _ra_snapshot_staleness_findings(
-    *,
-    task: dict[str, Any],
-    snapshot: dict[str, Any],
-    session_state: dict[str, Any],
-) -> list[dict[str, Any]]:
-    resource_jid = _shared._task_resource_jid(task)
-    if any(
-        isinstance(row, dict)
-        and _shared._task_resource_jid(row) == resource_jid
-        for row in (session_state.get("accepted_outline_prefix") or [])
-    ):
-        return []
-    start_state = dict(task.get("expected_start_state") or {})
-    occupancy = dict(snapshot.get("occupancy") or {})
-    actual_by_field = {
-        "resource_state": (
-            snapshot.get("resource_state")
-            if "resource_state" in snapshot
-            else snapshot.get("current_state")
-        ),
-        "resource_location": (
-            snapshot.get("resource_location")
-            if "resource_location" in snapshot
-            else snapshot.get("current_location")
-            if "current_location" in snapshot
-            else occupancy.get("location")
-        ),
-        "held_part": snapshot.get("held_part"),
-    }
-    mismatches = [
-        {
-            "field": field_name,
-            "expected": deepcopy(start_state.get(field_name)),
-            "actual": deepcopy(actual_by_field.get(field_name)),
-        }
-        for field_name in ("resource_state", "resource_location", "held_part")
-        if field_name in start_state
-        and actual_by_field.get(field_name) != start_state.get(field_name)
-    ]
-    if not mismatches:
-        return []
-    return [
-        _shared.annotate_validation_finding(
-            {
-                "task_id": str(task.get("outline_id") or "").strip(),
-                "resource_jid": _shared._task_resource_jid(task) or None,
-                "part_name": _shared._task_part_name(task) or None,
-                "validation_category": TRANSITION_FEASIBILITY,
-                "constraint_owner": "product",
-                "constraint_family": "transition_staleness",
-                "constraint_code": "validation_state_stale",
-                "reason": "ResourceAgent live state changed after the PA projection.",
-                "evidence": {"mismatches": mismatches},
-                "retriable": True,
-            }
-        )
-    ]
 
 
 def _verified_recovery_des_model(
@@ -3301,6 +3226,13 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             state_fingerprint=state_fingerprint,
         )
         resource_jid = _shared._task_resource_jid(task)
+        validation_stages.append(
+            _skipped_validation_stage(
+                category=TRANSITION_FEASIBILITY,
+                role="RA",
+                jid=resource_jid,
+            )
+        )
         validation_stages.append(
             _skipped_validation_stage(
                 category=PHYSICAL_FEASIBILITY,
@@ -3405,6 +3337,13 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             resource_jid = _shared._task_resource_jid(validated_task)
             validation_stages.append(
                 _skipped_validation_stage(
+                    category=TRANSITION_FEASIBILITY,
+                    role="RA",
+                    jid=resource_jid,
+                )
+            )
+            validation_stages.append(
+                _skipped_validation_stage(
                     category=PHYSICAL_FEASIBILITY,
                     role="RA",
                     jid=resource_jid,
@@ -3467,6 +3406,16 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             )
             if ra_result is None:
                 raise RuntimeError("ResourceAgent reply omitted the candidate result")
+            transition_result = ra_result.get("transition_feasibility")
+            physical_result = ra_result.get("physical_feasibility")
+            if not isinstance(transition_result, dict):
+                raise RuntimeError(
+                    "ResourceAgent reply omitted transition_feasibility"
+                )
+            if not isinstance(physical_result, dict):
+                raise RuntimeError(
+                    "ResourceAgent reply omitted physical_feasibility"
+                )
             ra_snapshot = dict(ra_reply.get("snapshot") or {})
             snapshot_fingerprint = str(
                 ra_reply.get("snapshot_fingerprint") or ""
@@ -3475,20 +3424,9 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 recovery_validation_fingerprint(ra_snapshot)
             ):
                 raise RuntimeError("ResourceAgent reply snapshot fingerprint is invalid")
-            expected_recovery_des_model_fingerprint = str(
-                dict(
-                    _recovery_des_models(
-                        session_state=session_state,
-                        prepared_recovery_request=prepared_recovery_request,
-                    ).get(resource_jid)
-                    or {}
-                ).get("descriptor_fingerprint")
-                or ""
-            ).strip()
             recovery_des_model, recovery_des_model_fingerprint = (
                 _verified_recovery_des_model(
                     ra_reply=ra_reply,
-                    expected_fingerprint=expected_recovery_des_model_fingerprint,
                 )
             )
             evaluation["recovery_des_models"][resource_jid] = deepcopy(
@@ -3500,20 +3438,27 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         except Exception as exc:  # noqa: BLE001 - validator transport must fail closed
             ra_finding = _unavailable_validation_finding(
                 task=validated_task,
-                validation_category=PHYSICAL_FEASIBILITY,
+                validation_category=TRANSITION_FEASIBILITY,
                 validator_role="RA",
                 constraint_code="resource_validation_unavailable",
                 reason=str(exc),
             )
             validation_stages.append(
                 recovery_validation_stage(
-                    validation_category=PHYSICAL_FEASIBILITY,
+                    validation_category=TRANSITION_FEASIBILITY,
                     validator_role="RA",
                     validator_jid=resource_jid,
                     status="unavailable",
                     findings=[ra_finding],
                     latency_ms=(time.perf_counter() - ra_started_at) * 1000.0,
                     state_fingerprint=state_fingerprint,
+                )
+            )
+            validation_stages.append(
+                _skipped_validation_stage(
+                    category=PHYSICAL_FEASIBILITY,
+                    role="RA",
+                    jid=resource_jid,
                 )
             )
             validation_stages.append(
@@ -3525,18 +3470,22 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             evaluation["failed_event_index"] = event_index
             return evaluation
 
-        ra_findings = [
+        transition_findings = [
             _shared.annotate_validation_finding(row)
-            for row in (ra_result.get("findings") or [])
+            for row in (transition_result.get("findings") or [])
             if isinstance(row, dict)
         ]
         validation_stages.append(
             recovery_validation_stage(
-                validation_category=PHYSICAL_FEASIBILITY,
+                validation_category=TRANSITION_FEASIBILITY,
                 validator_role="RA",
                 validator_jid=str(ra_reply.get("validator_jid") or resource_jid),
-                status="passed" if bool(ra_result.get("allowed")) else "rejected",
-                findings=ra_findings,
+                status=(
+                    "passed"
+                    if bool(transition_result.get("allowed"))
+                    else "rejected"
+                ),
+                findings=transition_findings,
                 request_id=str(ra_reply.get("request_id") or ""),
                 latency_ms=ra_reply.get("latency_ms"),
                 state_fingerprint=state_fingerprint,
@@ -3544,7 +3493,15 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 mocked=bool(ra_reply.get("mocked")),
             )
         )
-        if ra_findings or not bool(ra_result.get("allowed")):
+        if transition_findings or not bool(transition_result.get("allowed")):
+            validation_stages.append(
+                _skipped_validation_stage(
+                    category=PHYSICAL_FEASIBILITY,
+                    role="RA",
+                    jid=resource_jid,
+                    mocked=bool(ra_reply.get("mocked")),
+                )
+            )
             validation_stages.append(
                 _skipped_validation_stage(
                     category=SAFETY,
@@ -3554,36 +3511,47 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 )
             )
             evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(ra_findings)
+            evaluation["validation_findings"] = deepcopy(transition_findings)
             evaluation["validation_stages"] = deepcopy(validation_stages)
             evaluation["failed_event_index"] = event_index
             return evaluation
 
-        stale_findings = _ra_snapshot_staleness_findings(
-            task=validated_task,
-            snapshot=ra_snapshot,
-            session_state=working_session_state,
+        physical_findings = [
+            _shared.annotate_validation_finding(row)
+            for row in (physical_result.get("findings") or [])
+            if isinstance(row, dict)
+        ]
+        validation_stages.append(
+            recovery_validation_stage(
+                validation_category=PHYSICAL_FEASIBILITY,
+                validator_role="RA",
+                validator_jid=str(ra_reply.get("validator_jid") or resource_jid),
+                status=(
+                    "passed"
+                    if bool(physical_result.get("allowed"))
+                    else "rejected"
+                ),
+                findings=physical_findings,
+                request_id=str(ra_reply.get("request_id") or ""),
+                latency_ms=ra_reply.get("latency_ms"),
+                state_fingerprint=state_fingerprint,
+                snapshot_fingerprint=str(
+                    ra_reply.get("snapshot_fingerprint") or ""
+                ),
+                mocked=bool(ra_reply.get("mocked")),
+            )
         )
-        if stale_findings:
+        if physical_findings or not bool(physical_result.get("allowed")):
             validation_stages.append(
-                recovery_validation_stage(
-                    validation_category=TRANSITION_FEASIBILITY,
-                    validator_role="PA",
-                    validator_jid=product_jid,
-                    status="rejected",
-                    findings=stale_findings,
-                    state_fingerprint=state_fingerprint,
-                    snapshot_fingerprint=str(
-                        ra_reply.get("snapshot_fingerprint") or ""
-                    ),
+                _skipped_validation_stage(
+                    category=SAFETY,
+                    role="CCA",
+                    jid=cca_jid,
                     mocked=bool(ra_reply.get("mocked")),
                 )
             )
-            validation_stages.append(
-                _skipped_validation_stage(category=SAFETY, role="CCA", jid=cca_jid)
-            )
             evaluation["valid"] = False
-            evaluation["validation_findings"] = deepcopy(stale_findings)
+            evaluation["validation_findings"] = deepcopy(physical_findings)
             evaluation["validation_stages"] = deepcopy(validation_stages)
             evaluation["failed_event_index"] = event_index
             return evaluation
@@ -4127,6 +4095,13 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
                 findings=revision_requirement_findings,
                 product_jid=product_jid,
                 state_fingerprint=state_fingerprint,
+            )
+            validation_stages.append(
+                _skipped_validation_stage(
+                    category=TRANSITION_FEASIBILITY,
+                    role="RA",
+                    jid=_shared._task_resource_jid(task),
+                )
             )
             validation_stages.append(
                 _skipped_validation_stage(

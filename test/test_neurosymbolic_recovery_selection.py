@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +14,6 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
     recovery_artifacts,
-    recovery_validation_service,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
     multi_turn,
@@ -1180,18 +1180,16 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         session_state=session_state,
         prepared_recovery_request=prepared,
     )
-    assert findings[0]["constraint_code"] == "state_value_outside_ra_domain"
-    assert findings[0]["validation_category"] == "syntax_and_grounding_validation"
+    assert findings == []
 
-    invalid_task = deepcopy(valid_task)
-    invalid_task["expected_end_state"]["spindle_speed"] = 1
-    findings, _grounded = multi_turn.validate_recovery_outline_task(
-        planner=object(),
-        task=invalid_task,
+    invalid_candidate = deepcopy(llm_task)
+    invalid_candidate["expected_end_state"]["spindle_speed"] = 1
+    _validated, findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=invalid_candidate,
         session_state=session_state,
         prepared_recovery_request=prepared,
     )
-    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+    assert findings[0]["constraint_code"] == "candidate_schema_violation"
 
     robot_state_variables = {
         "resource_state": {"scope": "resource", "domain": ["idle", "ready"]},
@@ -1230,13 +1228,14 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         },
         "rationale": "job_state belongs to another RA descriptor",
     }
-    findings, _grounded = multi_turn.validate_recovery_outline_task(
-        planner=object(),
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="robot@localhost", static_capabilities={}),
         task=wrong_resource_field,
-        session_state=session_state,
-        prepared_recovery_request=prepared,
+        recovery_snapshot={"resource_state": "idle"},
+        part_context={},
+        recovery_des_model={"state_variables": robot_state_variables},
     )
-    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+    assert result["constraint_code"] == "disallowed_outline_state_field"
 
     private_gripper_field = {
         "outline_id": "robot_private_gripper_field",
@@ -1252,24 +1251,23 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         },
         "rationale": "gripper_state is private RobotAgent evidence",
     }
-    findings, _grounded = multi_turn.validate_recovery_outline_task(
-        planner=object(),
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="robot@localhost", static_capabilities={}),
         task=private_gripper_field,
-        session_state=session_state,
-        prepared_recovery_request=prepared,
+        recovery_snapshot={"resource_state": "idle"},
+        part_context={},
+        recovery_des_model={"state_variables": robot_state_variables},
     )
-    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+    assert result["constraint_code"] == "disallowed_outline_state_field"
 
-    missing_part_binding = deepcopy(valid_task)
-    missing_part_binding["expected_start_state"]["part_quality"] = "unknown"
+    missing_part_binding = deepcopy(llm_task)
     missing_part_binding["expected_end_state"]["part_quality"] = "accepted"
-    findings, _grounded = multi_turn.validate_recovery_outline_task(
-        planner=object(),
-        task=missing_part_binding,
+    _validated, findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=missing_part_binding,
         session_state=session_state,
         prepared_recovery_request=prepared,
     )
-    assert findings[0]["constraint_code"] == "disallowed_outline_state_field"
+    assert findings[0]["constraint_code"] == "candidate_schema_violation"
 
 
 def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:
@@ -2651,11 +2649,12 @@ def test_six_materially_different_handler_attempts_are_selection_unresolved(
     assert session_state["selection_repeated_failure_count"] == 1
 
 
-def test_pa_revision_targets_exclude_ra_cca_and_no_progress_candidates() -> None:
+def test_revision_targets_include_pa_and_ra_transition_rejections() -> None:
     def _evaluation_row(
         *,
         candidate_index: int,
         validator_role: str,
+        validation_category: str,
         valid: bool = False,
         selection_status: str = "excluded_invalid",
     ) -> dict[str, Any]:
@@ -2680,18 +2679,37 @@ def test_pa_revision_targets_exclude_ra_cca_and_no_progress_candidates() -> None
             "validation_stages": [
                 {
                     "validator_role": validator_role,
+                    "validation_category": validation_category,
                     "status": "rejected",
                 }
             ],
         }
 
     evaluations = [
-        _evaluation_row(candidate_index=0, validator_role="PA"),
-        _evaluation_row(candidate_index=1, validator_role="RA"),
-        _evaluation_row(candidate_index=2, validator_role="CCA"),
+        _evaluation_row(
+            candidate_index=0,
+            validator_role="PA",
+            validation_category="syntax_and_grounding_validation",
+        ),
+        _evaluation_row(
+            candidate_index=1,
+            validator_role="RA",
+            validation_category="transition_feasibility",
+        ),
+        _evaluation_row(
+            candidate_index=2,
+            validator_role="RA",
+            validation_category="physical_feasibility",
+        ),
         _evaluation_row(
             candidate_index=3,
+            validator_role="CCA",
+            validation_category="safety",
+        ),
+        _evaluation_row(
+            candidate_index=4,
             validator_role="PA",
+            validation_category="syntax_and_grounding_validation",
             valid=True,
             selection_status="excluded_no_progress",
         ),
@@ -2715,7 +2733,20 @@ def test_pa_revision_targets_exclude_ra_cca_and_no_progress_candidates() -> None
                 "part_location": "resource@localhost_gripper",
             },
             "constraint_codes": ["constraint_0"],
-        }
+        },
+        {
+            "candidate_id": "candidate_1",
+            "candidate_index": 1,
+            "resource_jid": "resource@localhost",
+            "part_name": "P1",
+            "expected_end_state": {
+                "resource_state": "idle",
+                "held_part": "P1",
+                "part_state": "in_gripper",
+                "part_location": "resource@localhost_gripper",
+            },
+            "constraint_codes": ["constraint_1"],
+        },
     ]
 
 
@@ -2913,7 +2944,7 @@ def test_omitted_pa_revision_target_is_rejected_before_ra_cca(
         for stage in evaluation["validation_stages"]
     ] == [
         ("PA", "rejected"),
-        ("PA", "skipped"),
+        ("RA", "skipped"),
         ("RA", "skipped"),
         ("CCA", "skipped"),
     ]
@@ -3329,86 +3360,62 @@ def test_non_robot_custody_validation_uses_its_declared_carried_location() -> No
             "domain": [None, "station", carried_location],
         },
     }
-    session_state = {
-        "symbolic_resources": {
-            resource_jid: {
+    owner = SimpleNamespace(
+        jid=resource_jid,
+        static_capabilities={"resource_type": resource_type},
+    )
+
+    def _validate(part_location: str) -> dict[str, Any]:
+        return ResourceAgent.check_recovery_transition_feasibility(
+            owner,
+            task={
+                "outline_id": "fixture_acquisition",
+                "event_name": "opaque_fixture_event",
                 "resource_jid": resource_jid,
+                "part_name": "P",
+                "expected_start_state": {
+                    "resource_state": "idle",
+                    "held_part": None,
+                    "part_state": "loose",
+                    "part_location": None,
+                },
+                "expected_end_state": {
+                    "resource_state": "idle",
+                    "held_part": "P",
+                    "part_state": "loose",
+                    "part_location": part_location,
+                },
+                "rationale": "Exercise the declared custody token.",
+            },
+            recovery_snapshot={
+                "resource_type": resource_type,
                 "resource_state": "idle",
                 "held_part": None,
                 "payload": None,
-            }
-        },
-        "symbolic_parts": {
-            "P": {
-                "part_name": "P",
+            },
+            part_context={
                 "part_state": "loose",
                 "part_location": None,
-                "part_holder_resource_jid": None,
-                "observed_pose": {"x": 0.0, "y": 0.0, "z": 0.0},
-            }
-        },
-        "recovery_des_models": {
-            resource_jid: {"state_variables": deepcopy(state_variables)}
-        },
-    }
-    prepared = {
-        "llm_input": {"part_facts": []},
-        "recovery_resources": {
-            resource_jid: {
-                "resource_type": resource_type,
-                "recovery_snapshot": {"resource_type": resource_type},
-                "recovery_des_model": {
-                    "state_variables": deepcopy(state_variables)
-                },
-            }
-        },
-    }
-
-    def _validate(part_location: str) -> list[dict[str, Any]]:
-        findings, _grounded_action = (
-            recovery_validation_service.validate_recovery_outline_task(
-                planner=object(),
-                task={
-                    "outline_id": "fixture_acquisition",
-                    "event_name": "opaque_fixture_event",
-                    "resource_jid": resource_jid,
-                    "part_name": "P",
-                    "expected_start_state": {
-                        "resource_state": "idle",
-                        "held_part": None,
-                        "part_state": "loose",
-                        "part_location": None,
-                    },
-                    "expected_end_state": {
-                        "resource_state": "idle",
-                        "held_part": "P",
-                        "part_state": "loose",
-                        "part_location": part_location,
-                    },
-                    "rationale": "Exercise the declared custody token.",
-                },
-                session_state=session_state,
-                prepared_recovery_request=prepared,
-            )
+                "current_holder_resource_jid": None,
+            },
+            recovery_des_model={
+                "state_variables": deepcopy(state_variables)
+            },
         )
-        return findings
 
-    assert _validate(carried_location) == []
-    findings = _validate("station")
-    assert findings[0]["constraint_code"] == "held_part_location_mismatch"
-    assert findings[0]["evidence"]["expected_carried_part_location"] == (
+    assert _validate(carried_location)["allowed"] is True
+    result = _validate("station")
+    assert result["constraint_code"] == "held_part_location_mismatch"
+    assert result["evidence"]["expected_carried_part_location"] == (
         carried_location
     )
 
     unavailable_type = "fixture_custody_validation_unavailable"
     register_resource_profile(ResourceProfile(resource_type=unavailable_type))
-    prepared["recovery_resources"][resource_jid]["resource_type"] = unavailable_type
-    prepared["recovery_resources"][resource_jid]["recovery_snapshot"][
-        "resource_type"
-    ] = unavailable_type
-    findings = _validate(carried_location)
-    assert findings[0]["constraint_code"] == "part_traceability_violation"
-    assert findings[0]["invariant_id"] == "part_traceability"
+    owner.static_capabilities["resource_type"] = unavailable_type
+    result = _validate(carried_location)
+    assert result["constraint_code"] == "part_traceability_violation"
+    assert result["invariant_id"] == "part_traceability"
 
 
 def test_cca_projects_dfa_state_without_mutating_a_live_monitor() -> None:

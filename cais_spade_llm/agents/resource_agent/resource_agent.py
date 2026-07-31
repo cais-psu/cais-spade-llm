@@ -187,6 +187,387 @@ class ResourceAgent(LlmAgent):
         return bool(requested_jid and requested_jid == receiving_jid)
 
     @staticmethod
+    def _recovery_transition_state_value(
+        *,
+        field_name: str,
+        scope: str,
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+    ) -> tuple[bool, Any]:
+        """Return one exact current value from Resource-Agent-owned evidence."""
+        source = part_context if scope == "part" else recovery_snapshot
+        aliases = {
+            ("resource", "resource_state"): (
+                "resource_state",
+                "current_state",
+                "state",
+            ),
+            ("resource", "resource_location"): (
+                "resource_location",
+                "current_location",
+                "location",
+            ),
+            ("resource", "held_part"): ("held_part",),
+            ("part", "part_state"): ("part_state", "current_state", "state"),
+            ("part", "part_location"): (
+                "part_location",
+                "current_location",
+                "location",
+                "current_pose_ref",
+            ),
+        }
+        for key in aliases.get((scope, field_name), (field_name,)):
+            if key in source:
+                return True, deepcopy(source.get(key))
+        if scope == "resource" and field_name == "resource_location":
+            occupancy = recovery_snapshot.get("occupancy")
+            if isinstance(occupancy, dict) and "location" in occupancy:
+                return True, deepcopy(occupancy.get("location"))
+        if (
+            scope == "part"
+            and field_name == "part_location"
+            and isinstance(part_context.get("observed_pose"), dict)
+        ):
+            return True, "observed_pose"
+        return False, None
+
+    @staticmethod
+    def _recovery_string_tokens(value: Any) -> set[str]:
+        """Return exact string tokens from one capability declaration value."""
+        if isinstance(value, dict):
+            return {
+                str(token).strip()
+                for token in value
+                if str(token).strip()
+            }
+        if not isinstance(value, (list, tuple, set)):
+            return set()
+        return {
+            str(token).strip()
+            for token in value
+            if isinstance(token, str) and str(token).strip()
+        }
+
+    def _recovery_known_location_tokens(
+        self,
+        *,
+        recovery_des_model: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+    ) -> set[str]:
+        """Return exact locations dynamically exposed by this Resource Agent."""
+        tokens: set[str] = set()
+        state_variables = dict(recovery_des_model.get("state_variables") or {})
+        for field_name in ("resource_location", "part_location"):
+            declaration = dict(state_variables.get(field_name) or {})
+            tokens.update(
+                str(value).strip()
+                for value in (declaration.get("domain") or [])
+                if isinstance(value, str) and str(value).strip()
+            )
+        for source in (
+            recovery_snapshot,
+        ):
+            for field_name in (
+                "named_poses",
+                "available_named_poses",
+                "reachability",
+                "reachable_locations",
+                "known_locations",
+            ):
+                tokens.update(
+                    ResourceAgent._recovery_string_tokens(source.get(field_name))
+                )
+            tokens.update(
+                str(token).strip()
+                for token in dict(source.get("staging_areas") or {})
+                if str(token).strip()
+            )
+            for field_name in (
+                "resource_location",
+                "current_location",
+                "location",
+            ):
+                value = source.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    tokens.add(value.strip())
+        for field_name in (
+            "part_location",
+            "current_location",
+            "location",
+            "current_pose_ref",
+        ):
+            value = part_context.get(field_name)
+            if isinstance(value, str) and value.strip():
+                tokens.add(value.strip())
+        if isinstance(part_context.get("observed_pose"), dict):
+            tokens.add("observed_pose")
+        observed_store_as = str(part_context.get("observed_store_as") or "").strip()
+        if observed_store_as:
+            tokens.add(observed_store_as)
+        tokens.update(
+            str(alias).strip()
+            for alias in (part_context.get("observed_aliases") or [])
+            if str(alias or "").strip()
+        )
+        return tokens
+
+    def check_recovery_transition_feasibility(  # noqa: C901
+        self,
+        *,
+        task: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+        recovery_des_model: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Check candidate consistency using freshly retrieved RA capabilities.
+
+        Generated event and state names remain opaque exact symbols. This check
+        does not select configured events or search for a capability sequence.
+        """
+        state_variables = dict(recovery_des_model.get("state_variables") or {})
+        if not state_variables:
+            return {
+                "allowed": False,
+                "constraint_code": "resource_validation_unavailable",
+                "reason": "ResourceAgent recovery capabilities are unavailable",
+            }
+
+        start_state = task.get("expected_start_state")
+        end_state = task.get("expected_end_state")
+        if not isinstance(start_state, dict) or not isinstance(end_state, dict):
+            return {
+                "allowed": False,
+                "constraint_code": "candidate_schema_violation",
+                "reason": "candidate transition states must be objects",
+            }
+        part_name = str(task.get("part_name") or "").strip()
+
+        unknown_fields = sorted(
+            {
+                str(field_name)
+                for state in (start_state, end_state)
+                for field_name in state
+                if str(field_name) not in state_variables
+            }
+        )
+        if unknown_fields:
+            return {
+                "allowed": False,
+                "constraint_code": "disallowed_outline_state_field",
+                "reason": (
+                    "candidate state field is not declared by the responsible "
+                    f"ResourceAgent: {', '.join(unknown_fields)}"
+                ),
+                "evidence": {"state_fields": unknown_fields},
+            }
+
+        part_scoped_without_part = sorted(
+            {
+                str(field_name)
+                for state in (start_state, end_state)
+                for field_name in state
+                if str(
+                    dict(state_variables.get(field_name) or {}).get("scope")
+                    or "resource"
+                )
+                == "part"
+                and not part_name
+            }
+        )
+        if part_scoped_without_part:
+            return {
+                "allowed": False,
+                "constraint_code": "disallowed_outline_state_field",
+                "reason": (
+                    "part-scoped state fields require part_name: "
+                    + ", ".join(part_scoped_without_part)
+                ),
+                "evidence": {"state_fields": part_scoped_without_part},
+            }
+
+        mismatches: list[dict[str, Any]] = []
+        for field_name, expected in sorted(start_state.items()):
+            scope = str(
+                dict(state_variables.get(field_name) or {}).get("scope")
+                or "resource"
+            )
+            available, actual = ResourceAgent._recovery_transition_state_value(
+                field_name=field_name,
+                scope=scope,
+                recovery_snapshot=recovery_snapshot,
+                part_context=part_context,
+            )
+            if not available or actual != expected:
+                mismatches.append(
+                    {
+                        "field": field_name,
+                        "expected": deepcopy(expected),
+                        "actual": deepcopy(actual) if available else None,
+                        "available": available,
+                    }
+                )
+        if mismatches:
+            return {
+                "allowed": False,
+                "constraint_family": "transition_staleness",
+                "constraint_code": "validation_state_stale",
+                "reason": (
+                    "ResourceAgent state changed after the candidate start state "
+                    "was projected"
+                ),
+                "evidence": {"mismatches": mismatches},
+                "retriable": True,
+            }
+
+        known_locations = ResourceAgent._recovery_known_location_tokens(
+            self,
+            recovery_des_model=recovery_des_model,
+            recovery_snapshot=recovery_snapshot,
+            part_context=part_context,
+        )
+        for field_name in ("resource_location", "part_location"):
+            value = end_state.get(field_name)
+            if value in (None, ""):
+                continue
+            if not isinstance(value, str) or value not in known_locations:
+                return {
+                    "allowed": False,
+                    "constraint_code": "unknown_location_token",
+                    "reason": (
+                        f"expected_end_state.{field_name} is not exposed by the "
+                        "responsible ResourceAgent"
+                    ),
+                    "evidence": {
+                        "field": f"expected_end_state.{field_name}",
+                        "location_token": deepcopy(value),
+                    },
+                }
+
+        named_pose_tokens = set()
+        for source in (recovery_snapshot,):
+            named_pose_tokens.update(
+                ResourceAgent._recovery_string_tokens(source.get("named_poses"))
+            )
+            named_pose_tokens.update(
+                ResourceAgent._recovery_string_tokens(
+                    source.get("available_named_poses")
+                )
+            )
+        end_resource_state = str(end_state.get("resource_state") or "").strip()
+        if (
+            end_resource_state in named_pose_tokens
+            and end_state.get("resource_location") != end_resource_state
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": (
+                    "named-pose resource state and resource location do not match"
+                ),
+                "evidence": {
+                    "resource_state": end_resource_state,
+                    "resource_location": deepcopy(
+                        end_state.get("resource_location")
+                    ),
+                },
+            }
+
+        end_held_part = end_state.get("held_part")
+        if part_name and end_held_part not in (None, "", part_name):
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": (
+                    "expected_end_state.held_part contradicts the candidate part_name"
+                ),
+                "evidence": {
+                    "field": "expected_end_state.held_part",
+                    "held_part": deepcopy(end_held_part),
+                    "part_name": part_name,
+                },
+                "invariant_id": "part_traceability",
+            }
+        if part_name and end_held_part == part_name:
+            current_holder_resource_jid = str(
+                part_context.get("current_holder_resource_jid") or ""
+            ).strip()
+            validator_jid = str(getattr(self, "jid", "") or "").strip()
+            if (
+                current_holder_resource_jid
+                and current_holder_resource_jid != validator_jid
+            ):
+                return {
+                    "allowed": False,
+                    "constraint_code": "part_traceability_violation",
+                    "reason": (
+                        "candidate custody conflicts with the ResourceAgent's "
+                        "current part-holder evidence"
+                    ),
+                    "evidence": {
+                        "current_holder_resource_jid": current_holder_resource_jid,
+                        "proposed_holder_resource_jid": validator_jid,
+                    },
+                    "invariant_id": "part_traceability",
+                }
+            from cais_spade_llm.resources.resource_profile import (
+                get_resource_profile_for_agent,
+                resource_snapshot_carried_entity_location,
+            )
+
+            carried_part_location = resource_snapshot_carried_entity_location(
+                resource_jid=str(getattr(self, "jid", "") or "").strip(),
+                snapshot=recovery_snapshot,
+                profile=get_resource_profile_for_agent(self),
+            )
+            part_location_declaration = dict(
+                state_variables.get("part_location") or {}
+            )
+            part_location_domain = part_location_declaration.get("domain")
+            if (
+                str(part_location_declaration.get("scope") or "") != "part"
+                or not isinstance(part_location_domain, list)
+                or carried_part_location not in part_location_domain
+            ):
+                carried_part_location = ""
+            proposed_part_location = end_state.get("part_location")
+            if not carried_part_location:
+                return {
+                    "allowed": False,
+                    "constraint_code": "part_traceability_violation",
+                    "reason": (
+                        "ResourceAgent capabilities do not declare a carried-part "
+                        "location"
+                    ),
+                    "evidence": {
+                        "field": "expected_end_state.part_location",
+                        "proposed_part_location": deepcopy(proposed_part_location),
+                        "expected_carried_part_location": None,
+                    },
+                    "invariant_id": "part_traceability",
+                }
+            if proposed_part_location != carried_part_location:
+                return {
+                    "allowed": False,
+                    "constraint_code": "held_part_location_mismatch",
+                    "reason": (
+                        "held_part and part_location do not describe the same "
+                        "ResourceAgent transition"
+                    ),
+                    "evidence": {
+                        "field": "expected_end_state.part_location",
+                        "proposed_part_location": deepcopy(proposed_part_location),
+                        "expected_carried_part_location": carried_part_location,
+                    },
+                    "invariant_id": "part_traceability",
+                }
+
+        return {
+            "allowed": True,
+            "reason": "ResourceAgent transition consistency is satisfied",
+        }
+
+    @staticmethod
     def recovery_physical_validation_snapshot(
         *,
         live_snapshot: dict[str, Any],
@@ -241,18 +622,29 @@ class ResourceAgent(LlmAgent):
             "reason": "resource_validation_unavailable",
         }
 
-    def validate_recovery_outline_physical_candidates(
+    def validate_recovery_outline_physical_candidates(  # noqa: C901
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         """Validate one same-resource candidate batch against one fresh snapshot."""
         validator_jid = str(self.jid)
-        snapshot = self.get_recovery_snapshot()
-        recovery_des_model_method = getattr(self, "recovery_des_model", None)
-        if callable(recovery_des_model_method):
-            recovery_des_model = recovery_des_model_method(snapshot=snapshot)
-        else:
-            recovery_des_model = {}
+        snapshot: dict[str, Any] = {}
+        recovery_des_model: dict[str, Any] = {}
+        capability_error = ""
+        try:
+            raw_snapshot = self.get_recovery_snapshot()
+            if not isinstance(raw_snapshot, dict):
+                raise TypeError("ResourceAgent returned a malformed recovery snapshot")
+            snapshot = deepcopy(raw_snapshot)
+            recovery_des_model_method = getattr(self, "recovery_des_model", None)
+            if not callable(recovery_des_model_method):
+                raise RuntimeError("ResourceAgent recovery capabilities are unavailable")
+            raw_recovery_des_model = recovery_des_model_method(snapshot=snapshot)
+            if not isinstance(raw_recovery_des_model, dict) or not raw_recovery_des_model:
+                raise RuntimeError("ResourceAgent recovery capabilities are unavailable")
+            recovery_des_model = deepcopy(raw_recovery_des_model)
+        except Exception as exc:  # noqa: BLE001 - capability boundary must fail closed
+            capability_error = str(exc).strip() or type(exc).__name__
         candidates = payload.get("candidates")
         if not isinstance(candidates, list):
             candidates = []
@@ -263,8 +655,22 @@ class ResourceAgent(LlmAgent):
             task = task if isinstance(task, dict) else {}
             candidate_index = int(candidate.get("candidate_index") or 0)
             resource_jid = str(task.get("resource_jid") or "").strip()
+            physical_input = candidate.get("physical_input")
+            physical_input = (
+                physical_input if isinstance(physical_input, dict) else {}
+            )
+            snapshot_projector = getattr(
+                self,
+                "recovery_physical_validation_snapshot",
+                ResourceAgent.recovery_physical_validation_snapshot,
+            )
+            validation_snapshot = snapshot_projector(
+                live_snapshot=snapshot,
+                physical_input=physical_input,
+                recovery_des_model=recovery_des_model,
+            )
             if not self.recovery_validation_resource_matches(resource_jid):
-                result = {
+                transition_result = {
                     "allowed": False,
                     "constraint_code": "wrong_resource_validator",
                     "reason": (
@@ -272,66 +678,153 @@ class ResourceAgent(LlmAgent):
                         f"receiving ResourceAgent '{validator_jid}'"
                     ),
                 }
+                physical_result = {
+                    "allowed": False,
+                    "skipped": True,
+                    "reason": "transition_feasibility rejected",
+                }
+            elif capability_error:
+                transition_result = {
+                    "allowed": False,
+                    "constraint_code": "resource_validation_unavailable",
+                    "reason": capability_error,
+                }
+                physical_result = {
+                    "allowed": False,
+                    "skipped": True,
+                    "reason": "transition_feasibility rejected",
+                }
             else:
-                physical_input = candidate.get("physical_input")
-                physical_input = (
-                    physical_input if isinstance(physical_input, dict) else {}
-                )
-                snapshot_projector = getattr(
+                transition_result = ResourceAgent.check_recovery_transition_feasibility(
                     self,
-                    "recovery_physical_validation_snapshot",
-                    ResourceAgent.recovery_physical_validation_snapshot,
-                )
-                validation_snapshot = snapshot_projector(
-                    live_snapshot=snapshot,
-                    physical_input=physical_input,
-                    recovery_des_model=recovery_des_model,
-                )
-                result = self.check_recovery_physical_feasibility(
-                    part_context=deepcopy(physical_input.get("part_context") or {}),
+                    task=deepcopy(task),
                     recovery_snapshot=validation_snapshot,
-                    grounded_action=deepcopy(
-                        physical_input.get("grounded_action") or {}
-                    ),
-                    operation_kind=str(physical_input.get("operation_kind") or ""),
-                    part_name=(
-                        str(physical_input.get("part_name") or "").strip() or None
-                    ),
+                    part_context=deepcopy(physical_input.get("part_context") or {}),
+                    recovery_des_model=deepcopy(recovery_des_model),
                 )
-                if not isinstance(result, dict):
-                    result = {
+                if not isinstance(transition_result, dict):
+                    transition_result = {
                         "allowed": False,
                         "constraint_code": "resource_validation_unavailable",
-                        "reason": "ResourceAgent returned a malformed validation result",
+                        "reason": (
+                            "ResourceAgent returned a malformed transition result"
+                        ),
                     }
-            allowed = bool(result.get("allowed") is True)
-            findings: list[dict[str, Any]] = []
-            if not allowed:
-                findings.append(
+                if bool(transition_result.get("allowed") is True):
+                    physical_result = self.check_recovery_physical_feasibility(
+                        part_context=deepcopy(
+                            physical_input.get("part_context") or {}
+                        ),
+                        recovery_snapshot=validation_snapshot,
+                        grounded_action=deepcopy(
+                            physical_input.get("grounded_action") or {}
+                        ),
+                        operation_kind=str(
+                            physical_input.get("operation_kind") or ""
+                        ),
+                        part_name=(
+                            str(physical_input.get("part_name") or "").strip()
+                            or None
+                        ),
+                    )
+                    if not isinstance(physical_result, dict):
+                        physical_result = {
+                            "allowed": False,
+                            "constraint_code": "resource_validation_unavailable",
+                            "reason": (
+                                "ResourceAgent returned a malformed physical result"
+                            ),
+                        }
+                else:
+                    physical_result = {
+                        "allowed": False,
+                        "skipped": True,
+                        "reason": "transition_feasibility rejected",
+                    }
+
+            transition_findings: list[dict[str, Any]] = []
+            if not bool(transition_result.get("allowed") is True):
+                transition_finding = {
+                    "validation_category": "transition_feasibility",
+                    "constraint_owner": "resource",
+                    "constraint_family": str(
+                        transition_result.get("constraint_family")
+                        or "transition_consistency"
+                    ),
+                    "constraint_code": str(
+                        transition_result.get("constraint_code")
+                        or "transition_feasibility_rejected"
+                    ),
+                    "reason": str(
+                        transition_result.get("reason")
+                        or "ResourceAgent rejected transition feasibility"
+                    ),
+                    "resource_jid": resource_jid or validator_jid,
+                    "part_name": task.get("part_name"),
+                    "evidence": deepcopy(
+                        transition_result.get("evidence") or {}
+                    ),
+                }
+                invariant_id = str(
+                    transition_result.get("invariant_id") or ""
+                ).strip()
+                if invariant_id:
+                    transition_finding["invariant_id"] = invariant_id
+                if transition_result.get("retriable") is True:
+                    transition_finding["retriable"] = True
+                transition_findings.append(transition_finding)
+
+            physical_findings: list[dict[str, Any]] = []
+            if (
+                not bool(physical_result.get("skipped"))
+                and not bool(physical_result.get("allowed") is True)
+            ):
+                physical_findings.append(
                     {
                         "validation_category": "physical_feasibility",
                         "constraint_owner": "resource",
                         "constraint_family": "resource_feasibility",
                         "constraint_code": str(
-                            result.get("constraint_code")
+                            physical_result.get("constraint_code")
                             or "resource_feasibility_rejected"
                         ),
                         "reason": str(
-                            result.get("reason")
+                            physical_result.get("reason")
                             or "ResourceAgent rejected physical feasibility"
                         ),
                         "resource_jid": resource_jid or validator_jid,
                         "part_name": task.get("part_name"),
-                        "evidence": deepcopy(result.get("evidence") or {}),
+                        "evidence": deepcopy(
+                            physical_result.get("evidence") or {}
+                        ),
                     }
                 )
+            transition_result = {
+                **deepcopy(transition_result),
+                "findings": deepcopy(transition_findings),
+            }
+            physical_result = {
+                **deepcopy(physical_result),
+                "findings": deepcopy(physical_findings),
+            }
+            allowed = bool(
+                transition_result.get("allowed") is True
+                and physical_result.get("allowed") is True
+            )
+            findings = [*transition_findings, *physical_findings]
             results.append(
                 {
                     "candidate_index": candidate_index,
                     "event_id": str(candidate.get("event_id") or "").strip(),
                     "allowed": allowed,
                     "findings": findings,
-                    "resource_result": deepcopy(result),
+                    "transition_feasibility": transition_result,
+                    "physical_feasibility": physical_result,
+                    "resource_result": deepcopy(
+                        physical_result
+                        if transition_result.get("allowed") is True
+                        else transition_result
+                    ),
                 }
             )
         return {
