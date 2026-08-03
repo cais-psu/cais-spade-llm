@@ -47,6 +47,8 @@ def _bootstrap_repo_site_packages(root: Path) -> None:
 
 _bootstrap_repo_site_packages(ROOT)
 
+from jsonschema import Draft202012Validator  # noqa: E402
+
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
 )  # noqa: E402
@@ -590,7 +592,9 @@ class FakeProductAgent:
         tools: list[dict[str, Any]] | None = None,
         tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
         max_tool_rounds: int = 3,
+        include_agent_instructions: bool = True,
     ) -> dict[str, Any]:
+        assert include_agent_instructions is False
         response_source = (
             "mocked_scripted_fixture" if self._uses_scripted_responses else "live"
         )
@@ -2633,6 +2637,8 @@ def _render_non_case3_candidate_prompt(
     reverse_order: bool = False,
     candidate_rejection_feedback: list[dict[str, Any]] | None = None,
     accepted_outline_prefix: list[dict[str, Any]] | None = None,
+    recovery_des_models: dict[str, Any] | None = None,
+    action_horizon: str = "1",
 ) -> str:
     resources = [
         {
@@ -2742,8 +2748,8 @@ def _render_non_case3_candidate_prompt(
     session_state = {
         "outline_mode": "incremental_candidates_validated",
         "recovery_selection_mode": "pure_llm",
-        "action_horizon": "1",
-        "action_horizon_steps": 1,
+        "action_horizon": action_horizon,
+        "action_horizon_steps": 1 if action_horizon == "1" else 3,
         "action_horizon_k": 3,
         "candidate_count": "auto",
         "accepted_outline_prefix": deepcopy(accepted_outline_prefix or []),
@@ -2753,6 +2759,7 @@ def _render_non_case3_candidate_prompt(
         "outline_validation_findings": [],
         "candidate_rejection_feedback": deepcopy(candidate_rejection_feedback or []),
         "primitive_escalation_diagnostics": [],
+        "recovery_des_models": deepcopy(recovery_des_models or {}),
         "symbolic_resources": {row["resource_jid"]: deepcopy(row) for row in resources},
         "symbolic_parts": {row["part_name"]: deepcopy(row) for row in parts},
     }
@@ -2987,6 +2994,9 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert "role=user" in first_request_text
     assert '"name": "multi_turn_grounding_response"' in first_request_text
     assert "multi_turn_grounding_response" not in request_message_text
+    assert '"goal_location"' not in request_message_text
+    assert '"goal_requirement_id"' not in request_message_text
+    assert "restore LG to assembly_board-v1" in request_message_text
 
     grounding_turns = [
         turn
@@ -3467,6 +3477,33 @@ def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     assert final_outline_result["selection_status"] == "selected"
     assert final_outline_result["remaining_blocked_issue_count"] == 0
     assert session_state["status"] == "ready_for_primitive_generation"
+    assert session_state["accepted_primitive_program"] == []
+    assert result.get("accepted_primitive_program") in (None, [])
+    for turn in result["turns"]:
+        if not isinstance(turn, dict) or turn.get("phase") != "outline":
+            continue
+        for artifact_key in (
+            "outline_result_artifact_path",
+            "outline_audit_artifact_path",
+            "outline_stack_artifact_path",
+        ):
+            artifact_path = turn.get(artifact_key)
+            if not artifact_path:
+                continue
+            serialized_artifact = json.dumps(
+                _load_json(Path(artifact_path)), sort_keys=True
+            )
+            assert "modeled_task_steps" not in serialized_artifact
+            assert "primitive_steps" not in serialized_artifact
+    serialized_outline = json.dumps(
+        {
+            "transition_trace": result["transition_trace"],
+            "multi_turn_session": result["multi_turn_session"],
+        },
+        sort_keys=True,
+    )
+    assert "modeled_task_steps" not in serialized_outline
+    assert "primitive_steps" not in serialized_outline
     assert result["llm_response_source"] == "mocked_scripted_fixture"
 
 
@@ -3633,6 +3670,29 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
         outline_prompt
     )
     assert "named poses" not in outline_prompt
+    resource_vocabulary = outline_prompt.split("Resource States", maxsplit=1)[1].split(
+        "Part States", maxsplit=1
+    )[0]
+    part_vocabulary = outline_prompt.split("Part States", maxsplit=1)[1].split(
+        "Resource Fields", maxsplit=1
+    )[0]
+    vocabulary = resource_vocabulary + part_vocabulary
+    current_des_state = outline_prompt.split("Current DES State", maxsplit=1)[1]
+    assert "held_part:" not in vocabulary
+    assert '"MCP"' not in vocabulary
+    assert '"held_part": "MCP"' in current_des_state
+    assert '"part_name": "MCP"' in current_des_state
+    assert '"part_name": "LG"' in current_des_state
+    assert "any" not in vocabulary
+    assert '"failed"' not in resource_vocabulary
+    assert '"misplaced"' not in part_vocabulary
+    assert '"resource_state": "failed"' in current_des_state
+    assert '"part_state": "misplaced"' in current_des_state
+    assert '"goal_location"' not in outline_prompt
+    assert '"goal_requirement_id"' not in outline_prompt
+    for line in vocabulary.splitlines():
+        if "resource_state:" in line or "part_state:" in line:
+            assert "null" not in line
 
     session_state["symbolic_parts"]["LG"].update(
         {
@@ -3883,19 +3943,17 @@ def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
         end_state={"resource_state": "ready"},
         state_variables=resource_only_states,
     )
-    assert len(findings) == 1
-    assert findings[0]["constraint_code"] == "candidate_schema_violation"
-    assert findings[0]["evidence"]["missing"] == [
-        "held_part",
-        "part_state",
-        "part_location",
-    ]
+    assert findings == []
 
     custody_states = {
         **resource_only_states,
-        "held_part": {"scope": "resource", "domain": [None, "LCP"]},
-        "part_state": {"scope": "part", "domain": ["available", "controlled"]},
+        "held_part": {"scope": "resource", "domain": [None]},
+        "part_state": {
+            "scope": "part",
+            "domain": [None, "available", "controlled"],
+        },
         "part_location": {"scope": "part", "domain": ["station"]},
+        "part_quality": {"scope": "part", "domain": ["unknown", "accepted"]},
     }
     findings = multi_turn_mode._candidate_state_completeness_findings(
         candidate_task=common,
@@ -3916,16 +3974,150 @@ def test_candidate_completeness_uses_responsible_ra_state_variables() -> None:
         recovery_selection_mode="neurosymbolic",
         declared_state_variables=custody_states,
     )
-    outline_event_schema = response_schema["schema"]["$defs"]["outline_event"]
-    assert outline_event_schema["allOf"][0]["if"]["required"] == ["part_name"]
-    required_part_fields = outline_event_schema["allOf"][0]["then"]["properties"]
-    assert "expected_start_state" not in outline_event_schema["properties"]
-    assert required_part_fields["expected_end_state"]["required"] == [
+    assert response_schema["strict"] is False
+    serialized_schema = json.dumps(response_schema["schema"], sort_keys=True)
+    for unsupported_keyword in ('"allOf"', '"if"', '"then"', '"else"', '"not"'):
+        assert unsupported_keyword not in serialized_schema
+    definitions = response_schema["schema"]["$defs"]
+    outline_event_schema = definitions["outline_event"]
+    branch_names = [
+        branch["$ref"].rsplit("/", maxsplit=1)[-1]
+        for branch in outline_event_schema["anyOf"]
+    ]
+    assert branch_names == [
+        "resource_only_outline_event",
+        "part_outline_event",
+        "custody_outline_event",
+    ]
+
+    resource_event = definitions["resource_only_outline_event"]
+    part_event = definitions["part_outline_event"]
+    custody_event = definitions["custody_outline_event"]
+    for event_schema in (resource_event, part_event, custody_event):
+        assert event_schema["additionalProperties"] is False
+        assert "expected_start_state" not in event_schema["properties"]
+    assert "part_name" not in resource_event["properties"]
+    assert "part_name" in part_event["required"]
+    assert "part_name" in custody_event["required"]
+
+    resource_state_schema = definitions["resource_only_outline_state"]
+    part_state_schema = definitions["part_outline_state"]
+    custody_state_schema = definitions["custody_outline_state"]
+    for state_schema in (
+        resource_state_schema,
+        part_state_schema,
+        custody_state_schema,
+    ):
+        assert state_schema["additionalProperties"] is False
+    assert set(resource_state_schema["properties"]) == {
+        "resource_state",
+        "resource_location",
+    }
+    assert "held_part" not in part_state_schema["properties"]
+    assert {"part_state", "part_location", "part_quality"}.issubset(
+        part_state_schema["properties"]
+    )
+    assert custody_state_schema["required"] == [
         "resource_state",
         "held_part",
         "part_state",
         "part_location",
     ]
+    assert custody_state_schema["properties"]["resource_state"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+    assert custody_state_schema["properties"]["part_state"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+    assert custody_state_schema["properties"]["held_part"] == {
+        "type": ["string", "null"],
+        "minLength": 1,
+    }
+
+
+def test_candidate_schema_separates_resource_part_and_custody_shapes() -> None:
+    response_schema = multi_turn_prompts.multi_turn_phase_response_schema(
+        "outline",
+        outline_mode="incremental_candidates_validated",
+        recovery_selection_mode="neurosymbolic",
+        declared_state_variables={
+            "resource_state": {"scope": "resource", "domain": ["idle", "ready"]},
+            "resource_location": {"scope": "resource", "domain": ["home"]},
+            "held_part": {"scope": "resource", "domain": [None, "LG"]},
+            "part_state": {
+                "scope": "part",
+                "domain": ["available", "in_gripper"],
+            },
+            "part_location": {
+                "scope": "part",
+                "domain": ["station", "resource@localhost"],
+            },
+        },
+    )["schema"]
+    Draft202012Validator.check_schema(response_schema)
+    validator = Draft202012Validator(response_schema)
+
+    def response(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {"thought": "propose one transition", "candidate_events": [candidate]}
+
+    common = {
+        "outline_id": "candidate_1",
+        "event_name": "recover_to_home",
+        "resource_jid": "resource@localhost",
+        "rationale": "recover the resource",
+    }
+    resource_only = {
+        **common,
+        "expected_end_state": {
+            "resource_state": "ready",
+            "resource_location": "home",
+        },
+    }
+    part_without_custody = {
+        **common,
+        "part_name": "LG",
+        "expected_end_state": {
+            "resource_state": "ready",
+            "part_state": "available",
+        },
+    }
+    acquisition = {
+        **common,
+        "part_name": "LG",
+        "expected_end_state": {
+            "resource_state": "ready",
+            "held_part": "LG",
+            "part_state": "in_gripper",
+            "part_location": "resource@localhost",
+        },
+    }
+    release = deepcopy(acquisition)
+    release["expected_end_state"] = {
+        "resource_state": "ready",
+        "held_part": None,
+        "part_state": "available",
+        "part_location": "station",
+    }
+    turn03_shape = {
+        **common,
+        "part_name": "",
+        "expected_end_state": {
+            "resource_state": "ready",
+            "resource_location": "home",
+            "held_part": None,
+            "part_state": "",
+            "part_location": None,
+        },
+    }
+    incomplete_custody = deepcopy(acquisition)
+    incomplete_custody["expected_end_state"].pop("part_location")
+
+    for candidate in (resource_only, part_without_custody, acquisition, release):
+        assert list(validator.iter_errors(response(candidate))) == []
+    assert list(validator.iter_errors(response(turn03_shape)))
+    assert list(validator.iter_errors(response(incomplete_custody)))
 
 
 def test_candidate_prompt_has_no_numeric_selected_index_example() -> None:
@@ -3944,15 +4136,22 @@ def test_candidate_prompt_has_no_numeric_selected_index_example() -> None:
     assert "Recovery Candidate Rules" in prompt
     assert "`candidate_events` must contain exactly three candidates" in prompt
     assert (
-        "Resource-only actions may include `resource_state`, `resource_location`, and `held_part`"
+        "Each candidate is one transition for one listed resource and includes"
         in prompt
     )
-    assert "A candidate with `part_name` must include `held_part`, `part_state`, and `part_location`" in prompt
+    assert "Without `part_name`, omit every part-scoped state field" in prompt
+    assert "Use `held_part` only in a candidate branch" not in prompt
+    assert "one physical action" not in prompt
+    assert "Resource-only actions may include" not in prompt
     assert "selected_candidate_index" in schema["required"]
     assert schema["properties"]["selected_candidate_index"]["type"] == "integer"
     assert schema["properties"]["selected_candidate_index"]["maximum"] == 2
     assert schema["properties"]["candidate_events"]["minItems"] == 3
     assert schema["properties"]["candidate_events"]["maxItems"] == 3
+
+    trace_prompt = _render_non_case3_candidate_prompt(action_horizon="k")
+    assert "Each event in a candidate trace is one transition" in trace_prompt
+    assert "Each candidate is one transition" not in trace_prompt
 
 
 def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbols() -> None:
@@ -3982,21 +4181,51 @@ def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbo
     assert "expected_end_state" not in accepted_history
     assert "new_clear_state" not in prompt
     assert "These transitions have already been applied" in prompt
-    assert "You may author a new `event_name`" in prompt
-    assert "optional new `resource_state` or `part_state` values" in prompt
-    assert "A new state name has no meaning by itself" in prompt
-    assert "must accompany a concrete state effect" in prompt
+    assert "`event_name` may be new" in prompt
+    assert "`resource_state` and `part_state` may be new nonempty exact strings" in prompt
+    assert "these labels alone do not establish capability" in prompt
     assert '"resource_location": "station"' in prompt
-    assert (
-        "Use only supplied resources, parts, known resource locations, predicates"
-        in prompt
-    )
+    assert "known resource locations" not in prompt
+    assert "Location tokens must belong to the same RA state field" in prompt
+    assert "exact current `part_location` may be preserved" in prompt
     assert "named poses" not in prompt
     assert "Outline Candidate Contract" not in prompt
     assert "Current DES State" in prompt
 
     initial_prompt = _render_non_case3_candidate_prompt()
     assert "Accepted Transition Prefix" not in initial_prompt
+
+
+def test_candidate_prompt_keeps_ra_location_vocabulary_field_specific() -> None:
+    prompt = _render_non_case3_candidate_prompt(
+        recovery_des_models={
+            "xarm6@localhost": {
+                "state_variables": {
+                    "resource_location": {
+                        "scope": "resource",
+                        "domain": ["home", None],
+                    },
+                    "part_location": {
+                        "scope": "part",
+                        "domain": ["assembly_board-v1", None],
+                    },
+                }
+            }
+        }
+    )
+    resource_fields = prompt.split("Resource Fields", maxsplit=1)[1].split(
+        "Current DES State", maxsplit=1
+    )[0]
+
+    assert (
+        'resource_location: {"domain": ["home"], "scope": "resource"}'
+        in resource_fields
+    )
+    assert "part_location" not in resource_fields
+    assert "Part Exact Fields" not in prompt
+    assert 'part_location="assembly_board-v1"' not in prompt
+    assert "\n- part_location=" not in prompt
+    assert "null" not in resource_fields
 
 
 def test_production_cca_rejects_safe1_out_of_order_mcp_placement() -> None:
@@ -4166,7 +4395,6 @@ def test_novel_event_and_state_symbols_use_declared_effects_and_clear_safe2() ->
         "resource_jid": "xarm6@localhost",
         "expected_end_state": {
             "resource_state": "xarm6_clear_state",
-            "held_part": None,
             "resource_location": "home",
         },
         "rationale": "Leave the explicitly occupied protected destination.",
@@ -4219,7 +4447,6 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
         "expected_end_state": {
             "resource_state": "home",
             "resource_location": "home",
-            "held_part": None,
         },
         "rationale": "Clear the explicitly occupied destination.",
     }
@@ -4389,7 +4616,7 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
         "part_name": "LG",
         "expected_end_state": {
             "resource_state": "picked",
-            "resource_location": None,
+            "resource_location": "home",
             "held_part": "LG",
             "part_state": "in_gripper",
             "part_location": "xarm6@localhost",
@@ -4550,7 +4777,6 @@ def test_exact_no_op_passes_validators_and_is_excluded_by_selection() -> None:
         "expected_end_state": {
             "resource_state": "failed",
             "resource_location": "assembly_board-v1",
-            "held_part": None,
         },
         "rationale": "Exercise selection-level no-progress classification.",
     }
@@ -4585,7 +4811,7 @@ def test_exact_no_op_passes_validators_and_is_excluded_by_selection() -> None:
     assert "candidate_revision_targets" not in turn_entry
 
 
-def test_transition_feasibility_checks_only_successor_custody_consistency() -> None:
+def test_transition_feasibility_checks_successor_custody_and_release_location() -> None:
     _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
         _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
@@ -4595,6 +4821,7 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         "y": 0.2,
         "z": 1.035,
     }
+    latest_stages: list[dict[str, Any]] = []
 
     def _transition_findings(
         candidate: dict[str, Any],
@@ -4613,6 +4840,7 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
             )
         )
         stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
+        latest_stages[:] = stages
         pa_stage = next(
             stage
             for stage in stages
@@ -4641,7 +4869,20 @@ def test_transition_feasibility_checks_only_successor_custody_consistency() -> N
         },
         "rationale": "Release the held part.",
     }
-    assert _transition_findings(release) == []
+    findings = _transition_findings(release)
+    assert findings[0]["constraint_code"] == "part_traceability_violation"
+    assert findings[0]["validation_category"] == "transition_feasibility"
+    assert findings[0]["invariant_id"] == "part_traceability"
+    assert next(
+        stage
+        for stage in latest_stages
+        if stage["validation_category"] == "physical_feasibility"
+    )["status"] == "skipped"
+    assert next(
+        stage
+        for stage in latest_stages
+        if stage["validation_category"] == "safety"
+    )["status"] == "skipped"
 
     release["expected_end_state"]["part_location"] = "prusa-mk4-2"
     assert _transition_findings(release) == []
@@ -4730,7 +4971,7 @@ def test_pa_rejects_malformed_candidate_without_contacting_ra() -> None:
     _fixture, product_agent, planner, prepared_recovery_request = asyncio.run(
         _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
-    session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
+    session_seed = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
     ra_calls = 0
     request_ra = product_agent.request_recovery_outline_physical_validation
 
@@ -4740,43 +4981,76 @@ def test_pa_rejects_malformed_candidate_without_contacting_ra() -> None:
         return await request_ra(**kwargs)
 
     product_agent.request_recovery_outline_physical_validation = _count_ra_calls
-    decision, turn_entry = asyncio.run(
-        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
-            session_state=session_state,
-            parsed_response={
-                "thought": "submit one malformed candidate",
-                "candidate_events": [
-                    {
-                        "outline_id": "unknown_resource_binding",
-                        "event_name": "generated_event_name",
-                        "resource_jid": "new_robot@localhost",
-                        "expected_end_state": {
-                            "resource_state": "generated_resource_state"
-                        },
-                        "rationale": "This candidate has an unknown resource_jid.",
-                    }
-                ],
+    common_candidate = {
+        "event_name": "generated_event_name",
+        "resource_jid": "xarm6@localhost",
+        "expected_end_state": {"resource_state": "generated_resource_state"},
+        "rationale": "Submit one malformed candidate.",
+    }
+    malformed_candidates = [
+        {
+            **common_candidate,
+            "outline_id": "custody_without_part_name",
+            "expected_end_state": {
+                "resource_state": "generated_resource_state",
+                "held_part": "LG",
             },
-            prepared_recovery_request=prepared_recovery_request,
-            planner=planner,
-        )
-    )
+        },
+        {**common_candidate, "outline_id": "empty_part_name", "part_name": ""},
+        {
+            **common_candidate,
+            "outline_id": "whitespace_part_name",
+            "part_name": "   ",
+        },
+        {
+            **common_candidate,
+            "outline_id": "padded_part_name",
+            "part_name": " LG ",
+        },
+        {
+            **common_candidate,
+            "outline_id": "non_string_part_name",
+            "part_name": 7,
+        },
+    ]
 
-    assert decision == "need_revision"
+    for candidate in malformed_candidates:
+        decision, turn_entry = asyncio.run(
+            multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+                session_state=deepcopy(session_seed),
+                parsed_response={
+                    "thought": "submit one malformed candidate",
+                    "candidate_events": [candidate],
+                },
+                prepared_recovery_request=prepared_recovery_request,
+                planner=planner,
+            )
+        )
+
+        assert decision == "need_revision"
+        stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
+        assert [stage["status"] for stage in stages] == [
+            "rejected",
+            "skipped",
+            "skipped",
+            "skipped",
+        ]
+        assert [stage["validator_role"] for stage in stages] == [
+            "PA",
+            "RA",
+            "RA",
+            "CCA",
+        ]
+        finding = stages[0]["findings"][0]
+        assert finding["constraint_code"] == "candidate_schema_violation"
+        if candidate["outline_id"] == "custody_without_part_name":
+            assert finding["evidence"]["unexpected"] == ["held_part"]
+        else:
+            assert finding["part_name"] is None
+            assert finding["evidence"]["field"] == "part_name"
+            assert finding["evidence"]["value"] == candidate["part_name"]
+
     assert ra_calls == 0
-    stages = turn_entry["candidate_evaluations"][0]["validation_stages"]
-    assert [stage["status"] for stage in stages] == [
-        "rejected",
-        "skipped",
-        "skipped",
-        "skipped",
-    ]
-    assert [stage["validator_role"] for stage in stages] == [
-        "PA",
-        "RA",
-        "RA",
-        "CCA",
-    ]
 
 
 def test_held_part_location_mismatch_skips_ra_cca_and_returns_scoped_feedback() -> None:
@@ -4938,8 +5212,8 @@ def test_novel_states_do_not_allow_invented_resources_parts_or_locations() -> No
     )
 
 
-def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() -> None:
-    _fixture, _product_agent, _planner, prepared_recovery_request = asyncio.run(
+def test_llm_resource_only_candidate_omits_held_part_and_part_fields_require_part_name() -> None:
+    _fixture, _product_agent, planner, prepared_recovery_request = asyncio.run(
         _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
     )
     session_state = deepcopy(prepared_recovery_request["multi_turn_session_seed"])
@@ -4950,7 +5224,6 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
         "resource_jid": "xarm6@localhost",
         "expected_end_state": {
             "resource_state": "xarm6_clear_state",
-            "held_part": None,
             "resource_location": "home",
         },
         "rationale": "Clear the occupied destination without changing any part state.",
@@ -4962,13 +5235,57 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
     )
     assert findings == []
     assert validated is not None
+    assert set(validated["expected_start_state"]) == {
+        "resource_location",
+        "resource_state",
+    }
+    resource_only_with_null = deepcopy(resource_only)
+    resource_only_with_null["part_name"] = None
+    validated, findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=resource_only_with_null,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings == []
+    assert validated is not None
+    assert "part_name" not in validated
+    _decision, resource_turn_entry = asyncio.run(
+        multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
+            session_state=deepcopy(session_state),
+            parsed_response={
+                "thought": "clear the resource",
+                "candidate_events": [resource_only_with_null],
+            },
+            prepared_recovery_request=prepared_recovery_request,
+            planner=planner,
+        )
+    )
+    resource_stages = resource_turn_entry["candidate_evaluations"][0][
+        "validation_stages"
+    ]
+    assert resource_stages[0]["validator_role"] == "PA"
+    assert resource_stages[0]["status"] == "passed"
+    assert resource_stages[1]["validator_role"] == "RA"
+    assert resource_stages[1]["validation_category"] == "transition_feasibility"
+    assert resource_stages[1]["status"] == "passed"
+
+    empty_part_name = deepcopy(resource_only)
+    empty_part_name["part_name"] = ""
+    _validated, findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=empty_part_name,
+        session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings
+    assert "exact supplied nonempty string token" in str(
+        findings[0].get("reason") or ""
+    )
 
     ambiguous_named_pose = deepcopy(resource_only)
     ambiguous_named_pose["outline_id"] = "resource_only_ambiguous_home"
     ambiguous_named_pose["expected_end_state"] = {
         "resource_state": "home",
-        "held_part": None,
-        "resource_location": None,
+        "resource_location": "assembly_board-v1",
     }
     validated, findings = multi_turn_mode._derive_candidate_outline_task(
         candidate_task=ambiguous_named_pose,
@@ -4985,7 +5302,7 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
                 "candidate_events": [ambiguous_named_pose],
             },
             prepared_recovery_request=prepared_recovery_request,
-            planner=_planner,
+            planner=planner,
         )
     )
     transition_stage = next(
@@ -5021,7 +5338,7 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
     assert "part_name" in reason
     assert "part_state" in reason
     assert "part_location" in reason
-    assert "held_part" not in reason
+    assert "held_part" in reason
 
     inconsistent_held_part = {
         "outline_id": "inconsistent_held_part",
@@ -5051,7 +5368,7 @@ def test_resource_only_held_part_is_allowed_but_part_fields_require_part_name() 
                 "candidate_events": [inconsistent_held_part],
             },
             prepared_recovery_request=prepared_recovery_request,
-            planner=_planner,
+            planner=planner,
         )
     )
     transition_stage = next(
@@ -5077,7 +5394,7 @@ def test_grounding_schema_contains_only_structural_decision_fields() -> None:
     assert request_schema["required"] == ["fact_type", "entity"]
 
 
-def test_production_structured_request_records_actual_system_message() -> None:
+def test_production_structured_request_records_actual_messages() -> None:
     calls: list[dict[str, Any]] = []
 
     def _create(**kwargs: Any) -> Any:
@@ -5136,6 +5453,92 @@ def test_production_structured_request_records_actual_system_message() -> None:
     ]
     assert calls[0]["messages"] == recorded_request["messages"]
     assert calls[0]["response_format"] == recorded_request["response_format"]
+
+    calls.clear()
+    with (
+        patch.object(llm_agent_module, "_client", fake_client),
+        patch.object(llm_agent_module.asyncio, "to_thread", new=_direct_to_thread),
+    ):
+        parsed = asyncio.run(
+            llm_agent_module.LlmAgent.ask_llm_structured(
+                agent,
+                "recovery user prompt",
+                response_format=response_format,
+                include_agent_instructions=False,
+            )
+        )
+
+    assert parsed["decision"] == "grounded"
+    assert agent._last_structured_request["messages"] == [
+        {"role": "user", "content": "recovery user prompt"}
+    ]
+    assert calls[0]["messages"] == agent._last_structured_request["messages"]
+    assert "tools" not in agent._last_structured_request
+
+
+def test_recovery_safety_request_records_only_user_prompt_and_schema(
+    tmp_path: Path,
+) -> None:
+    class _RecoverySafetyAgent:
+        tools_catalog = [{"type": "function", "function": {"name": "not_sent"}}]
+        logger = logging.getLogger(__name__)
+
+        def __init__(self) -> None:
+            self._last_structured_request: dict[str, Any] = {}
+
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            include_agent_instructions: bool = True,
+        ) -> dict[str, Any]:
+            assert include_agent_instructions is False
+            self._last_structured_request = {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": prompt}],
+                "reasoning_effort": "low",
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": deepcopy(response_format),
+                },
+                "response_source": "mocked_test",
+                "request_sent": False,
+            }
+            return {"rules": []}
+
+    result = asyncio.run(
+        generate_recovery_safety_bundle(
+            _RecoverySafetyAgent(),
+            {
+                "recovery_safety_dir": str(tmp_path / "recovery_safety"),
+                "recovery_safety_scope_id": "test_scope",
+                "accepted_outline_prefix": [],
+                "loaded_safety_rules": [],
+                "tools_catalog": [
+                    {"type": "function", "function": {"name": "not_sent"}}
+                ],
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    captured_request = json.loads(
+        Path(result["grounding_prompt_artifact_path"]).read_text(encoding="utf-8")
+    )
+    assert captured_request["messages"] == [
+        {
+            "role": "user",
+            "content": captured_request["messages"][0]["content"],
+        }
+    ]
+    assert captured_request["messages"][0]["content"].startswith(
+        "You are selecting which supplied recovery outline rows"
+    )
+    assert "tools" not in captured_request
+    assert captured_request["response_format"]["json_schema"]["name"] == (
+        "recovery_safety_grounding"
+    )
 
 
 def test_candidate_validation_feedback_is_rendered_once() -> None:
@@ -5342,6 +5745,7 @@ def test_outline_request_result_and_stack_artifacts_are_complete(tmp_path: Path)
 
     request_text = request_artifact.read_text(encoding="utf-8")
     assert "Model: test-model" in request_text
+    assert "role=system" not in request_text
     assert "role=user" in request_text
     assert "candidate prompt" in request_text
 
@@ -5579,7 +5983,16 @@ def test_selected_verified_ra_vocabulary_is_used_by_the_next_prompt() -> None:
                     "scope": "resource",
                     "domain": ["previous_vocabulary_token"],
                 }
-            }
+            },
+            "events": [
+                {
+                    "updates": {
+                        "resource_state": {
+                            "set": "previous_vocabulary_token"
+                        }
+                    }
+                }
+            ],
         }
     }
     refreshed_model = {
@@ -5588,7 +6001,14 @@ def test_selected_verified_ra_vocabulary_is_used_by_the_next_prompt() -> None:
                 "scope": "resource",
                 "domain": ["next_request_vocabulary_token"],
             }
-        }
+        },
+        "events": [
+            {
+                "updates": {
+                    "resource_state": {"set": "next_request_vocabulary_token"}
+                }
+            }
+        ],
     }
 
     asyncio.run(

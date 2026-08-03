@@ -50,7 +50,10 @@ from cais_spade_llm.product.order import (
 )
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.ui import digital_twin, ros2_processes
-from cais_spade_llm.ui.perception_manager import PerceptionManager
+from cais_spade_llm.ui.perception_manager import (
+    UR5E_CALIBRATION_MONITOR_STATUS,
+    PerceptionManager,
+)
 from cais_spade_llm.ui.process_registry import UIProcessRegistry
 
 log = logging.getLogger("ui.bridge")
@@ -343,35 +346,6 @@ class SystemBridge:
         "xarm6": [-1.572631, -1.054702, -0.385494, 0.000322, 1.440603, -1.572544],
     }
     _DIGITAL_TWIN_SYNC_RESTART_COOLDOWN_S = 8.0
-    _ROBOT_FUNCTION_NAMES = (
-        "pick_approach",
-        "pick_grasp",
-        "place_approach",
-        "place_insert",
-        "move_home",
-    )
-    _ROBOT_FUNCTION_TEMPLATES: dict[str, list[dict[str, str]]] = {
-        "pick_approach": [
-            {"step_name": "approach_pose", "primitive": "move_cartesian"},
-            {"step_name": "pick_pose", "primitive": "move_cartesian"},
-        ],
-        "pick_grasp": [
-            {"step_name": "grasp_part", "primitive": "grasp_part"},
-            {"step_name": "lift_pose", "primitive": "move_relative"},
-        ],
-        "place_approach": [
-            {"step_name": "approach_pose", "primitive": "move_cartesian"},
-            {"step_name": "place_pose", "primitive": "move_cartesian"},
-        ],
-        "place_insert": [
-            {"step_name": "insert_pose", "primitive": "move_cartesian"},
-            {"step_name": "release_part", "primitive": "release_part"},
-            {"step_name": "retreat_pose", "primitive": "move_relative"},
-        ],
-        "move_home": [
-            {"step_name": "home", "primitive": "move_to_named_pose"},
-        ],
-    }
     _ROBOT_FUNCTION_EVENT_PRIMITIVES = {
         "grasp_part",
         "release_part",
@@ -494,6 +468,8 @@ class SystemBridge:
         self._digital_twin_waypoints: dict[str, list[dict[str, Any]]] = {}
         self._digital_twin_function_steps: dict[str, list[dict[str, Any]]] = {}
         self._digital_twin_record_lock = threading.Lock()
+        self._ur5e_pick_execution_lock = threading.Lock()
+        self._ur5e_pick_execution_active: str | None = None
         self._digital_twin_prepare_lock = threading.Lock()
         self._digital_twin_prepare_threads: dict[str, threading.Thread] = {}
         self._digital_twin_sync_restart_threads: dict[str, threading.Thread] = {}
@@ -5052,9 +5028,31 @@ class SystemBridge:
             rtde_status_age_sec = time.time() - float(rtde_status.get("updated_at"))
         except (TypeError, ValueError):
             rtde_status_age_sec = float("inf")
+        ros_domain_id = target.get("ros_domain_id")
+        source = str(target.get("source") or "")
+        twin_target = source.removeprefix("digital_twin:") if source.startswith(
+            "digital_twin:"
+        ) else ""
+        repair_instruction = (
+            f"Click Repair Twin for {twin_target}."
+            if twin_target
+            else "Repair the active digital twin before retrying."
+        )
+        if self._ur5e_rtde_result_timeout_requires_repair(rtde_status):
+            return False, (
+                f"{_UR5E_RTDE_TRAJECTORY_ACTION} is blocked on ROS_DOMAIN_ID={ros_domain_id}: "
+                "UR5e RTDE trajectory server reported UR5e RTDE trajectory result timeout. "
+                f"{repair_instruction}"
+            )
+        if rtde_status_age_sec > 3.0:
+            return False, (
+                f"{_UR5E_RTDE_TRAJECTORY_ACTION} is unavailable on "
+                f"ROS_DOMAIN_ID={ros_domain_id}: UR5e RTDE trajectory status is stale "
+                f"({rtde_status_age_sec:.1f} s old). Failed twin component: "
+                f"UR5e RTDE trajectory server. {repair_instruction}"
+            )
         if (
-            rtde_status_age_sec <= 5.0
-            and rtde_status.get("rtde_control_connected") is False
+            rtde_status.get("rtde_control_connected") is False
         ):
             message = str(rtde_status.get("message") or "").strip()
             return False, message or (
@@ -5063,11 +5061,19 @@ class SystemBridge:
             )
         action_error = self._wait_for_ros_action(
             _UR5E_RTDE_TRAJECTORY_ACTION,
-            timeout_sec=3.0,
-            ros_domain_id=target.get("ros_domain_id"),
+            timeout_sec=8.0,
+            ros_domain_id=ros_domain_id,
         )
         if action_error:
-            return False, f"UR5e RTDE trajectory action unavailable: {action_error}"
+            failed_component = "UR5e RTDE trajectory server"
+            if twin_target:
+                row = dict(self.digital_twin_statuses().get(twin_target) or {})
+                failed_component = str(row.get("repair_reason") or failed_component)
+            return False, (
+                f"{_UR5E_RTDE_TRAJECTORY_ACTION} is unavailable on "
+                f"ROS_DOMAIN_ID={ros_domain_id}: {action_error}. "
+                f"Failed twin component: {failed_component}. {repair_instruction}"
+            )
         state_ok, state_message, _state = self.teleop_state(key)
         if not state_ok:
             return False, f"UR5e joint state unavailable: {state_message}"
@@ -5078,6 +5084,29 @@ class SystemBridge:
         if joint_state_age_sec > 2.0:
             return False, f"UR5e joint state is stale ({joint_state_age_sec:.2f} s old)"
         return True, f"UR5e RTDE action ready: {_UR5E_RTDE_TRAJECTORY_ACTION}"
+
+    @staticmethod
+    def _ur5e_rtde_result_timeout_requires_repair(
+        status: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Return whether the current RTDE status requires an explicit twin repair."""
+        if str(status.get("state") or "").strip().lower() != "failed":
+            return False
+        message = " ".join(
+            str(status.get(key) or "").strip()
+            for key in ("message", "blocked_reason")
+        )
+        if "UR5e RTDE trajectory result timeout" not in message:
+            return False
+        try:
+            age_sec = float(time.time() if now is None else now) - float(
+                status.get("updated_at")
+            )
+        except (TypeError, ValueError):
+            return False
+        return age_sec >= 0.0
 
     @staticmethod
     def _extract_robot_ip_from_resource(path: Path, robot_key: str) -> str | None:
@@ -5423,7 +5452,7 @@ class SystemBridge:
             "lg_status": "LG unavailable: model has no large_gear class",
         }
 
-    def test_physical_detection(self) -> dict[str, Any]:
+    def test_physical_detection(self, target: str | None = None) -> dict[str, Any]:
         """Request one fresh validated detection without initiating robot motion."""
         digital_twin_perception_running = any(
             self.ros2_proc_status(name) == "running"
@@ -5432,11 +5461,18 @@ class SystemBridge:
                 "digital_twin_dual_robots_physical_perception",
             }
         )
-        domain_id = (
-            self._digital_twin_domain_ids()["hardware"]
-            if digital_twin_perception_running
-            else self._default_ros_domain_id()
-        )
+        target_cfg = self._digital_twin_target(str(target or "")) if target else None
+        if isinstance(target_cfg, dict):
+            domains = self._digital_twin_domain_ids()
+            domain_id = self._digital_twin_hardware_domain_id(
+                target_cfg,
+                "ur5e",
+                domains,
+            )
+        elif digital_twin_perception_running:
+            domain_id = self._digital_twin_domain_ids()["hardware"]
+        else:
+            domain_id = self._default_ros_domain_id()
         started_at = time.time()
         cmd = (
             self._ROS2_ENV
@@ -5968,8 +6004,8 @@ class SystemBridge:
                 return f"{process_name} exited before {target} became available"
 
             ok, out = self._ros2_command_output(
-                "ros2 service list --include-hidden-services --no-daemon --spin-time 2.0",
-                timeout_sec=7.0,
+                "ros2 service list --include-hidden-services --no-daemon --spin-time 0.5",
+                timeout_sec=max(8.0, min(12.0, float(timeout_sec) + 2.0)),
                 ros_domain_id=ros_domain_id,
                 emit_slow_diag=False,
                 emit_failure_diag=False,
@@ -6065,6 +6101,7 @@ class SystemBridge:
             "blocked_reason",
             "final_error_rad",
             "final_error_joint",
+            "updated_at",
         ):
             if key in rtde_status:
                 status[f"rtde_trajectory_{key}"] = rtde_status.get(key)
@@ -6511,6 +6548,17 @@ class SystemBridge:
             status_file = self._digital_twin_status_path(target)
             status_data = self._read_json_file(status_file)
             updated_at = float(status_data.get("updated_at") or 0.0)
+            robot = str(items[0][0] or "").strip().lower() if items else ""
+            robot_statuses = {}
+            if robot:
+                robot_statuses[robot] = {
+                    "state": str(status_data.get("state") or "starting"),
+                    "message": str(status_data.get("message") or ""),
+                    "last_error": str(status_data.get("last_error") or ""),
+                    "status_age_ms": (
+                        (now - updated_at) * 1000.0 if updated_at > 0 else None
+                    ),
+                }
             return {
                 "process": process_names[0] if process_names else "",
                 "process_status": process_status,
@@ -6518,6 +6566,7 @@ class SystemBridge:
                 "status_files": [str(status_file)],
                 "status_data": status_data,
                 "status_age_ms": (now - updated_at) * 1000.0 if updated_at > 0 else None,
+                "robots": robot_statuses,
             }
 
         entries: list[tuple[str, Path, dict[str, Any]]] = []
@@ -6576,6 +6625,19 @@ class SystemBridge:
             "status_files": [str(path) for _robot, path, _data in entries],
             "status_data": status_data,
             "status_age_ms": (now - oldest_updated_at) * 1000.0 if oldest_updated_at > 0 else None,
+            "robots": {
+                robot: {
+                    "state": str(data.get("state") or "starting"),
+                    "message": str(data.get("message") or ""),
+                    "last_error": str(data.get("last_error") or ""),
+                    "status_age_ms": (
+                        (now - float(data.get("updated_at") or 0.0)) * 1000.0
+                        if float(data.get("updated_at") or 0.0) > 0.0
+                        else None
+                    ),
+                }
+                for robot, _path, data in entries
+            },
         }
 
     def _schedule_digital_twin_monitor_sync_restart(
@@ -6680,6 +6742,7 @@ class SystemBridge:
             sync_process_status = str(sync_snapshot.get("process_status") or "unknown")
             status_data = dict(sync_snapshot.get("status_data") or {})
             status_age_ms = sync_snapshot.get("status_age_ms")
+            sync_robots = dict(sync_snapshot.get("robots") or {})
             dual_drag_markers_status_file = self._digital_twin_dual_drag_markers_status_path(target)
             dual_drag_markers_status = (
                 self._read_json_file(dual_drag_markers_status_file)
@@ -6718,6 +6781,7 @@ class SystemBridge:
                     sync_process_status = str(sync_snapshot.get("process_status") or "unknown")
                     status_data = dict(sync_snapshot.get("status_data") or {})
                     status_age_ms = sync_snapshot.get("status_age_ms")
+                    sync_robots = dict(sync_snapshot.get("robots") or {})
 
             if not hardware_supported:
                 sync_state = "limited"
@@ -6781,10 +6845,63 @@ class SystemBridge:
                     "Ready to start hardware MoveIt + passive gazebo synched digital twin."
                 )
 
+            repair_reasons: list[str] = []
+            problematic_sync_states = {"partial", "waiting", "stale", "error", "failed"}
+            status_is_fresh = (
+                status_age_ms is not None and float(status_age_ms) <= 6000.0
+            )
+            stack_active = (
+                gazebo_status == "running"
+                or hardware_overall in {"running", "partial"}
+                or sync_process_status in {"running", "partial"}
+                or (status_is_fresh and sync_state in problematic_sync_states)
+            )
+            if hardware_supported and stack_active:
+                if gazebo_status != "running":
+                    repair_reasons.append(f"Gazebo process is {gazebo_status}")
+                if hardware_overall != "running":
+                    repair_reasons.append(f"hardware stack is {hardware_overall}")
+                if sync_process_status != "running":
+                    repair_reasons.append(
+                        f"hardware -> gazebo mirror process is {sync_process_status}"
+                    )
+                for robot, robot_sync in sync_robots.items():
+                    robot_status = dict(robot_sync or {})
+                    robot_state = str(robot_status.get("state") or "").strip().lower()
+                    robot_age_ms = robot_status.get("status_age_ms")
+                    if robot_state in problematic_sync_states:
+                        repair_reasons.append(f"{robot} mirror is {robot_state}")
+                    elif (
+                        robot_age_ms is not None
+                        and float(robot_age_ms) > 3000.0
+                        and sync_process_status == "running"
+                    ):
+                        repair_reasons.append(f"{robot} mirror status is stale")
+                if sync_state in problematic_sync_states and not sync_robots:
+                    repair_reasons.append(f"hardware -> gazebo mirror is {sync_state}")
+
+                ur5e_status = dict(hardware_status.get("ur5e") or hardware_status)
+                rtde_status = {
+                    "state": ur5e_status.get("rtde_trajectory_server"),
+                    "message": ur5e_status.get("rtde_trajectory_message"),
+                    "blocked_reason": ur5e_status.get("rtde_trajectory_blocked_reason"),
+                    "updated_at": ur5e_status.get("rtde_trajectory_updated_at"),
+                }
+                if self._ur5e_rtde_result_timeout_requires_repair(rtde_status, now=now):
+                    repair_reasons.append(
+                        "UR5e RTDE trajectory server failed: "
+                        "UR5e RTDE trajectory result timeout"
+                    )
+            repair_reasons = list(dict.fromkeys(repair_reasons))
+            repair_needed = bool(repair_reasons)
+            repair_reason = "; ".join(repair_reasons)
+
             result[target] = {
                 "target": target,
                 "supported": hardware_supported,
                 "blocked_reason": blocked_reason,
+                "repair_needed": repair_needed,
+                "repair_reason": repair_reason,
                 "domains": {
                     "gazebo": domains["gazebo"],
                     "hardware": domains["hardware"],
@@ -6832,6 +6949,7 @@ class SystemBridge:
                     "latency_ms": status_data.get("latency_ms"),
                     "max_joint_delta_deg": status_data.get("max_joint_delta_deg"),
                     "last_error": status_data.get("last_error"),
+                    "robots": sync_robots,
                 },
                 "dual_drag_markers": {
                     "status_file": str(dual_drag_markers_status_file),
@@ -7873,7 +7991,22 @@ class SystemBridge:
             self._physical_part_twin_reconcile_last_result = result
             return result
 
-    def digital_twin_start(self, target: str) -> str | None:
+    def _stop_digital_twin_stack(
+        self,
+        cfg: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Stop only the tracked twin stack and its scoped ROS/Gazebo helpers."""
+        for process_name in reversed(self._digital_twin_process_names(cfg)):
+            self.ros2_stop(process_name, reason=reason)
+        self._stop_teleop_server()
+        self._force_kill_digital_twin_helpers()
+        self._kill_stale_gazebo_helpers()
+        self._force_kill_gazebo_core(reason=reason)
+
+    def digital_twin_start(self, target: str, repair: bool = False) -> str | None:
+        """Start or explicitly repair a passive hardware-authoritative digital twin."""
         cfg = self._digital_twin_target(target)
         if not cfg:
             return f"unknown digital twin target: {target}"
@@ -7888,6 +8021,9 @@ class SystemBridge:
         gazebo_name = self._digital_twin_gazebo_launch(target, cfg)
         gazebo_process = str(cfg.get("gazebo_process") or "").strip()
 
+        if repair:
+            self._stop_digital_twin_stack(cfg, reason="digital_twin_repair")
+
         self.robot_env = "real"
         self._stop_teleop_server()
         self._write_digital_twin_direction(target, self._digital_twin_direction(target))
@@ -7896,12 +8032,18 @@ class SystemBridge:
             {
                 "state": "starting",
                 "direction": self._digital_twin_direction(target),
-                "message": "starting digital twin stack.",
+                "message": (
+                    "repairing digital twin stack without commanding robot motion."
+                    if repair
+                    else "starting digital twin stack."
+                ),
             },
         )
 
         dual_already_started = (
-            target == "dual robots" and self._digital_twin_dual_robots_already_started(cfg)
+            not repair
+            and target == "dual robots"
+            and self._digital_twin_dual_robots_already_started(cfg)
         )
         if dual_already_started:
             self._write_digital_twin_status(
@@ -7913,7 +8055,7 @@ class SystemBridge:
                 },
             )
             self._restart_ros2_daemon_for_discovery(ros_domain_id=domains["hardware"])
-        else:
+        elif not repair:
             self._shutdown_gazebo_prewarm_controllers()
             self._force_kill_digital_twin_helpers()
             self._kill_stale_gazebo_helpers()
@@ -8234,14 +8376,7 @@ class SystemBridge:
         if not cfg:
             return f"unknown digital twin target: {target}"
 
-        for process_name in reversed(self._digital_twin_process_names(cfg)):
-            self.ros2_stop(process_name, reason="digital_twin_stop")
-        self._stop_teleop_server()
-        # Force-kill stragglers (move_group/rviz2/sync, gazebo core) so the twin fully
-        # shuts down and the sim mode can be switched without leftovers.
-        self._force_kill_digital_twin_helpers()
-        self._kill_stale_gazebo_helpers()
-        self._force_kill_gazebo_core(reason="digital_twin_stop")
+        self._stop_digital_twin_stack(cfg, reason="digital_twin_stop")
         self._write_digital_twin_status(
             target,
             {
@@ -8396,9 +8531,17 @@ class SystemBridge:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    @staticmethod
+    def _robot_task_registry() -> dict[str, Any]:
+        from cais_spade_llm.resources.robot.robot_tasks import robot_task_registry
+
+        return robot_task_registry()
+
     @classmethod
     def digital_twin_function_names(cls) -> list[str]:
-        return list(cls._ROBOT_FUNCTION_NAMES)
+        from cais_spade_llm.resources.robot.robot_tasks import robot_task_names
+
+        return list(robot_task_names())
 
     def digital_twin_saved_function_names(self, target: str, robot: str) -> list[str]:
         cfg = self._digital_twin_target(target)
@@ -8414,16 +8557,100 @@ class SystemBridge:
         for function_dir in directory.iterdir():
             if not function_dir.is_dir() or function_dir.name.startswith("."):
                 continue
-            if (function_dir / f"default{suffix}").is_file():
+            if any(function_dir.glob(f"*{suffix}")):
                 names.append(function_dir.name)
         return sorted(dict.fromkeys(names))
 
     @classmethod
-    def digital_twin_function_template(cls, function_name: str) -> list[dict[str, str]]:
+    def digital_twin_function_template(cls, function_name: str) -> list[dict[str, Any]]:
+        task = cls._robot_task_registry().get(str(function_name or "").strip())
+        if task is None:
+            return []
+        rows: list[dict[str, Any]] = []
+        for step in task.program.steps:
+            recordable = bool(getattr(step, "physical_position_required", False))
+            parameter_source = cls._robot_function_parameter_source(step.params)
+            if (
+                task.name == "pick_approach"
+                and str(step.id) in {"move_above_part", "descend"}
+                and not recordable
+            ):
+                parameter_source = "Computed live by compute_pick_targets."
+            rows.append(
+                {
+                    "step_name": str(step.id),
+                    "primitive": str(step.op),
+                    "recordable": recordable,
+                    "exposed": bool(step.exposed),
+                    "parameter_source": parameter_source,
+                }
+            )
+        return rows
+
+    @classmethod
+    def digital_twin_function_location_argument(cls, function_name: str) -> str:
+        task = cls._robot_task_registry().get(str(function_name or "").strip())
+        if task is None:
+            return ""
+        names = {str(argument.name) for argument in task.arguments}
+        for candidate in ("origin_resource_location", "destination_location"):
+            if candidate in names:
+                return candidate
+        return ""
+
+    @staticmethod
+    def _robot_function_parameter_value_source(value: Any) -> str:
+        if isinstance(value, dict):
+            if str(value.get("$arg") or "").strip():
+                return f"argument {value['$arg']}"
+            if str(value.get("$step") or "").strip():
+                path = ".".join(str(token) for token in list(value.get("path") or []))
+                suffix = f".{path}" if path else ""
+                return f"{value['$step']}{suffix}"
+            if str(value.get("$state") or "").strip():
+                path = ".".join(str(token) for token in list(value.get("path") or []))
+                suffix = f".{path}" if path else ""
+                return f"state {value['$state']}{suffix}"
+            return json.dumps(value, sort_keys=True, default=str)
+        return str(value)
+
+    @classmethod
+    def _robot_function_parameter_source(cls, params: dict[str, Any]) -> str:
+        if not params:
+            return "no parameters"
+        return ", ".join(
+            f"{name}={cls._robot_function_parameter_value_source(value)}"
+            for name, value in params.items()
+        )
+
+    def digital_twin_function_location_options(
+        self,
+        robot: str,
+        function_name: str,
+    ) -> list[str]:
+        if not self.digital_twin_function_location_argument(function_name):
+            return ["default"]
+        resource_path = {
+            "xarm6": _XARM6_RESOURCE,
+            "ur5e": _UR5E_RESOURCE,
+        }.get(str(robot or "").strip().lower())
+        if resource_path is None:
+            return []
+        payload = self.load_config(str(resource_path))
+        robot_block = dict(payload.get(str(robot or "").strip().lower()) or {})
+        gazebo_block = dict(robot_block.get("gazebo") or {})
+        capabilities = dict(gazebo_block.get("static_capabilities") or {})
         return [
-            dict(step)
-            for step in cls._ROBOT_FUNCTION_TEMPLATES.get(str(function_name or "").strip(), [])
+            str(value)
+            for value in list(capabilities.get("reachability") or [])
+            if str(value or "").strip()
         ]
+
+    def digital_twin_function_part_options(self, function_name: str) -> list[str]:
+        """Return exact configured `part_name` tokens used by a robot function."""
+        if str(function_name or "").strip() not in {"pick_approach", "place_approach"}:
+            return []
+        return self.product_geometry_slots_for_product()
 
     def digital_twin_target_robots(self, target: str) -> list[str]:
         cfg = self._digital_twin_target(target) or {}
@@ -8437,11 +8664,15 @@ class SystemBridge:
         cls,
         function_name: str,
         step_name: str,
-    ) -> dict[str, str] | None:
-        return digital_twin.robot_function_template_step(
-            cls._ROBOT_FUNCTION_TEMPLATES,
-            function_name,
-            step_name,
+    ) -> dict[str, Any] | None:
+        step_key = str(step_name or "").strip()
+        return next(
+            (
+                dict(step)
+                for step in cls.digital_twin_function_template(function_name)
+                if str(step.get("step_name") or "") == step_key
+            ),
+            None,
         )
 
     @staticmethod
@@ -8458,8 +8689,15 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> str:
-        return digital_twin.robot_function_buffer_key(target, robot, function_name, name)
+        return digital_twin.robot_function_buffer_key(
+            target,
+            robot,
+            function_name,
+            name,
+            part_name,
+        )
 
     @staticmethod
     def _robot_function_display_path(path: Path) -> str:
@@ -8487,6 +8725,7 @@ class SystemBridge:
         function_name: str,
         name: str,
         storage_source: str,
+        part_name: str = "",
     ) -> Path:
         return digital_twin.robot_function_path(
             _ROBOT_TAUGHT_FUNCTIONS_DIR,
@@ -8494,7 +8733,39 @@ class SystemBridge:
             function_name,
             name,
             storage_source,
+            part_name,
         )
+
+    @classmethod
+    def _robot_function_part_name_error(
+        cls,
+        function_name: str,
+        part_name: str,
+    ) -> str:
+        if (
+            cls._robot_function_safe_function_name(function_name) == "place_approach"
+            and not str(part_name or "").strip()
+        ):
+            return "part_name is empty"
+        return ""
+
+    @classmethod
+    def _robot_function_payload_identity_error(
+        cls,
+        payload: dict[str, Any],
+        function_name: str,
+        name: str,
+        part_name: str,
+    ) -> str:
+        if cls._robot_function_safe_function_name(function_name) != "place_approach":
+            return ""
+        expected_name = str(name or "").strip()
+        expected_part_name = str(part_name or "").strip()
+        if str(payload.get("name") or "").strip() != expected_name:
+            return "destination_location mismatch in taught function file"
+        if str(payload.get("part_name") or "").strip() != expected_part_name:
+            return "part_name mismatch in taught function file"
+        return ""
 
     def digital_twin_function_info(
         self,
@@ -8502,6 +8773,7 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> dict[str, Any]:
         cfg = self._digital_twin_target(target)
         if not cfg:
@@ -8512,10 +8784,19 @@ class SystemBridge:
         function_key = self._robot_function_safe_function_name(function_name)
         if not function_key:
             return {"success": False, "message": "function name is empty"}
+        part_error = self._robot_function_part_name_error(function_key, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
         launch_mode = self._robot_function_launch_mode_from_target(target, cfg)
         storage_source = self._robot_function_storage_source_for_launch(launch_mode)
         capture_source = self._robot_function_capture_source(target, cfg)
-        path = self._robot_function_path(robot_key, function_key, name, storage_source)
+        path = self._robot_function_path(
+            robot_key,
+            function_key,
+            name,
+            storage_source,
+            part_name,
+        )
         return {
             "success": True,
             "launch_mode": launch_mode,
@@ -8531,12 +8812,16 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> int:
+        if self._robot_function_part_name_error(function_name, part_name):
+            return 0
         key = self._robot_function_buffer_key(
             target,
             robot,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         with self._digital_twin_record_lock:
             return len(list(self._digital_twin_function_steps.get(key, [])))
@@ -8547,12 +8832,16 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> list[dict[str, Any]]:
+        if self._robot_function_part_name_error(function_name, part_name):
+            return []
         key = self._robot_function_buffer_key(
             target,
             robot,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         with self._digital_twin_record_lock:
             steps = deepcopy(list(self._digital_twin_function_steps.get(key, [])))
@@ -8567,6 +8856,8 @@ class SystemBridge:
                     "primitive": str(step.get("primitive") or ""),
                     "has_waypoint": bool(positions),
                     "joint_positions": [float(v) for v in positions],
+                    "pose": deepcopy(waypoint.get("pose")),
+                    "params": deepcopy(step.get("params") or {}),
                     "source": str(waypoint.get("source") or step.get("capture_source") or ""),
                 }
             )
@@ -8577,14 +8868,23 @@ class SystemBridge:
         target: str,
         robot: str,
         function_name: str,
+        *,
+        part_name: str = "",
     ) -> list[str]:
         cfg = self._digital_twin_target(target)
         if not cfg:
             return []
+        if self._robot_function_part_name_error(function_name, part_name):
+            return []
         storage_source = self._robot_function_storage_source(target, cfg)
         robot_key = str(robot or "").strip().lower()
         function_key = self._robot_function_safe_function_name(function_name)
-        suffix = f"__{storage_source}.json"
+        part_suffix = (
+            f"__{self._robot_function_safe_name(part_name)}"
+            if function_key == "place_approach"
+            else ""
+        )
+        suffix = f"{part_suffix}__{storage_source}.json"
         directory = _ROBOT_TAUGHT_FUNCTIONS_DIR / robot_key / function_key
         if not directory.is_dir():
             return []
@@ -8600,19 +8900,29 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> list[dict[str, Any]]:
-        payload, _path, err = self._robot_function_file_payload(target, robot, function_name, name)
+        payload, _path, err = self._robot_function_file_payload(
+            target,
+            robot,
+            function_name,
+            name,
+            part_name=part_name,
+        )
         if err or payload is None:
             return []
         out: list[dict[str, Any]] = []
         for index, step in enumerate(list(payload.get("steps") or [])):
             body = self._robot_function_step_waypoint(dict(step))
+            waypoint = dict(dict(step).get("waypoint") or {})
             out.append(
                 {
                     "index": index,
                     "step_name": str(dict(step).get("step_name") or ""),
                     "primitive": str(dict(step).get("primitive") or ""),
                     "has_waypoint": body is not None,
+                    "pose": deepcopy(waypoint.get("pose")),
+                    "params": deepcopy(dict(step).get("params") or {}),
                 }
             )
         return out
@@ -8623,12 +8933,16 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        part_name: str = "",
     ) -> None:
+        if self._robot_function_part_name_error(function_name, part_name):
+            return
         key = self._robot_function_buffer_key(
             target,
             robot,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         with self._digital_twin_record_lock:
             self._digital_twin_function_steps.pop(key, None)
@@ -8640,12 +8954,17 @@ class SystemBridge:
         function_name: str,
         name: str,
         index: int,
+        part_name: str = "",
     ) -> dict[str, Any]:
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
         key = self._robot_function_buffer_key(
             target,
             robot,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         try:
             step_index = int(index)
@@ -8680,7 +8999,685 @@ class SystemBridge:
         function_key = self._robot_function_safe_function_name(function_name)
         if not function_key:
             return None, "function name is empty"
+        if function_key not in self._robot_task_registry():
+            return None, f"unknown robot function: {function_key}"
         return cfg, ""
+
+    def _robot_function_capture_snapshot(
+        self,
+        target: str,
+        robot: str,
+    ) -> dict[str, Any]:
+        cfg = self._digital_twin_target(target)
+        robot_key = str(robot or "").strip().lower()
+        if not cfg:
+            return {
+                "success": False,
+                "rtde_receive_connected": False,
+                "joint_states_fresh": False,
+                "world_tool0_ready": False,
+                "rtde_control_connected": False,
+                "blocked_reason": f"unknown digital twin target: {target}",
+            }
+        domains = self._digital_twin_domain_ids()
+        hardware_domain_id = self._digital_twin_hardware_domain_id(cfg, robot_key, domains)
+        status: dict[str, Any] = {}
+        if robot_key != "ur5e":
+            return {
+                "success": False,
+                "robot": robot_key,
+                "hardware_domain_id": hardware_domain_id,
+                "rtde_receive_connected": False,
+                "joint_states_fresh": False,
+                "world_tool0_ready": False,
+                "rtde_control_connected": False,
+                "blocked_reason": "Physical position capture is implemented for ur5e first.",
+            }
+        try:
+            self.perception_manager.ensure_ur5e_calibration_monitor(domain_id=hardware_domain_id)
+        except RuntimeError as exc:
+            status = self._read_json_file(UR5E_CALIBRATION_MONITOR_STATUS)
+            trajectory_status = self._read_json_file(_UR5E_RTDE_TRAJECTORY_STATUS)
+            status = trajectory_status if trajectory_status else status
+            return {
+                "success": False,
+                "robot": robot_key,
+                "hardware_domain_id": hardware_domain_id,
+                "rtde_receive_connected": bool(status.get("rtde_receive_connected")),
+                "joint_states_fresh": bool(status.get("joint_states_fresh")),
+                "world_tool0_ready": False,
+                "rtde_control_connected": bool(status.get("rtde_control_connected")),
+                "blocked_reason": str(exc),
+            }
+
+        monitor_status = self._read_json_file(UR5E_CALIBRATION_MONITOR_STATUS)
+        trajectory_status = self._read_json_file(_UR5E_RTDE_TRAJECTORY_STATUS)
+        status = max(
+            (monitor_status, trajectory_status),
+            key=lambda row: (
+                bool(row.get("joint_states_fresh")),
+                bool(row.get("rtde_receive_connected")),
+            ),
+        )
+        waypoint = self._snapshot_robot_waypoint(
+            robot_key,
+            source="hardware",
+            hardware_domain_id=hardware_domain_id,
+            include_world_tool_pose=True,
+        )
+        positions = list(waypoint.get("positions") or [])
+        pose = dict(waypoint.get("pose") or {})
+        snapshot_error = str(waypoint.get("error") or "").strip()
+        rtde_receive_connected = bool(status.get("rtde_receive_connected")) or bool(positions)
+        joint_states_fresh = bool(status.get("joint_states_fresh")) or bool(positions)
+        world_tool0_ready = (
+            str(pose.get("frame_id") or "") == "world"
+            and str(pose.get("child_frame_id") or "") == "tool0"
+            and all(
+                isinstance(pose.get(field), (int, float)) and math.isfinite(float(pose[field]))
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            )
+        )
+        blocked_reason = ""
+        if not rtde_receive_connected:
+            blocked_reason = "RTDE receive is not connected."
+        elif not joint_states_fresh:
+            blocked_reason = "UR5e joint feedback is not fresh."
+        elif not world_tool0_ready:
+            blocked_reason = snapshot_error or "TF world -> tool0 is unavailable."
+        return {
+            "success": not blocked_reason,
+            "robot": robot_key,
+            "hardware_domain_id": hardware_domain_id,
+            "rtde_receive_connected": rtde_receive_connected,
+            "joint_states_fresh": joint_states_fresh,
+            "world_tool0_ready": world_tool0_ready,
+            "rtde_control_connected": bool(status.get("rtde_control_connected")),
+            "blocked_reason": blocked_reason,
+            "waypoint": waypoint if not blocked_reason else {},
+        }
+
+    def digital_twin_function_capture_readiness(
+        self,
+        target: str,
+        robot: str,
+    ) -> dict[str, Any]:
+        """Report read-only physical position capture readiness."""
+        return self._robot_function_capture_snapshot(target, robot)
+
+    def _robot_function_product_geometry_for_part(self, part_name: str) -> dict[str, Any]:
+        product_file = str(getattr(self, "selected_product", "") or "").strip()
+        if not product_file:
+            product_files = self.list_product_files()
+            product_file = product_files[0] if product_files else ""
+        if not product_file:
+            return {}
+        raw = self.load_config(product_file)
+        _product_name, product_meta = self._first_manifest_entry(raw)
+        geometry_file = str(product_meta.get("product_geometry_file", "")).strip()
+        if not geometry_file:
+            return {}
+        geometry = ProductProfile.load_product_geometry(
+            str(self._abs_project_path(geometry_file)),
+            robot_env="real",
+        )
+        return ProductProfile.geometry_for_part_from_geometry(part_name, geometry)
+
+    def _physical_ur5e_pick_agent(self) -> Any | None:
+        """Return the running physical UR5e agent used for guarded pick execution."""
+        return next(
+            (
+                agent
+                for agent in getattr(self, "resource_agents", [])
+                if "ur5e"
+                in {
+                    str(getattr(agent, "agent_name", "") or "").strip().lower(),
+                    str(getattr(agent, "jid", "") or "")
+                    .split("@", 1)[0]
+                    .strip()
+                    .lower(),
+                }
+                and str(getattr(agent, "execution_mode", "") or "").strip().lower()
+                == "physical"
+            ),
+            None,
+        )
+
+    def _digital_twin_pick_execution_preflight(  # noqa: C901, PLR0911, PLR0912 - explicit motion gates.
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        origin_resource_location: str,
+        part_name: str,
+    ) -> tuple[Any | None, dict[str, Any], str]:
+        """Validate the no-motion gates for one operator-confirmed UR5e pick task."""
+        cfg, error = self._robot_function_validate_request(target, robot, function_name)
+        if error or cfg is None:
+            return None, {}, error
+
+        robot_key = str(robot or "").strip().lower()
+        if robot_key != "ur5e":
+            return None, {}, "Physical pick execution is implemented for ur5e first."
+        if str(target or "").strip().lower() != "dual robots" or not self._digital_twin_is_dual_robots(
+            cfg
+        ):
+            return None, {}, "Physical pick execution requires the dual robots digital twin."
+        if self._digital_twin_sim_mode(target) != "monitor":
+            return None, {}, "Physical pick execution requires dual robots Monitor mode."
+        if (
+            self._robot_function_capture_source(target, cfg) != "hardware"
+            or self._digital_twin_direction(target) != "hardware -> gazebo"
+        ):
+            return None, {}, "Physical pick execution requires hardware-led Monitor mode."
+
+        if not bool(getattr(self, "system_running", False)):
+            return None, {}, "Start the CAIS system before executing a robot function."
+        if str(getattr(self, "execution_mode", "") or "").strip().lower() != "physical":
+            return None, {}, "Start the CAIS system in Physical mode before executing motion."
+        twin_status = dict(self.digital_twin_statuses().get("dual robots") or {})
+        if not twin_status:
+            return None, {}, "dual robots status is unavailable; click Repair Twin."
+        if bool(twin_status.get("repair_needed")):
+            repair_reason = str(twin_status.get("repair_reason") or "").strip()
+            return None, {}, (
+                "dual robots requires Repair Twin before physical pick execution."
+                + (f" {repair_reason}" if repair_reason else "")
+            )
+        gazebo_status = str(dict(twin_status.get("gazebo") or {}).get("status") or "")
+        if gazebo_status != "running":
+            return None, {}, "dual robots passive Gazebo is not running; click Repair Twin."
+        hardware_status = dict(twin_status.get("hardware") or {})
+        if str(hardware_status.get("overall") or "") != "running":
+            return None, {}, "dual robots hardware is not running; click Repair Twin."
+        sync_status = dict(twin_status.get("sync/status") or {})
+        if str(sync_status.get("process_status") or "") != "running":
+            return None, {}, (
+                "dual robots hardware -> gazebo mirror process is not running; click Repair Twin."
+            )
+        if str(sync_status.get("state") or "").strip().lower() != "mirroring":
+            return None, {}, (
+                "dual robots hardware -> gazebo mirror is not mirroring; click Repair Twin."
+            )
+
+        origin_key = str(origin_resource_location or "").strip()
+        if not origin_key:
+            return None, {}, "origin_resource_location is empty"
+        part_key = str(part_name or "").strip()
+        if not part_key:
+            return None, {}, "part_name is empty"
+
+        resource_agent = self._physical_ur5e_pick_agent()
+        if resource_agent is None:
+            return None, {}, "Start the ur5e robot agent in Physical mode before executing motion."
+        is_alive = getattr(resource_agent, "is_alive", None)
+        if callable(is_alive) and not bool(is_alive()):
+            return None, {}, "The physical ur5e robot agent is not running."
+        if getattr(resource_agent, "_controller", None) is None:
+            return None, {}, "The physical ur5e controller is unavailable."
+        if not callable(getattr(resource_agent, function_name, None)):
+            return None, {}, f"The ur5e robot agent does not expose {function_name}."
+
+        named_positions = getattr(resource_agent, "named_positions", {})
+        raw_origin = named_positions.get(origin_key) if isinstance(named_positions, dict) else None
+        if not isinstance(raw_origin, (list, tuple)) or len(raw_origin) != 6:
+            return None, {}, (
+                f"Named position '{origin_key}' must contain exactly six UR5e joint values."
+            )
+        try:
+            origin_joints = [float(value) for value in raw_origin]
+        except (TypeError, ValueError):
+            return None, {}, f"Named position '{origin_key}' contains invalid joint values."
+        if any(isinstance(value, bool) for value in raw_origin) or not all(
+            math.isfinite(value) for value in origin_joints
+        ):
+            return None, {}, f"Named position '{origin_key}' contains non-finite joint values."
+
+        current_state = str(getattr(resource_agent, "_current_state", "") or "").strip()
+        held_part = getattr(resource_agent, "_held_part", None)
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        if function_name == "pick_approach":
+            if current_state != "idle":
+                return None, {}, (
+                    f"pick_approach requires ur5e state 'idle'; current state is "
+                    f"'{current_state or '<empty>'}'."
+                )
+            if held_part not in (None, ""):
+                return None, {}, "pick_approach requires an empty ur5e gripper."
+        elif function_name == "pick_grasp":
+            if current_state != "at_pick":
+                return None, {}, (
+                    f"pick_grasp requires ur5e state 'at_pick'; current state is "
+                    f"'{current_state or '<empty>'}'."
+                )
+            if held_part not in (None, ""):
+                return None, {}, "pick_grasp requires an empty ur5e gripper."
+            if str(task_context.get("part_name") or "").strip() != part_key:
+                return None, {}, "pick_grasp part_name does not match the active pick context."
+            if (
+                str(task_context.get("origin_resource_location") or "").strip()
+                != origin_key
+            ):
+                return None, {}, (
+                    "pick_grasp origin_resource_location does not match the active pick context."
+                )
+
+        motion_ready, motion_message = self.teleop_named_position_readiness("ur5e")
+        if not motion_ready:
+            return None, {}, motion_message
+        if function_name == "pick_approach":
+            perception_ready, perception_message = self.physical_perception_ready()
+            if not perception_ready:
+                return None, {}, perception_message
+
+        try:
+            product_geometry = self._robot_function_product_geometry_for_part(part_key)
+        except Exception as exc:  # noqa: BLE001 - isolate selected manifest/config boundary.
+            log.exception("could not resolve product geometry for physical %s", function_name)
+            return None, {}, f"Could not resolve product geometry for {part_key}: {exc}"
+        if not product_geometry:
+            return None, {}, f"No product geometry is configured for part_name '{part_key}'."
+        return resource_agent, product_geometry, ""
+
+    async def _digital_twin_pick_execution_preflight_async(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        origin_resource_location: str,
+        part_name: str,
+    ) -> tuple[Any | None, dict[str, Any], str]:
+        """Run blocking ROS readiness probes without blocking the NiceGUI event loop."""
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future[tuple[Any | None, dict[str, Any], str]] = (
+            loop.create_future()
+        )
+
+        def _finish(
+            result: tuple[Any | None, dict[str, Any], str] | None,
+            error: Exception | None,
+        ) -> None:
+            if result_future.done():
+                return
+            if error is not None:
+                result_future.set_exception(error)
+            elif result is not None:
+                result_future.set_result(result)
+
+        def _worker() -> None:
+            result: tuple[Any | None, dict[str, Any], str] | None = None
+            error: Exception | None = None
+            try:
+                result = self._digital_twin_pick_execution_preflight(
+                    target,
+                    robot,
+                    function_name,
+                    origin_resource_location,
+                    part_name,
+                )
+            except Exception as exc:  # noqa: BLE001 - transport failure to the UI loop.
+                error = exc
+            loop.call_soon_threadsafe(_finish, result, error)
+
+        threading.Thread(
+            target=_worker,
+            name=f"cais-{function_name}-preflight",
+            daemon=True,
+        ).start()
+        return await result_future
+
+    async def _digital_twin_execute_pick_function(  # noqa: PLR0915 - explicit motion gates.
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        origin_resource_location: str,
+        part_name: str,
+        *,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        """Execute one exact generated pick function behind operator and motion gates."""
+        origin_key = str(origin_resource_location or "").strip()
+        part_key = str(part_name or "").strip()
+        base = {
+            "success": False,
+            "function_name": function_name,
+            "robot": str(robot or "").strip().lower(),
+            "origin_resource_location": origin_key,
+            "part_name": part_key,
+        }
+        if confirmed is not True:
+            return {
+                **base,
+                "message": f"Explicit operator confirmation is required for {function_name}.",
+            }
+
+        lock = self._ur5e_pick_execution_lock
+        if not lock.acquire(blocking=False):
+            active = str(self._ur5e_pick_execution_active or "UR5e motion")
+            return {
+                **base,
+                "message": f"UR5e motion is already active: {active}.",
+                "active_function": active,
+            }
+        self._ur5e_pick_execution_active = function_name
+        release_lock_here = True
+        try:
+            resource_agent, product_geometry, error = (
+                await self._digital_twin_pick_execution_preflight_async(
+                    target,
+                    robot,
+                    function_name,
+                    origin_key,
+                    part_key,
+                )
+            )
+            if error or resource_agent is None:
+                return {**base, "message": error or "UR5e pick execution is not ready."}
+
+            generated_function = getattr(resource_agent, function_name)
+            runtime_task = asyncio.create_task(
+                self._run_on_agent_runtime(
+                    generated_function(
+                        origin_resource_location=origin_key,
+                        part_name=part_key,
+                        product_geometry=deepcopy(product_geometry),
+                    )
+                )
+            )
+            try:
+                result = await asyncio.shield(runtime_task)
+            except asyncio.CancelledError:
+                release_lock_here = False
+
+                def _release_after_runtime(task: asyncio.Task[Any]) -> None:
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        log.warning("physical %s runtime was cancelled", function_name)
+                    except Exception:  # noqa: BLE001 - report background runtime failure.
+                        log.exception("physical %s runtime failed after UI cancellation", function_name)
+                    finally:
+                        self._ur5e_pick_execution_active = None
+                        lock.release()
+
+                runtime_task.add_done_callback(_release_after_runtime)
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate the agent runtime boundary.
+                log.exception("physical %s execution failed", function_name)
+                return {**base, "message": f"{function_name} execution failed: {exc}"}
+
+            if not isinstance(result, dict):
+                return {**base, "message": f"{function_name} returned an invalid result."}
+            status = str(result.get("status") or "").strip().lower()
+            message = str(result.get("content") or result.get("message") or "").strip()
+            success = status == "completed"
+            if not message:
+                message = (
+                    f"{function_name} completed."
+                    if success
+                    else f"{function_name} did not complete (status={status or 'unknown'})."
+                )
+            return {
+                **base,
+                "success": success,
+                "message": message,
+                "status": status or "unknown",
+                "state": str(getattr(resource_agent, "_current_state", "") or ""),
+                "result": deepcopy(result),
+            }
+        finally:
+            if release_lock_here:
+                self._ur5e_pick_execution_active = None
+                lock.release()
+
+    async def digital_twin_execute_pick_approach(
+        self,
+        target: str,
+        robot: str,
+        origin_resource_location: str,
+        part_name: str,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute the exact live-vision `pick_approach` after operator confirmation."""
+        return await self._digital_twin_execute_pick_function(
+            target,
+            robot,
+            "pick_approach",
+            origin_resource_location,
+            part_name,
+            confirmed=confirmed,
+        )
+
+    async def digital_twin_execute_pick_grasp(
+        self,
+        target: str,
+        robot: str,
+        origin_resource_location: str,
+        part_name: str,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute the exact `pick_grasp` after a matching `pick_approach`."""
+        return await self._digital_twin_execute_pick_function(
+            target,
+            robot,
+            "pick_grasp",
+            origin_resource_location,
+            part_name,
+            confirmed=confirmed,
+        )
+
+    def digital_twin_preview_pick_target(  # noqa: C901, PLR0912 - explicit read-only gates.
+        self,
+        target: str,
+        robot: str,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Compute a fresh physical UR5e pick target without commanding robot motion."""
+        part_key = str(part_name or "").strip()
+        base: dict[str, Any] = {
+            "success": False,
+            "ready": False,
+            "part_name": part_key,
+            "confidence": None,
+            "world_pose": {},
+            "travel_z": None,
+            "pick_z": None,
+            "age_sec": None,
+            "rtde_control_required": False,
+            "readiness": {
+                "ready": False,
+                "rtde_receive_connected": False,
+                "joint_states_fresh": False,
+                "world_tool0_ready": False,
+                "detection_ready": False,
+                "world_pose_ready": False,
+                "calibration_ready": False,
+                "table_plane_ready": False,
+                "fresh": False,
+                "rtde_control_required": False,
+            },
+        }
+        cfg, error = self._robot_function_validate_request(target, robot, "pick_approach")
+        if error or cfg is None:
+            return {**base, "message": error, "blocked_reason": error}
+        if str(robot or "").strip().lower() != "ur5e":
+            reason = "Preview Target is implemented for physical ur5e first."
+            return {**base, "message": reason, "blocked_reason": reason}
+        if self._robot_function_capture_source(target, cfg) != "hardware":
+            reason = "Preview Target requires hardware-led monitor mode."
+            return {**base, "message": reason, "blocked_reason": reason}
+        if not part_key:
+            reason = "part_name is empty"
+            return {**base, "message": reason, "blocked_reason": reason}
+
+        robot_readiness = self._robot_function_capture_snapshot(target, "ur5e")
+        base["readiness"].update(
+            {
+                "rtde_receive_connected": bool(
+                    robot_readiness.get("rtde_receive_connected")
+                ),
+                "joint_states_fresh": bool(robot_readiness.get("joint_states_fresh")),
+                "world_tool0_ready": bool(robot_readiness.get("world_tool0_ready")),
+            }
+        )
+        if not robot_readiness.get("success"):
+            reason = str(
+                robot_readiness.get("blocked_reason")
+                or "UR5e read-only state is not ready."
+            )
+            return {**base, "message": reason, "blocked_reason": reason}
+
+        detection = self.test_physical_detection(target)
+        status = dict(detection.get("status") or {})
+        rows = [dict(row) for row in list(detection.get("detections") or [])]
+        matching_rows = [row for row in rows if str(row.get("part_name") or "").strip() == part_key]
+        if len(matching_rows) != 1:
+            detected = sorted(
+                {
+                    str(row.get("part_name") or "").strip()
+                    for row in rows
+                    if str(row.get("part_name") or "").strip()
+                }
+            )
+            detail = str(detection.get("message") or "").strip()
+            if len(matching_rows) > 1:
+                reason = (
+                    f"requested part '{part_key}' matched {len(matching_rows)} detections; "
+                    "selecting a motion target would be ambiguous"
+                )
+            elif rows:
+                reason = f"requested part '{part_key}' was not detected; detected={detected}"
+            else:
+                reason = detail or "no parts detected"
+            return {**base, "message": reason, "blocked_reason": reason}
+        selected = matching_rows[0]
+
+        pose_ready = str(selected.get("frame_id") or "").strip() == "world" and all(
+            isinstance(selected.get(field), (int, float)) and math.isfinite(float(selected[field]))
+            for field in ("x", "y", "z")
+        )
+        try:
+            confidence = float(selected.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = float("nan")
+        captured_at = selected.get("captured_at") or status.get("updated_at")
+        try:
+            age_sec = max(0.0, time.time() - float(captured_at))
+        except (TypeError, ValueError):
+            age_sec = None
+        fresh = age_sec is not None and age_sec <= 8.0
+        readiness = {
+            **dict(base["readiness"]),
+            "ready": False,
+            "detection_ready": bool(detection.get("success")),
+            "world_pose_ready": pose_ready,
+            "calibration_ready": bool(status.get("calibration_ready")),
+            "table_plane_ready": bool(status.get("table_plane_ready")),
+            "fresh": fresh,
+            "rtde_control_required": False,
+        }
+        base.update(
+            {
+                "confidence": confidence if math.isfinite(confidence) else None,
+                "world_pose": (
+                    {
+                        "frame_id": "world",
+                        "x": float(selected["x"]),
+                        "y": float(selected["y"]),
+                        "z": float(selected["z"]),
+                    }
+                    if pose_ready
+                    else {}
+                ),
+                "age_sec": age_sec,
+                "readiness": readiness,
+            }
+        )
+        blocked_reason = ""
+        if not detection.get("success"):
+            blocked_reason = str(detection.get("message") or "detection is not ready")
+        elif not pose_ready:
+            blocked_reason = "selected detection does not have a finite world pose"
+        elif not bool(status.get("calibration_ready")):
+            blocked_reason = str(status.get("calibration_error") or "calibration is not ready")
+        elif not bool(status.get("table_plane_ready")):
+            blocked_reason = "table_plane_ready is false"
+        elif not fresh:
+            blocked_reason = "selected detection is stale"
+        elif not math.isfinite(confidence):
+            blocked_reason = "selected detection confidence is invalid"
+        if blocked_reason:
+            return {**base, "message": blocked_reason, "blocked_reason": blocked_reason}
+
+        resource_agent = next(
+            (
+                agent
+                for agent in getattr(self, "resource_agents", [])
+                if "ur5e"
+                in {
+                    str(getattr(agent, "agent_name", "") or "").strip().lower(),
+                    str(getattr(agent, "jid", "") or "").split("@", 1)[0].strip().lower(),
+                }
+                and str(getattr(agent, "execution_mode", "") or "").strip().lower() == "physical"
+            ),
+            None,
+        )
+        controller = getattr(resource_agent, "_controller", None)
+        compute_pick_targets = getattr(controller, "compute_pick_targets", None)
+        if not callable(compute_pick_targets):
+            reason = "Start the ur5e robot agent in Physical mode before Preview Target."
+            return {**base, "message": reason, "blocked_reason": reason}
+        missing_start_pose = object()
+        remembered_start_pose = getattr(controller, "_last_start_pose", missing_start_pose)
+        try:
+            product_geometry = self._robot_function_product_geometry_for_part(part_key)
+            computed = compute_pick_targets(
+                part_name=part_key,
+                product_geometry=product_geometry,
+                detected_parts=[deepcopy(selected)],
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate the read-only controller boundary.
+            log.exception("physical pick target preview failed")
+            reason = str(exc)
+            return {**base, "message": reason, "blocked_reason": reason}
+        finally:
+            if remembered_start_pose is missing_start_pose:
+                try:
+                    delattr(controller, "_last_start_pose")
+                except AttributeError:
+                    pass
+            else:
+                controller._last_start_pose = remembered_start_pose
+        if not isinstance(computed, dict) or not computed.get("success"):
+            reason = (
+                str(computed.get("message") or "compute_pick_targets failed")
+                if isinstance(computed, dict)
+                else "compute_pick_targets failed"
+            )
+            return {**base, "message": reason, "blocked_reason": reason}
+        try:
+            travel_z = float(computed["travel_z"])
+            pick_z = float(computed["pick_z"])
+        except (KeyError, TypeError, ValueError):
+            reason = "compute_pick_targets returned invalid travel_z or pick_z"
+            return {**base, "message": reason, "blocked_reason": reason}
+        if not math.isfinite(travel_z) or not math.isfinite(pick_z):
+            reason = "compute_pick_targets returned non-finite travel_z or pick_z"
+            return {**base, "message": reason, "blocked_reason": reason}
+        readiness["ready"] = True
+        return {
+            **base,
+            "success": True,
+            "ready": True,
+            "travel_z": travel_z,
+            "pick_z": pick_z,
+            "readiness": readiness,
+            "message": "Pick target computed; no robot motion was requested.",
+            "blocked_reason": "",
+        }
 
     def digital_twin_capture_function_step(
         self,
@@ -8690,33 +9687,67 @@ class SystemBridge:
         name: str,
         step_name: str,
         primitive: str = "move_cartesian",
+        *,
+        part_name: str = "",
     ) -> dict[str, Any]:
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
         step_key = self._robot_function_safe_name(step_name)
         primitive = str(primitive or "move_cartesian").strip()
-        if primitive not in {
-            "move_cartesian",
-            "move_relative",
-            "move_to_named_pose",
-            *self._ROBOT_FUNCTION_EVENT_PRIMITIVES,
-        }:
-            return {"success": False, "message": f"unsupported step type: {primitive}"}
+        template_step = self._robot_function_template_step(function_name, step_key)
+        if template_step is None:
+            return {"success": False, "message": f"unknown step: {function_name}.{step_key}"}
+        expected_primitive = str(template_step.get("primitive") or "")
+        if primitive != expected_primitive:
+            return {
+                "success": False,
+                "message": (
+                    f"primitive mismatch for {function_name}.{step_key}: "
+                    f"expected {expected_primitive}, got {primitive}"
+                ),
+            }
+        if not bool(template_step.get("recordable")):
+            return {
+                "success": False,
+                "message": f"{function_name}.{step_key} does not require a physical position.",
+            }
+        if not str(name or "").strip():
+            location_argument = self.digital_twin_function_location_argument(function_name)
+            return {
+                "success": False,
+                "message": f"{location_argument or 'location'} is empty",
+            }
         robot_key = str(robot or "").strip().lower()
         source = self._robot_function_capture_source(target, cfg)
-        waypoint = self._snapshot_robot_waypoint(robot_key, source=source)
-        if "error" in waypoint:
-            return {"success": False, "message": waypoint["error"]}
+        if source != "hardware":
+            return {
+                "success": False,
+                "message": "Physical position capture requires hardware-led monitor mode.",
+            }
+        readiness = self._robot_function_capture_snapshot(target, robot_key)
+        if not readiness.get("success"):
+            return {
+                "success": False,
+                "message": str(readiness.get("blocked_reason") or "capture is not ready"),
+                "readiness": readiness,
+            }
+        waypoint = dict(readiness.get("waypoint") or {})
+        pose = dict(waypoint.get("pose") or {})
+        params = {field: float(pose[field]) for field in ("x", "y", "z", "qx", "qy", "qz", "qw")}
         step = {
             "step_name": step_key,
             "primitive": primitive,
+            "params": params,
             "capture_source": source,
             "captured_at": time.time(),
             "waypoint": {
                 "joint_names": list(waypoint.get("joint_names") or []),
                 "joint_positions": [float(v) for v in (waypoint.get("positions") or [])],
-                "pose": None,
+                "pose": pose,
                 "gripper_joint": waypoint.get("gripper_joint"),
                 "gripper_position": waypoint.get("gripper"),
                 "source": source,
@@ -8727,15 +9758,24 @@ class SystemBridge:
             robot_key,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         with self._digital_twin_record_lock:
             steps = self._digital_twin_function_steps.setdefault(key, [])
+            steps[:] = [item for item in steps if str(item.get("step_name") or "") != step_key]
             steps.append(step)
+            order = {
+                str(item.get("step_name") or ""): index
+                for index, item in enumerate(self.digital_twin_function_template(function_name))
+            }
+            steps.sort(key=lambda item: order.get(str(item.get("step_name") or ""), len(order)))
             count = len(steps)
         return {
             "success": True,
             "message": f"captured {step['step_name']} for {robot_key} {function_name}",
             "count": count,
+            "step": deepcopy(step),
+            "readiness": readiness,
         }
 
     def digital_twin_add_function_event(
@@ -8746,12 +9786,29 @@ class SystemBridge:
         name: str,
         step_name: str,
         primitive: str = "release_part",
+        *,
+        part_name: str = "",
     ) -> dict[str, Any]:
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
         step_key = self._robot_function_safe_name(step_name)
         primitive = str(primitive or "release_part").strip()
+        template_step = self._robot_function_template_step(function_name, step_key)
+        if template_step is None:
+            return {"success": False, "message": f"unknown step: {function_name}.{step_key}"}
+        expected_primitive = str(template_step.get("primitive") or "")
+        if primitive != expected_primitive:
+            return {
+                "success": False,
+                "message": (
+                    f"primitive mismatch for {function_name}.{step_key}: "
+                    f"expected {expected_primitive}, got {primitive}"
+                ),
+            }
         if primitive not in self._ROBOT_FUNCTION_EVENT_PRIMITIVES:
             return {
                 "success": False,
@@ -8769,6 +9826,7 @@ class SystemBridge:
             robot_key,
             self._robot_function_safe_function_name(function_name),
             self._robot_function_safe_name(name),
+            str(part_name or "").strip(),
         )
         with self._digital_twin_record_lock:
             steps = self._digital_twin_function_steps.setdefault(key, [])
@@ -8788,6 +9846,8 @@ class SystemBridge:
         function_name: str,
         name: str,
         steps: list[dict[str, Any]],
+        *,
+        part_name: str = "",
     ) -> dict[str, Any]:
         storage_source = self._robot_function_storage_source(target, cfg)
         replay_targets = ["gazebo"] if storage_source == "gazebo" else ["hardware", "digital_twin"]
@@ -8797,7 +9857,7 @@ class SystemBridge:
             if waypoint.get("source"):
                 capture_source = str(waypoint.get("source") or capture_source)
                 break
-        return {
+        payload = {
             "robot": str(robot or "").strip().lower(),
             "function_name": self._robot_function_safe_function_name(function_name),
             "name": str(name or "").strip() or "default",
@@ -8805,6 +9865,9 @@ class SystemBridge:
             "replay_targets": replay_targets,
             "steps": deepcopy(steps),
         }
+        if self._robot_function_safe_function_name(function_name) == "place_approach":
+            payload["part_name"] = str(part_name or "").strip()
+        return payload
 
     def digital_twin_save_function(
         self,
@@ -8812,44 +9875,426 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        *,
+        part_name: str = "",
     ) -> dict[str, Any]:
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
+        if not str(name or "").strip():
+            location_argument = self.digital_twin_function_location_argument(function_name)
+            return {
+                "success": False,
+                "message": f"{location_argument or 'location'} is empty",
+            }
         safe_name = self._robot_function_safe_name(name)
         function_key = self._robot_function_safe_function_name(function_name)
-        key = self._robot_function_buffer_key(target, robot, function_key, safe_name)
+        part_key = str(part_name or "").strip()
+        key = self._robot_function_buffer_key(
+            target,
+            robot,
+            function_key,
+            safe_name,
+            part_key,
+        )
         with self._digital_twin_record_lock:
             unsaved_steps = deepcopy(list(self._digital_twin_function_steps.get(key, [])))
         storage_source = self._robot_function_storage_source(target, cfg)
-        path = self._robot_function_path(robot, function_key, safe_name, storage_source)
+        path = self._robot_function_path(
+            robot,
+            function_key,
+            safe_name,
+            storage_source,
+            part_key,
+        )
         saved_steps: list[dict[str, Any]] = []
         if path.is_file():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(existing, dict):
+                    identity_error = self._robot_function_payload_identity_error(
+                        existing,
+                        function_key,
+                        name,
+                        part_key,
+                    )
+                    if identity_error:
+                        return {"success": False, "message": identity_error}
                     saved_steps = deepcopy(list(existing.get("steps") or []))
-            except Exception:
+            except (OSError, json.JSONDecodeError, TypeError):
                 saved_steps = []
-        steps = [*saved_steps, *unsaved_steps]
+        by_step_name: dict[str, dict[str, Any]] = {}
+        for step in [*saved_steps, *unsaved_steps]:
+            step_name = str(dict(step).get("step_name") or "").strip()
+            if step_name:
+                by_step_name[step_name] = deepcopy(dict(step))
+        order = {
+            str(step.get("step_name") or ""): index
+            for index, step in enumerate(self.digital_twin_function_template(function_key))
+        }
+        steps = sorted(
+            by_step_name.values(),
+            key=lambda step: order.get(str(step.get("step_name") or ""), len(order)),
+        )
         if not steps:
             return {"success": False, "message": "no function steps captured."}
-        payload = self._robot_function_payload(target, cfg, robot, function_key, safe_name, steps)
+        payload = self._robot_function_payload(
+            target,
+            cfg,
+            robot,
+            function_key,
+            str(name or "").strip(),
+            steps,
+            part_name=part_key,
+        )
         atomic_json_write(path, payload)
         with self._digital_twin_record_lock:
             self._digital_twin_function_steps.pop(key, None)
-        appended_text = (
-            f" ({len(saved_steps)} saved + {len(unsaved_steps)} new)"
-            if saved_steps and unsaved_steps
-            else ""
-        )
         return {
             "success": True,
-            "message": f"saved {len(steps)} steps{appended_text} to {self._robot_function_display_path(path)}",
+            "message": (
+                f"saved or replaced {len(unsaved_steps)} position(s) in "
+                f"{self._robot_function_display_path(path)}"
+            ),
             "file": str(path),
             "display_path": self._robot_function_display_path(path),
             "saved_steps": len(steps),
             "unsaved_steps": 0,
+        }
+
+    def digital_twin_save_function_position(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        name: str,
+        step_name: str,
+        *,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Save or replace one captured predefined physical position."""
+        cfg, err = self._robot_function_validate_request(target, robot, function_name)
+        if err or cfg is None:
+            return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
+        if not str(name or "").strip():
+            location_argument = self.digital_twin_function_location_argument(function_name)
+            return {
+                "success": False,
+                "message": f"{location_argument or 'location'} is empty",
+            }
+        safe_name = self._robot_function_safe_name(name)
+        function_key = self._robot_function_safe_function_name(function_name)
+        step_key = str(step_name or "").strip()
+        part_key = str(part_name or "").strip()
+        key = self._robot_function_buffer_key(
+            target,
+            robot,
+            function_key,
+            safe_name,
+            part_key,
+        )
+        with self._digital_twin_record_lock:
+            buffered = deepcopy(list(self._digital_twin_function_steps.get(key, [])))
+        captured = next(
+            (dict(step) for step in buffered if str(dict(step).get("step_name") or "") == step_key),
+            None,
+        )
+        if captured is None:
+            return {
+                "success": False,
+                "message": f"Capture {function_key}.{step_key} before saving it.",
+            }
+
+        storage_source = self._robot_function_storage_source(target, cfg)
+        path = self._robot_function_path(
+            robot,
+            function_key,
+            safe_name,
+            storage_source,
+            part_key,
+        )
+        existing_steps: list[dict[str, Any]] = []
+        if path.is_file():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                identity_error = self._robot_function_payload_identity_error(
+                    dict(existing),
+                    function_key,
+                    name,
+                    part_key,
+                )
+                if identity_error:
+                    return {"success": False, "message": identity_error}
+                existing_steps = [dict(step) for step in list(dict(existing).get("steps") or [])]
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"success": False, "message": f"could not read {path.name}: {exc}"}
+        by_step_name = {
+            str(step.get("step_name") or ""): step
+            for step in existing_steps
+            if str(step.get("step_name") or "").strip()
+        }
+        by_step_name[step_key] = captured
+        order = {
+            str(step.get("step_name") or ""): index
+            for index, step in enumerate(self.digital_twin_function_template(function_key))
+        }
+        steps = sorted(
+            by_step_name.values(),
+            key=lambda step: order.get(str(step.get("step_name") or ""), len(order)),
+        )
+        payload = self._robot_function_payload(
+            target,
+            cfg,
+            robot,
+            function_key,
+            str(name or "").strip(),
+            steps,
+            part_name=part_key,
+        )
+        atomic_json_write(path, payload)
+        with self._digital_twin_record_lock:
+            remaining = [
+                step
+                for step in self._digital_twin_function_steps.get(key, [])
+                if str(step.get("step_name") or "") != step_key
+            ]
+            if remaining:
+                self._digital_twin_function_steps[key] = remaining
+            else:
+                self._digital_twin_function_steps.pop(key, None)
+        return {
+            "success": True,
+            "message": (
+                f"saved or replaced {function_key}.{step_key} in "
+                f"{self._robot_function_display_path(path)}"
+            ),
+            "file": str(path),
+            "display_path": self._robot_function_display_path(path),
+            "saved_steps": len(steps),
+        }
+
+    def digital_twin_clear_function_position(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        name: str,
+        step_name: str,
+        *,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Clear one exact predefined physical position from memory and disk."""
+        cfg, err = self._robot_function_validate_request(target, robot, function_name)
+        if err or cfg is None:
+            return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
+        if not str(name or "").strip():
+            location_argument = self.digital_twin_function_location_argument(function_name)
+            return {
+                "success": False,
+                "message": f"{location_argument or 'location'} is empty",
+            }
+        step_key = str(step_name or "").strip()
+        template_step = self._robot_function_template_step(function_name, step_key)
+        if template_step is None or not bool(template_step.get("recordable")):
+            return {
+                "success": False,
+                "message": f"{function_name}.{step_key} does not have a physical position.",
+            }
+        safe_name = self._robot_function_safe_name(name)
+        function_key = self._robot_function_safe_function_name(function_name)
+        part_key = str(part_name or "").strip()
+        key = self._robot_function_buffer_key(
+            target,
+            robot,
+            function_key,
+            safe_name,
+            part_key,
+        )
+        removed = False
+        with self._digital_twin_record_lock:
+            buffered = self._digital_twin_function_steps.get(key, [])
+            remaining_buffer = [
+                step for step in buffered if str(step.get("step_name") or "") != step_key
+            ]
+            removed = len(remaining_buffer) != len(buffered)
+            if remaining_buffer:
+                self._digital_twin_function_steps[key] = remaining_buffer
+            else:
+                self._digital_twin_function_steps.pop(key, None)
+
+        storage_source = self._robot_function_storage_source(target, cfg)
+        path = self._robot_function_path(
+            robot,
+            function_key,
+            safe_name,
+            storage_source,
+            part_key,
+        )
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"success": False, "message": f"could not read {path.name}: {exc}"}
+            identity_error = self._robot_function_payload_identity_error(
+                dict(payload),
+                function_key,
+                name,
+                part_key,
+            )
+            if identity_error:
+                return {"success": False, "message": identity_error}
+            steps = [
+                dict(step)
+                for step in list(dict(payload).get("steps") or [])
+                if str(dict(step).get("step_name") or "") != step_key
+            ]
+            removed = removed or len(steps) != len(list(dict(payload).get("steps") or []))
+            if steps:
+                payload["steps"] = steps
+                atomic_json_write(path, payload)
+            else:
+                path.unlink(missing_ok=True)
+        if not removed:
+            return {"success": False, "message": f"{function_name}.{step_key} is not saved."}
+        return {
+            "success": True,
+            "message": f"cleared {function_name}.{step_key} for {safe_name}",
+        }
+
+    def digital_twin_test_function_position(  # noqa: C901 - explicit motion safety gates.
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        name: str,
+        step_name: str,
+        *,
+        confirmed: bool = False,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Execute one saved position through the active physical move_cartesian primitive."""
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
+        if not confirmed:
+            return {"success": False, "message": "Explicit motion confirmation is required."}
+        if not str(name or "").strip():
+            location_argument = self.digital_twin_function_location_argument(function_name)
+            return {
+                "success": False,
+                "message": f"{location_argument or 'location'} is empty",
+            }
+        payload, _path, err = self._robot_function_file_payload(
+            target,
+            robot,
+            function_name,
+            name,
+            part_name=part_name,
+        )
+        if err or payload is None:
+            return {"success": False, "message": err}
+        selected = next(
+            (
+                dict(step)
+                for step in list(payload.get("steps") or [])
+                if str(dict(step).get("step_name") or "") == str(step_name or "").strip()
+            ),
+            None,
+        )
+        if selected is None:
+            return {"success": False, "message": f"saved position not found: {step_name}"}
+        if str(selected.get("primitive") or "") != "move_cartesian":
+            return {"success": False, "message": f"{step_name} is not move_cartesian."}
+        recorded_pose = dict(dict(selected.get("waypoint") or {}).get("pose") or {})
+        if (
+            str(recorded_pose.get("frame_id") or "") != "world"
+            or str(recorded_pose.get("child_frame_id") or "") != "tool0"
+        ):
+            return {
+                "success": False,
+                "message": f"{step_name} is not a world -> tool0 position.",
+            }
+        params = dict(selected.get("params") or {})
+        required = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        if not all(
+            isinstance(params.get(field), (int, float)) and math.isfinite(float(params[field]))
+            for field in required
+        ):
+            return {"success": False, "message": f"{step_name} has an invalid world pose."}
+
+        robot_key = str(robot or "").strip().lower()
+        resource_agent = next(
+            (
+                agent
+                for agent in self.resource_agents
+                if robot_key
+                in {
+                    str(getattr(agent, "agent_name", "") or "").strip().lower(),
+                    str(getattr(agent, "jid", "") or "").split("@", 1)[0].strip().lower(),
+                }
+            ),
+            None,
+        )
+        if (
+            resource_agent is None
+            or str(getattr(resource_agent, "execution_mode", "") or "").strip().lower()
+            != "physical"
+        ):
+            return {
+                "success": False,
+                "message": "Start the robot agent in Physical mode before testing motion.",
+            }
+        if robot_key != "ur5e":
+            return {
+                "success": False,
+                "message": "Physical position testing is implemented for ur5e first.",
+            }
+        control_status = self._read_json_file(_UR5E_RTDE_TRAJECTORY_STATUS)
+        if not bool(control_status.get("rtde_receive_connected")):
+            return {
+                "success": False,
+                "message": "UR5e RTDE receive is not connected; Test Position was not started.",
+            }
+        if not bool(control_status.get("joint_states_fresh")):
+            return {
+                "success": False,
+                "message": "UR5e joint feedback is not fresh; Test Position was not started.",
+            }
+        if not bool(control_status.get("rtde_control_connected")):
+            detail = str(control_status.get("blocked_reason") or "").strip()
+            return {
+                "success": False,
+                "message": (
+                    "UR5e Remote Control is not ready; switch the pendant to Remote Control "
+                    "before Test Position." + (f" {detail}" if detail else "")
+                ),
+            }
+        controller = getattr(resource_agent, "_controller", None)
+        move_cartesian = getattr(controller, "move_cartesian", None)
+        if not callable(move_cartesian):
+            return {
+                "success": False,
+                "message": "The active physical robot controller is not initialized.",
+            }
+        try:
+            result = move_cartesian(**{field: float(params[field]) for field in required})
+        except Exception as exc:  # noqa: BLE001 - isolate the physical controller boundary.
+            log.exception("physical function position test failed")
+            return {"success": False, "message": str(exc)}
+        if isinstance(result, dict):
+            return dict(result)
+        return {
+            "success": bool(result),
+            "message": f"{function_name}.{step_name} {'completed' if result else 'failed'}",
         }
 
     def digital_twin_delete_function(
@@ -8858,14 +10303,34 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        *,
+        part_name: str = "",
     ) -> dict[str, Any]:
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return {"success": False, "message": err}
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return {"success": False, "message": part_error}
         storage_source = self._robot_function_storage_source(target, cfg)
-        path = self._robot_function_path(robot, function_name, name, storage_source)
+        path = self._robot_function_path(
+            robot,
+            function_name,
+            name,
+            storage_source,
+            part_name,
+        )
         if not path.is_file():
             return {"success": False, "message": f"taught function file not found: {path.name}"}
+        payload = self._read_json_file(path)
+        identity_error = self._robot_function_payload_identity_error(
+            payload,
+            function_name,
+            name,
+            part_name,
+        )
+        if identity_error:
+            return {"success": False, "message": identity_error}
         try:
             path.unlink()
         except Exception as exc:
@@ -8926,12 +10391,23 @@ class SystemBridge:
         robot: str,
         function_name: str,
         name: str,
+        *,
+        part_name: str = "",
     ) -> tuple[dict[str, Any] | None, Path | None, str]:
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return None, None, err
+        part_error = self._robot_function_part_name_error(function_name, part_name)
+        if part_error:
+            return None, None, part_error
         storage_source = self._robot_function_storage_source(target, cfg)
-        path = self._robot_function_path(robot, function_name, name, storage_source)
+        path = self._robot_function_path(
+            robot,
+            function_name,
+            name,
+            storage_source,
+            part_name,
+        )
         payload = self._read_json_file(path)
         if not payload:
             return (
@@ -8939,6 +10415,14 @@ class SystemBridge:
                 path,
                 f"taught function file not found: {self._robot_function_display_path(path)}",
             )
+        identity_error = self._robot_function_payload_identity_error(
+            payload,
+            function_name,
+            name,
+            part_name,
+        )
+        if identity_error:
+            return None, path, identity_error
         return payload, path, ""
 
     def _single_robot_replay_cfg(self, cfg: dict[str, Any], robot: str) -> dict[str, Any]:
@@ -8951,13 +10435,20 @@ class SystemBridge:
         function_name: str,
         name: str,
         *,
+        part_name: str = "",
         replay_target: str = "twin",
         repeat_count: int = 1,
     ) -> dict[str, Any]:
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
-        payload, path, err = self._robot_function_file_payload(target, robot, function_name, name)
+        payload, path, err = self._robot_function_file_payload(
+            target,
+            robot,
+            function_name,
+            name,
+            part_name=part_name,
+        )
         if err or payload is None or path is None:
             return {"success": False, "message": err}
         recording = self._recording_from_function_payload(target, payload)
@@ -8966,7 +10457,8 @@ class SystemBridge:
         temp_path = Path("/tmp") / (
             f"cais_digital_twin_function_{self._robot_function_safe_name(robot)}_"
             f"{self._robot_function_safe_name(function_name)}_"
-            f"{self._robot_function_safe_name(name)}.json"
+            f"{self._robot_function_safe_name(name)}_"
+            f"{self._robot_function_safe_name(part_name) if part_name else 'none'}.json"
         )
         atomic_json_write(temp_path, recording)
         replay_cfg = self._single_robot_replay_cfg(cfg, robot)
@@ -8975,7 +10467,7 @@ class SystemBridge:
             replay_cfg,
             temp_path,
             replay_target,
-            source=f"function_{robot}_{function_name}_{name}",
+            source=f"function_{robot}_{function_name}_{name}_{part_name or 'none'}",
             repeat_count=repeat_count,
         )
 
@@ -8987,12 +10479,19 @@ class SystemBridge:
         name: str,
         step_index: int,
         *,
+        part_name: str = "",
         replay_target: str = "twin",
     ) -> dict[str, Any]:
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
-        payload, path, err = self._robot_function_file_payload(target, robot, function_name, name)
+        payload, path, err = self._robot_function_file_payload(
+            target,
+            robot,
+            function_name,
+            name,
+            part_name=part_name,
+        )
         if err or payload is None or path is None:
             return {"success": False, "message": err}
         recording = self._recording_from_function_payload(target, payload, step_index=step_index)
@@ -9001,7 +10500,9 @@ class SystemBridge:
         temp_path = Path("/tmp") / (
             f"cais_digital_twin_function_step_{self._robot_function_safe_name(robot)}_"
             f"{self._robot_function_safe_name(function_name)}_"
-            f"{self._robot_function_safe_name(name)}_{int(step_index)}.json"
+            f"{self._robot_function_safe_name(name)}_"
+            f"{self._robot_function_safe_name(part_name) if part_name else 'none'}_"
+            f"{int(step_index)}.json"
         )
         atomic_json_write(temp_path, recording)
         replay_cfg = self._single_robot_replay_cfg(cfg, robot)
@@ -9010,7 +10511,10 @@ class SystemBridge:
             replay_cfg,
             temp_path,
             replay_target,
-            source=f"function_step_{robot}_{function_name}_{name}_{int(step_index)}",
+            source=(
+                f"function_step_{robot}_{function_name}_{name}_"
+                f"{part_name or 'none'}_{int(step_index)}"
+            ),
         )
 
     def _paired_recording_from_function_payloads(
@@ -9324,25 +10828,40 @@ class SystemBridge:
         except Exception:
             log.exception("failed to clear digital twin buffer %s", path)
 
-    def _snapshot_robot_waypoint(self, robot: str, *, source: str = "gazebo") -> dict[str, Any]:
+    def _snapshot_robot_waypoint(
+        self,
+        robot: str,
+        *,
+        source: str = "gazebo",
+        hardware_domain_id: int | None = None,
+        include_world_tool_pose: bool = False,
+    ) -> dict[str, Any]:
         """Snapshot one robot's current gazebo or hardware pose into a waypoint body."""
         source_key = str(source or "gazebo").strip().lower()
         if source_key not in {"gazebo", "hardware"}:
             source_key = "gazebo"
         domains = self._digital_twin_domain_ids()
+        resolved_hardware_domain_id = (
+            int(domains["hardware"])
+            if hardware_domain_id is None
+            else int(hardware_domain_id)
+        )
+        args = [
+            "--mode",
+            "snapshot",
+            "--robot",
+            robot,
+            "--source",
+            source_key,
+            "--gazebo-domain-id",
+            str(domains["gazebo"]),
+            "--hardware-domain-id",
+            str(resolved_hardware_domain_id),
+        ]
+        if include_world_tool_pose:
+            args.append("--include-world-tool-pose")
         result = self._run_digital_twin_sync(
-            [
-                "--mode",
-                "snapshot",
-                "--robot",
-                robot,
-                "--source",
-                source_key,
-                "--gazebo-domain-id",
-                str(domains["gazebo"]),
-                "--hardware-domain-id",
-                str(domains["hardware"]),
-            ],
+            args,
             timeout_sec=20.0,
         )
         if not result.get("success"):
@@ -9353,6 +10872,8 @@ class SystemBridge:
             "joint_names": list(result.get("joint_names") or []),
             "gripper_joint": result.get("gripper_joint"),
             "source": source_key,
+            "pose": deepcopy(result.get("pose")),
+            "world_tool0_ready": bool(result.get("world_tool0_ready")),
         }
 
     def _snapshot_waypoint(self, target: str, cfg: dict[str, Any]) -> dict[str, Any]:

@@ -81,6 +81,12 @@ LOOSE_PART_MODELS = {
     'rect_pin_large',
     'circ_pin_large',
 }
+PRUSA_PRINTERS_AND_ASSEMBLY_BOARD_MODELS = {
+    'assembly_board_v1',
+    'prusa_mk3',
+    'prusa_mk4_1',
+    'prusa_mk4_2',
+}
 
 
 def _strip_gazebo_ros2_control_plugin(root):
@@ -365,6 +371,7 @@ def _filtered_world(
     *,
     include_assembly_parts,
     include_loose_parts,
+    include_prusa_printers_and_assembly_board=True,
     table_surface_z_m=None,
 ):
     tree = ET.parse(world_path)
@@ -378,7 +385,15 @@ def _filtered_world(
             )
             remove_assembly = not include_assembly_parts and model_name in ASSEMBLY_PART_MODELS
             remove_loose = not include_loose_parts and model_name in LOOSE_PART_MODELS
-            if remove_assembly or remove_loose:
+            remove_prusa_printers_and_assembly_board = (
+                not include_prusa_printers_and_assembly_board
+                and model_name in PRUSA_PRINTERS_AND_ASSEMBLY_BOARD_MODELS
+            )
+            if (
+                remove_assembly
+                or remove_loose
+                or remove_prusa_printers_and_assembly_board
+            ):
                 world.remove(element)
                 continue
             if element.tag == 'include' and model_name == 'table_ur5e' and table_surface_z_m is not None:
@@ -404,6 +419,11 @@ def launch_setup(context, *args, **kwargs):
     passive = _launch_arg_enabled(context, 'passive')
     include_assembly_parts = _launch_arg_enabled(context, 'include_assembly_parts', default='true')
     include_loose_parts = _launch_arg_enabled(context, 'include_loose_parts', default='true')
+    include_prusa_printers_and_assembly_board = _launch_arg_enabled(
+        context,
+        'include_prusa_printers_and_assembly_board',
+        default='true',
+    )
     table_surface_z_m = _physical_table_surface_z() if passive else None
 
     # Ensure Gazebo can resolve IFRA LinkAttacher shared library.
@@ -426,11 +446,19 @@ def launch_setup(context, *args, **kwargs):
     gazebo_world_path = cais_lab_robotics_share / 'worlds' / 'table.world'
     gazebo_world = (
         str(gazebo_world_path)
-        if include_assembly_parts and include_loose_parts and table_surface_z_m is None
+        if (
+            include_assembly_parts
+            and include_loose_parts
+            and include_prusa_printers_and_assembly_board
+            and table_surface_z_m is None
+        )
         else _filtered_world(
             gazebo_world_path,
             include_assembly_parts=include_assembly_parts,
             include_loose_parts=include_loose_parts,
+            include_prusa_printers_and_assembly_board=(
+                include_prusa_printers_and_assembly_board
+            ),
             table_surface_z_m=table_surface_z_m,
         )
     )
@@ -805,6 +833,13 @@ def generate_launch_description():
             'include_loose_parts',
             default_value='true',
             description='Spawn loose gears and pins. Digital twin perception sets this false.',
+        ),
+        DeclareLaunchArgument(
+            'include_prusa_printers_and_assembly_board',
+            default_value='true',
+            description=(
+                'Spawn prusa_mk3, prusa_mk4_1, prusa_mk4_2, and assembly_board_v1.'
+            ),
         ),
         OpaqueFunction(function=launch_setup),
     ])

@@ -208,16 +208,18 @@ def robot_function_buffer_key(
     robot: str,
     function_name: str,
     name: str,
+    part_name: str = "",
 ) -> str:
     """Return the in-memory taught-function buffer key."""
-    return "::".join(
-        [
-            str(target or "").strip().lower(),
-            str(robot or "").strip().lower(),
-            str(function_name or "").strip(),
-            str(name or "").strip(),
-        ]
-    )
+    values = [
+        str(target or "").strip().lower(),
+        str(robot or "").strip().lower(),
+        str(function_name or "").strip(),
+        str(name or "").strip(),
+    ]
+    if str(part_name or "").strip():
+        values.append(str(part_name).strip())
+    return "::".join(values)
 
 
 def robot_function_display_path(path: Path, project_root: Path) -> str:
@@ -244,11 +246,14 @@ def robot_function_path(
     function_name: str,
     name: str,
     storage_source: str,
+    part_name: str = "",
 ) -> Path:
     """Return the taught-function JSON path."""
     robot_key = str(robot or "").strip().lower()
     function_key = robot_function_safe_function_name(function_name)
     safe_name = robot_function_safe_name(name)
+    if function_key == "place_approach" and str(part_name or "").strip():
+        safe_name = f"{safe_name}__{robot_function_safe_name(part_name)}"
     source_key = str(storage_source or "hardware").strip()
     return Path(taught_functions_dir) / robot_key / function_key / f"{safe_name}__{source_key}.json"
 

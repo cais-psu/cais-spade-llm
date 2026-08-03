@@ -651,6 +651,66 @@ def test_passive_worlds_align_only_the_physical_ur5e_table() -> None:
         dual_generated.unlink()
 
 
+def test_dual_digital_twin_world_hides_only_prusa_printers_and_assembly_board() -> None:
+    dual_launch = _module_from_path(
+        "xarm6_ur5e_gazebo_digital_twin_world_test",
+        "ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py",
+    )
+    source_world = ROOT / "ros2/cais_lab_robotics/worlds/table.world"
+    source_model_names = {
+        element.get("name")
+        if element.tag == "model"
+        else str(element.findtext("name") or "").strip()
+        for element in ET.parse(source_world).getroot().iter()
+        if element.tag in {"model", "include"}
+    }
+    hidden_model_names = {
+        "assembly_board_v1",
+        "prusa_mk3",
+        "prusa_mk4_1",
+        "prusa_mk4_2",
+    }
+    assert hidden_model_names <= source_model_names
+
+    dual_generated = Path(
+        dual_launch._filtered_world(
+            source_world,
+            include_assembly_parts=True,
+            include_loose_parts=False,
+            include_prusa_printers_and_assembly_board=False,
+            table_surface_z_m=1.028,
+        )
+    )
+    try:
+        root = ET.parse(dual_generated).getroot()
+        generated_model_names = {
+            element.get("name")
+            if element.tag == "model"
+            else str(element.findtext("name") or "").strip()
+            for element in root.iter()
+            if element.tag in {"model", "include"}
+        }
+        assert hidden_model_names.isdisjoint(generated_model_names)
+        assert {
+            "table_xarm6",
+            "table_ur5e",
+            "cam_mk3",
+            "cam_mk4_1",
+            "cam_mk4_2",
+            "cam_assembly",
+        } <= generated_model_names
+        assert any(
+            plugin.get("name") == "gazebo_ros_state"
+            for plugin in root.iter("plugin")
+        )
+        assert any(
+            plugin.get("name") == "gazebo_link_attacher"
+            for plugin in root.iter("plugin")
+        )
+    finally:
+        dual_generated.unlink()
+
+
 @pytest.mark.parametrize(
     ("module_name", "launch_path"),
     [

@@ -2075,7 +2075,7 @@ async def generate_primitive_batch_with_llm_agent(
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     response_schema = multi_turn_phase_response_schema("primitive_generation")
-    system_instructions = str(getattr(llm_agent, "instructions", "") or "")
+    system_instructions = ""
     if session_state is not None:
         session_state = deepcopy(session_state)
     else:
@@ -2114,7 +2114,29 @@ async def generate_primitive_batch_with_llm_agent(
         raw_response = await ask_llm_structured(
             prompt=prompt_text,
             response_format=response_schema,
+            include_agent_instructions=False,
         )
+        expected_messages = [{"role": "user", "content": prompt_text}]
+        llm_request = deepcopy(
+            dict(getattr(llm_agent, "_last_structured_request", {}) or {})
+        )
+        if llm_request.get("messages") != expected_messages:
+            llm_request = {
+                "model": str(
+                    getattr(llm_agent, "model", "")
+                    or getattr(llm_agent, "llm_model", "")
+                ).strip(),
+                "messages": expected_messages,
+                "reasoning_effort": str(
+                    getattr(llm_agent, "reasoning_effort", "")
+                    or getattr(llm_agent, "llm_reasoning_effort", "")
+                ).strip(),
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": deepcopy(response_schema),
+                },
+                "response_source": "unknown",
+            }
         parsed_response = deepcopy(raw_response) if isinstance(raw_response, dict) else {}
         decision, turn_entry = await _handle_primitive_generation_phase(
             session_state=session_state,
@@ -2128,6 +2150,7 @@ async def generate_primitive_batch_with_llm_agent(
         turn_entry["prompt_input"] = deepcopy(prompt_input)
         turn_entry["prompt_text"] = prompt_text
         turn_entry["llm_raw_response"] = deepcopy(parsed_response)
+        turn_entry["llm_request"] = llm_request
         turn_entry["resource_jid"] = resource_jid
         turn_entry["recovery_session_id"] = str(recovery_session_id or "").strip()
         turn_entry["response_schema"] = deepcopy(response_schema)

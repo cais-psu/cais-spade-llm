@@ -639,6 +639,8 @@ def _digital_twin_row(
 
     supported = bool(row.get("supported", False))
     blocked_reason = str(row.get("blocked_reason", "") or "").strip()
+    repair_needed = bool(row.get("repair_needed", False))
+    repair_reason = str(row.get("repair_reason", "") or "").strip()
     gazebo_status = str(gazebo.get("status", "stopped"))
     hardware_status = dict(hardware.get("status") or {})
     hardware_overall = str(hardware.get("overall", "unknown"))
@@ -660,14 +662,21 @@ def _digital_twin_row(
             ui.label("digital twin").classes("text-xs text-slate-400")
             if blocked_reason:
                 ui.label(blocked_reason).classes("text-xs text-amber-700")
+            if repair_needed and repair_reason:
+                ui.label(f"Repair required: {repair_reason}").classes("text-xs text-red-700")
 
             async def _start_twin_async() -> None:
                 try:
-                    err = await asyncio.to_thread(bridge.digital_twin_start, target)
+                    err = await asyncio.to_thread(
+                        bridge.digital_twin_start,
+                        target,
+                        repair=repair_needed,
+                    )
                     if err:
                         ui.notify(err, type="warning", timeout=5000)
                     else:
-                        ui.notify(f"Started {target} digital twin", type="positive")
+                        action = "Repaired" if repair_needed else "Started"
+                        ui.notify(f"{action} {target} digital twin", type="positive")
                 finally:
                     refresh_callback(force=True)
 
@@ -697,16 +706,19 @@ def _digital_twin_row(
             def _stop_twin() -> None:
                 asyncio.create_task(_stop_twin_async())
 
-            retry_sync = is_running and sync_process_status != "running"
             start_disabled = (
                 (not supported)
                 or other_target_running
-                or (is_running and not retry_sync)
+                or (is_running and not repair_needed)
                 or bool(blocked_reason)
             )
             stop_disabled = (not supported) or not is_running or other_target_running
             with ui.row().classes("gap-1"):
-                ui.button("Start Twin", on_click=_start_twin, icon="play_arrow").props(
+                ui.button(
+                    "Repair Twin" if repair_needed else "Start Twin",
+                    on_click=_start_twin,
+                    icon="build" if repair_needed else "play_arrow",
+                ).props(
                     "flat dense" + (" disable" if start_disabled else "")
                 ).classes("text-green-600")
                 ui.button("Stop Twin", on_click=_stop_twin, icon="stop").props(
@@ -856,7 +868,7 @@ def _function_record_panel(bridge: SystemBridge) -> None:
             if not target:
                 return
             with body:
-                _function_record_body(bridge, target)
+                _predefined_function_record_body(bridge, target)
 
         target_select.on_value_change(_refresh_body)
         _refresh_body()
@@ -906,26 +918,15 @@ def _function_record_panel(bridge: SystemBridge) -> None:
         ui.timer(3.0, _sync_active_target)
 
 
-def _function_record_body(bridge: SystemBridge, target: str) -> None:
-    is_dual = target == "dual robots"
+def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks share selection state.
+    bridge: SystemBridge,
+    target: str,
+) -> None:
     robots = bridge.digital_twin_target_robots(target)
-    fixed_name = "default"
-    step_types = [
-        "move_cartesian",
-        "move_relative",
-        "move_to_named_pose",
-        "grasp_part",
-        "release_part",
-    ]
-
-    def _selected_step_index(value: object) -> int | None:
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        try:
-            return int(raw.split(":", 1)[0])
-        except Exception:
-            return None
+    functions = bridge.digital_twin_function_names()
+    readiness: dict[str, object] = {"checked": False, "success": False}
+    preview: dict[str, object] = {}
+    pick_execution: dict[str, object] = {"busy": False, "active_function": ""}
 
     def _current_client() -> Client | None:
         try:
@@ -954,597 +955,679 @@ def _function_record_body(bridge: SystemBridge, target: str) -> None:
         except RuntimeError:
             log.warning("could not notify user because NiceGUI slot was deleted: %s", message)
 
-    robot_value = robots[0] if robots else ""
+    initial_robot = "ur5e" if "ur5e" in robots else (robots[0] if robots else "")
+    initial_function = "pick_approach" if "pick_approach" in functions else functions[0]
     with ui.row().classes("items-center gap-2 w-full"):
         robot_select = (
-            ui.select(robots, label="robot", value=robot_value).props("dense").classes("w-32")
+            ui.select(robots, label="robot", value=initial_robot).props("dense").classes("w-36")
         )
-        saved_function_select = ui.select([], label="saved function").props("dense").classes("w-52")
-        function_input = ui.input(label="function name", value="").props("dense").classes("w-52")
-
-    info_label = ui.label("").classes("text-xs text-slate-500")
-    path_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
-
-    with ui.row().classes("items-center gap-2 w-full"):
-        step_name_input = ui.input(label="step name", value="step_1").props("dense").classes("w-44")
-        step_type_select = (
-            ui.select(
-                step_types,
-                label="step type",
-                value="move_cartesian",
-            )
+        function_select = (
+            ui.select(functions, label="function", value=initial_function)
             .props("dense")
-            .classes("w-48")
+            .classes("w-52")
+        )
+        location_select = (
+            ui.select([], label="location / recording name").props("dense").classes("w-60")
+        )
+        part_select = ui.select([], label="part_name").props("dense").classes("w-36")
+
+    ui.label(
+        "The function and step IDs come from the Python robot task registry. "
+        "Only steps marked Position required can be captured."
+    ).classes("text-xs text-slate-500")
+    info_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
+
+    with ui.row().classes("items-center gap-3 w-full flex-wrap"):
+        readiness_label = ui.label("Capture readiness has not been checked.").classes(
+            "text-xs text-slate-500"
         )
 
-    count_label = ui.label("").classes("text-xs font-semibold")
-    saved_count_label = ui.label("").classes("text-xs font-semibold")
-    steps_container = ui.column().classes("w-full gap-0 mb-1")
+        async def _check_readiness() -> None:
+            _notify("Checking read-only capture readiness...", type="ongoing", timeout=1500)
+            result = await asyncio.to_thread(
+                bridge.digital_twin_function_capture_readiness,
+                target,
+                str(robot_select.value or ""),
+            )
+            readiness.clear()
+            readiness.update(result)
+            readiness["checked"] = True
+            _render_readiness()
+            _render_steps()
+            _notify(
+                "Capture is ready in Local Control."
+                if result.get("success")
+                else str(result.get("blocked_reason") or "Capture is not ready."),
+                type="positive" if result.get("success") else "warning",
+                timeout=5000,
+            )
+
+        ui.button("Check Capture Readiness", on_click=_check_readiness, icon="fact_check").props(
+            "outline dense"
+        )
+
+    steps_summary = ui.label("").classes("text-xs font-semibold")
+    steps_container = ui.column().classes("w-full gap-2")
 
     def _current_robot() -> str:
         return str(robot_select.value or "").strip()
 
     def _current_function() -> str:
-        return str(function_input.value or "").strip()
+        return str(function_select.value or "").strip()
 
-    def _saved_function() -> str:
-        return str(saved_function_select.value or "").strip() or _current_function()
+    def _current_name() -> str:
+        return str(location_select.value or "").strip()
 
-    def _repeat_count(repeat_input) -> int:
+    def _current_part_name() -> str:
+        return str(part_select.value or "").strip()
+
+    def _default_location(function_name: str, options: list[str]) -> str:
+        if function_name == "pick_approach" and "prusa-mk4-2" in options:
+            return "prusa-mk4-2"
+        if function_name == "place_approach" and "assembly_board-v1" in options:
+            return "assembly_board-v1"
+        return options[0] if options else ""
+
+    def _sync_location() -> None:
+        function_name = _current_function()
+        location_argument = bridge.digital_twin_function_location_argument(function_name)
+        options = bridge.digital_twin_function_location_options(
+            _current_robot(),
+            function_name,
+        )
+        if not location_argument:
+            options = ["default"]
+        location_select.options = options
+        if location_select.value not in options:
+            location_select.value = _default_location(function_name, options)
+        if location_argument:
+            location_select.enable()
+        else:
+            location_select.disable()
+        location_select.update()
+
+    def _sync_part_name() -> None:
+        function_name = _current_function()
+        visible = function_name in {"pick_approach", "place_approach"}
         try:
-            value = int(float(repeat_input.value or 1))
-        except Exception:
-            value = 1
-        return max(1, min(999, value))
+            options = bridge.digital_twin_function_part_options(function_name)
+        except (OSError, TypeError, ValueError):
+            log.exception("failed to load part_name options for %s", function_name)
+            options = []
+        part_select.options = options
+        if part_select.value not in options:
+            part_select.value = "MG" if "MG" in options else (options[0] if options else "")
+        part_select.set_visibility(visible)
+        part_select.update()
 
-    def _saved_step_options(robot: str, function_name: str) -> list[str]:
-        return [
+    def _render_readiness() -> None:
+        if not readiness.get("checked"):
+            readiness_label.set_text("Capture readiness has not been checked.")
+            readiness_label.classes(replace="text-xs text-slate-500")
+            return
+        values = [
+            f"RTDE receive: {'ready' if readiness.get('rtde_receive_connected') else 'not ready'}",
+            f"joints: {'fresh' if readiness.get('joint_states_fresh') else 'not fresh'}",
+            f"world → tool0: {'ready' if readiness.get('world_tool0_ready') else 'not ready'}",
             (
-                f"{int(step['index'])}: {step.get('step_name')} -> {step.get('primitive')}"
-                + ("" if step.get("has_waypoint") else " [action]")
-            )
-            for step in bridge.digital_twin_list_function_file_steps(
-                target,
-                robot,
-                function_name,
-                fixed_name,
-            )
+                "RTDE control: connected (not used for capture)"
+                if readiness.get("rtde_control_connected")
+                else "RTDE control: disconnected (allowed for capture)"
+            ),
         ]
+        blocked_reason = str(readiness.get("blocked_reason") or "").strip()
+        if blocked_reason:
+            values.append(blocked_reason)
+        readiness_label.set_text(" | ".join(values))
+        readiness_label.classes(
+            replace=(
+                "text-xs text-green-700" if readiness.get("success") else "text-xs text-amber-700"
+            )
+        )
 
-    def _refresh_info() -> None:
-        function_name = _current_function()
-        if not function_name:
-            info_label.text = "function name is empty"
-            path_label.text = ""
-            return
-        info = bridge.digital_twin_function_info(
-            target,
-            _current_robot(),
-            function_name,
-            fixed_name,
-        )
-        if not info.get("success"):
-            info_label.text = str(info.get("message") or "")
-            path_label.text = ""
-            return
-        info_label.text = (
-            f"Current launch: {info.get('launch_mode')} | "
-            f"capture source: {info.get('capture_source')} | "
-            f"storage source: {info.get('storage_source')}"
-        )
-        path_label.text = f"Saving as: {info.get('display_path')}"
+    preview_container = ui.column().classes("w-full gap-1")
 
-    def _refresh_steps() -> int:
-        steps = bridge.digital_twin_list_function_buffer_steps(
-            target,
-            _current_robot(),
-            _current_function(),
-            fixed_name,
+    def _render_preview() -> None:
+        preview_container.clear()
+        preview_button.set_visibility(
+            _current_robot() == "ur5e" and _current_function() == "pick_approach"
         )
-        count_label.text = f"unsaved steps: {len(steps)}"
-        steps_container.clear()
-        with steps_container:
-            if not steps:
-                ui.label("no unsaved function steps").classes("text-xs text-slate-400")
-                return 0
-            for step in steps:
-                positions = ", ".join(
-                    f"{float(value):.2f}" for value in list(step.get("joint_positions") or [])
+        if _current_part_name() and not pick_execution.get("busy"):
+            preview_button.enable()
+        else:
+            preview_button.disable()
+        if _current_function() != "pick_approach":
+            return
+        with preview_container:
+            if not preview:
+                ui.label(
+                    "Preview Target requests one fresh detection for part_name and computes "
+                    "the pick target without robot motion or RTDE control."
+                ).classes("text-xs text-slate-500")
+                return
+            world_pose = dict(preview.get("world_pose") or {})
+            confidence = preview.get("confidence")
+            age_sec = preview.get("age_sec")
+            confidence_text = (
+                f"{float(confidence) * 100.0:.1f}%" if confidence is not None else "unavailable"
+            )
+            age_text = f"{float(age_sec):.2f} s" if age_sec is not None else "unavailable"
+            pose_text = "unavailable"
+            if world_pose:
+                pose_text = (
+                    f"x={float(world_pose.get('x', 0.0)):.4f}, "
+                    f"y={float(world_pose.get('y', 0.0)):.4f}, "
+                    f"z={float(world_pose.get('z', 0.0)):.4f}"
                 )
-                suffix = f" [{positions}]" if positions else ""
-                source = str(step.get("source") or "").strip()
-                source_suffix = f" ({source})" if source else ""
-                with ui.row().classes("items-center gap-1 w-full"):
-                    ui.label(f"#{int(step['index']) + 1}").classes("text-xs font-semibold w-8")
-                    ui.label(
-                        f"{step.get('step_name')} -> {step.get('primitive')}{source_suffix}{suffix}"
-                    ).classes("text-xs text-slate-500 flex-1 truncate")
-                    step_index = int(step["index"])
-
-                    async def _delete_step(step_index=step_index) -> None:
-                        await _delete_unsaved_step(step_index)
-
-                    ui.button("", on_click=_delete_step, icon="close").props(
-                        "flat dense round"
-                    ).classes("text-red-600")
-        return len(steps)
-
-    def _suggest_next_step_name(count: int | None = None) -> None:
-        saved_count = len(
-            bridge.digital_twin_list_function_file_steps(
-                target,
-                _current_robot(),
-                _current_function(),
-                fixed_name,
+            travel_z = preview.get("travel_z")
+            pick_z = preview.get("pick_z")
+            travel_text = f"{float(travel_z):.4f}" if travel_z is not None else "unavailable"
+            pick_text = f"{float(pick_z):.4f}" if pick_z is not None else "unavailable"
+            ready_text = "ready" if preview.get("ready") else "blocked"
+            ui.label(
+                f"part_name={preview.get('part_name') or _current_part_name()} | "
+                f"confidence={confidence_text} | world {pose_text} | "
+                f"travel_z={travel_text} | pick_z={pick_text} | "
+                f"age={age_text} | readiness={ready_text}"
+            ).classes(
+                "text-xs text-green-700" if preview.get("ready") else "text-xs text-amber-700"
             )
-        )
-        unsaved_count = (
-            int(count)
-            if count is not None
-            else bridge.digital_twin_function_step_count(
-                target,
-                _current_robot(),
-                _current_function(),
-                fixed_name,
-            )
-        )
-        step_name_input.value = f"step_{saved_count + unsaved_count + 1}"
-        step_name_input.update()
+            message = str(preview.get("blocked_reason") or preview.get("message") or "").strip()
+            if message:
+                ui.label(message).classes("text-xs text-slate-600")
 
-    def _refresh_saved_steps() -> None:
-        options = _saved_step_options(_current_robot(), _saved_function())
-        saved_count_label.text = f"saved steps: {len(options)}"
-        saved_step_select.options = options
-        if saved_step_select.value not in options:
-            saved_step_select.value = options[0] if options else None
-        saved_step_select.update()
-
-    def _refresh_saved_functions() -> None:
-        options = bridge.digital_twin_saved_function_names(target, _current_robot())
-        saved_function_select.options = options
-        if saved_function_select.value not in options:
-            saved_function_select.value = (
-                _current_function()
-                if _current_function() in options
-                else (options[0] if options else None)
-            )
-        if not _current_function() and saved_function_select.value:
-            function_input.value = str(saved_function_select.value)
-            function_input.update()
-        saved_function_select.update()
-        _refresh_saved_steps()
-
-    def _refresh_all() -> None:
-        _refresh_info()
-        _refresh_steps()
-        _refresh_saved_functions()
-
-    def _new_function() -> None:
-        function_input.value = ""
-        function_input.update()
-        saved_function_select.value = None
-        saved_function_select.update()
-        _suggest_next_step_name(0)
-        _refresh_info()
-        _refresh_steps()
-        _refresh_saved_steps()
-
-    def _saved_function_changed(_e=None) -> None:
-        if saved_function_select.value:
-            function_input.value = str(saved_function_select.value)
-            function_input.update()
-        _refresh_info()
-        count = _refresh_steps()
-        _suggest_next_step_name(count)
-        _refresh_saved_steps()
-
-    async def _capture_step(step_name: str, primitive: str, *, busy_message: str) -> None:
-        function_name = _current_function()
-        if not function_name:
-            _notify("function name is empty", type="warning")
-            return
-        if not step_name:
-            _notify("step name is empty", type="warning")
-            return
-        try:
-            _notify(busy_message, type="ongoing", timeout=1500)
-            result = await asyncio.to_thread(
-                bridge.digital_twin_capture_function_step,
-                target,
-                _current_robot(),
-                function_name,
-                fixed_name,
-                step_name,
-                primitive,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=4500,
-            )
-            count = _refresh_steps()
-            if result.get("success"):
-                _suggest_next_step_name(int(result.get("count") or count))
-        except Exception as exc:  # noqa: BLE001
-            log.exception("function waypoint capture failed for %s", target)
-            _notify(f"Capture failed: {exc}", type="negative", timeout=6000)
-
-    async def _capture_current_step() -> None:
-        await _capture_step(
-            str(step_name_input.value or "").strip(),
-            str(step_type_select.value or "move_cartesian"),
-            busy_message="Capturing step...",
-        )
-
-    async def _save_function() -> None:
-        function_name = _current_function()
-        if not function_name:
-            _notify("function name is empty", type="warning")
-            return
-        try:
-            result = await asyncio.to_thread(
-                bridge.digital_twin_save_function,
-                target,
-                _current_robot(),
-                function_name,
-                fixed_name,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=4500,
-            )
-            if result.get("success"):
-                _refresh_saved_functions()
-                _refresh_info()
-                _refresh_steps()
-                _suggest_next_step_name(int(result.get("saved_steps") or 0))
-                _refresh_saved_steps()
-        except Exception as exc:  # noqa: BLE001
-            log.exception("function save failed for %s", target)
-            _notify(f"Save failed: {exc}", type="negative", timeout=6000)
-
-    def _clear_steps() -> None:
-        bridge.digital_twin_clear_function_steps(
-            target,
-            _current_robot(),
-            _current_function(),
-            fixed_name,
-        )
-        _refresh_steps()
-        _suggest_next_step_name(0)
-
-    async def _delete_unsaved_step(step_index: int) -> None:
+    async def _preview_target() -> None:
+        preview.clear()
+        _render_preview()
+        _notify("Requesting a fresh read-only pick target...", type="ongoing", timeout=1500)
         result = await asyncio.to_thread(
-            bridge.digital_twin_delete_function_buffer_step,
+            bridge.digital_twin_preview_pick_target,
             target,
             _current_robot(),
-            _current_function(),
-            fixed_name,
-            step_index,
+            _current_part_name(),
         )
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=3000,
-        )
-        count = _refresh_steps()
-        _suggest_next_step_name(count)
-
-    async def _delete_function() -> None:
-        function_name = _saved_function()
-        if not function_name:
-            _notify("Select a saved function.", type="warning")
-            return
-        try:
-            result = await asyncio.to_thread(
-                bridge.digital_twin_delete_function,
-                target,
-                _current_robot(),
-                function_name,
-                fixed_name,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=4500,
-            )
-            if result.get("success"):
-                saved_function_select.value = None
-                function_input.value = ""
-                function_input.update()
-                _refresh_saved_functions()
-                _refresh_info()
-                _refresh_steps()
-        except Exception as exc:  # noqa: BLE001
-            log.exception("function delete failed for %s", target)
-            _notify(f"Delete failed: {exc}", type="negative", timeout=6000)
-
-    async def _replay_function(
-        replay_target: str,
-        *,
-        client: Client | None = None,
-        repeat_count: int = 1,
-    ) -> dict[str, object]:
-        notify_client = client or _current_client()
-        function_name = _saved_function()
-        if not function_name:
-            _notify("Select a saved function.", type="warning", client=notify_client)
-            return {"success": False, "message": "Select a saved function."}
-        repeat_total = max(1, int(repeat_count))
-        try:
-            if repeat_total > 1:
-                _notify(
-                    f"Replay Function repeat count {repeat_total}...",
-                    type="ongoing",
-                    timeout=1500,
-                    client=notify_client,
-                )
-            result = await asyncio.to_thread(
-                bridge.digital_twin_replay_function,
-                target,
-                _current_robot(),
-                function_name,
-                fixed_name,
-                replay_target=replay_target,
-                repeat_count=repeat_total,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=6000,
-                client=notify_client,
-            )
-            return dict(result)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("function replay failed for %s", target)
-            _notify(f"Replay failed: {exc}", type="negative", timeout=6000, client=notify_client)
-            return {"success": False, "message": str(exc)}
-
-    async def _replay_selected_step(replay_target: str) -> None:
-        step_index = _selected_step_index(saved_step_select.value)
-        function_name = _saved_function()
-        if step_index is None or not function_name:
-            _notify("Select a saved function step.", type="warning")
-            return
-        result = await asyncio.to_thread(
-            bridge.digital_twin_replay_function_step,
-            target,
-            _current_robot(),
-            function_name,
-            fixed_name,
-            step_index,
-            replay_target=replay_target,
-        )
+        preview.update(result)
+        _render_preview()
         _notify(
             str(result.get("message") or ""),
             type="positive" if result.get("success") else "warning",
             timeout=6000,
         )
 
-    async def _preview_gazebo() -> None:
-        await _replay_function("gazebo")
+    preview_button = ui.button(
+        "Preview Target",
+        on_click=_preview_target,
+        icon="visibility",
+    ).props("outline dense")
+    preview_button.set_visibility(False)
 
-    async def _replay_step_twin() -> None:
-        await _replay_selected_step("twin")
-
-    with ui.row().classes("items-center gap-2 mt-1"):
-        ui.button("New Function", on_click=_new_function, icon="add").props("flat dense")
-        ui.button("Capture Step", on_click=_capture_current_step, icon="fiber_manual_record").props(
-            "flat dense"
-        )
-        ui.button("Clear Unsaved Steps", on_click=_clear_steps, icon="delete").props(
-            "flat dense"
-        ).classes("text-red-600")
-    with ui.row().classes("items-center gap-2"):
-        ui.button("Save Function", on_click=_save_function, icon="save").props("flat dense")
-        ui.button("Delete Function", on_click=_delete_function, icon="delete_forever").props(
-            "flat dense"
-        ).classes("text-red-600")
-
-    ui.separator().classes("my-2")
-    ui.label("Single Robot Replay").classes("text-xs font-semibold")
-    if is_dual:
+    pick_execution_container = ui.column().classes("w-full gap-2")
+    with pick_execution_container:
         ui.label(
-            "In dual robots, Replay Function moves only the selected robot. "
-            "Replay Dual Function starts both robots concurrently."
-        ).classes("text-xs text-slate-500")
-    with ui.row().classes("items-center gap-2"):
-        saved_step_select = ui.select([], label="saved step").props("dense").classes("w-56")
-        single_repeat_input = (
-            ui.number(
-                label="repeat count",
-                value=1,
-                min=1,
-                max=999,
-                precision=0,
-            )
-            .props("dense")
-            .classes("w-32")
-        )
-        ui.button("Preview in Gazebo", on_click=_preview_gazebo, icon="visibility").props(
-            "flat dense"
-        )
-        ui.button("Replay Selected Step", on_click=_replay_step_twin, icon="play_arrow").props(
-            "flat dense"
-        )
-
-        with ui.dialog() as replay_confirm, ui.card().classes("gap-3"):
-            ui.label("Replay Function in Twin?").classes("font-semibold")
-            with ui.row().classes("justify-end gap-2 w-full"):
-                ui.button("Cancel", on_click=replay_confirm.close).props("flat")
-
-                async def _replay_twin_confirmed() -> None:
-                    notify_client = _current_client()
-                    replay_confirm.close()
-                    await _replay_function(
-                        "twin",
-                        client=notify_client,
-                        repeat_count=_repeat_count(single_repeat_input),
-                    )
-
-                ui.button("Replay Function", on_click=_replay_twin_confirmed, icon="send").props(
-                    "color=red"
-                )
-
-        ui.button(
-            "Replay Function",
-            on_click=replay_confirm.open,
-            icon="precision_manufacturing",
-        ).props("outline dense").classes("text-red-600")
-
-    if is_dual:
-        ui.separator().classes("my-2")
-        ui.label("Dual Function Replay").classes("text-xs font-semibold")
-
-        def _dual_saved_options(robot: str) -> list[str]:
-            return bridge.digital_twin_saved_function_names(target, robot)
-
-        def _refresh_dual_steps(robot: str, function_select, step_select) -> None:
-            function_name = str(function_select.value or "").strip()
-            step_options = _saved_step_options(robot, function_name)
-            step_select.options = step_options
-            if step_select.value not in step_options:
-                step_select.value = step_options[0] if step_options else None
-            step_select.update()
-
-        with ui.row().classes("items-center gap-2 w-full"):
-            xarm_saved_select = (
-                ui.select(_dual_saved_options("xarm6"), label="xarm6 function")
-                .props("dense")
-                .classes("w-52")
-            )
-            xarm_step_select = ui.select([], label="xarm6 step").props("dense").classes("w-56")
-        with ui.row().classes("items-center gap-2 w-full"):
-            ur5e_saved_select = (
-                ui.select(_dual_saved_options("ur5e"), label="ur5e function")
-                .props("dense")
-                .classes("w-52")
-            )
-            ur5e_step_select = ui.select([], label="ur5e step").props("dense").classes("w-56")
-
-        def _refresh_dual_all() -> None:
-            _refresh_dual_steps("xarm6", xarm_saved_select, xarm_step_select)
-            _refresh_dual_steps("ur5e", ur5e_saved_select, ur5e_step_select)
-
-        xarm_saved_select.on_value_change(lambda _e: _refresh_dual_all())
-        ur5e_saved_select.on_value_change(lambda _e: _refresh_dual_all())
-
-        async def _replay_dual_function(
-            replay_target: str,
-            *,
-            client: Client | None = None,
-            repeat_count: int = 1,
-        ) -> dict[str, object]:
-            notify_client = client or _current_client()
-            repeat_total = max(1, int(repeat_count))
-            if repeat_total > 1:
-                _notify(
-                    f"Replay Dual Function repeat count {repeat_total}...",
-                    type="ongoing",
-                    timeout=1500,
-                    client=notify_client,
-                )
-            result = await asyncio.to_thread(
-                bridge.digital_twin_replay_dual_function,
-                target,
-                str(xarm_saved_select.value or ""),
-                fixed_name,
-                str(ur5e_saved_select.value or ""),
-                fixed_name,
-                replay_target=replay_target,
-                repeat_count=repeat_total,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=7000,
-                client=notify_client,
-            )
-            return dict(result)
-
-        async def _replay_dual_step(replay_target: str) -> None:
-            xarm_step = _selected_step_index(xarm_step_select.value)
-            ur5e_step = _selected_step_index(ur5e_step_select.value)
-            if xarm_step is None or ur5e_step is None:
-                _notify(
-                    "Select one saved step for xarm6 and one saved step for ur5e.", type="warning"
-                )
-                return
-            result = await asyncio.to_thread(
-                bridge.digital_twin_replay_dual_step,
-                target,
-                str(xarm_saved_select.value or ""),
-                fixed_name,
-                xarm_step,
-                str(ur5e_saved_select.value or ""),
-                fixed_name,
-                ur5e_step,
-                replay_target=replay_target,
-            )
-            _notify(
-                str(result.get("message") or ""),
-                type="positive" if result.get("success") else "warning",
-                timeout=7000,
-            )
-
-        async def _preview_dual_gazebo() -> None:
-            await _replay_dual_function("gazebo")
-
-        async def _replay_dual_step_twin() -> None:
-            await _replay_dual_step("twin")
-
-        with ui.row().classes("items-center gap-2"):
-            ui.button(
-                "Preview Dual in Gazebo", on_click=_preview_dual_gazebo, icon="visibility"
-            ).props("flat dense")
-            ui.button(
-                "Replay Dual Selected Step", on_click=_replay_dual_step_twin, icon="play_arrow"
-            ).props("flat dense")
-            dual_repeat_input = (
-                ui.number(
-                    label="repeat count",
-                    value=1,
-                    min=1,
-                    max=999,
-                    precision=0,
-                )
-                .props("dense")
-                .classes("w-32")
-            )
-
-            with ui.dialog() as dual_replay_confirm, ui.card().classes("gap-3"):
-                ui.label("Replay Dual Function in Twin?").classes("font-semibold")
+            "Preview Target is read-only. Running pick_approach requests a separate fresh "
+            "detection after the physical staging movement."
+        ).classes("text-xs text-amber-700")
+        pick_execution_status = ui.label("").classes("text-xs text-slate-500")
+        with ui.row().classes("items-center gap-2 flex-wrap"):
+            with ui.dialog() as pick_approach_confirm, ui.card().classes("gap-3 max-w-xl"):
+                ui.label("Run pick_approach on the physical UR5e?").classes("font-semibold")
+                pick_approach_confirm_text = ui.label("").classes("text-sm")
+                ui.label(
+                    "This commands physical robot motion. Clear the workcell and switch the "
+                    "pendant to Remote Control before continuing."
+                ).classes("text-xs text-red-700")
                 with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel", on_click=dual_replay_confirm.close).props("flat")
+                    ui.button("Cancel", on_click=pick_approach_confirm.close).props("flat")
 
-                    async def _dual_replay_twin_confirmed() -> None:
-                        notify_client = _current_client()
-                        dual_replay_confirm.close()
-                        await _replay_dual_function(
-                            "twin",
-                            client=notify_client,
-                            repeat_count=_repeat_count(dual_repeat_input),
+                    async def _confirmed_pick_approach() -> None:
+                        client = _current_client()
+                        pick_approach_confirm.close()
+                        if pick_execution.get("busy"):
+                            _notify(
+                                "A UR5e pick operation is already running.",
+                                type="warning",
+                                client=client,
+                            )
+                            return
+                        pick_execution.update(
+                            {"busy": True, "active_function": "pick_approach"}
                         )
+                        pick_approach_button.props("loading")
+                        _render_pick_execution()
+                        try:
+                            result = await bridge.digital_twin_execute_pick_approach(
+                                target,
+                                _current_robot(),
+                                _current_name(),
+                                _current_part_name(),
+                                confirmed=True,
+                            )
+                            message = str(result.get("message") or "pick_approach completed.")
+                            pick_execution_status.set_text(message)
+                            pick_execution_status.classes(
+                                replace=(
+                                    "text-xs text-green-700"
+                                    if result.get("success")
+                                    else "text-xs text-red-700"
+                                )
+                            )
+                            _notify(
+                                message,
+                                type="positive" if result.get("success") else "negative",
+                                timeout=7000,
+                                client=client,
+                            )
+                        except Exception as exc:
+                            log.exception("pick_approach UI execution failed")
+                            message = f"pick_approach failed: {exc}"
+                            pick_execution_status.set_text(message)
+                            pick_execution_status.classes(replace="text-xs text-red-700")
+                            _notify(message, type="negative", timeout=7000, client=client)
+                        finally:
+                            pick_execution.update({"busy": False, "active_function": ""})
+                            pick_approach_button.props(remove="loading")
+                            _render_pick_execution()
 
                     ui.button(
-                        "Replay Dual Function", on_click=_dual_replay_twin_confirmed, icon="send"
+                        "Confirm Run pick_approach",
+                        on_click=_confirmed_pick_approach,
+                        icon="play_arrow",
                     ).props("color=red")
 
-            ui.button(
-                "Replay Dual Function",
-                on_click=dual_replay_confirm.open,
-                icon="precision_manufacturing",
-            ).props("outline dense").classes("text-red-600")
+            def _open_pick_approach_confirmation() -> None:
+                pick_approach_confirm_text.set_text(
+                    f"The UR5e will move to {_current_name()}, request a fresh "
+                    f"{_current_part_name()} detection, open the gripper, move above the "
+                    "detected gear, and descend to the computed pick target."
+                )
+                pick_approach_confirm.open()
 
-        _refresh_dual_all()
+            pick_approach_button = (
+                ui.button(
+                    "Run pick_approach",
+                    on_click=_open_pick_approach_confirmation,
+                    icon="play_arrow",
+                )
+                .props("outline dense")
+                .classes("text-red-600")
+            )
 
-    robot_select.on_value_change(lambda _e: _refresh_all())
-    saved_function_select.on_value_change(_saved_function_changed)
-    function_input.on_value_change(
-        lambda _e: (_refresh_info(), _refresh_steps(), _refresh_saved_steps())
-    )
-    _refresh_all()
+            with ui.dialog() as pick_grasp_confirm, ui.card().classes("gap-3 max-w-xl"):
+                ui.label("Run pick_grasp on the physical UR5e?").classes("font-semibold")
+                pick_grasp_confirm_text = ui.label("").classes("text-sm")
+                ui.label(
+                    "This closes the physical RG2 gripper and lifts the gear. Continue only "
+                    "after pick_approach has completed at the correct gear."
+                ).classes("text-xs text-red-700")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Cancel", on_click=pick_grasp_confirm.close).props("flat")
+
+                    async def _confirmed_pick_grasp() -> None:
+                        client = _current_client()
+                        pick_grasp_confirm.close()
+                        if pick_execution.get("busy"):
+                            _notify(
+                                "A UR5e pick operation is already running.",
+                                type="warning",
+                                client=client,
+                            )
+                            return
+                        pick_execution.update({"busy": True, "active_function": "pick_grasp"})
+                        pick_grasp_button.props("loading")
+                        _render_pick_execution()
+                        try:
+                            result = await bridge.digital_twin_execute_pick_grasp(
+                                target,
+                                _current_robot(),
+                                _current_name(),
+                                _current_part_name(),
+                                confirmed=True,
+                            )
+                            message = str(result.get("message") or "pick_grasp completed.")
+                            pick_execution_status.set_text(message)
+                            pick_execution_status.classes(
+                                replace=(
+                                    "text-xs text-green-700"
+                                    if result.get("success")
+                                    else "text-xs text-red-700"
+                                )
+                            )
+                            _notify(
+                                message,
+                                type="positive" if result.get("success") else "negative",
+                                timeout=7000,
+                                client=client,
+                            )
+                        except Exception as exc:
+                            log.exception("pick_grasp UI execution failed")
+                            message = f"pick_grasp failed: {exc}"
+                            pick_execution_status.set_text(message)
+                            pick_execution_status.classes(replace="text-xs text-red-700")
+                            _notify(message, type="negative", timeout=7000, client=client)
+                        finally:
+                            pick_execution.update({"busy": False, "active_function": ""})
+                            pick_grasp_button.props(remove="loading")
+                            _render_pick_execution()
+
+                    ui.button(
+                        "Confirm Run pick_grasp",
+                        on_click=_confirmed_pick_grasp,
+                        icon="pan_tool",
+                    ).props("color=red")
+
+            def _open_pick_grasp_confirmation() -> None:
+                pick_grasp_confirm_text.set_text(
+                    f"The UR5e will grasp and lift {_current_part_name()} from "
+                    f"{_current_name()}."
+                )
+                pick_grasp_confirm.open()
+
+            pick_grasp_button = (
+                ui.button(
+                    "Run pick_grasp",
+                    on_click=_open_pick_grasp_confirmation,
+                    icon="pan_tool",
+                )
+                .props("outline dense")
+                .classes("text-red-600")
+            )
+
+    def _render_pick_execution() -> None:
+        visible = _current_robot() == "ur5e" and _current_function() == "pick_approach"
+        pick_execution_container.set_visibility(visible)
+        if not visible:
+            return
+        enabled = bool(
+            _current_name() and _current_part_name() and not pick_execution.get("busy")
+        )
+        pick_approach_button.set_enabled(enabled)
+        pick_grasp_button.set_enabled(enabled)
+        if pick_execution.get("busy"):
+            preview_button.disable()
+            active_function = str(pick_execution.get("active_function") or "pick operation")
+            pick_execution_status.set_text(f"{active_function} is running...")
+            pick_execution_status.classes(replace="text-xs text-amber-700")
+        elif _current_part_name():
+            preview_button.enable()
+
+    async def _capture_position(step_name: str, primitive: str) -> None:
+        result = await asyncio.to_thread(
+            bridge.digital_twin_capture_function_step,
+            target,
+            _current_robot(),
+            _current_function(),
+            _current_name(),
+            step_name,
+            primitive,
+            part_name=_current_part_name(),
+        )
+        if isinstance(result.get("readiness"), dict):
+            readiness.clear()
+            readiness.update(dict(result["readiness"]))
+            readiness["checked"] = True
+            _render_readiness()
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=5000,
+        )
+        _render_steps()
+
+    async def _save_position(step_name: str) -> None:
+        result = await asyncio.to_thread(
+            bridge.digital_twin_save_function_position,
+            target,
+            _current_robot(),
+            _current_function(),
+            _current_name(),
+            step_name,
+            part_name=_current_part_name(),
+        )
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=5000,
+        )
+        _render_steps()
+
+    async def _clear_position(step_name: str) -> None:
+        result = await asyncio.to_thread(
+            bridge.digital_twin_clear_function_position,
+            target,
+            _current_robot(),
+            _current_function(),
+            _current_name(),
+            step_name,
+            part_name=_current_part_name(),
+        )
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=4500,
+        )
+        _render_steps()
+
+    async def _test_position(step_name: str, *, client: Client | None = None) -> None:
+        result = await asyncio.to_thread(
+            bridge.digital_twin_test_function_position,
+            target,
+            _current_robot(),
+            _current_function(),
+            _current_name(),
+            step_name,
+            confirmed=True,
+            part_name=_current_part_name(),
+        )
+        _notify(
+            str(result.get("message") or ""),
+            type="positive" if result.get("success") else "warning",
+            timeout=6000,
+            client=client,
+        )
+
+    def _render_steps() -> None:
+        function_name = _current_function()
+        name = _current_name()
+        template = bridge.digital_twin_function_template(function_name)
+        saved_steps = {
+            str(step.get("step_name") or ""): dict(step)
+            for step in bridge.digital_twin_list_function_file_steps(
+                target,
+                _current_robot(),
+                function_name,
+                name,
+                part_name=_current_part_name(),
+            )
+        }
+        buffered_steps = {
+            str(step.get("step_name") or ""): dict(step)
+            for step in bridge.digital_twin_list_function_buffer_steps(
+                target,
+                _current_robot(),
+                function_name,
+                name,
+                part_name=_current_part_name(),
+            )
+        }
+        required = [step for step in template if bool(step.get("recordable"))]
+        saved_required = [
+            step
+            for step in required
+            if str(step.get("step_name") or "") in saved_steps
+            and saved_steps[str(step.get("step_name") or "")].get("pose")
+        ]
+        if required and function_name == "place_approach":
+            steps_summary.set_text(
+                f"{len(saved_required)}/{len(required)} positions saved for "
+                f"{name} / {_current_part_name()}"
+            )
+        elif required:
+            steps_summary.set_text(f"{len(saved_required)}/{len(required)} positions saved")
+        else:
+            steps_summary.set_text("No physical positions are required for this function.")
+        info = bridge.digital_twin_function_info(
+            target,
+            _current_robot(),
+            function_name,
+            name,
+            _current_part_name(),
+        )
+        info_label.set_text(
+            f"Saving as: {info.get('display_path')}"
+            if info.get("success") and required
+            else "Function primitives are shown from the Python registry."
+        )
+        steps_container.clear()
+        with steps_container:
+            for index, step in enumerate(template, start=1):
+                step_name = str(step.get("step_name") or "")
+                primitive = str(step.get("primitive") or "")
+                recordable = bool(step.get("recordable"))
+                saved = saved_steps.get(step_name)
+                buffered = buffered_steps.get(step_name)
+                with ui.card().classes("w-full p-3"):
+                    with ui.row().classes("items-center gap-2 w-full"):
+                        ui.label(str(index)).classes("text-xs font-semibold w-5")
+                        ui.label(step_name).classes("text-sm font-semibold")
+                        ui.label("→").classes("text-xs text-slate-400")
+                        ui.label(primitive).classes("text-sm text-blue-700")
+                        ui.space()
+                        if not recordable:
+                            ui.label("No position required").classes("text-xs text-slate-500")
+                        elif buffered:
+                            ui.label("Captured; not saved").classes("text-xs text-amber-700")
+                        elif saved:
+                            ui.label("Position saved").classes("text-xs text-green-700")
+                        else:
+                            ui.label("Position required").classes("text-xs text-red-700")
+                    ui.label(
+                        f"Parameter source: {str(step.get('parameter_source') or '')}"
+                    ).classes("text-xs text-slate-500")
+                    if (
+                        function_name == "pick_approach"
+                        and step_name == "move_to_origin_resource_location"
+                    ):
+                        ui.label(
+                            "Automatic physical staging from `origin_resource_location`; "
+                            "no recording required."
+                        ).classes("text-xs text-blue-700")
+                    position = buffered or saved
+                    pose = dict(position.get("pose") or {}) if position else {}
+                    if pose:
+                        ui.label(
+                            "world → tool0: "
+                            f"x={float(pose.get('x', 0.0)):.4f}, "
+                            f"y={float(pose.get('y', 0.0)):.4f}, "
+                            f"z={float(pose.get('z', 0.0)):.4f}, "
+                            f"q=({float(pose.get('qx', 0.0)):.4f}, "
+                            f"{float(pose.get('qy', 0.0)):.4f}, "
+                            f"{float(pose.get('qz', 0.0)):.4f}, "
+                            f"{float(pose.get('qw', 1.0)):.4f})"
+                        ).classes("text-xs text-slate-600")
+                    if not recordable:
+                        continue
+                    with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
+                        capture_button = ui.button(
+                            "Capture Position",
+                            on_click=lambda _e, s=step_name, p=primitive: _capture_position(s, p),
+                            icon="fiber_manual_record",
+                        ).props("flat dense")
+                        if (
+                            _current_robot() != "ur5e"
+                            or not readiness.get("success")
+                            or not name
+                            or (function_name == "place_approach" and not _current_part_name())
+                        ):
+                            capture_button.disable()
+                        save_button = ui.button(
+                            "Save/Replace Position",
+                            on_click=lambda _e, s=step_name: _save_position(s),
+                            icon="save",
+                        ).props("flat dense")
+                        if not buffered:
+                            save_button.disable()
+                        clear_button = (
+                            ui.button(
+                                "Clear Position",
+                                on_click=lambda _e, s=step_name: _clear_position(s),
+                                icon="delete",
+                            )
+                            .props("flat dense")
+                            .classes("text-red-600")
+                        )
+                        if not buffered and not saved:
+                            clear_button.disable()
+
+                        with ui.dialog() as test_confirm, ui.card().classes("gap-3"):
+                            ui.label(f"Test {function_name}.{step_name}?").classes("font-semibold")
+                            ui.label(
+                                "This commands physical robot motion through move_cartesian. "
+                                "Clear the workcell and switch the pendant to Remote Control first."
+                            ).classes("text-xs text-red-700")
+                            with ui.row().classes("justify-end gap-2 w-full"):
+                                ui.button("Cancel", on_click=test_confirm.close).props("flat")
+
+                                async def _confirmed_test(
+                                    step_name=step_name,
+                                    dialog=test_confirm,
+                                ) -> None:
+                                    client = _current_client()
+                                    dialog.close()
+                                    await _test_position(step_name, client=client)
+
+                                ui.button(
+                                    "Test Position",
+                                    on_click=_confirmed_test,
+                                    icon="send",
+                                ).props("color=red")
+                        test_button = (
+                            ui.button(
+                                "Test Position",
+                                on_click=test_confirm.open,
+                                icon="play_arrow",
+                            )
+                            .props("outline dense")
+                            .classes("text-red-600")
+                        )
+                        if not saved:
+                            test_button.disable()
+
+    def _selection_changed(_e=None) -> None:
+        readiness.clear()
+        readiness.update({"checked": False, "success": False})
+        preview.clear()
+        _render_readiness()
+        _sync_location()
+        _sync_part_name()
+        _render_preview()
+        _render_pick_execution()
+        _render_steps()
+
+    def _part_name_changed(_e=None) -> None:
+        preview.clear()
+        _render_preview()
+        _render_pick_execution()
+        _render_steps()
+
+    def _location_changed(_e=None) -> None:
+        _render_pick_execution()
+        _render_steps()
+
+    robot_select.on_value_change(_selection_changed)
+    function_select.on_value_change(_selection_changed)
+    location_select.on_value_change(_location_changed)
+    part_select.on_value_change(_part_name_changed)
+    _sync_location()
+    _sync_part_name()
+    _render_readiness()
+    _render_preview()
+    _render_pick_execution()
+    _render_steps()
+    ui.label(
+        "Capture is read-only and works with the UR5e pendant in Local Control. "
+        "Testing is a separate motion action and requires Physical mode, Remote Control, "
+        "and explicit confirmation."
+    ).classes("text-xs text-amber-700 mt-2")
 
 
 # =====================================================================

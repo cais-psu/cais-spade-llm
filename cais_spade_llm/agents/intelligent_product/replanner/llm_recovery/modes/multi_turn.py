@@ -233,6 +233,9 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
     else:
         candidate_bound = max(1, int(candidate_count))
         candidate_bound_cap = max(candidate_bound, candidate_bound_cap)
+    if recovery_selection_mode == "neurosymbolic":
+        candidate_bound = _DEFAULT_CANDIDATE_BOUND
+        candidate_bound_cap = max(candidate_bound_cap, candidate_bound)
     # Build symbolic resource/part state for validation tracking
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
@@ -1940,8 +1943,15 @@ def _compute_enabled_candidate_bound(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> int:
-    """Return the configured candidate budget for candidate selection."""
+    """Return the candidate budget for the current selection mode."""
     del prepared_recovery_request
+    if (
+        str(session_state.get("recovery_selection_mode") or "pure_llm")
+        .strip()
+        .lower()
+        == "neurosymbolic"
+    ):
+        return _DEFAULT_CANDIDATE_BOUND
     candidate_bound = max(
         1,
         int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
@@ -2237,7 +2247,7 @@ def _candidate_state_completeness_findings(
     """
     findings: list[dict[str, Any]] = []
     required_keys = ["resource_state"]
-    if part_name:
+    if part_name and "held_part" in end_state:
         required_keys.extend(("held_part", "part_state", "part_location"))
     missing = [key for key in required_keys if key not in end_state]
     if missing:
@@ -2252,19 +2262,22 @@ def _candidate_state_completeness_findings(
             )
         )
     if not part_name:
-        unexpected = [
+        unexpected = sorted(
             key
             for key in end_state
-            if str(dict(state_variables.get(key) or {}).get("scope") or "resource")
+            if key == "held_part"
+            or str(
+                dict(state_variables.get(key) or {}).get("scope") or "resource"
+            )
             == "part"
-        ]
+        )
         if unexpected:
             findings.append(
                 _candidate_schema_finding(
                     task=candidate_task,
                     reason=(
-                        "expected_end_state includes part-specific predicate key(s) "
-                        f"without part_name: {', '.join(unexpected)}"
+                        "expected_end_state includes held_part or part-scoped state "
+                        f"field(s) without part_name: {', '.join(unexpected)}"
                     ),
                     evidence={"field": "expected_end_state", "unexpected": unexpected},
                 )
@@ -2307,7 +2320,11 @@ def _generated_candidate_start_state(
     """Bind one LLM-authored successor to the exact projected current state."""
     field_names = {"resource_state", *end_state}
     if part_name:
-        field_names.update(("held_part", "part_state", "part_location"))
+        field_names.update(
+            field_name
+            for field_name in ("held_part", "part_state", "part_location")
+            if field_name in state_variables
+        )
 
     start_state: dict[str, Any] = {}
     missing_fields: list[str] = []
@@ -2364,7 +2381,10 @@ def _derive_candidate_outline_task(
     outline_id = str(candidate_task.get("outline_id") or "").strip()
     resource_jid = _task_resource_jid(candidate_task)
     event_name = str(candidate_task.get("event_name") or "").strip()
-    part_name = _task_part_name(candidate_task)
+    raw_part_name = candidate_task.get("part_name")
+    # The per-resource schema uses null to encode an omitted resource-only binding.
+    part_name_present = "part_name" in candidate_task and raw_part_name is not None
+    part_name = raw_part_name if isinstance(raw_part_name, str) else ""
     rationale = str(candidate_task.get("rationale") or "").strip()
     recovery_entry = dict(
         dict(prepared_recovery_request.get("recovery_resources") or {}).get(
@@ -2444,6 +2464,24 @@ def _derive_candidate_outline_task(
             )
         ]
 
+    if part_name_present and (
+        not isinstance(raw_part_name, str)
+        or not raw_part_name
+        or raw_part_name != raw_part_name.strip()
+    ):
+        finding = _candidate_schema_finding(
+            task=candidate_task,
+            reason=(
+                "candidate part_name must be an exact supplied nonempty string token"
+            ),
+            evidence={
+                "field": "part_name",
+                "value": deepcopy(raw_part_name),
+            },
+        )
+        finding["part_name"] = None
+        return None, [finding]
+
     if part_name and part_name not in parts_by_name:
         return None, [
             _candidate_schema_finding(
@@ -2463,6 +2501,32 @@ def _derive_candidate_outline_task(
             )
         ]
     end_state: dict[str, Any] = deepcopy(raw_end_state)
+
+    public_state_fields = {
+        field_name
+        for field_name, declaration in state_variables.items()
+        if dict(declaration or {}).get("private") is not True
+        and not str(field_name).startswith("task_ctx.")
+    }
+    undeclared_custody_fields = (
+        ["held_part"]
+        if "held_part" in end_state and "held_part" not in public_state_fields
+        else []
+    )
+    if undeclared_custody_fields:
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason=(
+                    "expected_end_state includes held_part but the responsible "
+                    "ResourceAgent does not publicly declare held_part"
+                ),
+                evidence={
+                    "field": "expected_end_state",
+                    "unexpected": undeclared_custody_fields,
+                },
+            )
+        ]
 
     completeness_findings = _candidate_state_completeness_findings(
         candidate_task=candidate_task,
@@ -2503,6 +2567,8 @@ def _commit_selected_candidate_task(
     sequence_index: int,
 ) -> dict[str, Any]:
     committed_task = deepcopy(task or {})
+    committed_task.pop("modeled_task_steps", None)
+    committed_task.pop("primitive_steps", None)
     committed_task["outline_id"] = _committed_outline_id(
         sequence_index=sequence_index
     )
@@ -3399,8 +3465,12 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             1,
             int(session_state.get("candidate_bound") or _DEFAULT_CANDIDATE_BOUND),
         )
-    declared_state_variables: dict[str, dict[str, Any]] = {}
-    for descriptor in dict(session_state.get("recovery_des_models") or {}).values():
+    recovery_des_models = dict(session_state.get("recovery_des_models") or {})
+    declared_state_variables_by_resource_jid: dict[
+        str, dict[str, dict[str, Any]]
+    ] = {}
+    for resource_jid, descriptor in sorted(recovery_des_models.items()):
+        declared_state_variables: dict[str, dict[str, Any]] = {}
         for field_name, declaration in dict(
             dict(descriptor or {}).get("state_variables") or {}
         ).items():
@@ -3408,9 +3478,12 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
                 field_name
             ).startswith("task_ctx."):
                 continue
-            declared_state_variables.setdefault(
-                str(field_name),
-                deepcopy(dict(declaration or {})),
+            declared_state_variables[str(field_name)] = deepcopy(
+                dict(declaration or {})
+            )
+        if "resource_state" in declared_state_variables:
+            declared_state_variables_by_resource_jid[str(resource_jid)] = (
+                declared_state_variables
             )
     return multi_turn_phase_response_schema(
         phase,
@@ -3423,7 +3496,11 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
         action_horizon=str(session_state.get("action_horizon") or "1").strip().lower(),
         action_horizon_steps=session_state.get("action_horizon_steps"),
         action_horizon_k=max(1, int(session_state.get("action_horizon_k") or 3)),
-        declared_state_variables=declared_state_variables,
+        declared_state_variables_by_resource_jid=(
+            declared_state_variables_by_resource_jid
+            if recovery_des_models
+            else None
+        ),
     )
 
 
@@ -4126,20 +4203,6 @@ def _recovery_proposal_initial_outline_rows(
         )
         if observed_pose and not dict(seeded_row.get("observed_pose") or {}):
             seeded_row["observed_pose"] = deepcopy(observed_pose)
-        part_state = str(seeded_row.get("part_state") or "").strip().lower()
-        part_location = str(seeded_row.get("part_location") or "").strip()
-        part_holder = str(seeded_row.get("part_holder_resource_jid") or "").strip()
-        if (
-            observed_pose
-            and not part_location
-            and not part_holder
-            and part_state in {"", "unknown"}
-        ):
-            seeded_row["part_state"] = "misplaced"
-            if "current_state" not in seeded_row or str(
-                seeded_row.get("current_state") or ""
-            ).strip().lower() in {"", "unknown"}:
-                seeded_row["current_state"] = "misplaced"
         return seeded_row
 
     def _merge_part_rows(
@@ -4699,31 +4762,31 @@ def _build_final_output_payload(
     for event in accepted_prefix:
         outline_id = str(event.get("outline_id") or "").strip()
         primitive_row = dict(primitives_by_outline_id.get(outline_id) or {})
-        executable_trace.append(
-            {
-                "outline_id": outline_id,
-                "des_event_id": outline_id,
-                "candidate_source": str(
-                    event.get("candidate_source") or ""
-                ).strip(),
-                "event_name": str(
-                    event.get("event_name") or primitive_row.get("event_name") or ""
-                ).strip(),
-                "resource_jid": _task_resource_jid(event),
-                "part_name": _task_part_name(event) or None,
-                "target_ref": _task_target_ref(event) or None,
-                "predecessors": [
-                    str(item).strip()
-                    for item in (event.get("predecessors") or [])
-                    if str(item).strip()
-                ],
-                "description": _task_description(event),
-                "rationale": str(event.get("rationale") or "").strip() or None,
-                "expected_start_state": deepcopy(event.get("expected_start_state") or {}),
-                "expected_end_state": deepcopy(event.get("expected_end_state") or {}),
-                "primitive_steps": deepcopy(primitive_row.get("primitive_steps") or []),
-            }
-        )
+        trace_row = {
+            "outline_id": outline_id,
+            "des_event_id": outline_id,
+            "candidate_source": str(event.get("candidate_source") or "").strip(),
+            "event_name": str(
+                event.get("event_name") or primitive_row.get("event_name") or ""
+            ).strip(),
+            "resource_jid": _task_resource_jid(event),
+            "part_name": _task_part_name(event) or None,
+            "target_ref": _task_target_ref(event) or None,
+            "predecessors": [
+                str(item).strip()
+                for item in (event.get("predecessors") or [])
+                if str(item).strip()
+            ],
+            "description": _task_description(event),
+            "rationale": str(event.get("rationale") or "").strip() or None,
+            "expected_start_state": deepcopy(event.get("expected_start_state") or {}),
+            "expected_end_state": deepcopy(event.get("expected_end_state") or {}),
+        }
+        if primitive_row:
+            trace_row["primitive_steps"] = deepcopy(
+                primitive_row.get("primitive_steps") or []
+            )
+        executable_trace.append(trace_row)
 
     final_output_payload = {
         "engine": "multi_turn",
@@ -5030,6 +5093,27 @@ def _ground_modeled_task_steps(
     prepared_recovery_request: dict[str, Any],
     outline_event: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    from .multi_turn_primitive_generation import (
+        _capability_decomposition_for_resource,
+    )
+
+    resource_jid = str(outline_event.get("resource_jid") or "").strip()
+    event_name = str(outline_event.get("event_name") or "").strip()
+    if not resource_jid or not event_name:
+        return [], ["capability_decomposition"]
+    decomposition = _capability_decomposition_for_resource(
+        prepared_recovery_request=prepared_recovery_request,
+        resource_jid=resource_jid,
+        function_name=event_name,
+    )
+    if not isinstance(decomposition, dict) or str(
+        decomposition.get("function_name") or ""
+    ).strip() != event_name:
+        return [], [f"capability_decomposition.{event_name}"]
+    modeled_task_steps = decomposition.get("recovery_visible_steps")
+    if not isinstance(modeled_task_steps, list) or not modeled_task_steps:
+        return [], [f"capability_decomposition.{event_name}.recovery_visible_steps"]
+
     grounding_context = _primitive_grounding_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -5041,7 +5125,7 @@ def _ground_modeled_task_steps(
     )
     grounded_steps: list[dict[str, Any]] = []
     unresolved: set[str] = set()
-    for raw_step in outline_event.get("modeled_task_steps") or []:
+    for raw_step in modeled_task_steps:
         if not isinstance(raw_step, dict):
             continue
         grounded, step_unresolved = _ground_modeled_step_value(
@@ -5639,6 +5723,7 @@ async def execute_multi_turn_recovery(
                     ask_llm_structured(
                         prompt=prompt_text,
                         response_format=response_schema,
+                        include_agent_instructions=False,
                     )
                 )
                 while True:
@@ -5662,6 +5747,24 @@ async def execute_multi_turn_recovery(
                 llm_request = deepcopy(
                     dict(getattr(product_agent, "_last_structured_request", {}) or {})
                 )
+                expected_messages = [{"role": "user", "content": prompt_text}]
+                if llm_request.get("messages") != expected_messages:
+                    llm_request = {
+                        "model": str(
+                            getattr(product_agent, "model", "")
+                            or getattr(product_agent, "llm_model", "")
+                        ).strip(),
+                        "messages": expected_messages,
+                        "reasoning_effort": str(
+                            getattr(product_agent, "reasoning_effort", "")
+                            or getattr(product_agent, "llm_reasoning_effort", "")
+                        ).strip(),
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": deepcopy(response_schema),
+                        },
+                        "response_source": "unknown",
+                    }
                 await _emit_progress(
                     session_state=session_state,
                     current_phase=current_phase,

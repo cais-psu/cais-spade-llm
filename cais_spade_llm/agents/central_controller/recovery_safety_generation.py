@@ -35,6 +35,43 @@ def _write_json(path: Path, payload: Any) -> str:
     return str(path)
 
 
+def _captured_structured_request(
+    llm_request: dict[str, Any],
+    *,
+    fallback_prompt: str,
+    fallback_response_format: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the complete recovery safety request sent to the LLM."""
+    request_payload = deepcopy(llm_request)
+    messages = [
+        deepcopy(row)
+        for row in (request_payload.get("messages") or [])
+        if isinstance(row, dict)
+    ]
+    if not messages or not any(
+        str(row.get("role") or "").strip() == "user"
+        and str(row.get("content") or "") == fallback_prompt
+        for row in messages
+    ):
+        request_payload = {
+            "messages": [{"role": "user", "content": fallback_prompt}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": deepcopy(fallback_response_format),
+            },
+            "response_source": "unknown",
+            "request_sent": None,
+        }
+    request_payload.setdefault(
+        "response_format",
+        {
+            "type": "json_schema",
+            "json_schema": deepcopy(fallback_response_format),
+        },
+    )
+    return request_payload
+
+
 def _fixed_state_surface_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -1793,17 +1830,37 @@ async def generate_recovery_safety_bundle(
     )
 
     prompt = build_recovery_safety_grounding_prompt(payload)
+    response_format = _grounding_response_schema()
     prompt_name = f"recovery_safety_grounding_prompt_{_utc_now_token()}.txt"
-    prompt_path = _write_text(recovery_safety_dir / prompt_name, prompt)
-    latest_prompt_path = _write_text(
-        recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt",
-        prompt,
+    prompt_artifact_path = recovery_safety_dir / prompt_name
+    latest_prompt_artifact_path = (
+        recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt"
     )
-
-    grounding = await controller_agent.ask_llm_structured(
-        prompt,
-        response_format=_grounding_response_schema(),
-    )
+    try:
+        grounding = await controller_agent.ask_llm_structured(
+            prompt,
+            response_format=response_format,
+            include_agent_instructions=False,
+        )
+    finally:
+        captured_request = _captured_structured_request(
+            deepcopy(
+                dict(getattr(controller_agent, "_last_structured_request", {}) or {})
+            ),
+            fallback_prompt=prompt,
+            fallback_response_format=response_format,
+        )
+        request_artifact = json.dumps(
+            captured_request,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+        prompt_path = _write_text(prompt_artifact_path, request_artifact)
+        latest_prompt_path = _write_text(
+            latest_prompt_artifact_path,
+            request_artifact,
+        )
     llm_response_name = f"recovery_safety_grounding_llm_response_{_utc_now_token()}.json"
     llm_response_path = _write_json(
         recovery_safety_dir / llm_response_name,

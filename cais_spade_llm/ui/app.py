@@ -10,7 +10,7 @@ from pathlib import Path
 from nicegui import app, ui
 from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
@@ -209,6 +209,40 @@ def create_app() -> None:
             frames(),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/perception/frame/{camera_role}/{stream_name}")
+    async def perception_frame(camera_role: str, stream_name: str) -> Response:
+        """Return the latest preview JPEG without invoking Roboflow inference."""
+        from cais_spade_llm.ui.perception_manager import CAMERA_ROLES, PREVIEW_ROOT
+
+        if camera_role not in CAMERA_ROLES or stream_name not in {
+            "color",
+            "depth",
+            "detection",
+        }:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="unknown perception preview")
+        image_path = PREVIEW_ROOT / camera_role / f"{stream_name}.jpg"
+        fallback_path = (
+            PREVIEW_ROOT / camera_role / "color.jpg"
+            if stream_name == "detection"
+            else image_path
+        )
+        try:
+            current_path = image_path if image_path.is_file() else fallback_path
+            payload = (
+                current_path.read_bytes()
+                if current_path.is_file()
+                else _NO_PERCEPTION_FRAME_JPEG
+            )
+        except OSError:
+            payload = _NO_PERCEPTION_FRAME_JPEG
+        return Response(
+            payload,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
     @ui.page("/")

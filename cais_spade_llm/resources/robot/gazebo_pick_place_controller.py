@@ -28,6 +28,9 @@ resolve_place_geometry = ProductProfile.resolve_place_geometry
 
 logger = logging.getLogger(__name__)
 
+_PHYSICAL_DETECTION_MAX_AGE_SEC = 10.0
+_PHYSICAL_DETECTION_FUTURE_TOLERANCE_SEC = 1.0
+
 
 def _import_linkattacher_srvs():
     """Import IFRA service types, even if workspace setup wasn't sourced."""
@@ -63,6 +66,90 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _normalized_optional_quaternion(
+    qx: float | None,
+    qy: float | None,
+    qz: float | None,
+    qw: float | None,
+) -> tuple[tuple[float, float, float, float] | None, str | None]:
+    values = (qx, qy, qz, qw)
+    supplied = tuple(value is not None for value in values)
+    if not any(supplied):
+        return None, None
+    if not all(supplied):
+        return None, "orientation requires qx, qy, qz, and qw together"
+
+    try:
+        numeric = tuple(float(value) for value in values)
+    except (TypeError, ValueError, OverflowError):
+        return None, "orientation quaternion must contain finite numeric values"
+    if not all(math.isfinite(value) for value in numeric):
+        return None, "orientation quaternion must contain finite numeric values"
+
+    norm = math.hypot(*numeric)
+    if not math.isfinite(norm):
+        return None, "orientation quaternion must have a finite norm"
+    if norm <= 1e-12:
+        return None, "orientation quaternion must be non-zero"
+    return tuple(value / norm for value in numeric), None
+
+
+def _physical_detection_error(
+    detection: dict[str, Any],
+    *,
+    requested_part: str,
+    now: float | None = None,
+) -> str:
+    detected_part = str(detection.get("part_name") or "").strip()
+    if requested_part and detected_part != requested_part:
+        return (
+            f"physical detection part mismatch: requested {requested_part!r}, "
+            f"received {detected_part or '<empty>'!r}"
+        )
+
+    coordinates: dict[str, float] = {}
+    for axis in ("x", "y", "z"):
+        try:
+            value = float(detection[axis])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return f"physical detection {axis} coordinate is missing or invalid"
+        if not math.isfinite(value):
+            return f"physical detection {axis} coordinate is not finite"
+        coordinates[axis] = value
+
+    if str(detection.get("frame_id") or "").strip() != "world":
+        return "physical detection frame_id must be world"
+
+    try:
+        captured_at = float(detection["captured_at"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "physical detection captured_at is missing or invalid"
+    if not math.isfinite(captured_at):
+        return "physical detection captured_at is not finite"
+    detection_age = float(time.time() if now is None else now) - captured_at
+    if (
+        detection_age < -_PHYSICAL_DETECTION_FUTURE_TOLERANCE_SEC
+        or detection_age > _PHYSICAL_DETECTION_MAX_AGE_SEC
+    ):
+        return f"physical detection is stale (age={detection_age:.2f}s)"
+
+    try:
+        table_surface_z_m = float(detection["table_surface_z_m"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "physical detection has no accepted table-plane evidence"
+    if not math.isfinite(table_surface_z_m):
+        return "physical detection table_surface_z_m is not finite"
+    if detection.get("table_plane_ready") is False:
+        return "physical detection table-plane evidence is not ready"
+    if detection.get("table_plane_accepted") is False:
+        return "physical detection table-plane evidence is not accepted"
+
+    detection.update(coordinates)
+    detection["captured_at"] = captured_at
+    detection["table_surface_z_m"] = table_surface_z_m
+    return ""
 
 
 def _gazebo_world_file_candidates() -> list[Path]:
@@ -764,15 +851,23 @@ class GazeboPickPlaceController:
         y: float,
         z: float,
         speed: float | None = None,
+        qx: float | None = None,
+        qy: float | None = None,
+        qz: float | None = None,
+        qw: float | None = None,
     ) -> dict[str, Any]:
         """
         ---
-        description: Move end-effector to an absolute Cartesian position.
+        description: Move end-effector to an absolute Cartesian position and optional orientation.
         params:
           x: {type: number, description: "Target X coordinate in meters (base frame)"}
           y: {type: number, description: "Target Y coordinate in meters (base frame)"}
           z: {type: number, description: "Target Z coordinate in meters (base frame)"}
           speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
+          qx: {type: number, description: "Target quaternion X component. Optional with qy, qz, and qw."}
+          qy: {type: number, description: "Target quaternion Y component. Optional with qx, qz, and qw."}
+          qz: {type: number, description: "Target quaternion Z component. Optional with qx, qy, and qw."}
+          qw: {type: number, description: "Target quaternion W component. Optional with qx, qy, and qz."}
         preconditions: {}
         effects:
           current_pose:
@@ -781,11 +876,22 @@ class GazeboPickPlaceController:
             set_unknown: true
         ---
         """
+        normalized_quaternion, orientation_error = _normalized_optional_quaternion(
+            qx,
+            qy,
+            qz,
+            qw,
+        )
+        if orientation_error:
+            return {"success": False, "message": f"move_cartesian {orientation_error}"}
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ee = self._get_ee_pose()
         if ee is None:
             return {"success": False, "message": "cannot read current ee pose"}
+        orientation = ee.orientation
+        if normalized_quaternion is not None:
+            orientation = self._make_orientation(*normalized_quaternion)
         target_x = float(x)
         target_y = float(y)
         target_z = float(z)
@@ -797,7 +903,7 @@ class GazeboPickPlaceController:
                 target_x,
                 target_y,
                 target_z,
-                orientation=ee.orientation,
+                orientation=orientation,
                 label="move_cartesian",
                 speed=speed,
             )
@@ -805,7 +911,7 @@ class GazeboPickPlaceController:
             target_x,
             target_y,
             target_z,
-            orientation=ee.orientation,
+            orientation=orientation,
             label="move_cartesian",
             speed=speed,
         )
@@ -1584,6 +1690,7 @@ class GazeboPickPlaceController:
         use_global_min_pick_tcp_z: bool = True,
         surface_clearance_override_m: float | None = None,
         apply_pick_z_adjustments: bool = True,
+        detected_parts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         ---
@@ -1592,6 +1699,7 @@ class GazeboPickPlaceController:
           part_name: {type: string, description: "Name of the detected part to pick"}
           product_geometry: {type: object, description: "Optional geometry override dict"}
           target_pose: {type: object, description: "Optional known target pose with x/y/z; skips perception when provided"}
+          detected_parts: {type: array, description: "Optional detect_parts result to consume without issuing another detection"}
           target_pose_source: {type: string, description: "Optional source label for target_pose, e.g. observed_pose"}
           prefer_live_detection: {type: boolean, description: "When true, try perception first and use target_pose only as fallback"}
           approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
@@ -1609,12 +1717,13 @@ class GazeboPickPlaceController:
         travel_z, part_height, tcp_offset_z, pick_tcp_z, start_x, start_y,
         start_z, or {"success": False, "message": ...} on failure.
         """
-        if not self.wait_for_services():
+        supplied_detected_parts = detected_parts is not None
+        if not supplied_detected_parts and not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
 
-        target = None
-        parts = None
-        detection_attempted = False
+        target: dict[str, Any] | None = None
+        parts: list[dict[str, Any]] | None = None
+        detection_attempted = supplied_detected_parts
         normalized_target_pose = None
         if isinstance(target_pose, dict) and {"x", "y", "z"} <= set(target_pose.keys()):
             try:
@@ -1626,13 +1735,61 @@ class GazeboPickPlaceController:
             except (TypeError, ValueError):
                 normalized_target_pose = None
 
-        if bool(prefer_live_detection) and str(part_name or "").strip():
+        if detected_parts is not None:
+            parts = [dict(row) for row in detected_parts if isinstance(row, dict)]
+            if part_name:
+                matching_parts = [row for row in parts if row.get("part_name") == part_name]
+                if self.execution_mode == "physical" and len(matching_parts) != 1:
+                    detected_names = sorted(
+                        {
+                            str(row.get("part_name"))
+                            for row in parts
+                            if str(row.get("part_name") or "").strip()
+                        }
+                    )
+                    return {
+                        "success": False,
+                        "message": (
+                            f"requested physical part {part_name!r} did not match exactly one "
+                            f"detection; detected={detected_names}"
+                        ),
+                    }
+                target = matching_parts[0] if matching_parts else None
+            elif parts:
+                target = parts[0]
+        elif bool(prefer_live_detection) and str(part_name or "").strip():
             detection_attempted = True
             parts = self.detect_parts()
             if parts:
                 target = next((p for p in parts if p.get("part_name") == part_name), None)
+            if self.execution_mode == "physical":
+                matching_parts = [
+                    row for row in (parts or []) if row.get("part_name") == part_name
+                ]
+                if len(matching_parts) != 1:
+                    detected_names = sorted(
+                        {
+                            str(row.get("part_name"))
+                            for row in (parts or [])
+                            if str(row.get("part_name") or "").strip()
+                        }
+                    )
+                    return {
+                        "success": False,
+                        "message": (
+                            f"requested physical part {part_name!r} did not match exactly one "
+                            f"detection; detected={detected_names}"
+                        ),
+                    }
 
         if target is not None:
+            if self.execution_mode == "physical":
+                detection_error = _physical_detection_error(
+                    target,
+                    requested_part=str(part_name or "").strip(),
+                )
+                if detection_error:
+                    return {"success": False, "message": detection_error}
             tx = _as_float(target.get("x"), 0.0)
             ty = _as_float(target.get("y"), 0.0)
             tz = _as_float(target.get("z"), 0.0)
@@ -1660,6 +1817,13 @@ class GazeboPickPlaceController:
                     }
             if target is None:
                 target = parts[0]
+            if self.execution_mode == "physical":
+                detection_error = _physical_detection_error(
+                    target,
+                    requested_part=str(part_name or "").strip(),
+                )
+                if detection_error:
+                    return {"success": False, "message": detection_error}
             tx = _as_float(target.get("x"), 0.0)
             ty = _as_float(target.get("y"), 0.0)
             tz = _as_float(target.get("z"), 0.0)
@@ -1682,6 +1846,11 @@ class GazeboPickPlaceController:
             geo.get("model_name") or (target or {}).get("model_name") or pose_model_name or ""
         )
 
+        if supplied_detected_parts and not self.init():
+            return {
+                "success": False,
+                "message": self._unavailable_message("read-only controller initialization failed"),
+            }
         ee = self._get_ee_pose()
         if ee is None:
             return {"success": False, "message": "cannot read current ee pose"}
@@ -1741,7 +1910,7 @@ class GazeboPickPlaceController:
             f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
         )
 
-        return {
+        result = {
             "success": True,
             "part_name": target_part_name,
             "model_name": target_model,
@@ -1766,6 +1935,16 @@ class GazeboPickPlaceController:
             "start_y": ee.position.y,
             "start_z": ee.position.z,
         }
+        if target is not None:
+            for provenance_field in (
+                "confidence",
+                "captured_at",
+                "frame_id",
+                "table_surface_z_m",
+            ):
+                if provenance_field in target:
+                    result[provenance_field] = target[provenance_field]
+        return result
 
     def compute_place_targets(
         self,

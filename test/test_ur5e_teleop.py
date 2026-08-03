@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -236,6 +237,7 @@ def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -
     assert "external_ur5e_runtime = (" in bridge
     assert "self.infer_robot_environment(robot) == 'real'" in teleop
     assert "self._move_ur5e_arm_action(" in teleop
+    assert "--include-hidden-services --no-daemon --spin-time 0.5" in bridge
 
 
 def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None:
@@ -259,6 +261,217 @@ def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None
     assert "disabled for read-only calibration monitoring" in server
     assert 'body["action"] = ""' in server
     assert 'body["action_name"] = ""' in server
+    assert "self._next_status_heartbeat_monotonic = now + 1.0" in server
+    assert 'state="stopped"' in server
+    assert "UR5e RTDE trajectory server exited:" in server
+
+
+def test_rtde_result_timeout_stops_and_clears_goal_without_destroying_server() -> None:
+    server = (
+        ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py"
+    ).read_text(encoding="utf-8")
+    timeout_block = server.split(
+        'reason = "UR5e RTDE trajectory result timeout"', maxsplit=1
+    )[1].split("        except Exception as exc:", maxsplit=1)[0]
+
+    assert timeout_block.index("self._stop_motion()") < timeout_block.index(
+        "goal_handle.abort()"
+    )
+    assert "self._clear_active_goal(goal_handle)" in timeout_block
+    assert "self._action_server.destroy" not in timeout_block
+
+
+def test_rtde_result_timeout_remains_blocked_until_server_status_is_repaired() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    status = {
+        "state": "failed",
+        "message": "UR5e RTDE trajectory result timeout",
+        "updated_at": 100.0,
+    }
+
+    assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(status, now=110.0) is True
+    assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(status, now=131.0) is True
+    assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(
+        {**status, "updated_at": None}, now=131.0
+    ) is False
+
+
+def test_named_position_readiness_reports_action_domain_and_repair_instruction() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _operation: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+        "source": "digital_twin:dual robots",
+    }
+    bridge._ur5e_rtde_trajectory_status = lambda: {
+        "state": "failed",
+        "message": "UR5e RTDE trajectory result timeout",
+        "updated_at": 100.0,
+    }
+    bridge._wait_for_ros_action = lambda *_args, **_kwargs: pytest.fail(
+        "result timeout must block before another action readiness attempt"
+    )
+
+    ready, message = bridge.teleop_named_position_readiness("ur5e")
+
+    assert ready is False
+    assert "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory" in message
+    assert "ROS_DOMAIN_ID=42" in message
+    assert "Click Repair Twin for dual robots" in message
+
+
+def test_named_position_readiness_rejects_stale_rtde_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _operation: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+        "source": "digital_twin:dual robots",
+    }
+    bridge._ur5e_rtde_trajectory_status = lambda: {
+        "state": "ready",
+        "message": "UR5e RTDE trajectory server ready",
+        "rtde_control_connected": True,
+        "updated_at": 100.0,
+    }
+    bridge._wait_for_ros_action = lambda *_args, **_kwargs: pytest.fail(
+        "stale status must block before ROS discovery"
+    )
+    monkeypatch.setattr("cais_spade_llm.ui.bridge.time.time", lambda: 105.0)
+
+    ready, message = bridge.teleop_named_position_readiness("ur5e")
+
+    assert ready is False
+    assert "status is stale (5.0 s old)" in message
+    assert "Click Repair Twin for dual robots" in message
+
+
+def test_dual_twin_waiting_robot_mirror_reports_repair_needed() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    cfg = {
+        "hardware_supported": True,
+        "hardware": ("xarm6", "ur5e"),
+        "gazebo_process": "dual_gazebo",
+        "hardware_processes": {},
+        "sync_processes": {"xarm6": "sync_xarm6", "ur5e": "sync_ur5e"},
+    }
+    bridge._DIGITAL_TWIN_TARGETS = {"dual robots": cfg}
+    bridge._digital_twin_domain_ids = lambda: {"gazebo": 41, "hardware": 42}
+    bridge._digital_twin_gazebo_launch = lambda _target, _cfg: "gazebo_dual_passive"
+    bridge._digital_twin_hardware_status = lambda _cfg: {
+        "overall": "running",
+        "moveit": "running",
+        "ur5e": {"overall": "running"},
+    }
+    bridge._ur5e_rg2_gripper_status = lambda: {}
+    bridge.ros2_proc_status = lambda _name: "running"
+    sync_snapshot = {
+        "process": "sync_xarm6, sync_ur5e",
+        "process_status": "running",
+        "status_data": {
+            "state": "waiting",
+            "message": "ur5e is waiting for /joint_states",
+        },
+        "status_age_ms": 100.0,
+        "robots": {
+            "xarm6": {"state": "mirroring", "status_age_ms": 100.0},
+            "ur5e": {"state": "waiting", "status_age_ms": 100.0},
+        },
+    }
+    bridge._digital_twin_sync_status_snapshot = lambda _target, _cfg, _now: sync_snapshot
+    bridge._digital_twin_dual_drag_markers_status_path = lambda _target: Path(
+        "/tmp/not-used.json"
+    )
+    bridge._read_json_file = lambda _path: {}
+    bridge._digital_twin_direction = lambda _target: "hardware -> gazebo"
+    bridge._digital_twin_blocked_reason = lambda _target, _cfg: ""
+    bridge._digital_twin_sim_mode = lambda _target: "monitor"
+    bridge._digital_twin_allowed_sim_modes = lambda _cfg: ("monitor",)
+    bridge._digital_twin_hardware_domain_id = (
+        lambda _cfg, _robot, domains: domains["hardware"]
+    )
+    bridge._digital_twin_status_path = lambda _target: Path("/tmp/not-used.json")
+
+    row = bridge.digital_twin_statuses()["dual robots"]
+
+    assert row["repair_needed"] is True
+    assert "ur5e mirror is waiting" in row["repair_reason"]
+    assert row["hardware"]["domain"] == 42
+
+    sync_snapshot["status_data"] = {
+        "state": "mirroring",
+        "message": "both robots are mirroring",
+    }
+    sync_snapshot["robots"]["ur5e"] = {
+        "state": "mirroring",
+        "status_age_ms": 100.0,
+    }
+
+    healthy_row = bridge.digital_twin_statuses()["dual robots"]
+
+    assert healthy_row["repair_needed"] is False
+    assert healthy_row["repair_reason"] == ""
+
+
+def test_repair_stop_is_scoped_and_contains_no_motion_operation() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    events: list[str] = []
+    bridge._digital_twin_process_names = lambda _cfg: ["driver", "moveit", "gazebo"]
+    bridge.ros2_stop = lambda name, reason="": events.append(f"stop:{name}:{reason}")
+    bridge._stop_teleop_server = lambda: events.append("stop:teleop")
+    bridge._force_kill_digital_twin_helpers = lambda: events.append("stop:helpers")
+    bridge._kill_stale_gazebo_helpers = lambda: events.append("stop:gazebo_helpers")
+    bridge._force_kill_gazebo_core = lambda reason="": events.append(
+        f"stop:gazebo_core:{reason}"
+    )
+
+    bridge._stop_digital_twin_stack({}, reason="digital_twin_repair")
+
+    assert events[:3] == [
+        "stop:gazebo:digital_twin_repair",
+        "stop:moveit:digital_twin_repair",
+        "stop:driver:digital_twin_repair",
+    ]
+    assert all("replay" not in event and "trajectory" not in event for event in events)
+
+
+def test_home2_is_removed_while_home_and_prusa_mk4_2_remain_unchanged() -> None:
+    payload = json.loads(
+        (ROOT / "cais_spade_llm/initialization/resources/robot_ur5e.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    named_positions = payload["ur5e"]["real"]["named_positions"]
+    assert "home2" not in named_positions
+    assert named_positions["home"] == [
+        -1.453988,
+        -0.856088,
+        -2.346209,
+        -1.510223,
+        1.568386,
+        -3.021614,
+    ]
+    assert named_positions["prusa-mk4-2"] == [
+        0.087405,
+        -0.888637,
+        -2.15416,
+        -1.669312,
+        1.553256,
+        -3.148605,
+    ]
 
 
 def test_ur5e_state_publisher_can_launch_without_moveit_or_rviz() -> None:
@@ -294,6 +507,8 @@ def test_control_page_bounds_ros_readiness_refresh_work() -> None:
     assert 'bridge.teleop_target("ur5e", "state")' in control
     assert 'f"Trajectory interface ({robot}): {message}"' in control
     assert "ui.timer(3.0, _refresh_named_position_readiness)" in control
+    assert '"Repair Twin" if repair_needed else "Start Twin"' in control
+    assert "repair=repair_needed" in control
 
 
 def test_external_ur5e_digital_twin_status_resolves_named_position_target() -> None:

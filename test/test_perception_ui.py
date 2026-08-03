@@ -375,8 +375,87 @@ def test_not_shared_realsense_requires_one_time_bind(
         "100",
     )
     assert error is not None
-    assert "one-time administrator bind" in error
-    assert "7-3" in error
+    assert "one-time command" in error
+    assert "usbipd bind --busid 7-3" in error
+
+
+def test_attach_not_shared_camera_returns_exact_administrator_command(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        perception_manager,
+        "discover_wsl_attachments",
+        lambda force=False: [
+            {
+                "busid": "6-1",
+                "description": "Intel(R) RealSense(TM) Depth Camera 435",
+                "state": "Not shared",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Not shared must not attempt attachment or request administrator credentials"
+        ),
+    )
+
+    error = perception_manager.attach_wsl_camera("6-1")
+
+    assert error == (
+        "RealSense BUSID 6-1 is Not shared. In Administrator Windows PowerShell run: "
+        "usbipd bind --busid 6-1. Then refresh WSL USB and attach it."
+    )
+
+
+def test_camera_status_reports_windows_wsl_and_assignment_counts(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    perception_manager.save_assignments(
+        {"ur5e": "103422070738", "xarm6": "", "stationary": ""}
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "discover_devices",
+        lambda force=False: [
+            {
+                "serial": "103422070738",
+                "model": "Intel RealSense D435",
+                "usb_type": "2.1",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "discover_wsl_attachments",
+        lambda force=False: [
+            {"busid": "6-1", "state": "Not shared"},
+            {"busid": "6-2", "state": "Attached"},
+        ],
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "preflight",
+        lambda: {"ready": True, "checks": {}, "setup_message": "ready"},
+    )
+
+    status = perception_manager.status()
+
+    assert status["camera_inventory"] == {
+        "windows_d435_devices": 2,
+        "wsl_attached_devices": 1,
+        "wsl_discovered_devices": 1,
+        "assigned_roles": 1,
+        "assigned_role_names": ["ur5e"],
+        "total_roles": 3,
+    }
+    assert status["preflight"]["camera_inventory"] == status["camera_inventory"]
+    assert status["cameras"]["ur5e"]["serial"] == "103422070738"
+    assert status["cameras"]["xarm6"]["serial"] == ""
+    assert status["cameras"]["stationary"]["serial"] == ""
 
 
 def test_camera_log_reports_specific_driver_error(tmp_path: Path) -> None:
@@ -891,8 +970,9 @@ def test_preview_and_page_contracts_do_not_invoke_inference_or_motion() -> None:
     assert "Camera & Perception" in page_source
     assert '"Perception", "/perception"' in app_source
     assert "/perception/stream/{camera_role}/{stream_name}" in app_source
+    assert "/perception/frame/{camera_role}/{stream_name}" in app_source
     assert '"detection",' in app_source
-    assert "/perception/stream/{role}/detection" in page_source
+    assert "/perception/frame/{role}/detection" in page_source
     assert 'ui.label("Detection view")' in page_source
     assert 'ui.element("img")' in page_source
     assert "ui.image(detection_url)" not in page_source
@@ -906,11 +986,23 @@ def test_preview_and_page_contracts_do_not_invoke_inference_or_motion() -> None:
     assert "Start All Detection" in page_source
     assert "Stop All Detection" in page_source
     assert "fallback_path" in app_source
-    assert "USB2 reduced-performance warning" in page_source
+    assert "USB2 allowed; move to USB3.x if frames become stale or drop" in page_source
+    assert "Windows D435:" in page_source
+    assert "WSL attached:" in page_source
+    assert "assigned roles:" in page_source
+    assert "usbipd bind --busid {busid}" in page_source
+    assert "row.get('state', 'Unknown')" in page_source
+    assert "self._set_serial_options(devices)" in page_source
     assert "Preview Automatic Calibration" in page_source
     assert "I Confirm — Plan and Replay" in page_source
     assert "Local Control through read-only" in page_source
     assert "MoveIt and RG2 control remain stopped" in page_source
+    assert "Calibration live view — raw color" in page_source
+    assert "Enlarge Calibration View" in page_source
+    assert 'color_url = f"/perception/frame/{role}/color"' in page_source
+    assert "calibration raw color" in page_source
+    assert "ui.timer(0.5, self._refresh_images)" in page_source
+    assert 'image.props["src"] = f"{source}?v={self.image_refresh_sequence}"' in page_source
     assert "ChArUco board={'visible' if charuco_visible else 'NOT VISIBLE'}" in page_source
     assert depth_preview(np.zeros((2, 3), dtype=np.uint16)).shape == (2, 3, 3)
 

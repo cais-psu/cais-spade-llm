@@ -822,6 +822,24 @@ def _snapshot_from_joint_state_msg(msg: Any) -> dict[str, float]:
     return {str(name): float(pos) for name, pos in zip(msg.name, msg.position)}
 
 
+def _pose_from_transform_msg(msg: Any) -> dict[str, Any]:
+    """Return a serializable pose from a geometry transform message."""
+    transform = msg.transform
+    translation = transform.translation
+    rotation = transform.rotation
+    return {
+        "frame_id": str(getattr(msg.header, "frame_id", "") or "world"),
+        "child_frame_id": str(getattr(msg, "child_frame_id", "") or "tool0"),
+        "x": float(translation.x),
+        "y": float(translation.y),
+        "z": float(translation.z),
+        "qx": float(rotation.x),
+        "qy": float(rotation.y),
+        "qz": float(rotation.z),
+        "qw": float(rotation.w),
+    }
+
+
 def _hardware_update_from_snapshot(
     snapshot: dict[str, float],
     robot: str,
@@ -869,12 +887,13 @@ def _hardware_update_from_snapshot(
     return item, gripper_joint, gripper_position
 
 
-def _joint_state_snapshot_worker(
+def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnostics share one node.
     domain_id: int,
     robot: str,
     source: str,
     timeout_sec: float,
     result_queue: mp.Queue,
+    include_world_tool_pose: bool = False,
 ) -> None:
     rclpy = None
     node = None
@@ -882,6 +901,11 @@ def _joint_state_snapshot_worker(
         rclpy = _init_ros_domain(domain_id)
         from rclpy.node import Node
         from sensor_msgs.msg import JointState
+
+        if include_world_tool_pose:
+            from rclpy.duration import Duration
+            from rclpy.time import Time
+            from tf2_ros import Buffer, TransformException, TransformListener
 
         class SnapshotNode(Node):
             def __init__(self) -> None:
@@ -891,6 +915,14 @@ def _joint_state_snapshot_worker(
                 self.missing: list[str] = []
                 self.seen_names: list[str] = []
                 self.unmatched_seen_names: list[str] = []
+                self.pose: dict[str, Any] | None = None
+                self.pose_error = ""
+                self.tf_buffer = Buffer() if include_world_tool_pose else None
+                self.tf_listener = (
+                    TransformListener(self.tf_buffer, self, spin_thread=False)
+                    if self.tf_buffer is not None
+                    else None
+                )
                 for topic in _joint_state_topics(robot, source):
                     self.create_subscription(JointState, topic, self._cb, 10)
 
@@ -921,10 +953,29 @@ def _joint_state_snapshot_worker(
                 self.missing = list(missing)
                 self.seen_names = sorted(self.accumulated_snapshot)
 
+            def read_world_tool_pose(self) -> None:
+                if self.tf_buffer is None or self.pose is not None:
+                    return
+                try:
+                    message = self.tf_buffer.lookup_transform(
+                        "world",
+                        "tool0",
+                        Time(),
+                        timeout=Duration(seconds=0.1),
+                    )
+                except TransformException as exc:
+                    self.pose_error = str(exc)
+                    return
+                self.pose = _pose_from_transform_msg(message)
+
         node = SnapshotNode()
         deadline = time.time() + max(0.5, float(timeout_sec))
-        while rclpy.ok() and time.time() < deadline and node.snapshot is None:
+        while rclpy.ok() and time.time() < deadline and (
+            node.snapshot is None or (include_world_tool_pose and node.pose is None)
+        ):
             rclpy.spin_once(node, timeout_sec=0.1)
+            if include_world_tool_pose:
+                node.read_world_tool_pose()
         if node.snapshot is None:
             missing = getattr(node, "missing", [])
             seen_names = getattr(node, "seen_names", [])
@@ -947,14 +998,25 @@ def _joint_state_snapshot_worker(
                     "message": message,
                 }
             )
-        else:
+        elif include_world_tool_pose and node.pose is None:
+            detail = f": {node.pose_error}" if node.pose_error else ""
             result_queue.put(
                 {
-                    "success": True,
-                    "snapshot": node.snapshot,
-                    "received_at": time.time(),
+                    "success": False,
+                    "message": f"TF world -> tool0 is unavailable{detail}",
+                    "world_tool0_ready": False,
                 }
             )
+        else:
+            result: dict[str, Any] = {
+                "success": True,
+                "snapshot": node.snapshot,
+                "received_at": time.time(),
+            }
+            if include_world_tool_pose:
+                result["pose"] = dict(node.pose or {})
+                result["world_tool0_ready"] = True
+            result_queue.put(result)
     except Exception as exc:
         topics = ", ".join(_joint_state_topics(robot, source))
         result_queue.put(
@@ -3521,13 +3583,27 @@ def _set_gazebo_model_configuration(
         return {"success": False, "message": "gazebo model configuration returned no data."}
 
 
-def _read_snapshot(domain_id: int, robot: str, source: str, timeout_sec: float) -> dict[str, Any]:
+def _read_snapshot(
+    domain_id: int,
+    robot: str,
+    source: str,
+    timeout_sec: float,
+    *,
+    include_world_tool_pose: bool = False,
+) -> dict[str, Any]:
     attempts = 2
     for attempt in range(attempts):
         result_queue: mp.Queue = mp.Queue(maxsize=1)
         proc = mp.Process(
             target=_joint_state_snapshot_worker,
-            args=(domain_id, robot, source, timeout_sec, result_queue),
+            args=(
+                domain_id,
+                robot,
+                source,
+                timeout_sec,
+                result_queue,
+                include_world_tool_pose,
+            ),
             daemon=True,
         )
         try:
@@ -3924,7 +4000,13 @@ def run_snapshot(args: argparse.Namespace) -> int:
     """Read one joint snapshot and print it as JSON (used by 'Capture Waypoint')."""
     source = str(args.source or "gazebo")
     domain_id = int(args.gazebo_domain_id) if source == "gazebo" else int(args.hardware_domain_id)
-    snap = _read_snapshot(domain_id, args.robot, source, 5.0)
+    snap = _read_snapshot(
+        domain_id,
+        args.robot,
+        source,
+        5.0,
+        include_world_tool_pose=bool(args.include_world_tool_pose),
+    )
     if not snap.get("success"):
         print(json.dumps({"success": False, "message": str(snap.get("message") or "no snapshot")}))
         return 4
@@ -3937,18 +4019,18 @@ def run_snapshot(args: argparse.Namespace) -> int:
         print(json.dumps({"success": False, "message": f"missing joints: {', '.join(missing)}"}))
         return 5
     gripper_joint, gripper_position = _resolve_gripper(snapshot, args.robot)
-    print(
-        json.dumps(
-            {
-                "success": True,
-                "source": source,
-                "joint_names": joint_names,
-                "positions": positions,
-                "gripper_joint": gripper_joint,
-                "gripper_position": gripper_position,
-            }
-        )
-    )
+    payload = {
+        "success": True,
+        "source": source,
+        "joint_names": joint_names,
+        "positions": positions,
+        "gripper_joint": gripper_joint,
+        "gripper_position": gripper_position,
+    }
+    if args.include_world_tool_pose:
+        payload["pose"] = dict(snap.get("pose") or {})
+        payload["world_tool0_ready"] = bool(snap.get("world_tool0_ready"))
+    print(json.dumps(payload))
     return 0
 
 
@@ -5195,6 +5277,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-joint-delta-deg", type=float, default=10.0)
     # snapshot mode
     parser.add_argument("--source", choices=["gazebo", "hardware"], default="gazebo")
+    parser.add_argument("--include-world-tool-pose", action="store_true")
     # initialize-gazebo-from-hardware mode
     parser.add_argument("--init-tolerance-rad", type=float, default=INITIALIZE_GAZEBO_TOLERANCE_RAD)
     parser.add_argument("--init-attempts", type=int, default=INITIALIZE_GAZEBO_ATTEMPTS)

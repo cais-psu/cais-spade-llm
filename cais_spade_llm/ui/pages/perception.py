@@ -35,6 +35,9 @@ class _PerceptionPage:
         self.serial_selects: dict[str, Any] = {}
         self.control_buttons: dict[str, Any] = {}
         self.board_inputs: dict[str, Any] = {}
+        self.wsl_rows_by_busid: dict[str, dict[str, str]] = {}
+        self.stream_images: list[tuple[Any, str]] = []
+        self.image_refresh_sequence = 0
         self.board_initialized = False
         self.refreshing = False
 
@@ -61,6 +64,7 @@ class _PerceptionPage:
         self._render_detection()
         self._render_digital_twin()
         self._render_diagnostics()
+        ui.timer(0.5, self._refresh_images)
         ui.timer(1.5, self._refresh, immediate=True)
 
     def _render_preflight(self) -> None:
@@ -71,6 +75,9 @@ class _PerceptionPage:
                 self.preflight_summary = ui.label("Checking host prerequisites...").classes(
                     "text-sm text-slate-600"
                 )
+            self.camera_inventory_summary = ui.label(
+                "Windows D435: checking | WSL attached: checking | assigned roles: checking"
+            ).classes("text-sm text-slate-600")
             with ui.row().classes("gap-2 flex-wrap"):
                 for key, label in (
                     ("wsl", "WSL"),
@@ -99,6 +106,7 @@ class _PerceptionPage:
                         {},
                         label="Windows RealSense BUSID",
                     ).classes("w-96")
+                    self.wsl_busid.on_value_change(self._update_wsl_guidance)
                     ui.button(
                         "Refresh WSL USB",
                         on_click=self._refresh_wsl_devices,
@@ -109,6 +117,9 @@ class _PerceptionPage:
                         on_click=self._attach_wsl_device,
                         icon="usb",
                     ).props("dense outline")
+                self.wsl_guidance = ui.label(
+                    "Refresh WSL USB to see each camera's Attached, Shared, or Not shared state."
+                ).classes("text-xs text-amber-700")
 
     def _render_assignments(self) -> None:
         with ui.card().classes("w-full"):
@@ -202,19 +213,27 @@ class _PerceptionPage:
             for role in CAMERA_ROLES:
                 self._render_live_card(role)
 
-    @staticmethod
-    def _stream_image(source: str, label: str, classes: str) -> Any:
-        """Render an MJPEG stream without NiceGUI's indefinite loading spinner."""
-        return (
+    def _stream_image(self, source: str, label: str, classes: str) -> Any:
+        """Register an ordinary JPEG image for periodic source refresh."""
+        image = (
             ui.element("img")
             .props(f'src="{source}" alt="{label}" draggable=false')
             .classes(classes)
         )
+        self.stream_images.append((image, source))
+        return image
+
+    def _refresh_images(self) -> None:
+        """Request fresh preview JPEGs without invoking perception or motion."""
+        self.image_refresh_sequence += 1
+        for image, source in self.stream_images:
+            if not image.is_deleted:
+                image.props["src"] = f"{source}?v={self.image_refresh_sequence}"
 
     def _render_live_card(self, role: str) -> None:
-        color_url = f"/perception/stream/{role}/color"
-        depth_url = f"/perception/stream/{role}/depth"
-        detection_url = f"/perception/stream/{role}/detection"
+        color_url = f"/perception/frame/{role}/color"
+        depth_url = f"/perception/frame/{role}/depth"
+        detection_url = f"/perception/frame/{role}/detection"
         with ui.card().classes("w-full"):
             ui.label(_ROLE_LABELS[role]).classes("font-semibold")
             ui.label("Detection view").classes("text-xs text-slate-500")
@@ -287,6 +306,22 @@ class _PerceptionPage:
             self.calibration_labels[role] = ui.label("No calibration status yet.").classes(
                 "text-sm text-slate-600"
             )
+            color_url = f"/perception/frame/{role}/color"
+            ui.label("Calibration live view — raw color").classes(
+                "text-xs font-medium text-slate-600"
+            )
+            self._stream_image(
+                color_url,
+                f"{_ROLE_LABELS[role]} calibration raw color",
+                "w-full max-w-3xl aspect-[4/3] bg-slate-200 object-contain",
+            )
+            ui.button(
+                "Enlarge Calibration View",
+                on_click=lambda source=color_url, label=(
+                    f"{_ROLE_LABELS[role]} Calibration"
+                ): self._enlarge(source, label),
+                icon="center_focus_strong",
+            ).props("dense flat")
             with ui.row().classes("gap-2 flex-wrap"):
                 capture_text = "Capture Sample" if role == "stationary" else "Save Pose + Capture"
                 ui.button(
@@ -408,10 +443,7 @@ class _PerceptionPage:
 
     async def _refresh_wsl_devices(self) -> None:
         rows = await asyncio.to_thread(self.bridge.perception_discover_wsl_attachments)
-        self.wsl_busid.options = {
-            row["busid"]: f"{row['busid']} — {row['description']}" for row in rows
-        }
-        self.wsl_busid.update()
+        self._set_wsl_device_options(rows)
         ui.notify(f"Found {len(rows)} Windows RealSense USB row(s)", type="info")
 
     async def _attach_wsl_device(self) -> None:
@@ -420,9 +452,50 @@ class _PerceptionPage:
             str(self.wsl_busid.value or ""),
         )
         self._notify_result(error, "RealSense attached to WSL")
+        rows = await asyncio.to_thread(self.bridge.perception_discover_wsl_attachments)
+        self._set_wsl_device_options(rows)
+        if error is None:
+            devices = await asyncio.to_thread(self.bridge.perception_discover_devices)
+            self._set_serial_options(devices)
 
-    async def _discover(self) -> None:
-        devices = await asyncio.to_thread(self.bridge.perception_discover_devices)
+    def _set_wsl_device_options(self, rows: list[dict[str, str]]) -> None:
+        self.wsl_rows_by_busid = {
+            str(row.get("busid") or ""): dict(row)
+            for row in rows
+            if str(row.get("busid") or "")
+        }
+        current = str(self.wsl_busid.value or "")
+        self.wsl_busid.options = {
+            busid: (
+                f"{busid} — {row.get('description', 'RealSense')} — "
+                f"{row.get('state', 'Unknown')}"
+            )
+            for busid, row in self.wsl_rows_by_busid.items()
+        }
+        self.wsl_busid.value = current if current in self.wsl_rows_by_busid else None
+        self.wsl_busid.update()
+        self._update_wsl_guidance()
+
+    def _update_wsl_guidance(self, _event: Any = None) -> None:
+        if not hasattr(self, "wsl_guidance"):
+            return
+        busid = str(self.wsl_busid.value or "")
+        row = self.wsl_rows_by_busid.get(busid, {})
+        state = str(row.get("state") or "")
+        if state == "Not shared":
+            text = (
+                f"Not shared. In Administrator Windows PowerShell run: "
+                f"usbipd bind --busid {busid}. Then refresh and Attach to WSL."
+            )
+        elif state == "Shared":
+            text = "Shared. Click Attach to WSL; administrator credentials are not requested."
+        elif state == "Attached":
+            text = "Attached to WSL. Click Discover, then assign its serial explicitly."
+        else:
+            text = "Select a Windows RealSense BUSID to see its attachment guidance."
+        self.wsl_guidance.set_text(text)
+
+    def _set_serial_options(self, devices: list[dict[str, str]]) -> None:
         options = {"": "Unassigned"}
         options.update(
             {
@@ -430,6 +503,7 @@ class _PerceptionPage:
                     f"{row.get('serial')} — {row.get('model', 'RealSense')}"
                 )
                 for row in devices
+                if str(row.get("serial") or "")
             }
         )
         for select in self.serial_selects.values():
@@ -437,6 +511,10 @@ class _PerceptionPage:
             select.options = options
             select.value = current
             select.update()
+
+    async def _discover(self) -> None:
+        devices = await asyncio.to_thread(self.bridge.perception_discover_devices)
+        self._set_serial_options(devices)
         ui.notify(f"Discovered {len(devices)} RealSense camera(s)", type="info")
 
     async def _save_assignments(self) -> None:
@@ -475,11 +553,10 @@ class _PerceptionPage:
         error = await asyncio.to_thread(self.bridge.perception_reset_camera, role)
         self._notify_result(error, f"{role} camera processes cleaned and detection restarted")
 
-    @staticmethod
-    def _enlarge(source: str, label: str) -> None:
+    def _enlarge(self, source: str, label: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-[90vw] max-w-none"):
             ui.label(f"{label} Live View").classes("text-lg font-semibold")
-            _PerceptionPage._stream_image(
+            self._stream_image(
                 source,
                 f"{label} enlarged view",
                 "w-full max-h-[80vh] object-contain",
@@ -641,6 +718,14 @@ class _PerceptionPage:
     def _refresh_preflight(self, preflight: dict[str, Any]) -> None:
         checks = preflight.get("checks", {})
         self.preflight_summary.text = str(preflight.get("setup_message") or "")
+        inventory = dict(preflight.get("camera_inventory") or {})
+        self.camera_inventory_summary.set_text(
+            f"Windows D435: {int(inventory.get('windows_d435_devices', 0) or 0)} | "
+            f"WSL attached: {int(inventory.get('wsl_attached_devices', 0) or 0)} | "
+            f"WSL discovered: {int(inventory.get('wsl_discovered_devices', 0) or 0)} | "
+            f"assigned roles: {int(inventory.get('assigned_roles', 0) or 0)}/"
+            f"{int(inventory.get('total_roles', len(CAMERA_ROLES)) or len(CAMERA_ROLES))}"
+        )
         for key, badge in self.preflight_labels.items():
             ready = bool(checks.get(key, False))
             label = badge.text.split(":", 1)[0]
@@ -690,7 +775,7 @@ class _PerceptionPage:
             f"{device.get('model', 'not discovered')} | firmware={device.get('firmware', 'n/a')} | "
             f"USB={device.get('usb_type', 'n/a')}"
             + (
-                " — USB2 reduced-performance warning"
+                " — USB2 allowed; move to USB3.x if frames become stale or drop"
                 if str(device.get("usb_type") or "").startswith("2")
                 else ""
             )

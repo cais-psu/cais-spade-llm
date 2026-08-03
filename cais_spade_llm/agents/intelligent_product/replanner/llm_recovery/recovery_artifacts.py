@@ -187,6 +187,10 @@ def _render_structured_llm_request(
     if not messages and str(fallback_prompt_text or "").strip():
         messages = [{"role": "user", "content": fallback_prompt_text}]
 
+    request_sent = llm_request.get("request_sent")
+    request_sent_text = (
+        str(request_sent).lower() if isinstance(request_sent, bool) else "(unknown)"
+    )
     lines = [
         "Structured LLM Request",
         f"Model: {str(llm_request.get('model') or '').strip() or '(unknown)'}",
@@ -198,7 +202,7 @@ def _render_structured_llm_request(
             "Response source: "
             f"{str(llm_request.get('response_source') or '').strip() or '(unknown)'}"
         ),
-        f"Request sent: {str(bool(llm_request.get('request_sent'))).lower()}",
+        f"Request sent: {request_sent_text}",
         "",
         "Messages",
     ]
@@ -217,7 +221,7 @@ def _render_structured_llm_request(
             "Response Format",
             json.dumps(
                 llm_request.get("response_format") or {},
-                indent=2,
+                indent=1,
                 default=str,
                 ensure_ascii=True,
             ),
@@ -1142,6 +1146,11 @@ def _primitive_substream_prompt_text(turn: dict[str, Any]) -> str:
     system_instructions = str(turn.get("system_instructions") or "").strip()
     response_schema = turn.get("response_schema")
     prompt_text = str(turn.get("prompt_text") or "").strip()
+    if isinstance(turn.get("llm_request"), dict) and turn.get("llm_request"):
+        return _render_structured_llm_request(
+            {"multi_turn_current_turn": turn},
+            fallback_prompt_text=prompt_text,
+        )
     lines = [
         f"Outline ID: {str(turn.get('outline_id') or '').strip() or '-'}",
         f"Resource JID: {str(turn.get('resource_jid') or '').strip() or '-'}",

@@ -100,7 +100,7 @@ _OUTLINE_STATE_SCHEMA: dict[str, Any] = {
     "properties": {
         "resource_state": {"type": "string", "minLength": 1},
         "resource_location": {"type": ["string", "null"]},
-        "held_part": {"type": ["string", "null"]},
+        "held_part": {"type": ["string", "null"], "minLength": 1},
         "part_state": {"type": "string", "minLength": 1},
         "part_location": {"type": ["string", "null"]},
     },
@@ -115,7 +115,7 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "outline_id": {"type": "string"},
         "event_name": {"type": "string", "minLength": 1},
         "resource_jid": {"type": "string"},
-        "part_name": {"type": "string"},
+        "part_name": {"type": "string", "minLength": 1},
         "expected_end_state": deepcopy(_OUTLINE_STATE_SCHEMA),
         "rationale": {"type": "string"},
     },
@@ -129,6 +129,25 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
     "allOf": [
         {
             "if": {"required": ["part_name"]},
+            "then": {},
+            "else": {
+                "properties": {
+                    "expected_end_state": {
+                        "allOf": [
+                            {"not": {"required": ["held_part"]}},
+                            {"not": {"required": ["part_state"]}},
+                            {"not": {"required": ["part_location"]}},
+                        ]
+                    }
+                }
+            },
+        },
+        {
+            "if": {
+                "properties": {
+                    "expected_end_state": {"required": ["held_part"]}
+                }
+            },
             "then": {
                 "properties": {
                     "expected_end_state": {
@@ -138,10 +157,10 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
                             "part_state",
                             "part_location",
                         ]
-                    },
+                    }
                 }
             },
-        }
+        },
     ],
 }
 
@@ -166,6 +185,19 @@ def _json_schema_types_for_domain(domain: list[Any]) -> list[str]:
     return sorted(types) or ["string", "number", "boolean", "object", "array", "null"]
 
 
+def _outline_state_field_schema(
+    field_name: str,
+    declaration: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the response-schema type for one public RA state variable."""
+    domain = list(dict(declaration or {}).get("domain") or [])
+    if field_name in {"resource_state", "part_state"}:
+        return {"type": "string", "minLength": 1}
+    if field_name == "held_part":
+        return {"type": ["string", "null"], "minLength": 1}
+    return {"type": _json_schema_types_for_domain(domain)}
+
+
 def _outline_symbolic_event_schema(
     declared_state_variables: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
@@ -176,46 +208,353 @@ def _outline_symbolic_event_schema(
         token = str(field_name or "").strip()
         if not token:
             continue
-        domain = list(dict(declaration or {}).get("domain") or [])
-        field_schema: dict[str, Any] = {
-            "type": _json_schema_types_for_domain(domain)
-        }
-        if token in {"resource_state", "part_state"}:
-            field_schema["minLength"] = 1
-        state_schema["properties"][token] = field_schema
+        state_schema["properties"][token] = _outline_state_field_schema(
+            token,
+            dict(declaration or {}),
+        )
     event_schema = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
     event_schema["properties"]["expected_end_state"] = deepcopy(state_schema)
+    part_scoped_fields = {
+        str(field_name)
+        for field_name, declaration in declared_state_variables.items()
+        if str(dict(declaration or {}).get("scope") or "resource") == "part"
+    }
+    forbidden_without_part = sorted({"held_part", *part_scoped_fields})
+    event_schema["allOf"] = [
+        {
+            "if": {"required": ["part_name"]},
+            "then": {},
+            "else": {
+                "properties": {
+                    "expected_end_state": {
+                        "allOf": [
+                            {"not": {"required": [field_name]}}
+                            for field_name in forbidden_without_part
+                        ]
+                    }
+                }
+            },
+        },
+        {
+            "if": {
+                "properties": {
+                    "expected_end_state": {"required": ["held_part"]}
+                }
+            },
+            "then": {
+                "properties": {
+                    "expected_end_state": {
+                        "required": [
+                            "resource_state",
+                            "held_part",
+                            "part_state",
+                            "part_location",
+                        ]
+                    }
+                }
+            },
+        },
+    ]
     return event_schema
 
 
 def _outline_candidate_schema_definitions(
     declared_state_variables: dict[str, dict[str, Any]] | None,
+    declared_state_variables_by_resource_jid: (
+        dict[str, dict[str, dict[str, Any]]] | None
+    ) = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return shared candidate schemas without repeating state declarations."""
+    """Return mutually exclusive schemas for recovery candidate shapes."""
+    if declared_state_variables_by_resource_jid:
+        resource_event_branches: list[dict[str, Any]] = []
+        state_definitions: dict[str, dict[str, Any]] = {}
+        state_definition_names: dict[tuple[str, str], str] = {}
+        state_definition_counts: dict[str, int] = {}
+        for resource_jid, raw_declarations in sorted(
+            declared_state_variables_by_resource_jid.items()
+        ):
+            declarations = {
+                str(field_name): dict(declaration or {})
+                for field_name, declaration in dict(raw_declarations or {}).items()
+                if str(field_name).strip()
+                and dict(declaration or {}).get("private") is not True
+                and not str(field_name).startswith("task_ctx.")
+            }
+            if "resource_state" not in declarations:
+                continue
+            candidate_branches = _resource_candidate_event_schemas(
+                resource_jid=str(resource_jid),
+                declared_state_variables=declarations,
+            )
+            for branch_kind, branch in zip(
+                ("resource_only", "part", "custody")[
+                    : len(candidate_branches)
+                ],
+                candidate_branches,
+                strict=True,
+            ):
+                state_schema = deepcopy(
+                    branch["properties"]["expected_end_state"]
+                )
+                state_signature = json.dumps(
+                    state_schema,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                definition_key = (branch_kind, state_signature)
+                definition_name = state_definition_names.get(definition_key)
+                if definition_name is None:
+                    count = state_definition_counts.get(branch_kind, 0) + 1
+                    state_definition_counts[branch_kind] = count
+                    definition_name = f"{branch_kind}_outline_state"
+                    if count > 1:
+                        definition_name = f"{definition_name}_{count}"
+                    state_definition_names[definition_key] = definition_name
+                    state_definitions[definition_name] = state_schema
+                branch["properties"]["expected_end_state"] = {
+                    "$ref": f"#/$defs/{definition_name}"
+                }
+                resource_event_branches.append(branch)
+        if resource_event_branches:
+            event_properties = deepcopy(
+                _OUTLINE_SYMBOLIC_EVENT_SCHEMA["properties"]
+            )
+            event_properties["part_name"] = {
+                "type": ["string", "null"],
+                "minLength": 1,
+            }
+            event_properties["expected_end_state"] = {"type": "object"}
+            return {
+                **state_definitions,
+                "outline_event": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": event_properties,
+                    "required": deepcopy(
+                        _OUTLINE_SYMBOLIC_EVENT_SCHEMA["required"]
+                    ),
+                    "anyOf": resource_event_branches,
+                }
+            }
+
     expanded_event = _outline_symbolic_event_schema(declared_state_variables)
-    state_schema = deepcopy(expanded_event["properties"]["expected_end_state"])
-    event_schema = deepcopy(expanded_event)
-    event_schema["properties"]["expected_end_state"] = {
-        "$ref": "#/$defs/outline_state"
+    state_properties = deepcopy(
+        expanded_event["properties"]["expected_end_state"]["properties"]
+    )
+    declarations = dict(declared_state_variables or {})
+
+    def field_scope(field_name: str) -> str:
+        if field_name in {"part_state", "part_location"}:
+            return "part"
+        declaration = dict(declarations.get(field_name) or {})
+        declared_scope = str(declaration.get("scope") or "").strip()
+        if declared_scope:
+            return declared_scope
+        return "resource"
+
+    resource_state_properties = {
+        field_name: deepcopy(field_schema)
+        for field_name, field_schema in state_properties.items()
+        if field_name != "held_part" and field_scope(field_name) != "part"
     }
+    part_state_properties = {
+        field_name: deepcopy(field_schema)
+        for field_name, field_schema in state_properties.items()
+        if field_name != "held_part"
+    }
+
+    def state_schema(
+        properties: dict[str, Any],
+        *,
+        required: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": deepcopy(properties),
+            "required": list(required or ["resource_state"]),
+        }
+
+    common_event_properties = {
+        field_name: deepcopy(field_schema)
+        for field_name, field_schema in expanded_event["properties"].items()
+        if field_name not in {"part_name", "expected_end_state"}
+    }
+    common_event_required = [
+        "outline_id",
+        "event_name",
+        "resource_jid",
+        "expected_end_state",
+        "rationale",
+    ]
+
+    def event_schema(*, state_ref: str, include_part_name: bool) -> dict[str, Any]:
+        properties = deepcopy(common_event_properties)
+        if include_part_name:
+            properties["part_name"] = deepcopy(
+                expanded_event["properties"]["part_name"]
+            )
+        properties["expected_end_state"] = {"$ref": state_ref}
+        required = list(common_event_required)
+        if include_part_name:
+            required.append("part_name")
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": properties,
+            "required": required,
+        }
+
     return {
-        "outline_state": state_schema,
-        "outline_event": event_schema,
+        "resource_only_outline_state": state_schema(resource_state_properties),
+        "part_outline_state": state_schema(part_state_properties),
+        "custody_outline_state": state_schema(
+            state_properties,
+            required=[
+                "resource_state",
+                "held_part",
+                "part_state",
+                "part_location",
+            ],
+        ),
+        "resource_only_outline_event": event_schema(
+            state_ref="#/$defs/resource_only_outline_state",
+            include_part_name=False,
+        ),
+        "part_outline_event": event_schema(
+            state_ref="#/$defs/part_outline_state",
+            include_part_name=True,
+        ),
+        "custody_outline_event": event_schema(
+            state_ref="#/$defs/custody_outline_state",
+            include_part_name=True,
+        ),
+        "outline_event": {
+            "anyOf": [
+                {"$ref": "#/$defs/resource_only_outline_event"},
+                {"$ref": "#/$defs/part_outline_event"},
+                {"$ref": "#/$defs/custody_outline_event"},
+            ]
+        },
     }
 
 
-def _outline_incremental_response_schema() -> dict[str, Any]:
+def _resource_candidate_event_schemas(
+    *,
+    resource_jid: str,
+    declared_state_variables: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return compact exact-JID constraints for one RA's candidate branches."""
+    state_properties = {
+        field_name: _outline_state_field_schema(field_name, declaration)
+        for field_name, declaration in sorted(declared_state_variables.items())
+    }
+
+    def field_scope(field_name: str) -> str:
+        return str(
+            dict(declared_state_variables.get(field_name) or {}).get("scope")
+            or "resource"
+        )
+
+    resource_state_properties = {
+        field_name: deepcopy(field_schema)
+        for field_name, field_schema in state_properties.items()
+        if field_name != "held_part" and field_scope(field_name) != "part"
+    }
+    part_state_properties = {
+        field_name: deepcopy(field_schema)
+        for field_name, field_schema in state_properties.items()
+        if field_name != "held_part"
+    }
+
+    def state_schema(
+        properties: dict[str, Any],
+        *,
+        required: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": deepcopy(properties),
+            "required": list(required or ["resource_state"]),
+        }
+
+    def branch_schema(
+        *,
+        expected_end_state_schema: dict[str, Any],
+        require_part_name: bool,
+    ) -> dict[str, Any]:
+        branch: dict[str, Any] = {
+            "properties": {
+                "resource_jid": {"enum": [resource_jid]},
+                "expected_end_state": deepcopy(expected_end_state_schema),
+            }
+        }
+        if require_part_name:
+            branch["properties"]["part_name"] = {
+                "type": "string",
+                "minLength": 1,
+            }
+            branch["required"] = ["part_name"]
+        else:
+            # Structured responses can encode an omitted resource-only binding as
+            # null, while part-bound branches still require an exact string token.
+            branch["properties"]["part_name"] = {"type": "null"}
+        return branch
+
+    branches = [
+        branch_schema(
+            expected_end_state_schema=state_schema(resource_state_properties),
+            require_part_name=False,
+        ),
+        branch_schema(
+            expected_end_state_schema=state_schema(part_state_properties),
+            require_part_name=True,
+        ),
+    ]
+    custody_fields = {"resource_state", "held_part", "part_state", "part_location"}
+    if custody_fields.issubset(state_properties):
+        branches.append(
+            branch_schema(
+                expected_end_state_schema=state_schema(
+                    state_properties,
+                    required=[
+                        "resource_state",
+                        "held_part",
+                        "part_state",
+                        "part_location",
+                    ],
+                ),
+                require_part_name=True,
+            )
+        )
+    return branches
+
+
+def _outline_incremental_response_schema(
+    *,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
+    declared_state_variables_by_resource_jid: (
+        dict[str, dict[str, dict[str, Any]]] | None
+    ) = None,
+) -> dict[str, Any]:
+    schema_definitions = _outline_candidate_schema_definitions(
+        declared_state_variables,
+        declared_state_variables_by_resource_jid,
+    )
+    outline_event = {"$ref": "#/$defs/outline_event"}
     return {
         "name": "multi_turn_outline_response",
         "strict": False,
         "schema": {
             "type": "object",
+            "$defs": schema_definitions,
             "properties": {
                 "thought": {"type": "string"},
-                "next_transition": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+                "next_transition": deepcopy(outline_event),
                 "transition_suffix": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+                    "items": deepcopy(outline_event),
                 },
             },
             "required": ["thought", "next_transition"],
@@ -232,6 +571,9 @@ def _outline_candidates_response_schema(
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
     declared_state_variables: dict[str, dict[str, Any]] | None = None,
+    declared_state_variables_by_resource_jid: (
+        dict[str, dict[str, dict[str, Any]]] | None
+    ) = None,
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
     normalized_candidate_count: int | str
@@ -260,7 +602,7 @@ def _outline_candidates_response_schema(
     if normalized_selection_mode == "neurosymbolic":
         normalized_horizon = "1"
         candidate_min_items = 1
-        candidate_max_items = normalized_bound
+        candidate_max_items = _DEFAULT_CANDIDATE_BOUND
     elif normalized_horizon == "1":
         candidate_min_items = _ONE_STEP_CANDIDATE_COUNT
         candidate_max_items = _ONE_STEP_CANDIDATE_COUNT
@@ -275,7 +617,8 @@ def _outline_candidates_response_schema(
     else:
         normalized_horizon_k = max(1, int(action_horizon_k or 3))
     schema_definitions = _outline_candidate_schema_definitions(
-        declared_state_variables
+        declared_state_variables,
+        declared_state_variables_by_resource_jid,
     )
     candidate_item_schema = {"$ref": "#/$defs/outline_event"}
     required = ["thought"]
@@ -337,17 +680,28 @@ def _outline_candidates_response_schema(
     }
 
 
-def _outline_single_pass_response_schema() -> dict[str, Any]:
+def _outline_single_pass_response_schema(
+    *,
+    declared_state_variables: dict[str, dict[str, Any]] | None = None,
+    declared_state_variables_by_resource_jid: (
+        dict[str, dict[str, dict[str, Any]]] | None
+    ) = None,
+) -> dict[str, Any]:
+    schema_definitions = _outline_candidate_schema_definitions(
+        declared_state_variables,
+        declared_state_variables_by_resource_jid,
+    )
     return {
         "name": "multi_turn_outline_single_pass_response",
         "strict": False,
         "schema": {
             "type": "object",
+            "$defs": schema_definitions,
             "properties": {
                 "thought": {"type": "string"},
                 "transition_trace": {
                     "type": "array",
-                    "items": deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA),
+                    "items": {"$ref": "#/$defs/outline_event"},
                 },
             },
             "required": ["thought", "transition_trace"],
@@ -460,12 +814,20 @@ def multi_turn_phase_response_schema(  # noqa: PLR0913
     action_horizon_steps: int | str | None = None,
     action_horizon_k: int = 3,
     declared_state_variables: dict[str, dict[str, Any]] | None = None,
+    declared_state_variables_by_resource_jid: (
+        dict[str, dict[str, dict[str, Any]]] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Return the JSON response schema for the given phase."""
     normalized = phase.strip().lower()
     if normalized == "outline":
         if outline_mode == "single_pass":
-            return _outline_single_pass_response_schema()
+            return _outline_single_pass_response_schema(
+                declared_state_variables=declared_state_variables,
+                declared_state_variables_by_resource_jid=(
+                    declared_state_variables_by_resource_jid
+                ),
+            )
         if outline_mode == "incremental_candidates_validated":
             return _outline_candidates_response_schema(
                 candidate_bound=max(1, int(candidate_bound or _DEFAULT_CANDIDATE_BOUND)),
@@ -475,8 +837,16 @@ def multi_turn_phase_response_schema(  # noqa: PLR0913
                 action_horizon_steps=action_horizon_steps,
                 action_horizon_k=action_horizon_k,
                 declared_state_variables=declared_state_variables,
+                declared_state_variables_by_resource_jid=(
+                    declared_state_variables_by_resource_jid
+                ),
             )
-        return _outline_incremental_response_schema()
+        return _outline_incremental_response_schema(
+            declared_state_variables=declared_state_variables,
+            declared_state_variables_by_resource_jid=(
+                declared_state_variables_by_resource_jid
+            ),
+        )
     if normalized == "grounding":
         return _grounding_response_schema()
     if normalized == "primitive_generation":
@@ -994,9 +1364,7 @@ def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
         return {
             "event_status": "disabled",
             "diagnosis": "no_state_change",
-            "guard_or_condition": (
-                "candidate event leaves the exact authored symbolic state unchanged"
-            ),
+            "guard_or_condition": "candidate event leaves the authored symbolic state unchanged",
             "re_enablement": (
                 "revise the event so the authored end state differs from the current "
                 "projected authored state"
@@ -1741,47 +2109,199 @@ def _resource_state_vocabulary_summary(
     recovery_resources: dict[str, Any],
     recovery_des_models: dict[str, Any],
 ) -> str:
-    """Render exact non-private RA state-variable declarations."""
+    """Render public resource-state labels grouped by exact resource type."""
     resource_jids = sorted(set(recovery_resources) | set(recovery_des_models))
-    rows: list[dict[str, Any]] = []
+    rows_by_resource_type: dict[str, dict[str, Any]] = {}
     for resource_jid in resource_jids:
+        entry = dict(recovery_resources.get(resource_jid) or {})
+        recovery_adapter = dict(entry.get("recovery_adapter") or {})
+        recovery_snapshot = dict(entry.get("recovery_snapshot") or {})
+        static_capabilities = dict(entry.get("static_capabilities") or {})
+        resource_type = str(
+            entry.get("resource_type")
+            or recovery_adapter.get("resource_type")
+            or recovery_snapshot.get("resource_type")
+            or static_capabilities.get("resource_type")
+            or resource_jid
+        ).strip()
+        descriptor = dict(
+            recovery_des_models.get(resource_jid)
+            or entry.get("recovery_des_model")
+            or {}
+        )
+        values = _modeled_state_values(
+            descriptor=descriptor,
+            field_name="resource_state",
+        )
+        if not values:
+            continue
+        row = rows_by_resource_type.setdefault(
+            resource_type,
+            {"resource_jids": [], "resource_state": []},
+        )
+        row["resource_jids"].append(resource_jid)
+        for value in values:
+            if value not in row["resource_state"]:
+                row["resource_state"].append(value)
+    if not rows_by_resource_type:
+        return "(none advertised)"
+    lines: list[str] = []
+    for resource_type in sorted(rows_by_resource_type):
+        row = rows_by_resource_type[resource_type]
+        row["resource_state"].sort()
+        lines.append(
+            f"- resource_type={_inline_json(resource_type)} | "
+            f"resource_jids={_inline_json(row['resource_jids'])}"
+        )
+        lines.append(
+            f"  - resource_state: {_inline_json(row['resource_state'])}"
+        )
+    return "\n".join(lines)
+
+
+def _part_state_vocabulary_summary(
+    *,
+    llm_input: dict[str, Any],
+    recovery_resources: dict[str, Any],
+    recovery_des_models: dict[str, Any],
+) -> str:
+    """Render known part-state labels once, independent of validating RAs."""
+    values: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+
+    for condition in llm_input.get("goal_conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        if str(condition.get("entity_kind") or "").strip() != "part":
+            continue
+        if str(condition.get("field") or "").strip() in {
+            "state",
+            "current_state",
+            "part_state",
+        }:
+            add(condition.get("expected"))
+    for resource_jid in sorted(set(recovery_resources) | set(recovery_des_models)):
         entry = dict(recovery_resources.get(resource_jid) or {})
         descriptor = dict(
             recovery_des_models.get(resource_jid)
             or entry.get("recovery_des_model")
             or {}
         )
-        state_variables: dict[str, Any] = {}
+        for value in _modeled_state_values(
+            descriptor=descriptor,
+            field_name="part_state",
+        ):
+            add(value)
+    values.sort()
+    return f"- part_state: {_inline_json(values)}" if values else "(none advertised)"
+
+
+def _modeled_state_values(
+    *,
+    descriptor: dict[str, Any],
+    field_name: str,
+) -> list[str]:
+    """Return exact literal state labels used by public modeled transitions."""
+    declaration = dict(
+        dict(descriptor.get("state_variables") or {}).get(field_name) or {}
+    )
+    if declaration.get("private") is True:
+        return []
+    values: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+
+    for raw_event in descriptor.get("events") or []:
+        if not isinstance(raw_event, dict) or raw_event.get("private") is True:
+            continue
+        guard = dict(dict(raw_event.get("guards") or {}).get(field_name) or {})
+        for operator in ("equals", "not_equals"):
+            if operator in guard:
+                add(guard.get(operator))
+        update = dict(dict(raw_event.get("updates") or {}).get(field_name) or {})
+        if "set" in update:
+            add(update.get("set"))
+    values.sort()
+    return values
+
+
+def _resource_exact_fields_summary(
+    *,
+    recovery_resources: dict[str, Any],
+    recovery_des_models: dict[str, Any],
+) -> str:
+    """Render public resource-scoped exact fields under their validating RA."""
+    lines: list[str] = []
+    for resource_jid in sorted(set(recovery_resources) | set(recovery_des_models)):
+        entry = dict(recovery_resources.get(resource_jid) or {})
+        descriptor = dict(
+            recovery_des_models.get(resource_jid)
+            or entry.get("recovery_des_model")
+            or {}
+        )
+        fields: list[tuple[str, dict[str, Any]]] = []
         for field_name, raw_declaration in dict(
             descriptor.get("state_variables") or {}
         ).items():
             declaration = dict(raw_declaration or {})
-            if declaration.get("private") is True or str(field_name).startswith(
-                "task_ctx."
+            field_token = str(field_name)
+            if (
+                declaration.get("private") is True
+                or field_token.startswith("task_ctx.")
+                or field_token in {"resource_state", "part_state", "held_part"}
+                or str(declaration.get("scope") or "resource") == "part"
             ):
                 continue
-            state_variables[str(field_name)] = {
+            public_declaration = {
                 key: deepcopy(declaration.get(key))
                 for key in ("scope", "domain")
                 if key in declaration
             }
-        if state_variables:
-            rows.append(
-                {
-                    "resource_jid": resource_jid,
-                    "state_variables": state_variables,
-                }
-            )
-    if not rows:
-        return "(none advertised)"
-    lines: list[str] = []
-    for row in rows:
-        lines.append(f"- {row['resource_jid']}")
-        for field_name, declaration in dict(
-            row.get("state_variables") or {}
-        ).items():
+            if field_token in {"resource_location", "part_location"} and isinstance(
+                public_declaration.get("domain"), list
+            ):
+                public_declaration["domain"] = [
+                    deepcopy(value)
+                    for value in public_declaration["domain"]
+                    if value is not None
+                ]
+            fields.append((field_token, public_declaration))
+        if not fields:
+            continue
+        lines.append(f"- {resource_jid}")
+        for field_name, declaration in fields:
             lines.append(f"  - {field_name}: {_inline_json(declaration)}")
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "(none advertised)"
+
+
+def _public_custody_state_is_declared(
+    *,
+    recovery_resources: dict[str, Any],
+    recovery_des_models: dict[str, Any],
+) -> bool:
+    """Return whether any current RA publicly declares ``held_part``."""
+    for resource_jid in sorted(set(recovery_resources) | set(recovery_des_models)):
+        entry = dict(recovery_resources.get(resource_jid) or {})
+        descriptor = dict(
+            recovery_des_models.get(resource_jid)
+            or entry.get("recovery_des_model")
+            or {}
+        )
+        declaration = dict(
+            dict(descriptor.get("state_variables") or {}).get("held_part") or {}
+        )
+        if (
+            declaration
+            and declaration.get("private") is not True
+            and str(declaration.get("scope") or "resource") == "resource"
+        ):
+            return True
+    return False
 
 
 def _active_primitive_outline_event(
@@ -2186,7 +2706,6 @@ def _candidate_grounding_target_refs(
                 part.get("part_location") or part.get("current_location") or ""
             ).strip()
         for raw_token in (
-            part.get("goal_location"),
             part.get("part_location"),
             part.get("current_location"),
         ):
@@ -2261,12 +2780,11 @@ def _candidate_grounding_facts_summary(
         part_state = str(part.get("part_state") or "").strip() or "null"
         part_holder = str(part.get("part_holder_resource_jid") or "").strip() or "null"
         part_location = str(part.get("part_location") or "").strip() or "null"
-        goal_location = str(part.get("goal_location") or "").strip() or "null"
         source_ref = "observed_pose" if dict(part.get("observed_pose") or {}) else "null"
         lines.append(
             f"- part_name={part_name} | part_state={part_state} | "
             f"part_holder_resource_jid={part_holder} | part_location={part_location} | "
-            f"goal_location={goal_location} | source_ref={source_ref}"
+            f"source_ref={source_ref}"
         )
 
     return "\n".join(lines) if lines else "(none)"
@@ -2613,8 +3131,6 @@ def _slim_part_facts(parts: list[Any]) -> list[dict[str, Any]]:
         "observed_pose",
         "current_holder_resource_jid",
         "origin_location",
-        "goal_location",
-        "goal_requirement_id",
     }
     rows = [
         {k: v for k, v in dict(row).items() if k in _keep} for row in parts if isinstance(row, dict)
@@ -2669,9 +3185,6 @@ def _prompt_outline_part_view(part: dict[str, Any]) -> dict[str, Any]:
         view["part_holder_resource_jid"] = deepcopy(part.get("current_holder_resource_jid"))
     if "observed_pose" in part:
         view["observed_pose"] = deepcopy(part.get("observed_pose"))
-    for field_name in ("goal_location", "goal_requirement_id"):
-        if field_name in part:
-            view[field_name] = deepcopy(part.get(field_name))
     return view
 
 
@@ -3032,6 +3545,11 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     llm_input = dict(payload.get("llm_input") or {})
     session_state = dict(payload.get("session_state") or {})
     recovery_resources = dict(payload.get("recovery_resources") or {})
+    recovery_des_models = dict(session_state.get("recovery_des_models") or {})
+    custody_state_declared = _public_custody_state_is_declared(
+        recovery_resources=recovery_resources,
+        recovery_des_models=recovery_des_models,
+    )
     feedback_render_style = _feedback_render_style_token(session_state)
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     accepted_prefix = list(session_state.get("accepted_outline_prefix") or [])
@@ -3130,14 +3648,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         )
     elif is_candidate_mode:
         if recovery_selection_mode == "neurosymbolic":
-            candidate_budget = max(
-                1,
-                int(
-                    session_state.get("candidate_proposal_budget")
-                    or session_state.get("candidate_bound")
-                    or _DEFAULT_CANDIDATE_BOUND
-                ),
-            )
+            candidate_budget = _DEFAULT_CANDIDATE_BOUND
             selection_owner_text = (
                 "Do not select or rank the candidates; validated projected DES product "
                 "states are compared after generation."
@@ -3266,13 +3777,26 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "Resource Capabilities",
                 _resource_capabilities_summary(recovery_resources),
                 "",
-                "RA State Vocabulary",
-                "These are the public state values currently declared by each Resource Agent. They describe the current model; new `resource_state` and `part_state` values may still be authored when they express a concrete state effect.",
+                "Resource States",
+                "These are modeled, non-closed `resource_state` labels grouped by `resource_type`; current observations remain in the authoritative state section below, and new nonempty strings may still be authored.",
                 _resource_state_vocabulary_summary(
                     recovery_resources=recovery_resources,
-                    recovery_des_models=dict(
-                        session_state.get("recovery_des_models") or {}
-                    ),
+                    recovery_des_models=recovery_des_models,
+                ),
+                "",
+                "Part States",
+                "These are modeled or goal-declared, non-closed product/part `part_state` labels; current observations remain in the authoritative state section below, and new nonempty strings may still be authored.",
+                _part_state_vocabulary_summary(
+                    llm_input=llm_input,
+                    recovery_resources=recovery_resources,
+                    recovery_des_models=recovery_des_models,
+                ),
+                "",
+                "Resource Fields",
+                "These public resource-scoped fields use values declared by the responsible Resource Agent.",
+                _resource_exact_fields_summary(
+                    recovery_resources=recovery_resources,
+                    recovery_des_models=recovery_des_models,
                 ),
             ]
         )
@@ -3312,7 +3836,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         [
             "",
             "Current DES State",
-            "`Current DES State` is the authoritative exact propagated state after applying the accepted transition prefix. Code binds each candidate to this state.",
+            "`Current DES State` is the authoritative propagated state after applying the accepted transition prefix. Code binds each candidate to this state.",
             "Resources",
             _compact_json(prompt_projected_resources),
             "",
@@ -3339,66 +3863,62 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         candidate_property_name = (
             "`candidate_events`" if action_horizon == "1" else "`candidate_traces`"
         )
+        if action_horizon == "1":
+            candidate_shape_rule = (
+                "- Each candidate is one transition for one listed resource and includes "
+                "`outline_id`, `event_name`, `resource_jid`, `expected_end_state`, and "
+                "`rationale`."
+            )
+        else:
+            candidate_shape_rule = (
+                "- Each event in a candidate trace is one transition for one listed "
+                "resource and includes `outline_id`, `event_name`, `resource_jid`, "
+                "`expected_end_state`, and `rationale`."
+            )
         if recovery_selection_mode == "neurosymbolic":
-            candidate_budget = max(
-                1,
-                int(
-                    session_state.get("candidate_proposal_budget")
-                    or session_state.get("candidate_bound")
-                    or _DEFAULT_CANDIDATE_BOUND
-                ),
-            )
-            response_rule = (
-                f"- Return one JSON object with `thought` and {candidate_property_name}; "
-                "do not return `selected_candidate_index`."
-            )
-            count_rules = [
-                f"- `candidate_events` must contain one to {candidate_budget} materially distinct candidates without padding."
+            response_rules = [
+                "- Return one JSON object with `thought` and one to 5 materially "
+                "distinct `candidate_events`; do not return `selected_candidate_index` "
+                "or padding."
             ]
         else:
-            response_rule = (
+            response_rules = [
                 f"- Return one JSON object with `thought`, {candidate_property_name}, and "
-                "an integer `selected_candidate_index` pointing at your chosen candidate."
-            )
-            count_rules = (
-                ["- `candidate_events` must contain exactly three candidates."]
-                if action_horizon == "1"
-                else []
+                "an integer `selected_candidate_index` pointing at your chosen candidate.",
+                *(
+                    ["- `candidate_events` must contain exactly three candidates."]
+                    if action_horizon == "1"
+                    else []
+                ),
+            ]
+        candidate_part_rules = [
+            "- Without `part_name`, omit every part-scoped state field."
+        ]
+        if custody_state_declared:
+            candidate_part_rules.append(
+                "- Use `held_part` only in a candidate branch whose Resource Agent "
+                "schema includes it. Without `part_name`, omit `held_part`. Any custody "
+                "change requires `part_name`, `held_part`, `part_state`, and "
+                "`part_location`. While held, `part_location` equals `resource_jid`; "
+                "release requires an exact non-null `part_location`."
             )
         sections.extend(
             [
                 "",
                 "Recovery Candidate Rules",
-                response_rule,
-                *count_rules,
-                (
-                    "- Each candidate is one physical action by one listed resource with "
-                    "`outline_id`, `event_name`, `resource_jid`, `expected_end_state`, "
-                    "and `rationale`."
-                ),
-                (
-                    "- Resource-only actions may include `resource_state`, "
-                    "`resource_location`, and `held_part` in `expected_end_state`."
-                ),
-                (
-                    "- A candidate with `part_name` must include `held_part`, `part_state`, "
-                    "and `part_location` in `expected_end_state`. When `held_part` equals "
-                    "`part_name`, `part_location` must equal that candidate's `resource_jid`. "
-                    "Every custody-changing end state must use an exact supplied, non-null "
-                    "`part_location`."
-                ),
+                *response_rules,
+                candidate_shape_rule,
+                *candidate_part_rules,
                 "- A non-null `observed_pose` is grounded source evidence for its part.",
                 (
-                    "- You may author a new `event_name` and optional new `resource_state` "
-                    "or `part_state` values."
+                    "- `event_name` may be new. `resource_state` and `part_state` may be new "
+                    "nonempty exact strings; these labels alone do not establish capability, "
+                    "custody, location, or recovery progress."
                 ),
                 (
-                    "- A new state name has no meaning by itself and must accompany a concrete "
-                    "state effect or satisfy a listed recovery condition."
-                ),
-                (
-                    "- Use only supplied resources, parts, known resource locations, "
-                    "predicates, and resource-specific values."
+                    "- Use only supplied `resource_jid` and `part_name` values. Location "
+                    "tokens must belong to the same RA state field, except that the exact "
+                    "current `part_location` may be preserved."
                 ),
             ]
         )
@@ -3414,6 +3934,18 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
 
     constraints: list[str] = []
     if not is_candidate_mode:
+        part_constraints = [
+            "- If part_name is present without a custody change, use only state fields "
+            "declared by that Resource Agent.",
+            "- If part_name is absent, do not emit part-scoped state keys.",
+        ]
+        if custody_state_declared:
+            part_constraints.insert(
+                1,
+                "- Use held_part only for a Resource Agent that publicly declares it; "
+                "a custody change requires part_name, held_part, part_state, and "
+                "part_location, with an exact non-null release location.",
+            )
         constraints.extend(
             [
                 "",
@@ -3423,8 +3955,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 "- Each transition must include outline_id, event_name, resource_jid, expected_end_state, and rationale.",
                 "- Do not emit ppr_ontology, source_ref, target_ref, event_schema_id, resource_binding, object_bindings, parameters, surface_event_name, surface_description, or predecessors in outline mode.",
                 "- Author expected_end_state in outline mode; code binds the transition to Current DES State.",
-                "- If part_name is present, include held_part, part_state, and part_location in expected_end_state; a custody-changing end state requires an exact supplied, non-null part_location.",
-                "- If part_name is absent, do not emit part-specific state keys.",
+                *part_constraints,
                 "- Bind only entities and location tokens grounded in the current plant state.",
                 "- Rationale should explain enabledness or which recovery goal is advanced.",
             ]

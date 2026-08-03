@@ -708,6 +708,7 @@ class UR5eRTDETrajectoryServer(Node):
         self._receive_error = ""
         self._control_error = ""
         self._joint_status_announced = False
+        self._next_status_heartbeat_monotonic = 0.0
         self._active_lock = threading.Lock()
         self._active_goal = None
         self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
@@ -945,6 +946,36 @@ class UR5eRTDETrajectoryServer(Node):
         msg.name = list(ARM_JOINTS)
         msg.position = [float(value) for value in actual]
         self._joint_state_pub.publish(msg)
+        now = time.monotonic()
+        if now < self._next_status_heartbeat_monotonic:
+            return
+        with self._active_lock:
+            if self._active_goal is not None:
+                return
+        self._next_status_heartbeat_monotonic = now + 1.0
+        control_connected = self.control is not None
+        status = _status_base()
+        status.update(
+            state="ready" if control_connected else "monitoring",
+            message=(
+                "UR5e RTDE trajectory server ready"
+                if control_connected
+                else (
+                    "UR5e read-only calibration monitoring ready in Local Control"
+                    if self.monitor_only
+                    else (
+                        "UR5e joint-state monitoring ready in Local Control; "
+                        "trajectory motion requires Remote Control"
+                    )
+                )
+            ),
+            blocked_reason="",
+            rtde_connected=control_connected,
+            rtde_receive_connected=True,
+            rtde_control_connected=control_connected,
+            joint_states_fresh=self._joint_states_fresh(),
+        )
+        self._write_status(status)
 
     def _cancel(self, _goal_handle: Any) -> CancelResponse:
         return CancelResponse.ACCEPT
@@ -1111,9 +1142,11 @@ class UR5eRTDETrajectoryServer(Node):
                         return self._result(0, "")
                 time.sleep(0.02)
             reason = "UR5e RTDE trajectory result timeout"
+            self._stop_motion()
             status.update(state="failed", message=reason, blocked_reason=reason)
             self._write_status(status)
             goal_handle.abort()
+            self._clear_active_goal(goal_handle)
             return self._result(-1, reason)
         except Exception as exc:
             reason = f"UR5e RTDE trajectory failed: {type(exc).__name__}: {exc}"
@@ -1179,9 +1212,36 @@ def main(argv: list[str] | None = None) -> int:
     )
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
+    failed = False
     try:
         executor.spin()
+    except Exception as exc:
+        failed = True
+        status = _status_base()
+        status.update(
+            state="failed",
+            blocked_reason=f"UR5e RTDE trajectory server exited: {type(exc).__name__}: {exc}",
+            message=f"UR5e RTDE trajectory server exited: {type(exc).__name__}: {exc}",
+            rtde_connected=False,
+            rtde_receive_connected=False,
+            rtde_control_connected=False,
+            joint_states_fresh=False,
+        )
+        node._write_status(status)
+        raise
     finally:
+        if not failed:
+            status = _status_base()
+            status.update(
+                state="stopped",
+                blocked_reason="UR5e RTDE trajectory server stopped",
+                message="UR5e RTDE trajectory server stopped",
+                rtde_connected=False,
+                rtde_receive_connected=False,
+                rtde_control_connected=False,
+                joint_states_fresh=False,
+            )
+            node._write_status(status)
         executor.shutdown()
         node.destroy_node()
         if rclpy.ok():

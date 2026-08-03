@@ -374,6 +374,24 @@ class PerceptionManager:
         normalized = str(busid or "").strip()
         if re.fullmatch(r"\d+-\d+", normalized) is None:
             return "select a valid RealSense BUSID first"
+        rows = self.discover_wsl_attachments(force=True)
+        selected = next(
+            (row for row in rows if str(row.get("busid") or "") == normalized),
+            None,
+        )
+        if selected is None:
+            return f"RealSense BUSID {normalized} is not present in Windows USB inventory"
+        state = str(selected.get("state") or "Unknown")
+        if state == "Not shared":
+            return (
+                f"RealSense BUSID {normalized} is Not shared. In Administrator Windows "
+                f"PowerShell run: usbipd bind --busid {normalized}. Then refresh WSL USB "
+                "and attach it."
+            )
+        if state == "Attached":
+            self._devices_cache_at = 0.0
+            self._wsl_devices_cache_at = 0.0
+            return None
         executable = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if executable is None:
             return "Windows PowerShell interoperability is unavailable"
@@ -426,10 +444,14 @@ class PerceptionManager:
         if attach_errors:
             return "RealSense USB attachment failed: " + "; ".join(attach_errors)
         if not_shared and not shared and not attached:
-            busids = ", ".join(str(row.get("busid") or "") for row in not_shared)
+            commands = "; ".join(
+                f"usbipd bind --busid {str(row.get('busid') or '')}"
+                for row in not_shared
+            )
             return (
-                "RealSense USB is not shared with usbipd-win. Run the one-time administrator "
-                f"bind for BUSID {busids}; the UI never requests or stores sudo credentials."
+                "RealSense USB is not shared with usbipd-win. In Administrator Windows "
+                f"PowerShell run the one-time command: {commands}. The UI never requests "
+                "administrator credentials."
             )
         if not rows:
             return "No Windows RealSense USB rows were found; reconnect the camera and retry."
@@ -659,10 +681,27 @@ class PerceptionManager:
     def _domain_id(self) -> int:
         hardware_processes = getattr(self.bridge, "_DIGITAL_TWIN_HARDWARE_PROCESS_NAMES", set())
         active_from_status = getattr(self.bridge, "_active_digital_twin_target_from_status", None)
+        active_target = active_from_status() if callable(active_from_status) else None
         if any(
             self.bridge.ros2_proc_status(name) == "running" for name in hardware_processes
-        ) or (callable(active_from_status) and active_from_status() is not None):
-            return int(self.bridge._digital_twin_domain_ids()["hardware"])
+        ) or active_target is not None:
+            domains = self.bridge._digital_twin_domain_ids()
+            target_lookup = getattr(self.bridge, "_digital_twin_target", None)
+            domain_lookup = getattr(self.bridge, "_digital_twin_hardware_domain_id", None)
+            target_cfg = (
+                target_lookup(active_target)
+                if active_target and callable(target_lookup)
+                else None
+            )
+            if isinstance(target_cfg, dict) and callable(domain_lookup):
+                return int(
+                    domain_lookup(
+                        target_cfg,
+                        "ur5e",
+                        domains,
+                    )
+                )
+            return int(domains["hardware"])
         return int(self.bridge._default_ros_domain_id())
 
     def _ur5e_digital_twin_process_running(self, process: str) -> bool:
@@ -704,13 +743,13 @@ class PerceptionManager:
             self.bridge.ros2_proc_status(name) == "running" for name in process_names
         )
 
-    def _ensure_ur5e_calibration_monitor(self) -> None:
+    def _ensure_ur5e_calibration_monitor(self, *, domain_id: int | None = None) -> None:
         """Start only the read-only UR5e state and TF publishers needed by calibration."""
         if self._ur5e_full_state_publisher_running():
             return
 
         names = self._process_names("ur5e")
-        domain_id = self._domain_id()
+        resolved_domain_id = self._domain_id() if domain_id is None else int(domain_id)
         state_publisher = names["calibration_state_publisher"]
         if self.bridge.ros2_proc_status(state_publisher) != "running":
             command = (
@@ -720,7 +759,7 @@ class PerceptionManager:
             error = self.bridge._start_tracked_ros2_command(
                 state_publisher,
                 self._logged_command(state_publisher, command),
-                ros_domain_id=domain_id,
+                ros_domain_id=resolved_domain_id,
             )
             if error and "already running" not in error:
                 raise RuntimeError(f"cannot start UR5e calibration state publisher: {error}")
@@ -749,7 +788,7 @@ class PerceptionManager:
             error = self.bridge._start_tracked_ros2_command(
                 rtde_monitor,
                 self._logged_command(rtde_monitor, command),
-                ros_domain_id=domain_id,
+                ros_domain_id=resolved_domain_id,
             )
             if error and "already running" not in error:
                 self.bridge.ros2_stop(state_publisher)
@@ -800,6 +839,10 @@ class PerceptionManager:
             "read-only UR5e calibration monitor did not publish /joint_states"
             + (f": {detail}" if detail else "")
         )
+
+    def ensure_ur5e_calibration_monitor(self, *, domain_id: int | None = None) -> None:
+        """Ensure read-only UR5e joint and TF feedback without enabling robot control."""
+        self._ensure_ur5e_calibration_monitor(domain_id=domain_id)
 
     def _reconcile_part_twin_sync(self, role: str) -> None:
         """Restore late-start gear mirroring without coupling camera readiness to Gazebo."""
@@ -1918,6 +1961,21 @@ class PerceptionManager:
         device_by_serial = {str(row.get("serial")): row for row in devices}
         wsl_rows = self.discover_wsl_attachments()
         wsl_states = {str(row.get("state") or "Unknown") for row in wsl_rows}
+        assigned_role_names = [
+            role
+            for role in CAMERA_ROLES
+            if str((config["cameras"].get(role) or {}).get("serial") or "").strip()
+        ]
+        camera_inventory = {
+            "windows_d435_devices": len(wsl_rows),
+            "wsl_attached_devices": sum(
+                1 for row in wsl_rows if str(row.get("state") or "") == "Attached"
+            ),
+            "wsl_discovered_devices": len(devices),
+            "assigned_roles": len(assigned_role_names),
+            "assigned_role_names": assigned_role_names,
+            "total_roles": len(CAMERA_ROLES),
+        }
         with self._connection_lock:
             recovery_by_role = deepcopy(self._recovery)
             desired_connected = set(self._desired_connected)
@@ -2016,9 +2074,12 @@ class PerceptionManager:
                 },
                 "topics": self._topics(camera),
             }
+        preflight = self.preflight()
+        preflight["camera_inventory"] = camera_inventory
         return {
             "config_path": str(self.config_path),
-            "preflight": self.preflight(),
+            "preflight": preflight,
+            "camera_inventory": camera_inventory,
             "devices": devices,
             "wsl_devices": wsl_rows,
             "cameras": cameras,

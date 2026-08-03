@@ -412,6 +412,434 @@ def test_ra_rejects_wrong_resource_and_robot_specific_physical_conflicts() -> No
     assert result["constraint_code"] == "gripper_occupancy_conflict"
 
 
+def test_ra_uses_fresh_field_specific_location_domains() -> None:
+    class _Owner:
+        jid = "ur5e@localhost"
+        static_capabilities = {"resource_type": "robot"}
+
+        def __init__(self) -> None:
+            self.snapshot_calls = 0
+            self.model_calls = 0
+            self.physical_calls = 0
+            self.part_location_domain = [
+                None,
+                "prusa-mk4-2",
+                "ur5e@localhost",
+            ]
+
+        def get_recovery_snapshot(self) -> dict[str, Any]:
+            self.snapshot_calls += 1
+            return {
+                "resource_state": "picked",
+                "resource_location": "prusa-mk4-2",
+                "held_part": "MCP",
+                "named_poses": {"home": "home"},
+            }
+
+        def recovery_des_model(
+            self,
+            *,
+            snapshot: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            self.model_calls += 1
+            return {
+                "state_variables": {
+                    "resource_state": {
+                        "scope": "resource",
+                        "domain": [dict(snapshot or {}).get("resource_state")],
+                    },
+                    "resource_location": {
+                        "scope": "resource",
+                        "domain": ["prusa-mk4-2", "home"],
+                    },
+                    "held_part": {
+                        "scope": "resource",
+                        "domain": [None, "MCP"],
+                    },
+                    "part_state": {
+                        "scope": "part",
+                        "domain": ["in_gripper", "ready"],
+                    },
+                    "part_location": {
+                        "scope": "part",
+                        "domain": deepcopy(self.part_location_domain),
+                    },
+                }
+            }
+
+        def recovery_validation_resource_matches(self, resource_jid: str) -> bool:
+            return ResourceAgent.recovery_validation_resource_matches(
+                self, resource_jid
+            )
+
+        def check_recovery_physical_feasibility(
+            self,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            self.physical_calls += 1
+            return {"allowed": True, "reason": "physical feasibility passed"}
+
+    owner = _Owner()
+    home_release = {
+        "candidate_index": 0,
+        "task": {
+            "resource_jid": "ur5e@localhost",
+            "part_name": "MCP",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "resource_location": "prusa-mk4-2",
+                "held_part": "MCP",
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost",
+            },
+            "expected_end_state": {
+                "resource_state": "placed",
+                "resource_location": "home",
+                "held_part": None,
+                "part_state": "ready",
+                "part_location": "home",
+            },
+        },
+        "physical_input": {
+            "part_context": {
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost",
+                "current_holder_resource_jid": "ur5e@localhost",
+            }
+        },
+    }
+    reachable_release = deepcopy(home_release)
+    reachable_release["candidate_index"] = 1
+    reachable_release["task"]["expected_end_state"]["resource_location"] = (
+        "prusa-mk4-2"
+    )
+    reachable_release["task"]["expected_end_state"]["part_location"] = (
+        "prusa-mk4-2"
+    )
+    payload = {
+        "candidates": [
+            home_release,
+            reachable_release,
+        ]
+    }
+
+    first = ResourceAgent.validate_recovery_outline_physical_candidates(
+        owner, payload
+    )
+    rejected_candidate = first["results"][0]
+    assert rejected_candidate["transition_feasibility"]["constraint_code"] == (
+        "unknown_location_token"
+    )
+    assert rejected_candidate["transition_feasibility"]["evidence"] == {
+        "field": "expected_end_state.part_location",
+        "location_token": "home",
+    }
+    assert rejected_candidate["physical_feasibility"]["skipped"] is True
+    assert first["results"][1]["allowed"] is True
+    assert owner.physical_calls == 1
+
+    owner.part_location_domain.append("home")
+    second = ResourceAgent.validate_recovery_outline_physical_candidates(
+        owner, {"candidates": [home_release]}
+    )
+    assert second["results"][0]["allowed"] is True
+    assert owner.snapshot_calls == 2
+    assert owner.model_calls == 2
+    assert owner.physical_calls == 2
+
+    resource_only_task = {
+        "resource_jid": "ur5e@localhost",
+        "expected_start_state": {
+            "resource_state": "picked",
+            "resource_location": "prusa-mk4-2",
+            "held_part": "MCP",
+        },
+        "expected_end_state": {
+            "resource_state": "idle",
+            "resource_location": "home",
+            "held_part": "MCP",
+        },
+    }
+    resource_only = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=resource_only_task,
+        recovery_snapshot=owner.get_recovery_snapshot(),
+        part_context={},
+        recovery_des_model=owner.recovery_des_model(),
+    )
+    assert resource_only["allowed"] is True
+
+    null_resource_location = deepcopy(resource_only_task)
+    null_resource_location["expected_end_state"]["resource_location"] = None
+    snapshot = owner.get_recovery_snapshot()
+    descriptor = owner.recovery_des_model(snapshot=snapshot)
+    rejected_null = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=null_resource_location,
+        recovery_snapshot=snapshot,
+        part_context={},
+        recovery_des_model=descriptor,
+    )
+    assert rejected_null["allowed"] is False
+    assert rejected_null["constraint_code"] == "unknown_location_token"
+
+    descriptor_with_null = deepcopy(descriptor)
+    descriptor_with_null["state_variables"]["resource_location"]["domain"].append(
+        None
+    )
+    accepted_null = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=null_resource_location,
+        recovery_snapshot=snapshot,
+        part_context={},
+        recovery_des_model=descriptor_with_null,
+    )
+    assert accepted_null["allowed"] is True
+
+    custody_change_without_part_name = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task={
+            "resource_jid": "ur5e@localhost",
+            "expected_start_state": {
+                "resource_state": "picked",
+                "resource_location": "prusa-mk4-2",
+                "held_part": "MCP",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "resource_location": "home",
+                "held_part": None,
+            },
+        },
+        recovery_snapshot=owner.get_recovery_snapshot(),
+        part_context={},
+        recovery_des_model=owner.recovery_des_model(),
+    )
+    assert custody_change_without_part_name["allowed"] is False
+    assert custody_change_without_part_name["constraint_code"] == (
+        "part_traceability_violation"
+    )
+
+
+def test_ra_preserves_observed_pose_without_weakening_custody() -> None:
+    descriptor = {
+        "state_variables": {
+            "resource_state": {"scope": "resource", "domain": ["idle"]},
+            "resource_location": {
+                "scope": "resource",
+                "domain": ["assembly_board-v1", "home"],
+            },
+            "held_part": {"scope": "resource", "domain": [None, "LG"]},
+            "part_state": {
+                "scope": "part",
+                "domain": ["unknown", "in_gripper"],
+            },
+            "part_location": {
+                "scope": "part",
+                "domain": [
+                    None,
+                    "assembly_board-v1",
+                    "ur5e@localhost",
+                ],
+            },
+        }
+    }
+    owner = SimpleNamespace(
+        jid="ur5e@localhost",
+        static_capabilities={"resource_type": "robot"},
+    )
+    snapshot = {
+        "resource_state": "idle",
+        "resource_location": "assembly_board-v1",
+        "held_part": None,
+        "named_poses": {"home": "home"},
+    }
+    part_context = {
+        "part_state": "unknown",
+        "observed_pose": {"x": 0.1, "y": 0.2, "z": 0.3},
+        "current_holder_resource_jid": None,
+    }
+    acquisition = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task={
+            "resource_jid": "ur5e@localhost",
+            "part_name": "LG",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "resource_location": "assembly_board-v1",
+                "held_part": None,
+                "part_state": "unknown",
+                "part_location": "observed_pose",
+            },
+            "expected_end_state": {
+                "resource_state": "picked",
+                "resource_location": "assembly_board-v1",
+                "held_part": "LG",
+                "part_state": "in_gripper",
+                "part_location": "ur5e@localhost",
+            },
+        },
+        recovery_snapshot=snapshot,
+        part_context=part_context,
+        recovery_des_model=descriptor,
+    )
+    unchanged = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task={
+            "resource_jid": "ur5e@localhost",
+            "part_name": "LG",
+            "expected_start_state": {
+                "resource_state": "idle",
+                "resource_location": "assembly_board-v1",
+                "held_part": None,
+                "part_state": "unknown",
+                "part_location": "observed_pose",
+            },
+            "expected_end_state": {
+                "resource_state": "idle",
+                "resource_location": "assembly_board-v1",
+                "held_part": None,
+                "part_state": "misplaced",
+                "part_location": "observed_pose",
+            },
+        },
+        recovery_snapshot=snapshot,
+        part_context=part_context,
+        recovery_des_model=descriptor,
+    )
+
+    invalid_release = {
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "expected_start_state": {
+            "resource_state": "picked",
+            "held_part": "LG",
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost",
+        },
+        "expected_end_state": {
+            "resource_state": "placed",
+            "held_part": None,
+            "part_state": "ready",
+            "part_location": "ur5e@localhost",
+        },
+    }
+    custody_mismatch = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=invalid_release,
+        recovery_snapshot={"resource_state": "picked", "held_part": "LG"},
+        part_context={
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost",
+            "current_holder_resource_jid": "ur5e@localhost",
+        },
+        recovery_des_model=descriptor,
+    )
+
+    assert acquisition["allowed"] is True
+    assert unchanged["allowed"] is True
+    assert custody_mismatch["constraint_code"] == "held_part_location_mismatch"
+
+
+def test_ra_rejects_empty_or_wrong_bound_custody_and_preserves_omitted_custody() -> None:
+    descriptor = {
+        "state_variables": {
+            "resource_state": {
+                "scope": "resource",
+                "domain": ["picked", "inspected", "idle"],
+            },
+            "held_part": {
+                "scope": "resource",
+                "domain": [None, "LG", "MCP"],
+            },
+            "part_state": {
+                "scope": "part",
+                "domain": ["in_gripper", "verified", "ready"],
+            },
+            "part_location": {
+                "scope": "part",
+                "domain": [None, "station", "ur5e@localhost"],
+            },
+        }
+    }
+    owner = SimpleNamespace(
+        jid="ur5e@localhost",
+        static_capabilities={"resource_type": "robot"},
+    )
+    held_snapshot = {
+        "resource_state": "picked",
+        "held_part": "LG",
+    }
+    held_part_context = {
+        "part_state": "in_gripper",
+        "part_location": "ur5e@localhost",
+        "current_holder_resource_jid": "ur5e@localhost",
+    }
+    inspection = {
+        "resource_jid": "ur5e@localhost",
+        "part_name": "LG",
+        "expected_start_state": {
+            "resource_state": "picked",
+            "held_part": "LG",
+            "part_state": "in_gripper",
+            "part_location": "ur5e@localhost",
+        },
+        "expected_end_state": {
+            "resource_state": "inspected",
+            "part_state": "verified",
+        },
+    }
+    preserved = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=inspection,
+        recovery_snapshot=held_snapshot,
+        part_context=held_part_context,
+        recovery_des_model=descriptor,
+    )
+    assert preserved["allowed"] is True
+
+    empty_held_part = deepcopy(inspection)
+    empty_held_part["expected_end_state"].update(
+        {
+            "held_part": "",
+            "part_location": "station",
+        }
+    )
+    rejected_empty = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=empty_held_part,
+        recovery_snapshot=held_snapshot,
+        part_context=held_part_context,
+        recovery_des_model=descriptor,
+    )
+    assert rejected_empty["allowed"] is False
+    assert rejected_empty["constraint_code"] == "part_traceability_violation"
+
+    wrong_bound_release = deepcopy(inspection)
+    wrong_bound_release["part_name"] = "LG"
+    wrong_bound_release["expected_start_state"]["held_part"] = "MCP"
+    wrong_bound_release["expected_end_state"].update(
+        {
+            "held_part": None,
+            "part_location": "station",
+        }
+    )
+    rejected_wrong_part = ResourceAgent.check_recovery_transition_feasibility(
+        owner,
+        task=wrong_bound_release,
+        recovery_snapshot={"resource_state": "picked", "held_part": "MCP"},
+        part_context=held_part_context,
+        recovery_des_model=descriptor,
+    )
+    assert rejected_wrong_part["allowed"] is False
+    assert rejected_wrong_part["constraint_code"] == (
+        "part_traceability_violation"
+    )
+    assert rejected_wrong_part["evidence"]["field"] == (
+        "expected_start_state.held_part"
+    )
+
+
 def test_ra_batch_refreshes_one_snapshot_and_rejects_wrong_resource_request() -> None:
     class _Owner:
         jid = "xarm6@localhost"
@@ -872,16 +1300,42 @@ def test_outline_state_schema_matches_pa_candidate_validator() -> None:
         candidate_count=3,
         action_horizon="1",
     )
-    state_schema = schema["schema"]["$defs"]["outline_state"]
-    assert state_schema["additionalProperties"] is False
-    assert state_schema["required"] == ["resource_state"]
-    assert set(state_schema["properties"]) == {
+    definitions = schema["schema"]["$defs"]
+    resource_state_schema = definitions["resource_only_outline_state"]
+    part_state_schema = definitions["part_outline_state"]
+    custody_state_schema = definitions["custody_outline_state"]
+
+    for state_schema in (
+        resource_state_schema,
+        part_state_schema,
+        custody_state_schema,
+    ):
+        assert state_schema["additionalProperties"] is False
+        assert "resource_state" in state_schema["required"]
+
+    assert set(resource_state_schema["properties"]) == {
+        "resource_state",
+        "resource_location",
+    }
+    assert set(part_state_schema["properties"]) == {
+        "resource_state",
+        "resource_location",
+        "part_state",
+        "part_location",
+    }
+    assert set(custody_state_schema["properties"]) == {
         "resource_state",
         "resource_location",
         "held_part",
         "part_state",
         "part_location",
     }
+    assert custody_state_schema["required"] == [
+        "resource_state",
+        "held_part",
+        "part_state",
+        "part_location",
+    ]
 
 
 def test_cca_candidate_validation_allows_when_no_safety_rules_are_active() -> None:

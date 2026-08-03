@@ -388,6 +388,7 @@ class LlmAgent(Agent):
         tools: list[dict[str, Any]] | None = None,
         tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
         max_tool_rounds: int = 3,
+        include_agent_instructions: bool = True,
     ) -> dict[str, Any]:
         """Call LLM with structured output + optional tool use (v3 bridge).
 
@@ -405,6 +406,8 @@ class LlmAgent(Agent):
             when the LLM emits a tool call.
         max_tool_rounds:
             Maximum number of tool-call rounds before raising.
+        include_agent_instructions:
+            Whether to prepend this agent's configured system instructions.
 
         Returns
         -------
@@ -413,7 +416,7 @@ class LlmAgent(Agent):
         """
 
         initial_messages: list[dict[str, Any]] = []
-        if self.instructions:
+        if include_agent_instructions and self.instructions:
             initial_messages.append({"role": "system", "content": self.instructions})
         initial_messages.append({"role": "user", "content": prompt})
         structured_response_format = {

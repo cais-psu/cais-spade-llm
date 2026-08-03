@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from cais_spade_llm.agents.central_controller.outline_macro_safety import (
     validate_outline_macro_recovery_safety,
@@ -18,6 +21,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
     multi_turn,
     multi_turn_outline_generation,
+    multi_turn_primitive_generation,
     multi_turn_prompts,
 )
 from cais_spade_llm.agents.resource_agent.printing_agent import PrintingAgent
@@ -300,8 +304,11 @@ def test_robot_and_printer_use_the_ra_owned_des_interface() -> None:
             "held_part": None,
             "gripper_state": "open",
             "current_pose": {"x": 0.0, "y": 0.0, "z": 1.0},
-            "reachable_locations": ["input_station", "output_station"],
-            "named_poses": ["home"],
+            "reachable_locations": [
+                "input_station",
+                "output_station",
+            ],
+            "named_poses": ["home", "input_station"],
         },
     )
     assert set(robot_descriptor["local_event_alphabet"]) == {
@@ -320,6 +327,23 @@ def test_robot_and_printer_use_the_ra_owned_des_interface() -> None:
         "move_relative",
     ):
         assert primitive_name not in robot_descriptor["local_event_alphabet"]
+
+    resource_location_domain = robot_descriptor["state_variables"][
+        "resource_location"
+    ]["domain"]
+    resource_state_domain = robot_descriptor["state_variables"]["resource_state"][
+        "domain"
+    ]
+    part_location_domain = robot_descriptor["state_variables"]["part_location"][
+        "domain"
+    ]
+    assert "any" not in resource_state_domain
+    assert "home" in resource_location_domain
+    assert "home" not in part_location_domain
+    assert robot.jid in part_location_domain
+    assert "input_station" in part_location_domain
+    assert "output_station" in part_location_domain
+    assert "input_station" in resource_location_domain
 
     assert robot_descriptor["state_variables"][
         "task_ctx.destination_location"
@@ -346,16 +370,43 @@ def test_robot_and_printer_use_the_ra_owned_des_interface() -> None:
         "equals_from_param": "destination_location"
     }
     assert move_home["updates"]["resource_location"] == {"set": "home"}
+    modeled_move_home = multi_turn_outline_generation._recovery_event_instance_task(
+        outline_id="modeled_move_home",
+        resource_jid=robot.jid,
+        event=move_home,
+        resource_row={
+            "resource_state": "idle",
+            "resource_location": "home",
+            "held_part": None,
+        },
+        part_name="",
+        part_row={},
+        state_variables=robot_descriptor["state_variables"],
+    )
+    assert modeled_move_home is not None
+    assert "task_ctx.destination_location" in modeled_move_home[
+        "expected_start_state"
+    ]
+    transition_result = ResourceAgent.check_recovery_transition_feasibility(
+        robot,
+        task=modeled_move_home,
+        recovery_snapshot={
+            "current_state": "idle",
+            "current_location": "home",
+            "held_part": None,
+            "named_poses": ["home", "input_station"],
+        },
+        part_context={},
+        recovery_des_model=robot_descriptor,
+    )
+    assert transition_result["allowed"] is True
 
     schema_session = _session(parts={})
     schema_session["recovery_des_models"] = {
         robot.jid: deepcopy(robot_descriptor)
     }
     response_schema = multi_turn._get_response_schema("outline", schema_session)
-    outline_state_properties = response_schema["schema"]["$defs"][
-        "outline_state"
-    ]["properties"]
-    assert "task_ctx.destination_location" not in outline_state_properties
+    assert "task_ctx.destination_location" not in repr(response_schema["schema"])
 
 
 def test_robot_task_program_backward_relevance_and_forward_enabledness() -> None:
@@ -678,7 +729,8 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
     assert parsed_response["candidate_events"][0]["outline_id"] == "RECOVERY_SEQ1_1"
     accepted = session_state["accepted_outline_prefix"][0]
     assert accepted["candidate_source"] == "robot_task_program"
-    assert accepted["modeled_task_steps"] == modeled_steps
+    assert "modeled_task_steps" not in accepted
+    assert "primitive_steps" not in accepted
     modeled_evaluation = turn_entry["candidate_evaluations"][0]
     for key in ("task", "validated_task"):
         assert modeled_evaluation[key]["candidate_source"] == "robot_task_program"
@@ -693,6 +745,9 @@ def test_modeled_continuation_bypasses_outline_llm_and_keeps_program_steps(
     ):
         assert session_state[key][0]["candidate_source"] == "robot_task_program"
         assert turn_entry[key][0]["candidate_source"] == "robot_task_program"
+    serialized_outline = repr({"session": session_state, "turn": turn_entry})
+    assert "modeled_task_steps" not in serialized_outline
+    assert "primitive_steps" not in serialized_outline
 
 
 def test_modeled_continuation_source_does_not_require_visible_steps() -> None:
@@ -787,21 +842,6 @@ def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> No
     part_name = "LG"
     destination = "assembly_board-v1"
     carried_location = resource_jid
-    descriptor = robot_recovery_des_descriptor(
-        resource_jid=resource_jid,
-        snapshot={
-            "current_state": "holding",
-            "current_location": "prusa-mk4-2",
-            "held_part": part_name,
-        },
-        reachable_locations=[destination],
-        named_poses=["home"],
-    )
-    place_approach = next(
-        event
-        for event in descriptor["events"]
-        if event["event_name"] == "place_approach"
-    )
     outline_event = {
         "outline_id": "RECOVERY_SEQ1",
         "event_name": "place_approach",
@@ -824,9 +864,6 @@ def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> No
             "part_location": carried_location,
             "task_ctx.destination_location": destination,
         },
-        "modeled_task_steps": deepcopy(
-            place_approach["recovery_visible_steps"]
-        ),
     }
     session_state = {
         "accepted_outline_prefix": [deepcopy(outline_event)],
@@ -914,6 +951,121 @@ def test_registered_modeled_steps_ground_exact_part_destination_and_refs() -> No
             "primitive_steps": primitive_steps,
         }
     ]
+
+
+def test_llm_primitive_generation_sends_only_auditable_user_request(
+    tmp_path: Path,
+) -> None:
+    class _PrimitiveLlm:
+        instructions = "inherited resource instructions"
+        model = "test-model"
+        reasoning_effort = "medium"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self._last_structured_request: dict[str, Any] = {}
+
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            include_agent_instructions: bool = True,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "response_format": deepcopy(response_format),
+                    "include_agent_instructions": include_agent_instructions,
+                }
+            )
+            self._last_structured_request = {
+                "model": self.model,
+                "messages": [
+                    {"role": "user", "content": "different concurrent request"}
+                ],
+                "reasoning_effort": self.reasoning_effort,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": deepcopy(response_format),
+                },
+                "response_source": "mocked_test",
+                "request_sent": False,
+            }
+            return {
+                "thought": "Stop after recording the request.",
+                "decision": "primitive_blocked",
+                "outline_id": "RECOVERY_SEQ1",
+                "resource_jid": "resource@localhost",
+                "rationale": "request-boundary test",
+            }
+
+    llm = _PrimitiveLlm()
+    result = asyncio.run(
+        multi_turn_primitive_generation.generate_primitive_batch_with_llm_agent(
+            llm_agent=llm,
+            prepared_recovery_request={
+                "llm_input": {},
+                "recovery_resources": {},
+                "recovery_debug": {"per_turn_debug_dir": str(tmp_path)},
+            },
+            assigned_outline_events=[
+                {
+                    "outline_id": "RECOVERY_SEQ1",
+                    "event_name": "recover",
+                    "resource_jid": "resource@localhost",
+                    "candidate_source": "llm",
+                    "expected_start_state": {"resource_state": "failed"},
+                    "expected_end_state": {"resource_state": "ready"},
+                }
+            ],
+            max_turns=1,
+        )
+    )
+
+    assert result["decision"] == "primitive_blocked"
+    assert llm.calls[0]["include_agent_instructions"] is False
+    turn = result["turns"][0]
+    assert turn["llm_request"]["messages"] == [
+        {"role": "user", "content": llm.calls[0]["prompt"]}
+    ]
+    request_text = Path(turn["prompt_artifact_path"]).read_text(encoding="utf-8")
+    assert request_text.count("role=user") == 1
+    assert "role=system" not in request_text
+    assert "Response Format" in request_text
+    assert '"name": "multi_turn_primitive_generation_response"' in request_text
+    assert "\nTools\n" not in request_text
+    assert "different concurrent request" not in request_text
+    assert "Request sent: (unknown)" in request_text
+
+
+def test_modeled_primitive_generation_fails_closed_without_decomposition() -> None:
+    outline_event = {
+        "outline_id": "RECOVERY_SEQ1",
+        "event_name": "missing_transition",
+        "resource_jid": "resource@localhost",
+        "candidate_source": "robot_task_program",
+    }
+
+    result = asyncio.run(
+        multi_turn._run_resource_primitive_batch(
+            planner=object(),
+            prepared_recovery_request={
+                "recovery_resources": {
+                    "resource@localhost": {"resource_type": "resource"}
+                }
+            },
+            session_state={"accepted_primitive_program": []},
+            resource_jid="resource@localhost",
+            assigned_outline_events=[outline_event],
+        )
+    )
+
+    assert result["decision"] == "primitive_blocked"
+    assert result["primitive_events"] == []
+    assert result["feedback"][0]["constraint_code"] == (
+        "modeled_primitive_grounding_incomplete"
+    )
 
 
 def test_base_resource_uses_only_an_explicit_private_des_descriptor() -> None:
@@ -1035,6 +1187,52 @@ def test_printer_transition_enables_ra_declared_continuation_event() -> None:
             "newly_enabled_recovery_event_ids"
         ]
     )
+
+
+def test_modeled_non_custody_resource_omits_undeclared_held_part() -> None:
+    state_variables = {
+        "resource_state": {
+            "scope": "resource",
+            "domain": ["printing", "paused"],
+        },
+        "job_state": {
+            "scope": "resource",
+            "domain": ["printing", "paused"],
+        },
+    }
+    task = multi_turn_outline_generation._recovery_event_instance_task(
+        outline_id="modeled_pause",
+        resource_jid="printer@localhost",
+        event={
+            "event_name": "pause_job",
+            "updates": {
+                "resource_state": {"set": "paused"},
+                "job_state": {"set": "paused"},
+            },
+        },
+        resource_row={
+            "resource_state": "printing",
+            "job_state": "printing",
+        },
+        part_name="",
+        part_row={},
+        state_variables=state_variables,
+    )
+
+    assert task is not None
+    assert "held_part" not in task["expected_start_state"]
+    assert "held_part" not in task["expected_end_state"]
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="printer@localhost", static_capabilities={}),
+        task=task,
+        recovery_snapshot={
+            "resource_state": "printing",
+            "job_state": "printing",
+        },
+        part_context={},
+        recovery_des_model={"state_variables": deepcopy(state_variables)},
+    )
+    assert result["allowed"] is True
 
 
 def test_nominal_reentry_guard_uses_printer_declared_state_without_robot_fields() -> None:
@@ -1191,15 +1389,26 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         recovery_selection_mode="neurosymbolic",
         declared_state_variables=state_variables,
     )["schema"]
-    properties = schema["$defs"]["outline_state"]["properties"]
-    assert "job_state" in properties
-    assert "spindle_speed" not in properties
-    assert properties["resource_state"]["minLength"] == 1
-    assert (
-        schema["$defs"]["outline_event"]["properties"]["event_name"]["minLength"]
-        == 1
-    )
-    assert "expected_start_state" not in schema["$defs"]["outline_event"]["properties"]
+    definitions = schema["$defs"]
+    resource_properties = definitions["resource_only_outline_state"]["properties"]
+    part_properties = definitions["part_outline_state"]["properties"]
+    custody_properties = definitions["custody_outline_state"]["properties"]
+    for properties in (resource_properties, part_properties, custody_properties):
+        assert "job_state" in properties
+        assert "spindle_speed" not in properties
+        assert properties["resource_state"]["minLength"] == 1
+    assert "part_quality" not in resource_properties
+    assert "part_quality" in part_properties
+    assert "part_quality" in custody_properties
+
+    for event_name in (
+        "resource_only_outline_event",
+        "part_outline_event",
+        "custody_outline_event",
+    ):
+        event_properties = definitions[event_name]["properties"]
+        assert event_properties["event_name"]["minLength"] == 1
+        assert "expected_start_state" not in event_properties
 
     prepared = {
         "llm_input": {
@@ -1294,6 +1503,34 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         prepared_recovery_request=prepared,
     )
     assert findings == []
+    ra_result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="printer@localhost", static_capabilities={}),
+        task=outside_domain,
+        recovery_snapshot={
+            "resource_state": "printing",
+            "job_state": "printing",
+        },
+        part_context={},
+        recovery_des_model={"state_variables": deepcopy(state_variables)},
+    )
+    assert ra_result["allowed"] is False
+    assert ra_result["constraint_code"] == "state_value_outside_ra_domain"
+
+    novel_resource_state = deepcopy(valid_task)
+    novel_resource_state["expected_end_state"]["resource_state"] = (
+        "authored_resource_state"
+    )
+    ra_result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="printer@localhost", static_capabilities={}),
+        task=novel_resource_state,
+        recovery_snapshot={
+            "resource_state": "printing",
+            "job_state": "printing",
+        },
+        part_context={},
+        recovery_des_model={"state_variables": deepcopy(state_variables)},
+    )
+    assert ra_result["allowed"] is True
 
     invalid_candidate = deepcopy(llm_task)
     invalid_candidate["expected_end_state"]["spindle_speed"] = 1
@@ -1303,6 +1540,7 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
         prepared_recovery_request=prepared,
     )
     assert findings[0]["constraint_code"] == "candidate_schema_violation"
+
 
     robot_state_variables = {
         "resource_state": {"scope": "resource", "domain": ["idle", "ready"]},
@@ -1383,6 +1621,445 @@ def test_ra_declared_candidate_fields_are_dynamic_and_undeclared_fields_reject()
     assert findings[0]["constraint_code"] == "candidate_schema_violation"
 
 
+def test_mixed_resource_candidate_schema_scopes_fields_by_resource_jid() -> None:
+    recovery_des_models = {
+        "robot@localhost": {
+            "state_variables": {
+                "resource_state": {"scope": "resource", "domain": ["idle"]},
+                "held_part": {"scope": "resource", "domain": [None, "P"]},
+                "part_state": {"scope": "part", "domain": ["ready"]},
+                "part_location": {
+                    "scope": "part",
+                    "domain": ["station", "robot@localhost"],
+                },
+            }
+        },
+        "printer@localhost": {
+            "state_variables": {
+                "resource_state": {
+                    "scope": "resource",
+                    "domain": ["printing", "paused"],
+                },
+                "job_state": {
+                    "scope": "resource",
+                    "domain": ["printing", "paused"],
+                },
+            }
+        },
+        "mill@localhost": {
+            "state_variables": {
+                "resource_state": {"scope": "resource", "domain": ["idle"]},
+                "part_quality": {
+                    "scope": "part",
+                    "domain": ["unknown", "accepted"],
+                },
+            }
+        },
+        "drill@localhost": {
+            "state_variables": {
+                "resource_state": {"scope": "resource", "domain": ["idle"]},
+                "part_quality": {
+                    "scope": "part",
+                    "domain": ["unknown", "accepted"],
+                },
+            }
+        },
+        "buffer@localhost": {
+            "state_variables": {
+                "resource_state": {"scope": "resource", "domain": ["idle"]},
+                "part_state": {"scope": "part", "domain": ["ready", "stored"]},
+                "part_location": {
+                    "scope": "part",
+                    "domain": ["station", "buffer@localhost"],
+                },
+            }
+        },
+        "single-slot-buffer@localhost": {
+            "state_variables": {
+                "resource_state": {"scope": "resource", "domain": ["idle"]},
+                "held_part": {"scope": "resource", "domain": [None, "P"]},
+                "part_state": {"scope": "part", "domain": ["ready", "stored"]},
+                "part_location": {
+                    "scope": "part",
+                    "domain": ["station", "single-slot-buffer@localhost"],
+                },
+            }
+        },
+    }
+    session_state = _session(parts={"P": "ready"})
+    session_state["recovery_des_models"] = deepcopy(recovery_des_models)
+    response_schema = multi_turn._get_response_schema(
+        "outline",
+        session_state,
+    )["schema"]
+    Draft202012Validator.check_schema(response_schema)
+    validator = Draft202012Validator(response_schema)
+    definitions = response_schema["$defs"]
+    outline_event = definitions["outline_event"]
+    assert outline_event["additionalProperties"] is False
+    assert set(outline_event["properties"]) == {
+        "outline_id",
+        "event_name",
+        "resource_jid",
+        "part_name",
+        "expected_end_state",
+        "rationale",
+    }
+    assert len(outline_event["anyOf"]) == 14
+    assert all(
+        set(branch["properties"]["expected_end_state"]) == {"$ref"}
+        for branch in outline_event["anyOf"]
+    )
+    assert len(json.dumps(response_schema, separators=(",", ":"))) < 6_000
+
+    def response(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {"thought": "propose one transition", "candidate_events": [candidate]}
+
+    def candidate(
+        resource_jid: str,
+        expected_end_state: dict[str, Any],
+        *,
+        part_name: str | None = None,
+    ) -> dict[str, Any]:
+        row = {
+            "outline_id": f"candidate_{resource_jid}",
+            "event_name": "authored_event",
+            "resource_jid": resource_jid,
+            "expected_end_state": deepcopy(expected_end_state),
+            "rationale": "Exercise the responsible ResourceAgent schema.",
+        }
+        if part_name is not None:
+            row["part_name"] = part_name
+        return row
+
+    valid_candidates = [
+        candidate(
+            "robot@localhost",
+            {
+                "resource_state": "idle",
+                "held_part": "P",
+                "part_state": "ready",
+                "part_location": "robot@localhost",
+            },
+            part_name="P",
+        ),
+        candidate(
+            "printer@localhost",
+            {"resource_state": "paused", "job_state": "paused"},
+        ),
+        candidate(
+            "mill@localhost",
+            {"resource_state": "idle", "part_quality": "accepted"},
+            part_name="P",
+        ),
+        candidate(
+            "drill@localhost",
+            {"resource_state": "idle", "part_quality": "accepted"},
+            part_name="P",
+        ),
+        candidate(
+            "buffer@localhost",
+            {
+                "resource_state": "idle",
+                "part_state": "stored",
+                "part_location": "buffer@localhost",
+            },
+            part_name="P",
+        ),
+        candidate(
+            "single-slot-buffer@localhost",
+            {
+                "resource_state": "idle",
+                "held_part": "P",
+                "part_state": "stored",
+                "part_location": "single-slot-buffer@localhost",
+            },
+            part_name="P",
+        ),
+    ]
+    resource_only_with_null = candidate(
+        "printer@localhost",
+        {"resource_state": "paused", "job_state": "paused"},
+    )
+    resource_only_with_null["part_name"] = None
+    valid_candidates.append(resource_only_with_null)
+    for row in valid_candidates:
+        assert list(validator.iter_errors(response(row))) == []
+
+    custody_state = {
+        "resource_state": "idle",
+        "held_part": "P",
+        "part_state": "ready",
+        "part_location": "station",
+    }
+    invalid_candidates = [
+        candidate(resource_jid, custody_state, part_name="P")
+        for resource_jid in (
+            "printer@localhost",
+            "mill@localhost",
+            "drill@localhost",
+            "buffer@localhost",
+        )
+    ]
+    invalid_candidates.extend(
+        [
+            candidate(
+                "robot@localhost",
+                {"resource_state": "idle", "job_state": "paused"},
+            ),
+            candidate("unknown@localhost", {"resource_state": "idle"}),
+        ]
+    )
+    for row in invalid_candidates:
+        assert list(validator.iter_errors(response(row)))
+
+
+def test_candidate_schema_tracks_latest_public_custody_declaration() -> None:
+    resource_jid = "buffer@localhost"
+    state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["idle"]},
+        "part_state": {"scope": "part", "domain": ["ready", "stored"]},
+        "part_location": {
+            "scope": "part",
+            "domain": ["station", resource_jid],
+        },
+    }
+    session_state = _session(parts={"P": "ready"})
+    session_state["recovery_des_models"] = {
+        resource_jid: {"state_variables": deepcopy(state_variables)}
+    }
+    candidate = {
+        "outline_id": "buffer_custody",
+        "event_name": "authored_event",
+        "resource_jid": resource_jid,
+        "part_name": "P",
+        "expected_end_state": {
+            "resource_state": "idle",
+            "held_part": "P",
+            "part_state": "stored",
+            "part_location": resource_jid,
+        },
+        "rationale": "Exercise the latest public RA declaration.",
+    }
+    response = {"thought": "propose one transition", "candidate_events": [candidate]}
+
+    buffer_schema = multi_turn._get_response_schema("outline", session_state)[
+        "schema"
+    ]
+    Draft202012Validator.check_schema(buffer_schema)
+    assert "held_part" not in repr(buffer_schema)
+    assert list(Draft202012Validator(buffer_schema).iter_errors(response))
+
+    session_state["recovery_des_models"][resource_jid]["state_variables"][
+        "held_part"
+    ] = {"scope": "resource", "domain": [None, "P"]}
+    single_slot_schema = multi_turn._get_response_schema(
+        "outline", session_state
+    )["schema"]
+    Draft202012Validator.check_schema(single_slot_schema)
+    assert "held_part" in repr(single_slot_schema)
+    assert list(Draft202012Validator(single_slot_schema).iter_errors(response)) == []
+
+
+def test_pa_rejects_held_part_for_ra_that_does_not_declare_it() -> None:
+    state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["idle"]},
+        "part_state": {"scope": "part", "domain": ["ready"]},
+        "part_location": {
+            "scope": "part",
+            "domain": ["station", "printer@localhost"],
+        },
+    }
+    recovery_des_model = {"state_variables": deepcopy(state_variables)}
+    prepared_recovery_request = {
+        "llm_input": {
+            "observed_runtime_state": {
+                "resources": [
+                    {
+                        "resource_jid": "printer@localhost",
+                        "resource_state": "idle",
+                        "held_part": None,
+                    }
+                ]
+            },
+            "part_facts": [
+                {
+                    "part_name": "P",
+                    "part_state": "ready",
+                    "part_location": "station",
+                }
+            ],
+            "goal_conditions": [],
+            "loaded_safety_rules": [],
+        },
+        "recovery_resources": {
+            "printer@localhost": {
+                "recovery_des_model": deepcopy(recovery_des_model)
+            }
+        },
+    }
+    session_state = _session(parts={"P": "ready"})
+    session_state["recovery_des_models"] = {
+        "printer@localhost": deepcopy(recovery_des_model)
+    }
+    session_state["symbolic_resources"] = {
+        "printer@localhost": {
+            "resource_jid": "printer@localhost",
+            "resource_state": "idle",
+            "held_part": None,
+        }
+    }
+    session_state["symbolic_parts"]["P"].update(
+        {"part_location": "station", "current_location": "station"}
+    )
+    agent_calls = {"ra": 0, "cca": 0}
+
+    class _ProductAgent:
+        jid = "product@localhost"
+        cca_jid = "cca@localhost"
+
+        async def request_recovery_outline_physical_validation(self, **_kwargs: Any) -> None:
+            agent_calls["ra"] += 1
+            pytest.fail("PA-rejected candidate must not contact RA")
+
+        async def request_recovery_outline_safety_validation(self, **_kwargs: Any) -> None:
+            agent_calls["cca"] += 1
+            pytest.fail("PA-rejected candidate must not contact CCA")
+
+    candidate_row = {
+        "outline_id": "printer_custody",
+        "event_name": "authored_event",
+        "resource_jid": "printer@localhost",
+        "part_name": "P",
+        "expected_end_state": {
+            "resource_state": "idle",
+            "held_part": "P",
+            "part_state": "ready",
+            "part_location": "printer@localhost",
+        },
+        "rationale": "This undeclared custody field must fail at PA.",
+    }
+    evaluation = asyncio.run(
+        multi_turn_outline_generation._validate_candidate_sequence(
+            candidate={"candidate_index": 0, "surface_events": [candidate_row]},
+            sequence_index=1,
+            action_horizon="1",
+            action_horizon_k=1,
+            session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request,
+            planner=SimpleNamespace(product_agent=_ProductAgent()),
+        )
+    )
+
+    assert evaluation["valid"] is False
+    assert agent_calls == {"ra": 0, "cca": 0}
+    assert [stage["status"] for stage in evaluation["validation_stages"]] == [
+        "rejected",
+        "skipped",
+        "skipped",
+        "skipped",
+    ]
+    finding = evaluation["validation_stages"][0]["findings"][0]
+    assert finding["constraint_code"] == "candidate_schema_violation"
+    assert finding["evidence"] == {
+        "field": "expected_end_state",
+        "unexpected": ["held_part"],
+    }
+
+
+def test_part_bound_non_custody_fields_do_not_require_robot_state_fields() -> None:
+    state_variables = {
+        "resource_state": {
+            "scope": "resource",
+            "domain": ["processing", "complete"],
+        },
+        "part_quality": {
+            "scope": "part",
+            "domain": ["unknown", "accepted"],
+        },
+    }
+    prepared = {
+        "llm_input": {
+            "observed_runtime_state": {
+                "resources": [
+                    {
+                        "resource_jid": "mill@localhost",
+                        "resource_state": "processing",
+                    }
+                ]
+            },
+            "part_facts": [
+                {
+                    "part_name": "P",
+                    "part_quality": "unknown",
+                }
+            ],
+        },
+        "recovery_resources": {
+            "mill@localhost": {
+                "recovery_des_model": {
+                    "state_variables": deepcopy(state_variables)
+                }
+            }
+        },
+    }
+    session_state = {
+        "recovery_des_models": {
+            "mill@localhost": {
+                "state_variables": deepcopy(state_variables)
+            }
+        },
+        "symbolic_resources": {
+            "mill@localhost": {
+                "resource_jid": "mill@localhost",
+                "resource_state": "processing",
+            }
+        },
+        "symbolic_parts": {
+            "P": {
+                "part_name": "P",
+                "part_quality": "unknown",
+            }
+        },
+    }
+    candidate = {
+        "outline_id": "inspect_p",
+        "event_name": "inspect_surface",
+        "resource_jid": "mill@localhost",
+        "part_name": "P",
+        "expected_end_state": {
+            "resource_state": "complete",
+            "part_quality": "accepted",
+        },
+        "rationale": "Record the exact RA-declared part result.",
+    }
+
+    validated, findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=candidate,
+        session_state=session_state,
+        prepared_recovery_request=prepared,
+    )
+
+    assert findings == []
+    assert validated is not None
+    assert validated["expected_start_state"] == {
+        "part_quality": "unknown",
+        "resource_state": "processing",
+    }
+    assert "held_part" not in validated["expected_start_state"]
+    result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(
+            jid="mill@localhost",
+            static_capabilities={"resource_type": "mill"},
+        ),
+        task=validated,
+        recovery_snapshot={"resource_state": "processing"},
+        part_context={"part_quality": "unknown"},
+        recovery_des_model={"state_variables": deepcopy(state_variables)},
+    )
+    assert result["allowed"] is True
+
+
 def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history_states() -> None:
     printer_jid = "printer@localhost"
     robot_jid = "robot@localhost"
@@ -1400,8 +2077,12 @@ def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history
         },
     }
     robot_state_variables = {
-        "resource_state": {"scope": "resource", "domain": ["failed", "idle"]},
+        "resource_state": {
+            "scope": "resource",
+            "domain": ["failed", None, "idle"],
+        },
         "held_part": {"scope": "resource", "domain": [None]},
+        "part_state": {"scope": "part", "domain": [None, "ready"]},
     }
     session_state = _session(parts={})
     session_state["recovery_des_models"] = {
@@ -1410,15 +2091,33 @@ def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history
             "events": [
                 {
                     "event_name": "private_event_token",
-                    "guards": {"job_state": {"equals": "private_guard_token"}},
-                    "updates": {"job_state": {"set": "private_update_token"}},
+                    "guards": {
+                        "resource_state": {"equals": "printing"},
+                        "job_state": {"equals": "private_guard_token"},
+                    },
+                    "updates": {
+                        "resource_state": {"set": "paused"},
+                        "job_state": {"set": "private_update_token"},
+                    },
                     "recovery_visible_steps": [
                         {"primitive": "private_program_step_token"}
                     ],
                 }
             ],
         },
-        robot_jid: {"state_variables": deepcopy(robot_state_variables)},
+        robot_jid: {
+            "state_variables": deepcopy(robot_state_variables),
+            "events": [
+                {
+                    "event_name": "inspect_part",
+                    "guards": {
+                        "resource_state": {"equals": "idle"},
+                        "part_state": {"equals": "ready"},
+                    },
+                    "updates": {"part_state": {"set": "assembled"}},
+                }
+            ],
+        },
     }
     session_state["symbolic_resources"] = {
         printer_jid: {
@@ -1520,12 +2219,26 @@ def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history
     assert "expected_end_state" not in accepted_history
     assert "job_state" not in accepted_history
     assert "held_part" not in accepted_history
-    assert "RA State Vocabulary" in prompt
+    assert "Resource States" in prompt
+    assert "Part States" in prompt
+    assert "Resource Fields" in prompt
+    assert "Vocabulary" not in prompt
+    assert "Resource Exact Fields" not in prompt
+    assert "Part Exact Fields" not in prompt
     assert (
         'job_state: {"domain": ["printing", "paused"], "scope": "resource"}'
         in prompt
     )
-    assert 'held_part: {"domain": [null], "scope": "resource"}' in prompt
+    vocabulary = prompt.split("Resource States", maxsplit=1)[1].split(
+        "Current DES State", maxsplit=1
+    )[0]
+    assert "held_part" not in vocabulary
+    assert 'resource_type="printer" | resource_jids=["printer@localhost"]' in prompt
+    assert 'resource_state: ["paused", "printing"]' in vocabulary
+    assert 'resource_type="robot" | resource_jids=["robot@localhost"]' in prompt
+    assert 'resource_state: ["idle"]' in vocabulary
+    assert 'part_state: ["assembled", "ready"]' in vocabulary
+    assert '"failed"' not in vocabulary
     assert 'resource_type="printer"' in prompt
     assert "supports_printer_job_control=true" in prompt
     assert 'example_families=["generic_recovery", "printer_job_control"]' in prompt
@@ -1542,7 +2255,9 @@ def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history
         "private_program_step_token",
     ):
         assert private_token not in prompt
-    assert "You may author a new `event_name`" in prompt
+    assert "`event_name` may be new" in prompt
+    candidate_rules = prompt.split("Recovery Candidate Rules", maxsplit=1)[1]
+    assert "Use `held_part` only in a candidate branch" in candidate_rules
 
     session_state["recovery_des_models"][printer_jid]["state_variables"][
         "job_state"
@@ -1557,6 +2272,238 @@ def test_candidate_prompt_renders_multiple_ra_state_vocabularies_without_history
     )
     assert "next_request_vocabulary_token" in next_prompt
     assert "next_request_vocabulary_token" not in prompt
+    session_state["recovery_des_models"][printer_jid]["events"][0]["updates"][
+        "resource_state"
+    ]["set"] = "next_modeled_state_token"
+    modeled_state_prompt = multi_turn_prompts.render_multi_turn_phase_prompt(
+        multi_turn_prompts.build_multi_turn_phase_prompt_input(
+            phase="outline",
+            llm_input=llm_input,
+            session_state=session_state,
+            recovery_resources=recovery_resources,
+        )
+    )
+    assert "next_modeled_state_token" in modeled_state_prompt
+    assert "next_modeled_state_token" not in next_prompt
+
+
+def test_candidate_prompt_conditionally_renders_ra_declared_custody_rule() -> None:
+    resource_jid = "buffer@localhost"
+    base_state_variables = {
+        "resource_state": {"scope": "resource", "domain": ["idle"]},
+        "part_state": {"scope": "part", "domain": ["ready", "stored"]},
+        "part_location": {
+            "scope": "part",
+            "domain": ["station", resource_jid],
+        },
+    }
+
+    def render(state_variables: dict[str, dict[str, Any]]) -> str:
+        descriptor = {"state_variables": deepcopy(state_variables), "events": []}
+        resource_row = {
+            "resource_jid": resource_jid,
+            "resource_state": "idle",
+        }
+        session_state = _session(parts={})
+        session_state["recovery_des_models"] = {resource_jid: descriptor}
+        session_state["symbolic_resources"] = {
+            resource_jid: deepcopy(resource_row)
+        }
+        return multi_turn_prompts.render_multi_turn_phase_prompt(
+            multi_turn_prompts.build_multi_turn_phase_prompt_input(
+                phase="outline",
+                llm_input={
+                    "observed_runtime_state": {
+                        "resources": [deepcopy(resource_row)]
+                    },
+                    "part_facts": [],
+                    "goal_conditions": [],
+                    "loaded_safety_rules": [],
+                },
+                session_state=session_state,
+                recovery_resources={
+                    resource_jid: {
+                        "resource_type": "buffer",
+                        "recovery_des_model": deepcopy(descriptor),
+                        "recovery_snapshot": deepcopy(resource_row),
+                    }
+                },
+            )
+        )
+
+    buffer_prompt = render(base_state_variables)
+    assert "held_part" not in buffer_prompt
+    assert "Without `part_name`, omit every part-scoped state field" in buffer_prompt
+
+    private_custody = deepcopy(base_state_variables)
+    private_custody["held_part"] = {
+        "scope": "resource",
+        "domain": [None],
+        "private": True,
+    }
+    assert "held_part" not in render(private_custody)
+
+    public_custody = deepcopy(base_state_variables)
+    public_custody["held_part"] = {
+        "scope": "resource",
+        "domain": [None, "P"],
+    }
+    custody_prompt = render(public_custody)
+    candidate_rules = custody_prompt.split(
+        "Recovery Candidate Rules", maxsplit=1
+    )[1]
+    assert "Use `held_part` only in a candidate branch" in candidate_rules
+    assert resource_jid not in candidate_rules
+
+
+def test_resource_state_vocabulary_groups_exact_resource_types() -> None:
+    recovery_resources = {
+        "ur5e@localhost": {"resource_type": "robot"},
+        "xarm6@localhost": {"resource_type": "robot"},
+        "printer@localhost": {"resource_type": "printer"},
+        "mill@localhost": {"resource_type": "milling"},
+        "drill@localhost": {"resource_type": "drilling"},
+    }
+    recovery_des_models = {
+        "ur5e@localhost": {
+            "state_variables": {"resource_state": {"domain": ["idle", "picked"]}},
+            "events": [
+                {
+                    "guards": {"resource_state": {"equals": "idle"}},
+                    "updates": {"resource_state": {"set": "picked"}},
+                }
+            ],
+        },
+        "xarm6@localhost": {
+            "state_variables": {"resource_state": {"domain": ["idle", "failed"]}},
+            "events": [
+                {
+                    "guards": {"resource_state": {"equals": "idle"}},
+                    "updates": {"resource_state": {"set": "picked"}},
+                }
+            ],
+        },
+        "printer@localhost": {
+            "state_variables": {"resource_state": {"domain": ["printing", "paused"]}},
+            "events": [
+                {
+                    "guards": {"resource_state": {"equals": "printing"}},
+                    "updates": {"resource_state": {"set": "paused"}},
+                }
+            ],
+        },
+        "mill@localhost": {
+            "state_variables": {"resource_state": {"domain": ["milling", "idle"]}},
+            "events": [
+                {
+                    "guards": {"resource_state": {"equals": "idle"}},
+                    "updates": {"resource_state": {"set": "milling"}},
+                }
+            ],
+        },
+        "drill@localhost": {
+            "state_variables": {"resource_state": {"domain": ["drilling", "idle"]}},
+            "events": [
+                {
+                    "guards": {"resource_state": {"equals": "idle"}},
+                    "updates": {"resource_state": {"set": "drilling"}},
+                }
+            ],
+        },
+    }
+
+    vocabulary = multi_turn_prompts._resource_state_vocabulary_summary(
+        recovery_resources=recovery_resources,
+        recovery_des_models=recovery_des_models,
+    )
+
+    assert vocabulary.count('resource_type="robot"') == 1
+    assert 'resource_jids=["ur5e@localhost", "xarm6@localhost"]' in vocabulary
+    assert 'resource_state: ["idle", "picked"]' in vocabulary
+    assert '"failed"' not in vocabulary
+    for resource_type in ("printer", "milling", "drilling"):
+        assert f'resource_type="{resource_type}"' in vocabulary
+
+
+def test_modeled_failed_state_is_visible_without_snapshot_domain_leakage() -> None:
+    recovery_resources = {"resource@localhost": {"resource_type": "robot"}}
+    descriptor = {
+        "state_variables": {
+            "resource_state": {"scope": "resource", "domain": ["failed", "idle"]}
+        },
+        "current_valuation": {"resource_state": "failed"},
+        "events": [
+            {
+                "guards": {"resource_state": {"equals": "failed"}},
+                "updates": {"resource_state": {"set": "idle"}},
+            }
+        ],
+    }
+
+    vocabulary = multi_turn_prompts._resource_state_vocabulary_summary(
+        recovery_resources=recovery_resources,
+        recovery_des_models={"resource@localhost": descriptor},
+    )
+
+    assert 'resource_state: ["failed", "idle"]' in vocabulary
+
+
+def test_observed_pose_preserves_unknown_part_state() -> None:
+    _resources, parts = multi_turn._recovery_proposal_initial_outline_rows(
+        prepared_recovery_request={
+            "llm_input": {
+                "part_facts": [
+                    {
+                        "part_name": "P1",
+                        "current_state": "unknown",
+                        "current_location": None,
+                        "current_holder_resource_jid": None,
+                        "observed_pose": {"x": 0.1, "y": 0.2, "z": 0.3},
+                    }
+                ]
+            }
+        }
+    )
+
+    assert parts["P1"]["current_state"] == "unknown"
+    assert parts["P1"]["part_state"] == "unknown"
+    assert parts["P1"]["observed_pose"] == {"x": 0.1, "y": 0.2, "z": 0.3}
+
+
+def test_part_state_vocabulary_combines_goals_and_modeled_ra_labels() -> None:
+    vocabulary = multi_turn_prompts._part_state_vocabulary_summary(
+        llm_input={
+            "part_facts": [{"part_name": "P1", "current_state": "observed"}],
+            "goal_conditions": [
+                {
+                    "entity_kind": "part",
+                    "entity": "P1",
+                    "field": "state",
+                    "expected": "assembled",
+                }
+            ],
+        },
+        recovery_resources={"resource@localhost": {"resource_type": "robot"}},
+        recovery_des_models={
+            "resource@localhost": {
+                "state_variables": {
+                    "part_state": {
+                        "scope": "part",
+                        "domain": [None, "in_gripper"],
+                    }
+                },
+                "events": [
+                    {
+                        "guards": {"part_state": {"equals": "ready"}},
+                        "updates": {"part_state": {"set": "in_gripper"}},
+                    }
+                ],
+            }
+        },
+    )
+
+    assert vocabulary == '- part_state: ["assembled", "in_gripper", "ready"]'
+    assert "observed" not in vocabulary
 
 
 def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:
@@ -1605,6 +2552,18 @@ def test_exact_goal_state_label_is_allowed_without_other_state_delta() -> None:
     assert findings == []
     assert grounded is not None
     assert grounded["expected_end_state"]["part_state"] == "restored"
+    ra_result = ResourceAgent.check_recovery_transition_feasibility(
+        SimpleNamespace(jid="resource@localhost", static_capabilities={}),
+        task=task,
+        recovery_snapshot={"resource_state": "idle", "held_part": None},
+        part_context={
+            "part_state": "faulted",
+            "part_location": "station",
+            "current_holder_resource_jid": None,
+        },
+        recovery_des_model=descriptor,
+    )
+    assert ra_result["allowed"] is True
 
     empty_state_label = deepcopy(task)
     empty_state_label["expected_end_state"]["part_state"] = ""
@@ -2537,7 +3496,7 @@ def test_empty_and_budget_overflow_generation_fail_before_agent_validation() -> 
                         start_state="faulted",
                         end_state="restored",
                     )
-                    for index in range(3)
+                    for index in range(6)
                 ],
             },
             prepared_recovery_request={},
@@ -3607,10 +4566,27 @@ def test_session_seed_preserves_pure_llm_and_enables_neurosymbolic_budget() -> N
             }
         }
     )
+    neuro_with_smaller_legacy_budget = multi_turn.build_multi_turn_session_seed(
+        {
+            "recovery_session": {
+                "recovery_selection_mode": "neurosymbolic",
+                "candidate_proposal_budget": 3,
+            }
+        }
+    )
 
     assert pure["candidate_count"] == 3
     assert pure["recovery_selection_mode"] == "pure_llm"
     assert neuro["recovery_selection_mode"] == "neurosymbolic"
     assert neuro["action_horizon"] == "1"
     assert neuro["candidate_count"] == "adaptive"
-    assert neuro["candidate_bound"] == 7
+    assert neuro["candidate_proposal_budget"] == 5
+    assert neuro["candidate_bound"] == 5
+    assert neuro_with_smaller_legacy_budget["candidate_proposal_budget"] == 5
+    assert neuro_with_smaller_legacy_budget["candidate_bound"] == 5
+    for configured_bound in (3, 7):
+        schema = multi_turn_prompts._outline_candidates_response_schema(
+            recovery_selection_mode="neurosymbolic",
+            candidate_bound=configured_bound,
+        )["schema"]
+        assert schema["properties"]["candidate_events"]["maxItems"] == 5

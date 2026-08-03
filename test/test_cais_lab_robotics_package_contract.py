@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+import yaml
 
 from cais_spade_llm.ui.ros2_processes import build_ros2_launch_cmds
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = ROOT / "ros2" / "cais_lab_robotics"
+
+
+def _realsense_launch_module():
+    path = PACKAGE_ROOT / "launch" / "realsense_camera.launch.py"
+    spec = importlib.util.spec_from_file_location("cais_realsense_camera_launch_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_cais_lab_robotics_is_an_ament_cmake_package() -> None:
@@ -60,6 +72,26 @@ def test_ui_launch_commands_use_cais_lab_robotics() -> None:
     assert ros2_launch_commands
     assert all("ros2 launch cais_lab_robotics " in command for command in ros2_launch_commands)
     assert all("ros2 launch xarm_gazebo " not in command for command in ros2_launch_commands)
+    assert "include_prusa_printers_and_assembly_board:=false" in commands[
+        "gazebo_dual_passive"
+    ]
+    assert "include_prusa_printers_and_assembly_board:=false" not in commands[
+        "gazebo_dual"
+    ]
+
+
+def test_realsense_serials_remain_strings_in_generated_parameter_yaml() -> None:
+    launch = _realsense_launch_module()
+
+    assert launch._serial_no_for_driver("048522073304") == "_048522073304"
+    assert launch._serial_no_for_driver("103422070738") == "_103422070738"
+    assert launch._serial_no_for_driver("") == ""
+    assert launch._serial_no_for_driver("_048522073304") == "_048522073304"
+    parsed = yaml.safe_load(
+        f"serial_no: {launch._serial_no_for_driver('048522073304')}"
+    )
+    assert parsed["serial_no"] == "_048522073304"
+    assert isinstance(parsed["serial_no"], str)
 
 
 def test_bootstrap_registers_package_without_overlaying_xarm_gazebo() -> None:

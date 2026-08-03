@@ -158,7 +158,9 @@ def build_ros2_launch_cmds(
         ),
         "gazebo_dual_passive": (
             "ros2 launch cais_lab_robotics xarm6_ur5e_gazebo.launch.py "
-            "passive:=true run_perception:=false include_assembly_parts:=true include_loose_parts:=false"
+            "passive:=true run_perception:=false include_assembly_parts:=true "
+            "include_loose_parts:=false "
+            "include_prusa_printers_and_assembly_board:=false"
         ),
         "gazebo_xarm6": "ros2 launch cais_lab_robotics xarm6_moveit_single_gazebo.launch.py",
         "gazebo_ur5e": "ros2 launch cais_lab_robotics ur5e_rg2_moveit_gazebo.launch.py",

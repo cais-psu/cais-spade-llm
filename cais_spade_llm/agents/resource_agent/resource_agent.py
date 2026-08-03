@@ -248,71 +248,7 @@ class ResourceAgent(LlmAgent):
             if isinstance(token, str) and str(token).strip()
         }
 
-    def _recovery_known_location_tokens(
-        self,
-        *,
-        recovery_des_model: dict[str, Any],
-        recovery_snapshot: dict[str, Any],
-        part_context: dict[str, Any],
-    ) -> set[str]:
-        """Return exact locations dynamically exposed by this Resource Agent."""
-        tokens: set[str] = set()
-        state_variables = dict(recovery_des_model.get("state_variables") or {})
-        for field_name in ("resource_location", "part_location"):
-            declaration = dict(state_variables.get(field_name) or {})
-            tokens.update(
-                str(value).strip()
-                for value in (declaration.get("domain") or [])
-                if isinstance(value, str) and str(value).strip()
-            )
-        for source in (
-            recovery_snapshot,
-        ):
-            for field_name in (
-                "named_poses",
-                "available_named_poses",
-                "reachability",
-                "reachable_locations",
-                "known_locations",
-            ):
-                tokens.update(
-                    ResourceAgent._recovery_string_tokens(source.get(field_name))
-                )
-            tokens.update(
-                str(token).strip()
-                for token in dict(source.get("staging_areas") or {})
-                if str(token).strip()
-            )
-            for field_name in (
-                "resource_location",
-                "current_location",
-                "location",
-            ):
-                value = source.get(field_name)
-                if isinstance(value, str) and value.strip():
-                    tokens.add(value.strip())
-        for field_name in (
-            "part_location",
-            "current_location",
-            "location",
-            "current_pose_ref",
-        ):
-            value = part_context.get(field_name)
-            if isinstance(value, str) and value.strip():
-                tokens.add(value.strip())
-        if isinstance(part_context.get("observed_pose"), dict):
-            tokens.add("observed_pose")
-        observed_store_as = str(part_context.get("observed_store_as") or "").strip()
-        if observed_store_as:
-            tokens.add(observed_store_as)
-        tokens.update(
-            str(alias).strip()
-            for alias in (part_context.get("observed_aliases") or [])
-            if str(alias or "").strip()
-        )
-        return tokens
-
-    def check_recovery_transition_feasibility(  # noqa: C901
+    def check_recovery_transition_feasibility(  # noqa: C901, PLR0912
         self,
         *,
         task: dict[str, Any],
@@ -387,6 +323,9 @@ class ResourceAgent(LlmAgent):
             }
 
         mismatches: list[dict[str, Any]] = []
+        current_valuation = dict(
+            recovery_des_model.get("current_valuation") or {}
+        )
         for field_name, expected in sorted(start_state.items()):
             scope = str(
                 dict(state_variables.get(field_name) or {}).get("scope")
@@ -398,6 +337,13 @@ class ResourceAgent(LlmAgent):
                 recovery_snapshot=recovery_snapshot,
                 part_context=part_context,
             )
+            if (
+                not available
+                and scope == "resource"
+                and field_name in current_valuation
+            ):
+                available = True
+                actual = deepcopy(current_valuation.get(field_name))
             if not available or actual != expected:
                 mismatches.append(
                     {
@@ -420,17 +366,144 @@ class ResourceAgent(LlmAgent):
                 "retriable": True,
             }
 
-        known_locations = ResourceAgent._recovery_known_location_tokens(
-            self,
-            recovery_des_model=recovery_des_model,
-            recovery_snapshot=recovery_snapshot,
-            part_context=part_context,
-        )
-        for field_name in ("resource_location", "part_location"):
-            value = end_state.get(field_name)
-            if value in (None, ""):
+        for field_name, value in sorted(end_state.items()):
+            if field_name in {
+                "resource_state",
+                "part_state",
+                "resource_location",
+                "part_location",
+                "held_part",
+            }:
                 continue
-            if not isinstance(value, str) or value not in known_locations:
+            declaration = dict(state_variables.get(field_name) or {})
+            if declaration.get("private") is True:
+                continue
+            domain = declaration.get("domain")
+            if isinstance(domain, (list, tuple)) and any(
+                type(domain_value) is type(value) and domain_value == value
+                for domain_value in domain
+            ):
+                continue
+            return {
+                "allowed": False,
+                "constraint_code": "state_value_outside_ra_domain",
+                "reason": (
+                    f"expected_end_state.{field_name} must use an exact value "
+                    "from the responsible ResourceAgent domain"
+                ),
+                "evidence": {
+                    "field": f"expected_end_state.{field_name}",
+                    "value": deepcopy(value),
+                    "domain": (
+                        deepcopy(domain)
+                        if isinstance(domain, (list, tuple))
+                        else []
+                    ),
+                },
+            }
+
+        start_held_part = start_state.get("held_part")
+        if "held_part" not in start_state and "held_part" in state_variables:
+            held_part_available, current_held_part = (
+                ResourceAgent._recovery_transition_state_value(
+                    field_name="held_part",
+                    scope="resource",
+                    recovery_snapshot=recovery_snapshot,
+                    part_context=part_context,
+                )
+            )
+            if held_part_available:
+                start_held_part = current_held_part
+        held_part_authored = "held_part" in end_state
+        end_held_part = (
+            end_state.get("held_part") if held_part_authored else start_held_part
+        )
+        custody_changed = held_part_authored and end_held_part != start_held_part
+        start_part_location = start_state.get("part_location")
+        if (
+            "part_location" not in start_state
+            and "part_location" in state_variables
+        ):
+            part_location_available, current_part_location = (
+                ResourceAgent._recovery_transition_state_value(
+                    field_name="part_location",
+                    scope="part",
+                    recovery_snapshot=recovery_snapshot,
+                    part_context=part_context,
+                )
+            )
+            if part_location_available:
+                start_part_location = current_part_location
+        end_part_location = (
+            end_state.get("part_location")
+            if "part_location" in end_state
+            else start_part_location
+        )
+        if held_part_authored and end_held_part == "":
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": "candidate held_part must use an exact part name or null",
+                "evidence": {
+                    "field": "expected_end_state.held_part",
+                    "held_part": "",
+                },
+                "invariant_id": "part_traceability",
+            }
+        if (
+            part_name
+            and custody_changed
+            and start_held_part == part_name
+            and end_held_part is None
+            and end_part_location in (None, "")
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": (
+                    "candidate releases part custody without an exact non-null "
+                    "part_location"
+                ),
+                "evidence": {
+                    "field": "expected_end_state.part_location",
+                    "part_name": part_name,
+                    "proposed_part_location": deepcopy(end_part_location),
+                },
+                "invariant_id": "part_traceability",
+            }
+
+        for field_name in ("resource_location", "part_location"):
+            if field_name not in end_state:
+                continue
+            value = end_state.get(field_name)
+            declaration = dict(state_variables.get(field_name) or {})
+            domain = declaration.get("domain")
+            value_is_declared = bool(
+                isinstance(domain, (list, tuple))
+                and any(
+                    type(domain_value) is type(value) and domain_value == value
+                    for domain_value in domain
+                )
+            )
+            preserves_current_part_location = False
+            if field_name == "part_location":
+                current_available, current_part_location = (
+                    ResourceAgent._recovery_transition_state_value(
+                        field_name="part_location",
+                        scope="part",
+                        recovery_snapshot=recovery_snapshot,
+                        part_context=part_context,
+                    )
+                )
+                preserves_current_part_location = bool(
+                    current_available
+                    and type(value) is type(current_part_location)
+                    and value == current_part_location
+                )
+            if (
+                value == ""
+                or (not value_is_declared and not preserves_current_part_location)
+            ):
                 return {
                     "allowed": False,
                     "constraint_code": "unknown_location_token",
@@ -473,8 +546,41 @@ class ResourceAgent(LlmAgent):
                 },
             }
 
-        end_held_part = end_state.get("held_part")
-        if part_name and end_held_part not in (None, "", part_name):
+        if not part_name and custody_changed:
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": "candidate changes held_part without binding part_name",
+                "evidence": {
+                    "field": "expected_end_state.held_part",
+                    "expected_start_held_part": deepcopy(start_held_part),
+                    "proposed_held_part": deepcopy(end_held_part),
+                },
+                "invariant_id": "part_traceability",
+            }
+        if (
+            part_name
+            and custody_changed
+            and start_held_part not in (None, part_name)
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "part_traceability_violation",
+                "reason": (
+                    "candidate custody change contradicts the bound part_name"
+                ),
+                "evidence": {
+                    "field": "expected_start_state.held_part",
+                    "held_part": deepcopy(start_held_part),
+                    "part_name": part_name,
+                },
+                "invariant_id": "part_traceability",
+            }
+        if (
+            part_name
+            and held_part_authored
+            and end_held_part not in (None, part_name)
+        ):
             return {
                 "allowed": False,
                 "constraint_code": "part_traceability_violation",
@@ -488,6 +594,29 @@ class ResourceAgent(LlmAgent):
                 },
                 "invariant_id": "part_traceability",
             }
+        carried_part_location = ""
+        carried_part_location_declared = False
+        if part_name:
+            from cais_spade_llm.resources.resource_profile import (
+                get_resource_profile_for_agent,
+                resource_snapshot_carried_entity_location,
+            )
+
+            carried_part_location = resource_snapshot_carried_entity_location(
+                resource_jid=str(getattr(self, "jid", "") or "").strip(),
+                snapshot=recovery_snapshot,
+                profile=get_resource_profile_for_agent(self),
+            )
+            part_location_declaration = dict(
+                state_variables.get("part_location") or {}
+            )
+            part_location_domain = part_location_declaration.get("domain")
+            carried_part_location_declared = bool(
+                str(part_location_declaration.get("scope") or "") == "part"
+                and isinstance(part_location_domain, list)
+                and carried_part_location in part_location_domain
+            )
+
         if part_name and end_held_part == part_name:
             current_holder_resource_jid = str(
                 part_context.get("current_holder_resource_jid") or ""
@@ -510,28 +639,8 @@ class ResourceAgent(LlmAgent):
                     },
                     "invariant_id": "part_traceability",
                 }
-            from cais_spade_llm.resources.resource_profile import (
-                get_resource_profile_for_agent,
-                resource_snapshot_carried_entity_location,
-            )
-
-            carried_part_location = resource_snapshot_carried_entity_location(
-                resource_jid=str(getattr(self, "jid", "") or "").strip(),
-                snapshot=recovery_snapshot,
-                profile=get_resource_profile_for_agent(self),
-            )
-            part_location_declaration = dict(
-                state_variables.get("part_location") or {}
-            )
-            part_location_domain = part_location_declaration.get("domain")
-            if (
-                str(part_location_declaration.get("scope") or "") != "part"
-                or not isinstance(part_location_domain, list)
-                or carried_part_location not in part_location_domain
-            ):
-                carried_part_location = ""
-            proposed_part_location = end_state.get("part_location")
-            if not carried_part_location:
+            proposed_part_location = end_part_location
+            if not carried_part_location or not carried_part_location_declared:
                 return {
                     "allowed": False,
                     "constraint_code": "part_traceability_violation",
@@ -561,6 +670,27 @@ class ResourceAgent(LlmAgent):
                     },
                     "invariant_id": "part_traceability",
                 }
+        elif (
+            part_name
+            and carried_part_location
+            and end_part_location == carried_part_location
+        ):
+            return {
+                "allowed": False,
+                "constraint_code": "held_part_location_mismatch",
+                "reason": (
+                    "part_location identifies ResourceAgent custody but "
+                    "held_part does not"
+                ),
+                "evidence": {
+                    "field": "expected_end_state.part_location",
+                    "proposed_part_location": deepcopy(
+                        end_part_location
+                    ),
+                    "expected_carried_part_location": None,
+                },
+                "invariant_id": "part_traceability",
+            }
 
         return {
             "allowed": True,

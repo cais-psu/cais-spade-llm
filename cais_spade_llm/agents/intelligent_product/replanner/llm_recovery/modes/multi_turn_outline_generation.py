@@ -1178,7 +1178,7 @@ def _recovery_event_instance_task(
             resource_row, "resource_state"
         )
         end_state["resource_state"] = deepcopy(start_state["resource_state"])
-    if "held_part" not in start_state:
+    if "held_part" in state_variables and "held_part" not in start_state:
         start_state["held_part"] = deepcopy(resource_row.get("held_part"))
         end_state["held_part"] = deepcopy(resource_row.get("held_part"))
     if part_name:
@@ -1496,9 +1496,6 @@ def _symbolically_enabled_recovery_event_instances(
                             task=task,
                             session_state=session_state,
                             prepared_recovery_request=prepared_recovery_request,
-                        ),
-                        "recovery_visible_steps": deepcopy(
-                            event.get("recovery_visible_steps") or []
                         ),
                     }
                 )
@@ -3823,7 +3820,10 @@ async def _handle_outline_incremental_candidates_validated(  # noqa: C901, PLR09
             }
             for row in candidate_sequences
         ]
-    candidate_bound = int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND)
+    candidate_bound = _shared._compute_enabled_candidate_bound(
+        session_state,
+        prepared_recovery_request,
+    )
     if candidate_count == "auto":
         count_is_valid = 1 <= len(candidate_sequences) <= candidate_bound
         count_error = (
@@ -4554,14 +4554,9 @@ def _attach_modeled_task_steps(
     turn_entry: dict[str, Any],
     instance_by_outline_id: dict[str, dict[str, Any]],
 ) -> None:
+    """Attach RobotTaskProgram provenance without exposing primitive data."""
+    del instance_by_outline_id
     selected_candidate = dict(turn_entry.get("selected_candidate_task") or {})
-    source_outline_id = str(selected_candidate.get("outline_id") or "").strip()
-    instance = dict(instance_by_outline_id.get(source_outline_id) or {})
-    modeled_task_steps = [
-        deepcopy(row)
-        for row in (instance.get("recovery_visible_steps") or [])
-        if isinstance(row, dict)
-    ]
     selected_candidate["candidate_source"] = "robot_task_program"
     turn_entry["selected_candidate_task"] = selected_candidate
 
@@ -4588,19 +4583,13 @@ def _attach_modeled_task_steps(
         if str(row.get("outline_id") or "").strip() not in selected_outline_ids:
             continue
         row["candidate_source"] = "robot_task_program"
-        if modeled_task_steps:
-            row["modeled_task_steps"] = deepcopy(modeled_task_steps)
     for key in ("selected_transition", "next_transition"):
         row = turn_entry.get(key)
         if isinstance(row, dict):
             row["candidate_source"] = "robot_task_program"
-            if modeled_task_steps:
-                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
     for row in turn_entry.get("selected_transition_sequence") or []:
         if isinstance(row, dict):
             row["candidate_source"] = "robot_task_program"
-            if modeled_task_steps:
-                row["modeled_task_steps"] = deepcopy(modeled_task_steps)
 
 
 async def _try_handle_modeled_continuation(
@@ -4646,9 +4635,9 @@ async def _try_handle_modeled_continuation(
         session_state["modeled_continuation_binding"] = {}
         return None
 
-    candidate_bound = max(
-        1,
-        int(session_state.get("candidate_bound") or _shared._DEFAULT_CANDIDATE_BOUND),
+    candidate_bound = _shared._compute_enabled_candidate_bound(
+        session_state,
+        prepared_recovery_request,
     )
     instances = instances[:candidate_bound]
     sequence_index = _shared._next_recovery_sequence_index(session_state)
