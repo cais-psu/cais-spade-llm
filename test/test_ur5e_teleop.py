@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -241,9 +242,9 @@ def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -
 
 
 def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None:
-    server = (
-        ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py"
-    ).read_text(encoding="utf-8")
+    server = (ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py").read_text(
+        encoding="utf-8"
+    )
     connect_method = server.split("    def _connect_rtde(self)", maxsplit=1)[1].split(
         "    def _reconnect_receive_locked", maxsplit=1
     )[0]
@@ -261,22 +262,22 @@ def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None
     assert "disabled for read-only calibration monitoring" in server
     assert 'body["action"] = ""' in server
     assert 'body["action_name"] = ""' in server
+    assert 'body["ros_domain_id"] = self.ros_domain_id' in server
+    assert 'body["process_id"] = os.getpid()' in server
     assert "self._next_status_heartbeat_monotonic = now + 1.0" in server
     assert 'state="stopped"' in server
     assert "UR5e RTDE trajectory server exited:" in server
 
 
 def test_rtde_result_timeout_stops_and_clears_goal_without_destroying_server() -> None:
-    server = (
-        ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py"
-    ).read_text(encoding="utf-8")
-    timeout_block = server.split(
-        'reason = "UR5e RTDE trajectory result timeout"', maxsplit=1
-    )[1].split("        except Exception as exc:", maxsplit=1)[0]
-
-    assert timeout_block.index("self._stop_motion()") < timeout_block.index(
-        "goal_handle.abort()"
+    server = (ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py").read_text(
+        encoding="utf-8"
     )
+    timeout_block = server.split('reason = "UR5e RTDE trajectory result timeout"', maxsplit=1)[
+        1
+    ].split("        except Exception as exc:", maxsplit=1)[0]
+
+    assert timeout_block.index("self._stop_motion()") < timeout_block.index("goal_handle.abort()")
     assert "self._clear_active_goal(goal_handle)" in timeout_block
     assert "self._action_server.destroy" not in timeout_block
 
@@ -292,9 +293,12 @@ def test_rtde_result_timeout_remains_blocked_until_server_status_is_repaired() -
 
     assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(status, now=110.0) is True
     assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(status, now=131.0) is True
-    assert SystemBridge._ur5e_rtde_result_timeout_requires_repair(
-        {**status, "updated_at": None}, now=131.0
-    ) is False
+    assert (
+        SystemBridge._ur5e_rtde_result_timeout_requires_repair(
+            {**status, "updated_at": None}, now=131.0
+        )
+        is False
+    )
 
 
 def test_named_position_readiness_reports_action_domain_and_repair_instruction() -> None:
@@ -310,6 +314,7 @@ def test_named_position_readiness_reports_action_domain_and_repair_instruction()
     bridge._ur5e_rtde_trajectory_status = lambda: {
         "state": "failed",
         "message": "UR5e RTDE trajectory result timeout",
+        "ros_domain_id": 42,
         "updated_at": 100.0,
     }
     bridge._wait_for_ros_action = lambda *_args, **_kwargs: pytest.fail(
@@ -339,6 +344,7 @@ def test_named_position_readiness_rejects_stale_rtde_status(
     bridge._ur5e_rtde_trajectory_status = lambda: {
         "state": "ready",
         "message": "UR5e RTDE trajectory server ready",
+        "ros_domain_id": 42,
         "rtde_control_connected": True,
         "updated_at": 100.0,
     }
@@ -352,6 +358,31 @@ def test_named_position_readiness_rejects_stale_rtde_status(
     assert ready is False
     assert "status is stale (5.0 s old)" in message
     assert "Click Repair Twin for dual robots" in message
+
+
+def test_named_position_readiness_rejects_another_domain_status() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _operation: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+        "source": "digital_twin:dual robots",
+    }
+    bridge._ur5e_rtde_trajectory_status = lambda: {
+        "state": "ready",
+        "message": "UR5e RTDE trajectory server ready",
+        "ros_domain_id": 43,
+        "rtde_control_connected": True,
+        "updated_at": time.time(),
+    }
+
+    ready, message = bridge.teleop_named_position_readiness("ur5e")
+
+    assert ready is False
+    assert "ROS_DOMAIN_ID=43" in message
+    assert "requested ROS_DOMAIN_ID=42" in message
 
 
 def test_dual_twin_waiting_robot_mirror_reports_repair_needed() -> None:
@@ -389,17 +420,13 @@ def test_dual_twin_waiting_robot_mirror_reports_repair_needed() -> None:
         },
     }
     bridge._digital_twin_sync_status_snapshot = lambda _target, _cfg, _now: sync_snapshot
-    bridge._digital_twin_dual_drag_markers_status_path = lambda _target: Path(
-        "/tmp/not-used.json"
-    )
+    bridge._digital_twin_dual_drag_markers_status_path = lambda _target: Path("/tmp/not-used.json")
     bridge._read_json_file = lambda _path: {}
     bridge._digital_twin_direction = lambda _target: "hardware -> gazebo"
     bridge._digital_twin_blocked_reason = lambda _target, _cfg: ""
     bridge._digital_twin_sim_mode = lambda _target: "monitor"
     bridge._digital_twin_allowed_sim_modes = lambda _cfg: ("monitor",)
-    bridge._digital_twin_hardware_domain_id = (
-        lambda _cfg, _robot, domains: domains["hardware"]
-    )
+    bridge._digital_twin_hardware_domain_id = lambda _cfg, _robot, domains: domains["hardware"]
     bridge._digital_twin_status_path = lambda _target: Path("/tmp/not-used.json")
 
     row = bridge.digital_twin_statuses()["dual robots"]
@@ -433,9 +460,7 @@ def test_repair_stop_is_scoped_and_contains_no_motion_operation() -> None:
     bridge._stop_teleop_server = lambda: events.append("stop:teleop")
     bridge._force_kill_digital_twin_helpers = lambda: events.append("stop:helpers")
     bridge._kill_stale_gazebo_helpers = lambda: events.append("stop:gazebo_helpers")
-    bridge._force_kill_gazebo_core = lambda reason="": events.append(
-        f"stop:gazebo_core:{reason}"
-    )
+    bridge._force_kill_gazebo_core = lambda reason="": events.append(f"stop:gazebo_core:{reason}")
 
     bridge._stop_digital_twin_stack({}, reason="digital_twin_repair")
 
@@ -475,9 +500,9 @@ def test_home2_is_removed_while_home_and_prusa_mk4_2_remain_unchanged() -> None:
 
 
 def test_ur5e_state_publisher_can_launch_without_moveit_or_rviz() -> None:
-    launch = (
-        ROOT / "ros2/cais_lab_robotics/launch/ur5e_rg2_hardware_moveit.launch.py"
-    ).read_text(encoding="utf-8")
+    launch = (ROOT / "ros2/cais_lab_robotics/launch/ur5e_rg2_hardware_moveit.launch.py").read_text(
+        encoding="utf-8"
+    )
 
     assert '"launch_move_group"' in launch
     assert "if not launch_move_group and not launch_rviz:" in launch
@@ -496,14 +521,14 @@ def test_control_page_bounds_ros_readiness_refresh_work() -> None:
     assert '"ready": False,' in control
     assert "def _update_named_position_go_enabled()" in control
     assert 'named_pos_readiness_state["ready"] = bool(ready)' in control
-    assert "and not named_pos_busy[\"moving\"]" in control
+    assert 'and not named_pos_busy["moving"]' in control
     assert 'if named_pos_readiness_state["busy"]:' in control
     assert 'active_target_refresh = {"busy": False}' in control
     assert 'if active_target_refresh["busy"]:' in control
     assert "await asyncio.to_thread(bridge.digital_twin_statuses)" in control
     assert "signature = _signature(rows)" in control
     assert "signature = _signature()" not in control
-    assert 'initial_robot = (' in control
+    assert "initial_robot = (" in control
     assert 'bridge.teleop_target("ur5e", "state")' in control
     assert 'f"Trajectory interface ({robot}): {message}"' in control
     assert "ui.timer(3.0, _refresh_named_position_readiness)" in control

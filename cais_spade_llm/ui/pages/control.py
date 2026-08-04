@@ -166,7 +166,7 @@ def render(bridge: SystemBridge) -> None:
         # ── Digital Twin Launch ──────────────────────────────────────
         _digital_twin_launch_section(bridge)
 
-        # ── Function Record / Replay ─────────────────────────────────
+        # ── Robot Functions ──────────────────────────────────────────
         _function_record_panel(bridge)
 
         # ── Interactive Teleop ───────────────────────────────────────
@@ -509,10 +509,6 @@ def _hardware_stack_row(
 # =====================================================================
 # Digital Twin Launch Section
 # =====================================================================
-# Remembers whether each target's Record/Replay expansion is open, so a section
-# rebuild (from the 3 s status timer) reopens it where the operator left it.
-_DT_RECORD_OPEN: dict[str, bool] = {}
-
 # Friendly display labels for the internal sim-mode keys.
 _DT_MODE_LABELS = {"monitor": "Monitor", "teach": "Teach"}
 
@@ -522,7 +518,7 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
         ui.label("digital twin launch").classes("text-lg font-semibold mb-1")
         ui.label(
             "Monitor = sim mirrors the live robot (hardware drives gazebo). "
-            "Use Function Record / Replay to capture, preview, and replay monitor-mode motions."
+            "Use Robot Functions to run exact functions and record required positions."
         ).classes("text-xs text-slate-500 mb-3")
 
         container = ui.column().classes("w-full gap-3")
@@ -830,7 +826,7 @@ def _digital_twin_row(
             if sync.get("last_error"):
                 ui.label(str(sync.get("last_error"))).classes("text-xs text-red-700")
 
-            # Record/replay controls live in the separate Function Record / Replay panel.
+            # Function execution and position recording live in Robot Functions.
 
 
 def _function_record_panel(bridge: SystemBridge) -> None:
@@ -846,7 +842,7 @@ def _function_record_panel(bridge: SystemBridge) -> None:
     )
 
     with ui.card().classes("w-full"):
-        ui.label("Function Record / Replay").classes("text-lg font-semibold mb-1")
+        ui.label("Robot Functions").classes("text-lg font-semibold mb-1")
         with ui.row().classes("items-center gap-2 w-full"):
             target_select = (
                 ui.select(
@@ -924,9 +920,13 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
 ) -> None:
     robots = bridge.digital_twin_target_robots(target)
     functions = bridge.digital_twin_function_names()
-    readiness: dict[str, object] = {"checked": False, "success": False}
-    preview: dict[str, object] = {}
-    pick_execution: dict[str, object] = {"busy": False, "active_function": ""}
+    execution: dict[str, object] = {
+        "busy": False,
+        "checking": False,
+        "active_function": "",
+        "selection_revision": 0,
+    }
+    pending_execution: dict[str, str] = {}
 
     def _current_client() -> Client | None:
         try:
@@ -966,48 +966,36 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             .props("dense")
             .classes("w-52")
         )
-        location_select = (
-            ui.select([], label="location / recording name").props("dense").classes("w-60")
+        origin_select = (
+            ui.select([], label="origin_resource_location").props("dense").classes("w-60")
+        )
+        destination_select = (
+            ui.select([], label="destination_location").props("dense").classes("w-60")
         )
         part_select = ui.select([], label="part_name").props("dense").classes("w-36")
 
     ui.label(
         "The function and step IDs come from the Python robot task registry. "
-        "Only steps marked Position required can be captured."
+        "Run executes only the exact selected function. This is manual commissioning and does "
+        "not advance ProductAgent/CCA workflow state."
     ).classes("text-xs text-slate-500")
-    info_label = ui.label("").classes("text-xs text-blue-700 font-semibold")
 
-    with ui.row().classes("items-center gap-3 w-full flex-wrap"):
-        readiness_label = ui.label("Capture readiness has not been checked.").classes(
-            "text-xs text-slate-500"
-        )
+    ui.label("Function Execution").classes("text-sm font-semibold mt-2")
+    execution_status = ui.label("Run readiness is checked automatically without motion.").classes(
+        "text-xs text-slate-500"
+    )
+    execution_controls = ui.row().classes("items-center gap-2 w-full flex-wrap")
 
-        async def _check_readiness() -> None:
-            _notify("Checking read-only capture readiness...", type="ongoing", timeout=1500)
-            result = await asyncio.to_thread(
-                bridge.digital_twin_function_capture_readiness,
-                target,
-                str(robot_select.value or ""),
-            )
-            readiness.clear()
-            readiness.update(result)
-            readiness["checked"] = True
-            _render_readiness()
-            _render_steps()
-            _notify(
-                "Capture is ready in Local Control."
-                if result.get("success")
-                else str(result.get("blocked_reason") or "Capture is not ready."),
-                type="positive" if result.get("success") else "warning",
-                timeout=5000,
-            )
+    ui.label("Function Definition").classes("text-sm font-semibold mt-2")
+    definition_summary = ui.label("").classes("text-xs text-slate-500")
+    definition_container = ui.column().classes("w-full gap-2")
 
-        ui.button("Check Capture Readiness", on_click=_check_readiness, icon="fact_check").props(
-            "outline dense"
-        )
-
-    steps_summary = ui.label("").classes("text-xs font-semibold")
-    steps_container = ui.column().classes("w-full gap-2")
+    recording_container = ui.column().classes("w-full gap-2 mt-2")
+    with recording_container:
+        ui.label("Position Recording").classes("text-sm font-semibold")
+        recording_summary = ui.label("").classes("text-xs font-semibold")
+        recording_info = ui.label("").classes("text-xs text-blue-700 font-semibold")
+        recording_steps = ui.column().classes("w-full gap-2")
 
     def _current_robot() -> str:
         return str(robot_select.value or "").strip()
@@ -1015,16 +1003,27 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     def _current_function() -> str:
         return str(function_select.value or "").strip()
 
-    def _current_name() -> str:
-        return str(location_select.value or "").strip()
+    def _current_origin_resource_location() -> str:
+        return str(origin_select.value or "").strip()
+
+    def _current_destination_location() -> str:
+        return str(destination_select.value or "").strip()
+
+    def _current_recording_name() -> str:
+        location_argument = bridge.digital_twin_function_location_argument(_current_function())
+        if location_argument == "origin_resource_location":
+            return _current_origin_resource_location()
+        if location_argument == "destination_location":
+            return _current_destination_location()
+        return "default"
 
     def _current_part_name() -> str:
         return str(part_select.value or "").strip()
 
     def _default_location(function_name: str, options: list[str]) -> str:
-        if function_name == "pick_approach" and "prusa-mk4-2" in options:
+        if function_name in {"pick_approach", "pick_grasp"} and "prusa-mk4-2" in options:
             return "prusa-mk4-2"
-        if function_name == "place_approach" and "assembly_board-v1" in options:
+        if function_name in {"place_approach", "place_insert"} and "assembly_board-v1" in options:
             return "assembly_board-v1"
         return options[0] if options else ""
 
@@ -1035,20 +1034,30 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             _current_robot(),
             function_name,
         )
-        if not location_argument:
-            options = ["default"]
-        location_select.options = options
-        if location_select.value not in options:
-            location_select.value = _default_location(function_name, options)
-        if location_argument:
-            location_select.enable()
-        else:
-            location_select.disable()
-        location_select.update()
+        selected = _default_location(function_name, options)
+        origin_select.options = options if location_argument == "origin_resource_location" else []
+        if origin_select.value not in origin_select.options:
+            origin_select.value = (
+                selected if location_argument == "origin_resource_location" else ""
+            )
+        origin_select.set_visibility(location_argument == "origin_resource_location")
+        origin_select.update()
+        destination_select.options = options if location_argument == "destination_location" else []
+        if destination_select.value not in destination_select.options:
+            destination_select.value = (
+                selected if location_argument == "destination_location" else ""
+            )
+        destination_select.set_visibility(location_argument == "destination_location")
+        destination_select.update()
 
     def _sync_part_name() -> None:
         function_name = _current_function()
-        visible = function_name in {"pick_approach", "place_approach"}
+        visible = function_name in {
+            "pick_approach",
+            "pick_grasp",
+            "place_approach",
+            "place_insert",
+        }
         try:
             options = bridge.digital_twin_function_part_options(function_name)
         except (OSError, TypeError, ValueError):
@@ -1060,374 +1069,405 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         part_select.set_visibility(visible)
         part_select.update()
 
-    def _render_readiness() -> None:
-        if not readiness.get("checked"):
-            readiness_label.set_text("Capture readiness has not been checked.")
-            readiness_label.classes(replace="text-xs text-slate-500")
-            return
-        values = [
-            f"RTDE receive: {'ready' if readiness.get('rtde_receive_connected') else 'not ready'}",
-            f"joints: {'fresh' if readiness.get('joint_states_fresh') else 'not fresh'}",
-            f"world → tool0: {'ready' if readiness.get('world_tool0_ready') else 'not ready'}",
-            (
-                "RTDE control: connected (not used for capture)"
-                if readiness.get("rtde_control_connected")
-                else "RTDE control: disconnected (allowed for capture)"
-            ),
-        ]
-        blocked_reason = str(readiness.get("blocked_reason") or "").strip()
-        if blocked_reason:
-            values.append(blocked_reason)
-        readiness_label.set_text(" | ".join(values))
-        readiness_label.classes(
-            replace=(
-                "text-xs text-green-700" if readiness.get("success") else "text-xs text-amber-700"
-            )
-        )
+    def _execution_kwargs() -> dict[str, str]:
+        return {
+            "origin_resource_location": _current_origin_resource_location(),
+            "destination_location": _current_destination_location(),
+            "part_name": _current_part_name(),
+        }
 
-    preview_container = ui.column().classes("w-full gap-1")
-
-    def _render_preview() -> None:
-        preview_container.clear()
-        preview_button.set_visibility(
-            _current_robot() == "ur5e" and _current_function() == "pick_approach"
-        )
-        if _current_part_name() and not pick_execution.get("busy"):
-            preview_button.enable()
-        else:
-            preview_button.disable()
-        if _current_function() != "pick_approach":
-            return
-        with preview_container:
-            if not preview:
-                ui.label(
-                    "Preview Target requests one fresh detection for part_name and computes "
-                    "the pick target without robot motion or RTDE control."
-                ).classes("text-xs text-slate-500")
-                return
-            world_pose = dict(preview.get("world_pose") or {})
-            confidence = preview.get("confidence")
-            age_sec = preview.get("age_sec")
-            confidence_text = (
-                f"{float(confidence) * 100.0:.1f}%" if confidence is not None else "unavailable"
-            )
-            age_text = f"{float(age_sec):.2f} s" if age_sec is not None else "unavailable"
-            pose_text = "unavailable"
-            if world_pose:
-                pose_text = (
-                    f"x={float(world_pose.get('x', 0.0)):.4f}, "
-                    f"y={float(world_pose.get('y', 0.0)):.4f}, "
-                    f"z={float(world_pose.get('z', 0.0)):.4f}"
-                )
-            travel_z = preview.get("travel_z")
-            pick_z = preview.get("pick_z")
-            travel_text = f"{float(travel_z):.4f}" if travel_z is not None else "unavailable"
-            pick_text = f"{float(pick_z):.4f}" if pick_z is not None else "unavailable"
-            ready_text = "ready" if preview.get("ready") else "blocked"
-            ui.label(
-                f"part_name={preview.get('part_name') or _current_part_name()} | "
-                f"confidence={confidence_text} | world {pose_text} | "
-                f"travel_z={travel_text} | pick_z={pick_text} | "
-                f"age={age_text} | readiness={ready_text}"
-            ).classes(
-                "text-xs text-green-700" if preview.get("ready") else "text-xs text-amber-700"
-            )
-            message = str(preview.get("blocked_reason") or preview.get("message") or "").strip()
-            if message:
-                ui.label(message).classes("text-xs text-slate-600")
-
-    async def _preview_target() -> None:
-        preview.clear()
-        _render_preview()
-        _notify("Requesting a fresh read-only pick target...", type="ongoing", timeout=1500)
-        result = await asyncio.to_thread(
-            bridge.digital_twin_preview_pick_target,
-            target,
+    def _selection_signature() -> tuple[str, str, str, str, str]:
+        return (
             _current_robot(),
+            _current_function(),
+            _current_origin_resource_location(),
+            _current_destination_location(),
             _current_part_name(),
         )
-        preview.update(result)
-        _render_preview()
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=6000,
-        )
 
-    preview_button = ui.button(
-        "Preview Target",
-        on_click=_preview_target,
-        icon="visibility",
-    ).props("outline dense")
-    preview_button.set_visibility(False)
+    def _confirmation_description(function_name: str, values: dict[str, str]) -> str:
+        part_name = values.get("part_name", "")
+        if function_name == "pick_approach":
+            return (
+                f"The UR5e will stage at {values.get('origin_resource_location', '')}, request "
+                f"a fresh {part_name} detection, open the gripper, move above the detected "
+                "gear, and descend to the computed pick target."
+            )
+        if function_name == "pick_grasp":
+            return f"The UR5e will grasp and lift {part_name}."
+        if function_name == "place_approach":
+            return (
+                f"The UR5e will move {part_name} to the saved approach and descend positions "
+                f"for {values.get('destination_location', '')}."
+            )
+        if function_name == "place_insert":
+            return (
+                f"The UR5e will release {part_name} at "
+                f"{values.get('destination_location', '')} and lift away. "
+                "Releasing the part is irreversible."
+            )
+        return "The UR5e will move to the configured home named position."
 
-    pick_execution_container = ui.column().classes("w-full gap-2")
-    with pick_execution_container:
-        ui.label(
-            "Preview Target is read-only. Running pick_approach requests a separate fresh "
-            "detection after the physical staging movement."
-        ).classes("text-xs text-amber-700")
-        pick_execution_status = ui.label("").classes("text-xs text-slate-500")
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            with ui.dialog() as pick_approach_confirm, ui.card().classes("gap-3 max-w-xl"):
-                ui.label("Run pick_approach on the physical UR5e?").classes("font-semibold")
-                pick_approach_confirm_text = ui.label("").classes("text-sm")
-                ui.label(
-                    "This commands physical robot motion. Clear the workcell and switch the "
-                    "pendant to Remote Control before continuing."
-                ).classes("text-xs text-red-700")
-                with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel", on_click=pick_approach_confirm.close).props("flat")
+    with execution_controls:
+        with ui.dialog() as run_confirm, ui.card().classes("gap-3 max-w-xl"):
+            run_confirm_title = ui.label("").classes("font-semibold")
+            run_confirm_text = ui.label("").classes("text-sm")
+            ui.label(
+                "This commands physical robot motion. Clear the workcell and switch the "
+                "pendant to Remote Control before continuing."
+            ).classes("text-xs text-red-700")
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=run_confirm.close).props("flat")
 
-                    async def _confirmed_pick_approach() -> None:
-                        client = _current_client()
-                        pick_approach_confirm.close()
-                        if pick_execution.get("busy"):
-                            _notify(
-                                "A UR5e pick operation is already running.",
-                                type="warning",
-                                client=client,
-                            )
-                            return
-                        pick_execution.update(
-                            {"busy": True, "active_function": "pick_approach"}
+                async def _confirmed_run() -> None:
+                    client = _current_client()
+                    run_confirm.close()
+                    if execution.get("busy") or not pending_execution:
+                        _notify(
+                            "Run readiness must complete before confirmation.",
+                            type="warning",
+                            client=client,
                         )
-                        pick_approach_button.props("loading")
-                        _render_pick_execution()
-                        try:
-                            result = await bridge.digital_twin_execute_pick_approach(
-                                target,
-                                _current_robot(),
-                                _current_name(),
-                                _current_part_name(),
-                                confirmed=True,
-                            )
-                            message = str(result.get("message") or "pick_approach completed.")
-                            pick_execution_status.set_text(message)
-                            pick_execution_status.classes(
+                        return
+                    values = dict(pending_execution)
+                    function_name = values.pop("function_name")
+                    robot = values.pop("robot")
+                    execution.update({"busy": True, "active_function": function_name})
+                    run_button.props("loading")
+                    _render_execution()
+                    _render_steps()
+                    try:
+                        result = await bridge.digital_twin_execute_robot_function(
+                            target,
+                            robot,
+                            function_name,
+                            origin_resource_location=values["origin_resource_location"],
+                            destination_location=values["destination_location"],
+                            part_name=values["part_name"],
+                            confirmed=True,
+                        )
+                        message = str(result.get("message") or f"{function_name} completed.")
+                        if _client_alive(execution_status):
+                            execution_status.set_text(message)
+                            execution_status.classes(
                                 replace=(
                                     "text-xs text-green-700"
                                     if result.get("success")
                                     else "text-xs text-red-700"
                                 )
                             )
-                            _notify(
-                                message,
-                                type="positive" if result.get("success") else "negative",
-                                timeout=7000,
-                                client=client,
-                            )
-                        except Exception as exc:
-                            log.exception("pick_approach UI execution failed")
-                            message = f"pick_approach failed: {exc}"
-                            pick_execution_status.set_text(message)
-                            pick_execution_status.classes(replace="text-xs text-red-700")
-                            _notify(message, type="negative", timeout=7000, client=client)
-                        finally:
-                            pick_execution.update({"busy": False, "active_function": ""})
-                            pick_approach_button.props(remove="loading")
-                            _render_pick_execution()
+                        _notify(
+                            message,
+                            type="positive" if result.get("success") else "negative",
+                            timeout=7000,
+                            client=client,
+                        )
+                    except Exception as exc:
+                        log.exception("%s UI execution failed", function_name)
+                        message = f"{function_name} failed: {exc}"
+                        if _client_alive(execution_status):
+                            execution_status.set_text(message)
+                            execution_status.classes(replace="text-xs text-red-700")
+                        _notify(message, type="negative", timeout=7000, client=client)
+                    finally:
+                        pending_execution.clear()
+                        execution.update({"busy": False, "active_function": ""})
+                        if _client_alive(run_button):
+                            run_button.props(remove="loading")
+                            _render_execution()
+                            _render_steps()
 
-                    ui.button(
-                        "Confirm Run pick_approach",
-                        on_click=_confirmed_pick_approach,
-                        icon="play_arrow",
-                    ).props("color=red")
-
-            def _open_pick_approach_confirmation() -> None:
-                pick_approach_confirm_text.set_text(
-                    f"The UR5e will move to {_current_name()}, request a fresh "
-                    f"{_current_part_name()} detection, open the gripper, move above the "
-                    "detected gear, and descend to the computed pick target."
-                )
-                pick_approach_confirm.open()
-
-            pick_approach_button = (
-                ui.button(
-                    "Run pick_approach",
-                    on_click=_open_pick_approach_confirmation,
+                confirm_run_button = ui.button(
+                    "Confirm Run",
+                    on_click=_confirmed_run,
                     icon="play_arrow",
+                ).props("color=red")
+
+        async def _check_run_readiness() -> None:
+            client = _current_client()
+            if execution.get("busy") or execution.get("checking"):
+                _notify("A robot function check or execution is already active.", type="warning")
+                return
+            function_name = _current_function()
+            robot = _current_robot()
+            values = _execution_kwargs()
+            selection_signature = _selection_signature()
+            selection_revision = int(execution["selection_revision"])
+            execution.update({"checking": True, "active_function": function_name})
+            pending_execution.clear()
+            run_button.props("loading")
+            _render_execution()
+            _render_steps()
+            execution_status.set_text(f"Checking {function_name} readiness without motion...")
+            execution_status.classes(replace="text-xs text-amber-700")
+            try:
+                result = await bridge.digital_twin_robot_function_execution_readiness(
+                    target,
+                    robot,
+                    function_name,
+                    origin_resource_location=values["origin_resource_location"],
+                    destination_location=values["destination_location"],
+                    part_name=values["part_name"],
                 )
-                .props("outline dense")
-                .classes("text-red-600")
-            )
-
-            with ui.dialog() as pick_grasp_confirm, ui.card().classes("gap-3 max-w-xl"):
-                ui.label("Run pick_grasp on the physical UR5e?").classes("font-semibold")
-                pick_grasp_confirm_text = ui.label("").classes("text-sm")
-                ui.label(
-                    "This closes the physical RG2 gripper and lifts the gear. Continue only "
-                    "after pick_approach has completed at the correct gear."
-                ).classes("text-xs text-red-700")
-                with ui.row().classes("justify-end gap-2 w-full"):
-                    ui.button("Cancel", on_click=pick_grasp_confirm.close).props("flat")
-
-                    async def _confirmed_pick_grasp() -> None:
-                        client = _current_client()
-                        pick_grasp_confirm.close()
-                        if pick_execution.get("busy"):
-                            _notify(
-                                "A UR5e pick operation is already running.",
-                                type="warning",
-                                client=client,
-                            )
-                            return
-                        pick_execution.update({"busy": True, "active_function": "pick_grasp"})
-                        pick_grasp_button.props("loading")
-                        _render_pick_execution()
-                        try:
-                            result = await bridge.digital_twin_execute_pick_grasp(
-                                target,
-                                _current_robot(),
-                                _current_name(),
-                                _current_part_name(),
-                                confirmed=True,
-                            )
-                            message = str(result.get("message") or "pick_grasp completed.")
-                            pick_execution_status.set_text(message)
-                            pick_execution_status.classes(
-                                replace=(
-                                    "text-xs text-green-700"
-                                    if result.get("success")
-                                    else "text-xs text-red-700"
-                                )
-                            )
-                            _notify(
-                                message,
-                                type="positive" if result.get("success") else "negative",
-                                timeout=7000,
-                                client=client,
-                            )
-                        except Exception as exc:
-                            log.exception("pick_grasp UI execution failed")
-                            message = f"pick_grasp failed: {exc}"
-                            pick_execution_status.set_text(message)
-                            pick_execution_status.classes(replace="text-xs text-red-700")
-                            _notify(message, type="negative", timeout=7000, client=client)
-                        finally:
-                            pick_execution.update({"busy": False, "active_function": ""})
-                            pick_grasp_button.props(remove="loading")
-                            _render_pick_execution()
-
-                    ui.button(
-                        "Confirm Run pick_grasp",
-                        on_click=_confirmed_pick_grasp,
-                        icon="pan_tool",
-                    ).props("color=red")
-
-            def _open_pick_grasp_confirmation() -> None:
-                pick_grasp_confirm_text.set_text(
-                    f"The UR5e will grasp and lift {_current_part_name()} from "
-                    f"{_current_name()}."
+                if not _client_alive(execution_status):
+                    return
+                if (
+                    selection_revision != int(execution["selection_revision"])
+                    or selection_signature != _selection_signature()
+                ):
+                    _notify(
+                        "Selection changed during readiness; the old result was discarded.",
+                        type="warning",
+                        client=client,
+                    )
+                    return
+                message = str(result.get("message") or "")
+                execution_status.set_text(message)
+                execution_status.classes(
+                    replace=(
+                        "text-xs text-green-700"
+                        if result.get("success")
+                        else "text-xs text-red-700"
+                    )
                 )
-                pick_grasp_confirm.open()
-
-            pick_grasp_button = (
-                ui.button(
-                    "Run pick_grasp",
-                    on_click=_open_pick_grasp_confirmation,
-                    icon="pan_tool",
+                if not result.get("success"):
+                    _notify(message, type="warning", timeout=7000, client=client)
+                    return
+                pending_execution.update(
+                    {
+                        "function_name": function_name,
+                        "robot": robot,
+                        **values,
+                    }
                 )
-                .props("outline dense")
-                .classes("text-red-600")
-            )
+                run_confirm_title.set_text(f"Run {function_name} on the physical {robot}?")
+                run_confirm_text.set_text(_confirmation_description(function_name, values))
+                confirm_run_button.set_text(f"Confirm Run {function_name}")
+                run_confirm.open()
+            except Exception as exc:
+                log.exception("%s readiness check failed", function_name)
+                message = f"{function_name} readiness check failed: {exc}"
+                if _client_alive(execution_status):
+                    execution_status.set_text(message)
+                    execution_status.classes(replace="text-xs text-red-700")
+                _notify(message, type="negative", timeout=7000, client=client)
+            finally:
+                execution.update({"checking": False, "active_function": ""})
+                if _client_alive(run_button):
+                    run_button.props(remove="loading")
+                    _render_execution()
+                    _render_steps()
 
-    def _render_pick_execution() -> None:
-        visible = _current_robot() == "ur5e" and _current_function() == "pick_approach"
-        pick_execution_container.set_visibility(visible)
-        if not visible:
-            return
-        enabled = bool(
-            _current_name() and _current_part_name() and not pick_execution.get("busy")
+        run_button = (
+            ui.button("Run", on_click=_check_run_readiness, icon="play_arrow")
+            .props("outline dense")
+            .classes("text-red-600")
         )
-        pick_approach_button.set_enabled(enabled)
-        pick_grasp_button.set_enabled(enabled)
-        if pick_execution.get("busy"):
-            preview_button.disable()
-            active_function = str(pick_execution.get("active_function") or "pick operation")
-            pick_execution_status.set_text(f"{active_function} is running...")
-            pick_execution_status.classes(replace="text-xs text-amber-700")
-        elif _current_part_name():
-            preview_button.enable()
+
+    def _render_execution() -> None:
+        function_name = _current_function()
+        run_button.set_text(f"Run {function_name}" if function_name else "Run")
+        controls_enabled = not execution.get("busy") and not execution.get("checking")
+        for selector in (
+            robot_select,
+            function_select,
+            origin_select,
+            destination_select,
+            part_select,
+        ):
+            selector.set_enabled(bool(controls_enabled))
+        needs_part = function_name in {
+            "pick_approach",
+            "pick_grasp",
+            "place_approach",
+            "place_insert",
+        }
+        location_argument = bridge.digital_twin_function_location_argument(function_name)
+        has_location = (
+            bool(_current_origin_resource_location())
+            if location_argument == "origin_resource_location"
+            else bool(_current_destination_location())
+            if location_argument == "destination_location"
+            else True
+        )
+        enabled = bool(
+            _current_robot() == "ur5e"
+            and function_name
+            and has_location
+            and (not needs_part or _current_part_name())
+            and controls_enabled
+        )
+        run_button.set_enabled(enabled)
 
     async def _capture_position(step_name: str, primitive: str) -> None:
-        result = await asyncio.to_thread(
-            bridge.digital_twin_capture_function_step,
-            target,
-            _current_robot(),
-            _current_function(),
-            _current_name(),
-            step_name,
-            primitive,
-            part_name=_current_part_name(),
+        client = _current_client()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        robot = _current_robot()
+        function_name = _current_function()
+        recording_name = _current_recording_name()
+        part_name = _current_part_name()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": f"{function_name}.{step_name} Capture Position",
+            }
         )
-        if isinstance(result.get("readiness"), dict):
-            readiness.clear()
-            readiness.update(dict(result["readiness"]))
-            readiness["checked"] = True
-            _render_readiness()
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=5000,
-        )
+        _render_execution()
         _render_steps()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_capture_function_step,
+                target,
+                robot,
+                function_name,
+                recording_name,
+                step_name,
+                primitive,
+                part_name=part_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=5000,
+                client=client,
+            )
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(run_button):
+                _render_execution()
+                _render_steps()
 
     async def _save_position(step_name: str) -> None:
-        result = await asyncio.to_thread(
-            bridge.digital_twin_save_function_position,
-            target,
-            _current_robot(),
-            _current_function(),
-            _current_name(),
-            step_name,
-            part_name=_current_part_name(),
+        client = _current_client()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        robot = _current_robot()
+        function_name = _current_function()
+        recording_name = _current_recording_name()
+        part_name = _current_part_name()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": f"{function_name}.{step_name} Save/Replace Position",
+            }
         )
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=5000,
-        )
+        _render_execution()
         _render_steps()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_save_function_position,
+                target,
+                robot,
+                function_name,
+                recording_name,
+                step_name,
+                part_name=part_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=5000,
+                client=client,
+            )
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(run_button):
+                _render_execution()
+                _render_steps()
 
     async def _clear_position(step_name: str) -> None:
-        result = await asyncio.to_thread(
-            bridge.digital_twin_clear_function_position,
-            target,
-            _current_robot(),
-            _current_function(),
-            _current_name(),
-            step_name,
-            part_name=_current_part_name(),
+        client = _current_client()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        robot = _current_robot()
+        function_name = _current_function()
+        recording_name = _current_recording_name()
+        part_name = _current_part_name()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": f"{function_name}.{step_name} Clear Position",
+            }
         )
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=4500,
-        )
+        _render_execution()
         _render_steps()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_clear_function_position,
+                target,
+                robot,
+                function_name,
+                recording_name,
+                step_name,
+                part_name=part_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=4500,
+                client=client,
+            )
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(run_button):
+                _render_execution()
+                _render_steps()
 
-    async def _test_position(step_name: str, *, client: Client | None = None) -> None:
-        result = await asyncio.to_thread(
-            bridge.digital_twin_test_function_position,
-            target,
-            _current_robot(),
-            _current_function(),
-            _current_name(),
-            step_name,
-            confirmed=True,
-            part_name=_current_part_name(),
+    async def _test_position(
+        step_name: str,
+        *,
+        robot: str,
+        function_name: str,
+        recording_name: str,
+        part_name: str,
+        client: Client | None = None,
+    ) -> None:
+        if execution.get("busy") or execution.get("checking"):
+            _notify(
+                "A robot function check or execution is already active.",
+                type="warning",
+                client=client,
+            )
+            return
+        execution.update(
+            {
+                "busy": True,
+                "active_function": f"{function_name}.{step_name} Test Position",
+            }
         )
-        _notify(
-            str(result.get("message") or ""),
-            type="positive" if result.get("success") else "warning",
-            timeout=6000,
-            client=client,
-        )
+        _render_execution()
+        _render_steps()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_test_function_position,
+                target,
+                robot,
+                function_name,
+                recording_name,
+                step_name,
+                confirmed=True,
+                part_name=part_name,
+            )
+            _notify(
+                str(result.get("message") or ""),
+                type="positive" if result.get("success") else "warning",
+                timeout=6000,
+                client=client,
+            )
+        finally:
+            execution.update({"busy": False, "active_function": ""})
+            if _client_alive(run_button):
+                _render_execution()
+                _render_steps()
 
     def _render_steps() -> None:
         function_name = _current_function()
-        name = _current_name()
+        name = _current_recording_name()
+        controls_blocked = bool(execution.get("busy") or execution.get("checking"))
         template = bridge.digital_twin_function_template(function_name)
         saved_steps = {
             str(step.get("step_name") or ""): dict(step)
@@ -1456,15 +1496,19 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             if str(step.get("step_name") or "") in saved_steps
             and saved_steps[str(step.get("step_name") or "")].get("pose")
         ]
+        recording_container.set_visibility(bool(required))
+        definition_summary.set_text(
+            f"{len(template)} ordered primitive step{'s' if len(template) != 1 else ''}."
+            if template
+            else "No function definition is available."
+        )
         if required and function_name == "place_approach":
-            steps_summary.set_text(
+            recording_summary.set_text(
                 f"{len(saved_required)}/{len(required)} positions saved for "
                 f"{name} / {_current_part_name()}"
             )
         elif required:
-            steps_summary.set_text(f"{len(saved_required)}/{len(required)} positions saved")
-        else:
-            steps_summary.set_text("No physical positions are required for this function.")
+            recording_summary.set_text(f"{len(saved_required)}/{len(required)} positions saved")
         info = bridge.digital_twin_function_info(
             target,
             _current_robot(),
@@ -1472,19 +1516,15 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             name,
             _current_part_name(),
         )
-        info_label.set_text(
-            f"Saving as: {info.get('display_path')}"
-            if info.get("success") and required
-            else "Function primitives are shown from the Python registry."
+        recording_info.set_text(
+            f"Saving as: {info.get('display_path')}" if info.get("success") and required else ""
         )
-        steps_container.clear()
-        with steps_container:
+        definition_container.clear()
+        with definition_container:
             for index, step in enumerate(template, start=1):
                 step_name = str(step.get("step_name") or "")
                 primitive = str(step.get("primitive") or "")
                 recordable = bool(step.get("recordable"))
-                saved = saved_steps.get(step_name)
-                buffered = buffered_steps.get(step_name)
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-2 w-full"):
                         ui.label(str(index)).classes("text-xs font-semibold w-5")
@@ -1493,13 +1533,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         ui.label(primitive).classes("text-sm text-blue-700")
                         ui.space()
                         if not recordable:
-                            ui.label("No position required").classes("text-xs text-slate-500")
-                        elif buffered:
-                            ui.label("Captured; not saved").classes("text-xs text-amber-700")
-                        elif saved:
-                            ui.label("Position saved").classes("text-xs text-green-700")
+                            ui.label("No recorded position required").classes(
+                                "text-xs text-slate-500"
+                            )
                         else:
-                            ui.label("Position required").classes("text-xs text-red-700")
+                            ui.label("Recorded position required").classes("text-xs text-blue-700")
                     ui.label(
                         f"Parameter source: {str(step.get('parameter_source') or '')}"
                     ).classes("text-xs text-slate-500")
@@ -1511,7 +1549,27 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             "Automatic physical staging from `origin_resource_location`; "
                             "no recording required."
                         ).classes("text-xs text-blue-700")
-                    position = buffered or saved
+
+        recording_steps.clear()
+        with recording_steps:
+            for step in required:
+                step_name = str(step.get("step_name") or "")
+                primitive = str(step.get("primitive") or "")
+                saved = saved_steps.get(step_name)
+                buffered = buffered_steps.get(step_name)
+                position = buffered or saved
+                with ui.card().classes("w-full p-3"):
+                    with ui.row().classes("items-center gap-2 w-full"):
+                        ui.label(step_name).classes("text-sm font-semibold")
+                        ui.label("→").classes("text-xs text-slate-400")
+                        ui.label(primitive).classes("text-sm text-blue-700")
+                        ui.space()
+                        if buffered:
+                            ui.label("Captured; not saved").classes("text-xs text-amber-700")
+                        elif saved:
+                            ui.label("Position saved").classes("text-xs text-green-700")
+                        else:
+                            ui.label("Position required").classes("text-xs text-red-700")
                     pose = dict(position.get("pose") or {}) if position else {}
                     if pose:
                         ui.label(
@@ -1524,8 +1582,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             f"{float(pose.get('qz', 0.0)):.4f}, "
                             f"{float(pose.get('qw', 1.0)):.4f})"
                         ).classes("text-xs text-slate-600")
-                    if not recordable:
-                        continue
                     with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
                         capture_button = ui.button(
                             "Capture Position",
@@ -1533,8 +1589,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             icon="fiber_manual_record",
                         ).props("flat dense")
                         if (
-                            _current_robot() != "ur5e"
-                            or not readiness.get("success")
+                            controls_blocked
+                            or _current_robot() != "ur5e"
                             or not name
                             or (function_name == "place_approach" and not _current_part_name())
                         ):
@@ -1544,7 +1600,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             on_click=lambda _e, s=step_name: _save_position(s),
                             icon="save",
                         ).props("flat dense")
-                        if not buffered:
+                        if controls_blocked or not buffered:
                             save_button.disable()
                         clear_button = (
                             ui.button(
@@ -1555,9 +1611,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             .props("flat dense")
                             .classes("text-red-600")
                         )
-                        if not buffered and not saved:
+                        if controls_blocked or (not buffered and not saved):
                             clear_button.disable()
 
+                        test_robot = _current_robot()
+                        test_part_name = _current_part_name()
                         with ui.dialog() as test_confirm, ui.card().classes("gap-3"):
                             ui.label(f"Test {function_name}.{step_name}?").classes("font-semibold")
                             ui.label(
@@ -1569,11 +1627,22 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
 
                                 async def _confirmed_test(
                                     step_name=step_name,
+                                    robot=test_robot,
+                                    function_name=function_name,
+                                    recording_name=name,
+                                    part_name=test_part_name,
                                     dialog=test_confirm,
                                 ) -> None:
                                     client = _current_client()
                                     dialog.close()
-                                    await _test_position(step_name, client=client)
+                                    await _test_position(
+                                        step_name,
+                                        robot=robot,
+                                        function_name=function_name,
+                                        recording_name=recording_name,
+                                        part_name=part_name,
+                                        client=client,
+                                    )
 
                                 ui.button(
                                     "Test Position",
@@ -1589,44 +1658,59 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             .props("outline dense")
                             .classes("text-red-600")
                         )
-                        if not saved:
+                        if controls_blocked or not saved:
                             test_button.disable()
 
+    def _reset_execution_status() -> None:
+        if _current_robot() == "ur5e":
+            message = "Run readiness is checked automatically without motion."
+            classes = "text-xs text-slate-500"
+        else:
+            message = "Physical robot function execution is implemented for ur5e first."
+            classes = "text-xs text-amber-700"
+        execution_status.set_text(message)
+        execution_status.classes(replace=classes)
+
     def _selection_changed(_e=None) -> None:
-        readiness.clear()
-        readiness.update({"checked": False, "success": False})
-        preview.clear()
-        _render_readiness()
+        execution["selection_revision"] = int(execution["selection_revision"]) + 1
+        pending_execution.clear()
+        run_confirm.close()
         _sync_location()
         _sync_part_name()
-        _render_preview()
-        _render_pick_execution()
+        _reset_execution_status()
+        _render_execution()
         _render_steps()
 
     def _part_name_changed(_e=None) -> None:
-        preview.clear()
-        _render_preview()
-        _render_pick_execution()
+        execution["selection_revision"] = int(execution["selection_revision"]) + 1
+        pending_execution.clear()
+        run_confirm.close()
+        _reset_execution_status()
+        _render_execution()
         _render_steps()
 
     def _location_changed(_e=None) -> None:
-        _render_pick_execution()
+        execution["selection_revision"] = int(execution["selection_revision"]) + 1
+        pending_execution.clear()
+        run_confirm.close()
+        _reset_execution_status()
+        _render_execution()
         _render_steps()
 
     robot_select.on_value_change(_selection_changed)
     function_select.on_value_change(_selection_changed)
-    location_select.on_value_change(_location_changed)
+    origin_select.on_value_change(_location_changed)
+    destination_select.on_value_change(_location_changed)
     part_select.on_value_change(_part_name_changed)
     _sync_location()
     _sync_part_name()
-    _render_readiness()
-    _render_preview()
-    _render_pick_execution()
+    _reset_execution_status()
+    _render_execution()
     _render_steps()
     ui.label(
-        "Capture is read-only and works with the UR5e pendant in Local Control. "
-        "Testing is a separate motion action and requires Physical mode, Remote Control, "
-        "and explicit confirmation."
+        "Capture checks read-only readiness automatically and works with the UR5e pendant in "
+        "Local Control. Run and Test Position are separate motion actions requiring Physical "
+        "mode, Remote Control, and explicit confirmation."
     ).classes("text-xs text-amber-700 mt-2")
 
 

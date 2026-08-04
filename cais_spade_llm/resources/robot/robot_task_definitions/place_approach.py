@@ -67,6 +67,16 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         },
         entry_guards=(
             RobotTaskGuard(
+                predicate="always",
+                message="place_approach requires pick_grasp to finish at picked.",
+                description="resource is picked after pick_grasp",
+                condition={
+                    "field": "resource_state",
+                    "operator": "equals",
+                    "value": "picked",
+                },
+            ),
+            RobotTaskGuard(
                 predicate="held_part_exists",
                 message="Cannot move-loaded without holding a part.",
                 description="held_part exists",

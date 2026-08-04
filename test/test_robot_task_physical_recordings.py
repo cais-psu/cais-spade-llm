@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,24 @@ from cais_spade_llm.resources.robot.robot_tasks import (
     robot_task_names,
     robot_task_registry,
 )
+
+
+def test_robot_agent_rejects_overlapping_registered_robot_tasks() -> None:
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+
+    agent = object.__new__(RobotAgent)
+    agent.agent_name = "ur5e"
+    agent._robot_motion_lock = threading.Lock()
+    agent._robot_motion_lock.acquire()
+    try:
+        result = asyncio.run(RobotAgent._execute_registered_robot_task(agent, "move_home"))
+    finally:
+        agent._robot_motion_lock.release()
+
+    assert result == {
+        "status": "blocked",
+        "content": "ur5e is already executing a robot task.",
+    }
 
 
 class _Logger:
@@ -129,8 +148,8 @@ def _recorded_step(step_name: str, pose: dict[str, float]) -> dict[str, Any]:
                 "child_frame_id": "tool0",
                 **deepcopy(pose),
             },
-            "joint_names": ["joint_1"],
-            "joint_positions": [0.0],
+            "joint_names": [f"joint_{index}" for index in range(6)],
+            "joint_positions": [0.0] * 6,
             "source": "hardware",
         },
     }
@@ -404,9 +423,7 @@ def test_physical_pick_staging_failure_stops_before_detection_or_gripper() -> No
     assert result["status"] == "failed"
     assert result["step"] == "pick_approach.move_to_origin_resource_location"
     assert "staging trajectory failed" in result["content"]
-    assert [primitive for primitive, _params in agent.primitive_calls] == [
-        "move_to_named_pose"
-    ]
+    assert [primitive for primitive, _params in agent.primitive_calls] == ["move_to_named_pose"]
     assert agent._current_state == "idle"
 
 
@@ -523,6 +540,7 @@ def test_physical_place_preflight_fails_before_any_primitive_for_missing_recordi
     monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
     agent = _Agent(execution_mode="physical")
     agent._held_part = "MG"
+    agent._current_state = "picked"
 
     result = asyncio.run(
         execute_robot_task(
@@ -548,6 +566,7 @@ def test_physical_place_does_not_fall_back_to_another_parts_recording(
     _place_recording(tmp_path, part_name="MG")
     agent = _Agent(execution_mode="physical")
     agent._held_part = "LG"
+    agent._current_state = "picked"
 
     result = asyncio.run(
         execute_robot_task(
@@ -575,6 +594,7 @@ def test_physical_place_rejects_payload_part_name_mismatch(
     path.write_text(json.dumps(payload), encoding="utf-8")
     agent = _Agent(execution_mode="physical")
     agent._held_part = "MG"
+    agent._current_state = "picked"
 
     result = asyncio.run(
         execute_robot_task(
@@ -639,6 +659,53 @@ def test_physical_place_threads_recorded_height_into_unrecorded_place_insert_lif
     assert agent.primitive_calls[-1][1]["dz"] == pytest.approx(above["z"] - target["z"])
 
 
+def test_place_approach_requires_exact_picked_resource_state() -> None:
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "at_pick"
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result == {
+        "status": "blocked",
+        "content": "place_approach requires pick_grasp to finish at picked.",
+    }
+    assert agent.primitive_calls == []
+
+
+def test_place_insert_requires_exact_positioned_resource_state() -> None:
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    agent._task_ctx = {
+        "destination_location": "assembly_board-v1",
+        "model_name": "gear_medium",
+        "travel_z": 0.69,
+    }
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result == {
+        "status": "blocked",
+        "content": "place_insert requires place_approach to finish at positioned.",
+    }
+    assert agent.primitive_calls == []
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_message"),
     [
@@ -654,6 +721,12 @@ def test_physical_place_threads_recorded_height_into_unrecorded_place_insert_lif
         (
             lambda steps: steps[0].update({"primitive": "move_relative"}),
             "physical position primitive mismatch",
+        ),
+        (
+            lambda steps: steps[0]["waypoint"].update(
+                {"joint_names": ["joint_0"], "joint_positions": [0.0]}
+            ),
+            "physical position joints are incomplete",
         ),
         (
             lambda steps: steps[0]["waypoint"]["pose"].update({"x": float("nan")})
@@ -691,6 +764,7 @@ def test_invalid_physical_recording_fails_closed_before_motion(
     )
     agent = _Agent(execution_mode="physical")
     agent._held_part = "MG"
+    agent._current_state = "picked"
 
     result = asyncio.run(
         execute_robot_task(
@@ -745,6 +819,7 @@ def test_xarm6_recordable_physical_task_fails_closed(
     monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
     agent = _Agent(execution_mode="physical", robot="xarm6")
     agent._held_part = "MG"
+    agent._current_state = "picked"
 
     result = asyncio.run(
         execute_robot_task(

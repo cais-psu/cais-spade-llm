@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -107,6 +108,7 @@ class RobotAgent(ResourceAgent):
         self._controller_prewarm_attempted = False
         self._controller_prewarm_lock = asyncio.Lock()
         self._controller_prewarm_task: asyncio.Task | None = None
+        self._robot_motion_lock = threading.Lock()
         self._primitive_catalog_cache: list | None = None
 
         self.logger.info(
@@ -225,7 +227,15 @@ class RobotAgent(ResourceAgent):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute a registry-backed robot task through the generic DSL runtime."""
-        return await execute_robot_task(self, task_name, **kwargs)
+        if not self._robot_motion_lock.acquire(blocking=False):
+            return {
+                "status": "blocked",
+                "content": f"{self.agent_name} is already executing a robot task.",
+            }
+        try:
+            return await execute_robot_task(self, task_name, **kwargs)
+        finally:
+            self._robot_motion_lock.release()
 
     @staticmethod
     def _normalize_failure_scenario_bindings(raw_bindings: Any) -> list[dict[str, Any]]:

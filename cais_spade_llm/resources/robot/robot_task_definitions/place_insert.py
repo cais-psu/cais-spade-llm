@@ -67,6 +67,16 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         },
         entry_guards=(
             RobotTaskGuard(
+                predicate="always",
+                message="place_insert requires place_approach to finish at positioned.",
+                description="resource is positioned after place_approach",
+                condition={
+                    "field": "resource_state",
+                    "operator": "equals",
+                    "value": "positioned",
+                },
+            ),
+            RobotTaskGuard(
                 predicate="held_part_exists",
                 message="No part currently held; run pick_grasp first.",
                 description="held_part exists",

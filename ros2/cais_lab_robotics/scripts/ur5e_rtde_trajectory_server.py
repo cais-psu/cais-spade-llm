@@ -696,6 +696,10 @@ class UR5eRTDETrajectoryServer(Node):
         super().__init__("ur5e_rtde_trajectory_server")
         self.robot_ip = str(robot_ip or "").strip()
         self.status_file = Path(status_file)
+        try:
+            self.ros_domain_id = int(os.environ.get("ROS_DOMAIN_ID", "0"))
+        except ValueError:
+            self.ros_domain_id = -1
         self.monitor_only = bool(monitor_only)
         self.control_factory = control_factory
         self.receive_factory = receive_factory
@@ -735,6 +739,8 @@ class UR5eRTDETrajectoryServer(Node):
         if self.monitor_only:
             body["action"] = ""
             body["action_name"] = ""
+        body["ros_domain_id"] = self.ros_domain_id
+        body["process_id"] = os.getpid()
         body["updated_at"] = time.time()
         _atomic_json_write(self.status_file, body)
 

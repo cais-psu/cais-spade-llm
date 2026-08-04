@@ -167,6 +167,9 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
     bridge = object.__new__(SystemBridge)
     bridge._digital_twin_function_steps = {}
     bridge._digital_twin_record_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_preflight_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
     bridge._robot_function_validate_request = lambda *_args: ({}, "")
     bridge._robot_function_capture_source = lambda *_args: "hardware"
     capture_index = {"value": 0}
@@ -196,6 +199,19 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
 
     bridge._robot_function_capture_snapshot = _capture_snapshot
 
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = "place_approach"
+    busy = bridge.digital_twin_capture_function_step(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "move_above_destination",
+        "move_cartesian",
+        part_name="MG",
+    )
+    bridge._ur5e_robot_function_execution_lock.release()
+    bridge._ur5e_robot_function_execution_active = None
     first = bridge.digital_twin_capture_function_step(
         "ur5e only",
         "ur5e",
@@ -215,6 +231,8 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
         part_name="MG",
     )
 
+    assert busy["success"] is False
+    assert busy["active_function"] == "place_approach"
     assert first["success"] is True
     assert second["success"] is True
     assert second["count"] == 1
@@ -263,8 +281,8 @@ def test_save_position_replaces_same_step_in_hardware_file(
                 },
                 "waypoint": {
                     "pose": {"frame_id": "world", "x": 0.5},
-                    "joint_names": ["joint_0"],
-                    "joint_positions": [1.0],
+                    "joint_names": [f"joint_{index}" for index in range(6)],
+                    "joint_positions": [1.0] * 6,
                     "source": "hardware",
                 },
             }
@@ -310,7 +328,13 @@ def test_save_position_replaces_same_step_in_hardware_file(
     assert bridge._digital_twin_function_steps == {}
 
 
-def test_test_position_uses_move_cartesian_and_requires_confirmation() -> None:
+def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.resources.robot import robot_task_runtime
+
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
     called: list[dict[str, float]] = []
     control_status = {
         "rtde_receive_connected": True,
@@ -326,42 +350,80 @@ def test_test_position_uses_move_cartesian_and_requires_confirmation() -> None:
 
     controller = _Controller()
     bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._robot_function_validate_request = lambda *_args: ({"hardware": ("ur5e",)}, "")
+    bridge._digital_twin_robot_function_target_error = lambda *_args: ""
+
+    def _motion_readiness(
+        _target: str,
+        _cfg: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        readiness = {
+            "rtde_receive_connected": True,
+            "joint_states_fresh": True,
+            "rtde_control_connected": control_status["rtde_control_connected"],
+            "trajectory_action_ready": control_status["rtde_control_connected"],
+        }
+        error = "" if control_status["rtde_control_connected"] else "Remote Control is not ready."
+        return readiness, error
+
+    bridge._digital_twin_ur5e_motion_readiness = _motion_readiness
     bridge.resource_agents = [
         SimpleNamespace(
             agent_name="ur5e",
             jid="ur5e@localhost",
             execution_mode="physical",
             _controller=controller,
+            _robot_motion_lock=threading.Lock(),
         )
     ]
-    bridge._robot_function_file_payload = lambda *_args, **_kwargs: (
-        {
-            "steps": [
-                {
-                    "step_name": "descend",
-                    "primitive": "move_cartesian",
-                    "params": {
-                        "x": 0.4,
-                        "y": 0.3,
-                        "z": 1.1,
-                        "qx": 0.0,
-                        "qy": 0.0,
-                        "qz": 0.0,
-                        "qw": 1.0,
-                    },
-                    "waypoint": {
-                        "pose": {
-                            "frame_id": "world",
-                            "child_frame_id": "tool0",
-                        }
-                    },
-                }
-            ]
-        },
-        Path("recording.json"),
-        "",
+
+    def _recorded_step(step_name: str, z: float) -> dict[str, object]:
+        params = {
+            "x": 0.4,
+            "y": 0.3,
+            "z": z,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        }
+        return {
+            "step_name": step_name,
+            "primitive": "move_cartesian",
+            "params": dict(params),
+            "capture_source": "hardware",
+            "waypoint": {
+                "pose": {
+                    "frame_id": "world",
+                    "child_frame_id": "tool0",
+                    **params,
+                },
+                "joint_names": [f"joint_{index}" for index in range(6)],
+                "joint_positions": [0.0] * 6,
+                "source": "hardware",
+            },
+        }
+
+    path = tmp_path / "ur5e/place_approach/assembly_board-v1__MG__hardware.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "robot": "ur5e",
+                "function_name": "place_approach",
+                "name": "assembly_board-v1",
+                "part_name": "MG",
+                "capture_source": "hardware",
+                "steps": [
+                    _recorded_step("move_above_destination", 1.2),
+                    _recorded_step("descend", 1.1),
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
-    bridge._read_json_file = lambda _path: dict(control_status)
 
     blocked = bridge.digital_twin_test_function_position(
         "ur5e only",
@@ -381,7 +443,32 @@ def test_test_position_uses_move_cartesian_and_requires_confirmation() -> None:
         part_name="MG",
     )
     control_status["rtde_control_connected"] = True
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = "pick_approach"
+    motion_busy = bridge.digital_twin_test_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "descend",
+        confirmed=True,
+        part_name="MG",
+    )
+    bridge._ur5e_robot_function_execution_lock.release()
+    bridge._ur5e_robot_function_execution_active = None
     moved = bridge.digital_twin_test_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "descend",
+        confirmed=True,
+        part_name="MG",
+    )
+    invalid_payload = json.loads(path.read_text(encoding="utf-8"))
+    invalid_payload["steps"].append(dict(invalid_payload["steps"][0]))
+    path.write_text(json.dumps(invalid_payload), encoding="utf-8")
+    invalid_recording = bridge.digital_twin_test_function_position(
         "ur5e only",
         "ur5e",
         "place_approach",
@@ -394,6 +481,10 @@ def test_test_position_uses_move_cartesian_and_requires_confirmation() -> None:
     assert blocked["success"] is False
     assert remote_control_blocked["success"] is False
     assert "Remote Control" in remote_control_blocked["message"]
+    assert motion_busy["success"] is False
+    assert motion_busy["active_function"] == "pick_approach"
+    assert invalid_recording["success"] is False
+    assert "duplicate physical position step_name" in invalid_recording["message"]
     assert called == [
         {
             "x": 0.4,
@@ -451,9 +542,15 @@ def test_predefined_ui_has_no_free_form_function_or_step_inputs() -> None:
     assert "step_1" not in source
     assert "Capture Position" in source
     assert "Save/Replace Position" in source
+    assert "Position Recording" in source
+    assert "recording_container.set_visibility(bool(required))" in source
+    assert 'label="origin_resource_location"' in source
+    assert 'label="destination_location"' in source
     assert 'label="part_name"' in source
-    assert "Preview Target" in source
-    assert "digital_twin_preview_pick_target" in source
+    assert "digital_twin_robot_function_execution_readiness" in source
+    assert "digital_twin_execute_robot_function" in source
+    assert "Preview Target" not in source
+    assert "Check Capture Readiness" not in source
 
 
 def test_place_recording_requires_exact_part_name_and_validates_payload(

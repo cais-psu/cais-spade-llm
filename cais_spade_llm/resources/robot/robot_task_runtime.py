@@ -175,8 +175,10 @@ def _recorded_joints_error(
     if (
         not isinstance(joint_names, list)
         or not isinstance(joint_positions, list)
-        or not joint_names
+        or len(joint_names) != 6
         or len(joint_names) != len(joint_positions)
+        or any(not str(name or "").strip() for name in joint_names)
+        or len({str(name).strip() for name in joint_names}) != len(joint_names)
     ):
         return f"physical position joints are incomplete for {task.name}.{step.id}"
     try:

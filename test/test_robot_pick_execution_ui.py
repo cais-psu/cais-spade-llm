@@ -1,4 +1,4 @@
-"""UI contract tests for confirmed physical UR5e pick execution."""
+"""UI contract tests for confirmed physical robot-function execution."""
 
 from __future__ import annotations
 
@@ -29,43 +29,75 @@ def _directly_awaited_bridge_methods() -> dict[str, ast.Call]:
     return calls
 
 
-def test_pick_controls_use_separate_explicit_confirmations() -> None:
+def test_robot_functions_panel_has_one_dynamic_run_control() -> None:
     source = inspect.getsource(control._predefined_function_record_body)
+    panel_source = inspect.getsource(control._function_record_panel)
 
-    assert '"Run pick_approach"' in source
-    assert '"Confirm Run pick_approach"' in source
-    assert '"Run pick_grasp"' in source
-    assert '"Confirm Run pick_grasp"' in source
-    assert "with ui.dialog() as pick_approach_confirm" in source
-    assert "with ui.dialog() as pick_grasp_confirm" in source
+    assert 'ui.label("Robot Functions")' in panel_source
+    assert 'ui.button("Run", on_click=_check_run_readiness' in source
+    assert 'run_button.set_text(f"Run {function_name}"' in source
+    assert "with ui.dialog() as run_confirm" in source
+    assert '"Confirm Run"' in source
+    assert '"Run pick_approach"' not in source
+    assert '"Run pick_grasp"' not in source
     assert "This commands physical robot motion." in source
-    assert "This closes the physical RG2 gripper and lifts the gear." in source
-    assert '"Move Above Part"' not in source
 
 
-def test_pick_handlers_directly_await_confirmed_bridge_apis() -> None:
+def test_run_checks_no_motion_readiness_before_confirmation_and_rechecks_on_execute() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
     calls = _directly_awaited_bridge_methods()
 
-    for method_name in (
-        "digital_twin_execute_pick_approach",
-        "digital_twin_execute_pick_grasp",
-    ):
-        call = calls[method_name]
-        confirmed = next(keyword.value for keyword in call.keywords if keyword.arg == "confirmed")
-        assert isinstance(confirmed, ast.Constant)
-        assert confirmed.value is True
-        assert len(call.args) == 4
+    readiness_call = calls["digital_twin_robot_function_execution_readiness"]
+    execute_call = calls["digital_twin_execute_robot_function"]
+    assert len(readiness_call.args) == 3
+    assert len(execute_call.args) == 3
+    assert {keyword.arg for keyword in readiness_call.keywords} == {
+        "origin_resource_location",
+        "destination_location",
+        "part_name",
+    }
+    confirmed = next(
+        keyword.value for keyword in execute_call.keywords if keyword.arg == "confirmed"
+    )
+    assert isinstance(confirmed, ast.Constant)
+    assert confirmed.value is True
+    assert source.index("digital_twin_robot_function_execution_readiness") < source.index(
+        "run_confirm.open()"
+    )
 
 
-def test_pick_ui_keeps_preview_read_only_and_disables_controls_while_busy() -> None:
+def test_exact_dynamic_selectors_cover_all_function_arguments() -> None:
     source = inspect.getsource(control._predefined_function_record_body)
 
-    assert "Preview Target is read-only." in source
-    assert "requests a separate fresh" in source
-    assert "pick_execution.get(\"busy\")" in source
-    assert "pick_approach_button.set_enabled(enabled)" in source
-    assert "pick_grasp_button.set_enabled(enabled)" in source
-    assert "preview_button.disable()" in source
+    assert 'label="origin_resource_location"' in source
+    assert 'label="destination_location"' in source
+    assert 'label="part_name"' in source
+    for function_name in (
+        "pick_approach",
+        "pick_grasp",
+        "place_approach",
+        "place_insert",
+    ):
+        assert f'"{function_name}"' in source
+    assert "origin_select.set_visibility" in source
+    assert "destination_select.set_visibility" in source
+    assert "part_select.set_visibility" in source
+    assert "Releasing the part is irreversible." in source
+
+
+def test_position_recording_is_conditional_and_capture_checks_readiness_automatically() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+
+    assert 'ui.label("Position Recording")' in source
+    assert "recording_container.set_visibility(bool(required))" in source
+    assert '"Capture Position"' in source
+    assert '"Save/Replace Position"' in source
+    assert '"Clear Position"' in source
+    assert '"Test Position"' in source
+    assert "digital_twin_capture_function_step" in source
+    assert "digital_twin_function_capture_readiness" not in source
+    assert "Check Capture Readiness" not in source
+    assert "Preview Target" not in source
 
 
 def test_pick_staging_step_explains_that_no_recording_is_required() -> None:
@@ -74,4 +106,3 @@ def test_pick_staging_step_explains_that_no_recording_is_required() -> None:
     assert 'step_name == "move_to_origin_resource_location"' in source
     assert "Automatic physical staging from `origin_resource_location`; " in source
     assert "no recording required." in source
-
