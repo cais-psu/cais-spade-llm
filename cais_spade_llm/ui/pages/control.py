@@ -1304,6 +1304,104 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             .classes("text-red-600")
         )
 
+        with ui.dialog() as mg_close_test_confirm, ui.card().classes("gap-3 max-w-xl"):
+            ui.label("Run MG Close Test on the physical ur5e?").classes("font-semibold")
+            ui.label(
+                "The arm will not move. The RG2 will close once to the retained MG position "
+                "(approximately 0.047), hold for three seconds while you inspect the smooth "
+                "hub contact, and reopen in all cases. The stock fingertips move downward "
+                "approximately 26.16 mm while closing."
+            ).classes("text-sm")
+            ui.label(
+                "Clear the gripper area and keep the UR5e at the completed pick_approach pose."
+            ).classes("text-xs text-red-700")
+            with ui.row().classes("justify-end gap-2 w-full"):
+                ui.button("Cancel", on_click=mg_close_test_confirm.close).props("flat")
+
+                async def _confirmed_mg_close_test() -> None:
+                    client = _current_client()
+                    mg_close_test_confirm.close()
+                    if execution.get("busy") or execution.get("checking"):
+                        _notify(
+                            "A robot function check or execution is already active.",
+                            type="warning",
+                            client=client,
+                        )
+                        return
+                    execution.update({"busy": True, "active_function": "MG Close Test"})
+                    mg_close_test_button.props("loading")
+                    _render_execution()
+                    _render_steps()
+                    execution_status.set_text(
+                        "Checking fresh physical readiness, then closing the RG2 without "
+                        "moving the arm."
+                    )
+                    execution_status.classes(replace="text-xs text-amber-700")
+                    try:
+                        result = await bridge.digital_twin_execute_mg_close_test(
+                            target,
+                            _current_robot(),
+                            _current_origin_resource_location(),
+                            confirmed=True,
+                        )
+                        message = str(result.get("message") or "MG Close Test completed.")
+                        if _client_alive(execution_status):
+                            execution_status.set_text(message)
+                            execution_status.classes(
+                                replace=(
+                                    "text-xs text-green-700"
+                                    if result.get("success")
+                                    else "text-xs text-red-700"
+                                )
+                            )
+                        _notify(
+                            message,
+                            type="positive" if result.get("success") else "negative",
+                            timeout=7000,
+                            client=client,
+                        )
+                    except Exception as exc:
+                        log.exception("MG Close Test UI execution failed")
+                        message = f"MG Close Test failed: {exc}"
+                        if _client_alive(execution_status):
+                            execution_status.set_text(message)
+                            execution_status.classes(replace="text-xs text-red-700")
+                        _notify(message, type="negative", timeout=7000, client=client)
+                    finally:
+                        execution.update({"busy": False, "active_function": ""})
+                        if _client_alive(mg_close_test_button):
+                            mg_close_test_button.props(remove="loading")
+                            _render_execution()
+                            _render_steps()
+
+                ui.button(
+                    "Confirm MG Close Test",
+                    on_click=_confirmed_mg_close_test,
+                    icon="compare_arrows",
+                ).props("color=red")
+
+        def _open_mg_close_test_confirm() -> None:
+            if execution.get("busy") or execution.get("checking"):
+                _notify("A robot function check or execution is already active.", type="warning")
+                return
+            mg_close_test_confirm.open()
+
+        mg_close_test_button = (
+            ui.button(
+                "MG Close Test",
+                on_click=_open_mg_close_test_confirm,
+                icon="compare_arrows",
+            )
+            .props("outline dense")
+            .classes("text-amber-700")
+        )
+        mg_close_test_help = ui.label(
+            "Start with the configured MG +1 mm. If the closed pads are still low, let the "
+            "test reopen, jog Z+ by 1 mm, and repeat. Persist MG: 0.002 only if that second "
+            "millimeter is required. If more than 2 mm is needed, do not run pick_grasp; "
+            "inspect the mount, table plane, fingertips, and MG orientation."
+        ).classes("text-xs text-amber-700")
+
     def _render_execution() -> None:
         function_name = _current_function()
         run_button.set_text(f"Run {function_name}" if function_name else "Run")
@@ -1342,6 +1440,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             and controls_enabled
         )
         run_button.set_enabled(enabled)
+        show_mg_close_test = bool(
+            _current_robot() == "ur5e"
+            and _current_part_name() == "MG"
+            and function_name in {"pick_approach", "pick_grasp"}
+        )
+        mg_close_test_button.set_visibility(show_mg_close_test)
+        mg_close_test_help.set_visibility(show_mg_close_test)
+        mg_close_test_button.set_enabled(
+            bool(show_mg_close_test and has_location and controls_enabled)
+        )
 
     async def _capture_position(step_name: str, primitive: str) -> None:
         client = _current_client()

@@ -17,6 +17,7 @@ from cais_spade_llm.resources.robot import gazebo_pick_place_controller
 from cais_spade_llm.resources.robot.hardware_pick_place_controller import (
     UR5eHardwareController,
 )
+from cais_spade_llm.resources.robot.robot_task_runtime import _normalize_pick_targets
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_GEOMETRY = ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
@@ -44,7 +45,13 @@ def _controller_double() -> UR5eHardwareController:
     controller.pick_tcp_z_bias_min_m = 0.003
     controller.pick_tcp_z_bias_max_m = 0.020
     controller.min_pick_tcp_z_m = 1.070
-    controller.pick_z_adjustments_m = {}
+    controller.pick_z_adjustments_m = {
+        key: float(value)
+        for key, value in controller_config["parts_tuning"][
+            "pick_z_adjustments_m"
+        ].items()
+    }
+    controller.pick_tool0_z_adjustment_m = 0.005
     controller.approach_height_m = 0.200
     controller._last_failure_message = ""
     controller.init = lambda: True
@@ -151,12 +158,56 @@ def test_physical_mg_target_uses_stl_hub_and_never_gazebo_footprint(
     assert result["success"] is True
     assert result["use_global_min_pick_tcp_z"] is False
     assert result["effective_min_pick_tcp_z"] is None
-    assert result["pick_tcp_z"] == pytest.approx(table_surface_z_m + 0.02065, abs=2e-6)
-    assert result["pick_z"] == pytest.approx(table_surface_z_m + 0.23865, abs=2e-6)
+    assert result["pick_tcp_z"] == pytest.approx(table_surface_z_m + 0.02165, abs=2e-6)
+    assert result["pick_z"] == pytest.approx(table_surface_z_m + 0.24465, abs=2e-6)
+    assert result["pick_z_adjustment_m"] == pytest.approx(0.001)
+    assert result["pick_tool0_z_adjustment_m"] == pytest.approx(0.005)
     assert result["grasp_width_m"] == pytest.approx(0.028, abs=2e-6)
     assert result["gripper_close_position"] == pytest.approx(0.047, abs=2e-6)
-    assert result["finger_tooth_clearance_m"] == pytest.approx(0.002, abs=2e-6)
-    assert result["finger_hub_overlap_m"] == pytest.approx(0.008, abs=2e-6)
+    assert result["finger_tooth_clearance_m"] == pytest.approx(0.003, abs=2e-6)
+    assert result["finger_hub_overlap_m"] == pytest.approx(0.007, abs=2e-6)
+    assert result["open_inner_pad_lower_z_from_tcp_m"] == pytest.approx(0.01751)
+    assert result["closed_inner_pad_lower_z_from_tcp_m"] == pytest.approx(-0.00865)
+    assert result["predicted_closing_z_displacement_m"] == pytest.approx(
+        -0.02616,
+        abs=5e-6,
+    )
+    assert _normalize_pick_targets(result)["target_pose"]["z"] == pytest.approx(
+        result["pick_z"]
+    )
+
+
+def test_pick_tool0_z_adjustment_is_validated_and_enabled_only_for_real_ur5e() -> None:
+    manifest = json.loads(UR5E_MANIFEST.read_text(encoding="utf-8"))
+    gazebo_motion = manifest["ur5e"]["gazebo"]["controller"]["motion"]
+    real_controller_config = manifest["ur5e"]["real"]["controller"]
+
+    assert "pick_tool0_z_adjustment_m" not in gazebo_motion
+    assert real_controller_config["motion"]["pick_tool0_z_adjustment_m"] == pytest.approx(
+        0.005
+    )
+
+    gazebo_controller = gazebo_pick_place_controller.UR5eGazeboController(
+        controller_config=manifest["ur5e"]["gazebo"]["controller"]
+    )
+    assert gazebo_controller._config_valid is True
+    assert gazebo_controller.pick_tool0_z_adjustment_m == pytest.approx(0.0)
+
+    controller = UR5eHardwareController(controller_config=real_controller_config)
+    assert controller._config_valid is True
+    assert controller.pick_tool0_z_adjustment_m == pytest.approx(0.005)
+
+    for invalid_value in ("not-a-number", float("inf")):
+        invalid_controller_config = json.loads(json.dumps(real_controller_config))
+        invalid_controller_config["motion"]["pick_tool0_z_adjustment_m"] = invalid_value
+        invalid_controller = UR5eHardwareController(
+            controller_config=invalid_controller_config
+        )
+        assert invalid_controller._config_valid is False
+        assert (
+            "controller.motion.pick_tool0_z_adjustment_m"
+            in invalid_controller._config_errors
+        )
 
 
 def test_physical_mg_requires_actual_stl_and_rejects_unsafe_height_override() -> None:
@@ -191,5 +242,70 @@ def test_rg2_width_mapping_produces_expected_action_position() -> None:
     assert readiness["success"] is True
     assert readiness["grasp_width_m"] == pytest.approx(0.028, abs=2e-6)
     assert readiness["gripper_close_position"] == pytest.approx(0.047, abs=2e-6)
-    assert readiness["finger_tooth_clearance_m"] >= 0.002 - 1e-9
-    assert readiness["finger_hub_overlap_m"] >= 0.006
+    assert readiness["open_gripper_position"] == pytest.approx(0.11)
+    assert readiness["predicted_closing_z_displacement_m"] == pytest.approx(
+        -0.02616,
+        abs=5e-6,
+    )
+    assert readiness["finger_tooth_clearance_m"] == pytest.approx(0.003, abs=2e-6)
+    assert readiness["finger_hub_overlap_m"] == pytest.approx(0.007, abs=2e-6)
+
+
+def test_combined_mount_and_mg_adjustments_raise_only_the_arm_target_by_6_mm() -> None:
+    controller = _controller_double()
+    corrected = controller.compute_pick_targets(
+        part_name="MG",
+        product_geometry=_actual_mg_geometry(),
+        detected_parts=[_physical_detection()],
+    )
+    controller.pick_z_adjustments_m = {}
+    controller.pick_tool0_z_adjustment_m = 0.0
+    restored_baseline = controller.compute_pick_targets(
+        part_name="MG",
+        product_geometry=_actual_mg_geometry(),
+        detected_parts=[_physical_detection()],
+    )
+
+    assert corrected["success"] is True
+    assert restored_baseline["success"] is True
+    assert corrected["pick_z"] - restored_baseline["pick_z"] == pytest.approx(0.006)
+    assert corrected["gripper_close_position"] == pytest.approx(
+        restored_baseline["gripper_close_position"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "message"),
+    [
+        ("open_gripper_position", 0.10, "position 0.11"),
+        ("mg_gripper_close_position", 0.05, "approximately 0.047"),
+        (
+            "open_inner_pad_lower_z_from_tcp_m",
+            0.010,
+            "approximately -0.02616 m",
+        ),
+    ],
+)
+def test_mg_readiness_rejects_mismatched_fixed_rg2_calibration(
+    field_name: str,
+    invalid_value: float,
+    message: str,
+) -> None:
+    controller = _controller_double()
+    controller.controller_config = json.loads(json.dumps(controller.controller_config))
+    controller.controller_config["gripper"]["stock_fingertip"][field_name] = invalid_value
+
+    result = controller._physical_stl_pick_readiness(_actual_mg_geometry())
+
+    assert result["success"] is False
+    assert message in result["message"]
+
+
+def test_mg_adjustment_above_2_mm_fails_readiness() -> None:
+    controller = _controller_double()
+    controller.pick_z_adjustments_m["MG"] = 0.003
+
+    result = controller._physical_stl_pick_readiness(_actual_mg_geometry())
+
+    assert result["success"] is False
+    assert "between 0.000 and 0.002 m" in result["message"]

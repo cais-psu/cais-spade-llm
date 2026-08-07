@@ -108,6 +108,15 @@ class _Agent:
                 "minimum_hub_overlap_m": 0.006,
                 "finger_tooth_clearance_m": 0.002,
                 "finger_hub_overlap_m": 0.008,
+                "pick_z_adjustment_m": 0.001,
+                "pick_tool0_z_adjustment_m": 0.005,
+                "open_gripper_position": 0.11,
+                "mg_gripper_close_position": 0.047,
+                "open_inner_pad_lower_z_from_tcp_m": 0.01751,
+                "open_inner_pad_upper_z_from_tcp_m": 0.04726,
+                "closed_inner_pad_lower_z_from_tcp_m": -0.00865,
+                "closed_inner_pad_upper_z_from_tcp_m": 0.0211,
+                "predicted_closing_z_displacement_m": -0.02616,
                 "gripper_close_position": 0.37,
                 "start_x": 0.0,
                 "start_y": 0.0,
@@ -351,6 +360,11 @@ def test_physical_pick_passes_one_detection_to_compute_and_uses_live_targets(
     assert agent._task_ctx["hub_diameter_m"] == pytest.approx(0.03)
     assert agent._task_ctx["finger_tooth_clearance_m"] == pytest.approx(0.002)
     assert agent._task_ctx["finger_hub_overlap_m"] == pytest.approx(0.008)
+    assert agent._task_ctx["pick_z_adjustment_m"] == pytest.approx(0.001)
+    assert agent._task_ctx["pick_tool0_z_adjustment_m"] == pytest.approx(0.005)
+    assert agent._task_ctx["predicted_closing_z_displacement_m"] == pytest.approx(
+        -0.02616
+    )
     assert agent._task_ctx["gripper_close_position"] == pytest.approx(0.37)
     assert agent._position == pytest.approx({"x": 0.1, "y": 0.2, "z": 0.4})
 

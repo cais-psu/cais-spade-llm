@@ -677,24 +677,98 @@ class UR5eHardwareController(HardwarePickPlaceController):
         )
         stock_fingertip = dict(gripper_config.get("stock_fingertip") or {})
         try:
-            inner_pad_lower_z = float(stock_fingertip["inner_pad_lower_z_from_tcp_m"])
-            inner_pad_upper_z = float(stock_fingertip["inner_pad_upper_z_from_tcp_m"])
+            open_gripper_position = float(stock_fingertip["open_gripper_position"])
+            mg_gripper_close_position = float(
+                stock_fingertip["mg_gripper_close_position"]
+            )
+            open_inner_pad_lower_z = float(
+                stock_fingertip["open_inner_pad_lower_z_from_tcp_m"]
+            )
+            open_inner_pad_upper_z = float(
+                stock_fingertip["open_inner_pad_upper_z_from_tcp_m"]
+            )
+            closed_inner_pad_lower_z = float(
+                stock_fingertip["inner_pad_lower_z_from_tcp_m"]
+            )
+            closed_inner_pad_upper_z = float(
+                stock_fingertip["inner_pad_upper_z_from_tcp_m"]
+            )
         except (KeyError, TypeError, ValueError, OverflowError):
             return {
                 "success": False,
-                "message": "physical MG grasp requires the configured stock RG2 fingertip band",
+                "message": (
+                    "physical MG grasp requires the configured stock RG2 open and closed "
+                    "fingertip bands"
+                ),
             }
-        if not all(
-            math.isfinite(value) for value in (inner_pad_lower_z, inner_pad_upper_z)
+        fingertip_values = (
+            open_gripper_position,
+            mg_gripper_close_position,
+            open_inner_pad_lower_z,
+            open_inner_pad_upper_z,
+            closed_inner_pad_lower_z,
+            closed_inner_pad_upper_z,
+        )
+        if not all(math.isfinite(value) for value in fingertip_values):
+            return {
+                "success": False,
+                "message": "stock RG2 open or closed fingertip band contains non-finite values",
+            }
+        if (
+            open_inner_pad_lower_z >= open_inner_pad_upper_z
+            or closed_inner_pad_lower_z >= closed_inner_pad_upper_z
         ):
             return {
                 "success": False,
-                "message": "stock RG2 fingertip band contains non-finite values",
+                "message": "stock RG2 open or closed fingertip band is inverted",
             }
-        if inner_pad_lower_z >= inner_pad_upper_z:
+        position_tolerance_m = 5e-6
+        if (
+            abs(open_gripper_position - 0.11) > position_tolerance_m
+            or abs(float(self.gripper_open) - open_gripper_position)
+            > position_tolerance_m
+        ):
             return {
                 "success": False,
-                "message": "stock RG2 fingertip band is inverted",
+                "message": (
+                    "physical MG stock RG2 open fingertip band requires gripper "
+                    "position 0.11"
+                ),
+            }
+        if (
+            abs(mg_gripper_close_position - 0.047) > position_tolerance_m
+            or abs(gripper_position - mg_gripper_close_position) > position_tolerance_m
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "physical MG stock RG2 closed fingertip band requires calculated "
+                    "gripper position approximately 0.047"
+                ),
+            }
+
+        lower_closing_z_displacement_m = (
+            closed_inner_pad_lower_z - open_inner_pad_lower_z
+        )
+        upper_closing_z_displacement_m = (
+            closed_inner_pad_upper_z - open_inner_pad_upper_z
+        )
+        predicted_closing_z_displacement_m = (
+            lower_closing_z_displacement_m + upper_closing_z_displacement_m
+        ) / 2.0
+        closing_displacement_tolerance_m = 5e-5
+        if (
+            abs(lower_closing_z_displacement_m - upper_closing_z_displacement_m)
+            > closing_displacement_tolerance_m
+            or abs(predicted_closing_z_displacement_m - (-0.02616))
+            > closing_displacement_tolerance_m
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "physical MG stock RG2 closing displacement must be approximately "
+                    "-0.02616 m"
+                ),
             }
 
         tooth_height_m = numeric_fields["tooth_height_m"]
@@ -702,13 +776,42 @@ class UR5eHardwareController(HardwarePickPlaceController):
         tooth_clearance_m = numeric_fields["tooth_clearance_m"]
         minimum_hub_overlap_m = numeric_fields["minimum_hub_overlap_m"]
         pick_tcp_z_offset_from_table_m = (
-            tooth_height_m + tooth_clearance_m - inner_pad_lower_z
+            tooth_height_m + tooth_clearance_m - closed_inner_pad_lower_z
         )
-        pad_lower_m = pick_tcp_z_offset_from_table_m + inner_pad_lower_z
-        pad_upper_m = pick_tcp_z_offset_from_table_m + inner_pad_upper_z
+        mg_pick_z_adjustment_m = float(self.pick_z_adjustments_m.get("MG", 0.0))
+        if (
+            not math.isfinite(mg_pick_z_adjustment_m)
+            or mg_pick_z_adjustment_m < 0.0
+            or mg_pick_z_adjustment_m > 0.002
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "physical MG pick_z_adjustments_m.MG must remain between 0.000 "
+                    "and 0.002 m"
+                ),
+            }
+        adjusted_tcp_z_offset_from_table_m = (
+            pick_tcp_z_offset_from_table_m + mg_pick_z_adjustment_m
+        )
+        lowest_closing_endpoint_z_from_tcp_m = min(
+            open_inner_pad_lower_z,
+            closed_inner_pad_lower_z,
+        )
+        pad_lower_m = (
+            adjusted_tcp_z_offset_from_table_m
+            + lowest_closing_endpoint_z_from_tcp_m
+        )
+        closed_pad_lower_m = (
+            adjusted_tcp_z_offset_from_table_m + closed_inner_pad_lower_z
+        )
+        closed_pad_upper_m = (
+            adjusted_tcp_z_offset_from_table_m + closed_inner_pad_upper_z
+        )
         hub_overlap_m = max(
             0.0,
-            min(pad_upper_m, part_height_m) - max(pad_lower_m, tooth_height_m),
+            min(closed_pad_upper_m, part_height_m)
+            - max(closed_pad_lower_m, tooth_height_m),
         )
         measured_tooth_clearance_m = pad_lower_m - tooth_height_m
         if measured_tooth_clearance_m + 1e-9 < tooth_clearance_m:
@@ -735,10 +838,21 @@ class UR5eHardwareController(HardwarePickPlaceController):
             **numeric_fields,
             "gripper_close_position": gripper_position,
             "pick_tcp_z_offset_from_table_m": pick_tcp_z_offset_from_table_m,
+            "pick_z_adjustment_m": mg_pick_z_adjustment_m,
             "finger_tooth_clearance_m": measured_tooth_clearance_m,
             "finger_hub_overlap_m": hub_overlap_m,
-            "inner_pad_lower_z_from_tcp_m": inner_pad_lower_z,
-            "inner_pad_upper_z_from_tcp_m": inner_pad_upper_z,
+            "open_gripper_position": open_gripper_position,
+            "mg_gripper_close_position": mg_gripper_close_position,
+            "open_inner_pad_lower_z_from_tcp_m": open_inner_pad_lower_z,
+            "open_inner_pad_upper_z_from_tcp_m": open_inner_pad_upper_z,
+            "closed_inner_pad_lower_z_from_tcp_m": closed_inner_pad_lower_z,
+            "closed_inner_pad_upper_z_from_tcp_m": closed_inner_pad_upper_z,
+            "predicted_closing_z_displacement_m": predicted_closing_z_displacement_m,
+            "lowest_closing_endpoint_z_from_tcp_m": (
+                lowest_closing_endpoint_z_from_tcp_m
+            ),
+            "inner_pad_lower_z_from_tcp_m": closed_inner_pad_lower_z,
+            "inner_pad_upper_z_from_tcp_m": closed_inner_pad_upper_z,
         }
 
     def init(self) -> bool:

@@ -1156,6 +1156,7 @@ class RobotAgent(ResourceAgent):
             "target_pose_source",
             "surface_clearance_m",
             "pick_z_adjustment_m",
+            "pick_tool0_z_adjustment_m",
             "apply_pick_z_adjustments",
             "source_stl",
             "source_stl_sha256",
@@ -1169,6 +1170,13 @@ class RobotAgent(ResourceAgent):
             "minimum_hub_overlap_m",
             "finger_tooth_clearance_m",
             "finger_hub_overlap_m",
+            "open_gripper_position",
+            "mg_gripper_close_position",
+            "open_inner_pad_lower_z_from_tcp_m",
+            "open_inner_pad_upper_z_from_tcp_m",
+            "closed_inner_pad_lower_z_from_tcp_m",
+            "closed_inner_pad_upper_z_from_tcp_m",
+            "predicted_closing_z_displacement_m",
             "gripper_close_position",
         ):
             if key in step_result:

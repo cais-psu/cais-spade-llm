@@ -148,6 +148,15 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "minimum_hub_overlap_m": 0.0,
                     "finger_tooth_clearance_m": 0.0,
                     "finger_hub_overlap_m": 0.0,
+                    "pick_z_adjustment_m": 0.0,
+                    "pick_tool0_z_adjustment_m": 0.0,
+                    "open_gripper_position": 0.11,
+                    "mg_gripper_close_position": 0.047,
+                    "open_inner_pad_lower_z_from_tcp_m": 0.0,
+                    "open_inner_pad_upper_z_from_tcp_m": 0.0,
+                    "closed_inner_pad_lower_z_from_tcp_m": 0.0,
+                    "closed_inner_pad_upper_z_from_tcp_m": 0.0,
+                    "predicted_closing_z_displacement_m": 0.0,
                     "gripper_close_position": None,
                     "start_x": 0.0,
                     "start_y": 0.0,
@@ -238,6 +247,33 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     ),
                     "finger_hub_overlap_m": _step_output(
                         "pick_targets", "finger_hub_overlap_m"
+                    ),
+                    "pick_z_adjustment_m": _step_output(
+                        "pick_targets", "pick_z_adjustment_m"
+                    ),
+                    "pick_tool0_z_adjustment_m": _step_output(
+                        "pick_targets", "pick_tool0_z_adjustment_m"
+                    ),
+                    "open_gripper_position": _step_output(
+                        "pick_targets", "open_gripper_position"
+                    ),
+                    "mg_gripper_close_position": _step_output(
+                        "pick_targets", "mg_gripper_close_position"
+                    ),
+                    "open_inner_pad_lower_z_from_tcp_m": _step_output(
+                        "pick_targets", "open_inner_pad_lower_z_from_tcp_m"
+                    ),
+                    "open_inner_pad_upper_z_from_tcp_m": _step_output(
+                        "pick_targets", "open_inner_pad_upper_z_from_tcp_m"
+                    ),
+                    "closed_inner_pad_lower_z_from_tcp_m": _step_output(
+                        "pick_targets", "closed_inner_pad_lower_z_from_tcp_m"
+                    ),
+                    "closed_inner_pad_upper_z_from_tcp_m": _step_output(
+                        "pick_targets", "closed_inner_pad_upper_z_from_tcp_m"
+                    ),
+                    "predicted_closing_z_displacement_m": _step_output(
+                        "pick_targets", "predicted_closing_z_displacement_m"
                     ),
                     "gripper_close_position": _step_output(
                         "pick_targets", "gripper_close_position"

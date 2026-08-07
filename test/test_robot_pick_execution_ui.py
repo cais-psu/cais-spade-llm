@@ -43,6 +43,24 @@ def test_robot_functions_panel_has_one_dynamic_run_control() -> None:
     assert "This commands physical robot motion." in source
 
 
+def test_mg_close_test_is_separate_confirmed_gripper_only_control() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+    calls = _directly_awaited_bridge_methods()
+
+    assert 'ui.button(\n                "MG Close Test"' in source
+    assert '"Confirm MG Close Test"' in source
+    assert "The arm will not move." in source
+    assert "approximately 26.16 mm while closing" in source
+    assert "Persist MG: 0.002 only if that second" in source
+    assert "If more than 2 mm is needed, do not run pick_grasp" in source
+    close_test_call = calls["digital_twin_execute_mg_close_test"]
+    confirmed = next(
+        keyword.value for keyword in close_test_call.keywords if keyword.arg == "confirmed"
+    )
+    assert isinstance(confirmed, ast.Constant)
+    assert confirmed.value is True
+
+
 def test_run_checks_no_motion_readiness_before_confirmation_and_rechecks_on_execute() -> None:
     source = inspect.getsource(control._predefined_function_record_body)
     calls = _directly_awaited_bridge_methods()

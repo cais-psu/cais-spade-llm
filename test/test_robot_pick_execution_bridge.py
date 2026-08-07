@@ -45,8 +45,17 @@ def _mg_task_context() -> dict[str, Any]:
         **_mg_product_geometry(),
         "origin_resource_location": "prusa-mk4-2",
         "pick_tcp_z": 1.0323,
-        "finger_tooth_clearance_m": 0.002,
-        "finger_hub_overlap_m": 0.008,
+        "finger_tooth_clearance_m": 0.003,
+        "finger_hub_overlap_m": 0.007,
+        "pick_z_adjustment_m": 0.001,
+        "pick_tool0_z_adjustment_m": 0.005,
+        "open_gripper_position": 0.11,
+        "mg_gripper_close_position": 0.047,
+        "open_inner_pad_lower_z_from_tcp_m": 0.01751,
+        "open_inner_pad_upper_z_from_tcp_m": 0.04726,
+        "closed_inner_pad_lower_z_from_tcp_m": -0.00865,
+        "closed_inner_pad_upper_z_from_tcp_m": 0.0211,
+        "predicted_closing_z_displacement_m": -0.02616,
         "gripper_close_position": 0.047,
         "travel_z": 1.2,
     }
@@ -56,6 +65,24 @@ class _PhysicalController:
     gripper_open = 0.11
     gripper_close = 0.02
 
+    def __init__(self) -> None:
+        self.gripper_calls: list[tuple[str, float | None]] = []
+        self.close_success = True
+        self.reopen_success = True
+        self._last_failure_message = ""
+
+    def close_gripper(self, position: float | None = None) -> bool:
+        self.gripper_calls.append(("close_gripper", position))
+        if not self.close_success:
+            self._last_failure_message = "close failed"
+        return self.close_success
+
+    def open_gripper(self) -> bool:
+        self.gripper_calls.append(("open_gripper", None))
+        if not self.reopen_success:
+            self._last_failure_message = "reopen failed"
+        return self.reopen_success
+
     @staticmethod
     def _physical_stl_pick_readiness(geometry: dict[str, Any]) -> dict[str, Any]:
         if not geometry.get("source_stl"):
@@ -64,8 +91,12 @@ class _PhysicalController:
             "success": True,
             **geometry,
             "gripper_close_position": 0.047,
-            "finger_tooth_clearance_m": 0.002,
-            "finger_hub_overlap_m": 0.008,
+            "finger_tooth_clearance_m": 0.003,
+            "finger_hub_overlap_m": 0.007,
+            "pick_z_adjustment_m": 0.001,
+            "open_gripper_position": 0.11,
+            "mg_gripper_close_position": 0.047,
+            "predicted_closing_z_displacement_m": -0.02616,
         }
 
 
@@ -90,6 +121,7 @@ class _PhysicalUR5eAgent:
         self._gripper_state = gripper_state
         self._position: dict[str, float] = {"x": 0.0, "y": 0.0, "z": 1.0}
         self._task_ctx: dict[str, Any] = {}
+        self._robot_motion_lock = threading.Lock()
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.executables = {
             name: getattr(self, name)
@@ -162,6 +194,10 @@ def _ready_bridge(agent: _PhysicalUR5eAgent) -> SystemBridge:
     bridge._ur5e_robot_function_execution_lock = threading.Lock()
     bridge._ur5e_robot_function_preflight_lock = threading.Lock()
     bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_execution_stage = ""
+    bridge._ur5e_robot_function_execution_started_at = 0.0
+    bridge._ur5e_robot_function_state_uncertain = False
+    bridge._MG_CLOSE_TEST_HOLD_S = 0.0
     bridge._digital_twin_sim_mode = lambda _target: "monitor"
     bridge._robot_function_capture_source = lambda _target, _cfg: "hardware"
     bridge._digital_twin_direction = lambda _target: "hardware -> gazebo"
@@ -218,6 +254,13 @@ def _agent_for(function_name: str) -> _PhysicalUR5eAgent:
         }
         return agent
     return _PhysicalUR5eAgent(state="placed")
+
+
+def _run_to_thread_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _inline(function: Any, *args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _inline)
 
 
 @pytest.mark.parametrize(
@@ -337,6 +380,149 @@ def test_pick_grasp_readiness_blocks_invalid_stl_grounded_context() -> None:
     assert result["ready"] is False
     assert "do not sufficiently overlap" in result["message"]
     assert agent.calls == []
+
+
+def test_mg_close_test_closes_once_holds_and_reopens_without_arm_motion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_to_thread_inline(monkeypatch)
+    agent = _agent_for("pick_grasp")
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_mg_close_test(
+            "ur5e only",
+            "ur5e",
+            "prusa-mk4-2",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["gripper_close_position"] == pytest.approx(0.047)
+    assert result["hold_sec"] == pytest.approx(0.0)
+    assert agent._controller.gripper_calls == [
+        ("close_gripper", pytest.approx(0.047)),
+        ("open_gripper", None),
+    ]
+    assert agent.calls == []
+    assert agent._current_state == "at_pick"
+    assert agent._gripper_state == "open"
+    assert bridge._ur5e_robot_function_state_uncertain is False
+
+
+@pytest.mark.parametrize(
+    ("close_success", "reopen_success", "failed_action"),
+    [
+        (False, True, "close"),
+        (True, False, "reopen"),
+    ],
+)
+def test_mg_close_test_reopens_in_finally_and_failed_cycle_requires_move_home(
+    close_success: bool,
+    reopen_success: bool,
+    failed_action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_to_thread_inline(monkeypatch)
+    agent = _agent_for("pick_grasp")
+    agent._controller.close_success = close_success
+    agent._controller.reopen_success = reopen_success
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_mg_close_test(
+            "dual robots",
+            "ur5e",
+            "prusa-mk4-2",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert failed_action in result["message"]
+    assert "complete move_home" in result["message"]
+    assert agent._controller.gripper_calls[-1] == ("open_gripper", None)
+    assert agent.calls == []
+    assert bridge._ur5e_robot_function_state_uncertain is True
+
+    blocked = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+    assert blocked["ready"] is False
+    assert "state is uncertain" in blocked["message"]
+
+    recovered = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "move_home",
+            confirmed=True,
+        )
+    )
+    assert recovered["success"] is True
+    assert bridge._ur5e_robot_function_state_uncertain is False
+
+
+def test_mg_close_test_requires_at_pick_empty_mg_context_and_motion_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_to_thread_inline(monkeypatch)
+    idle_agent = _PhysicalUR5eAgent(state="idle")
+    idle_bridge = _ready_bridge(idle_agent)
+
+    idle = asyncio.run(
+        idle_bridge.digital_twin_execute_mg_close_test(
+            "ur5e only",
+            "ur5e",
+            "prusa-mk4-2",
+            confirmed=True,
+        )
+    )
+
+    assert idle["success"] is False
+    assert "state 'at_pick'" in idle["message"]
+    assert idle_agent._controller.gripper_calls == []
+
+    closed_agent = _agent_for("pick_grasp")
+    closed_agent._gripper_state = "closed"
+    closed_bridge = _ready_bridge(closed_agent)
+    closed = asyncio.run(
+        closed_bridge.digital_twin_execute_mg_close_test(
+            "ur5e only",
+            "ur5e",
+            "prusa-mk4-2",
+            confirmed=True,
+        )
+    )
+    assert closed["success"] is False
+    assert "empty RG2 to be open" in closed["message"]
+    assert closed_agent._controller.gripper_calls == []
+
+    locked_agent = _agent_for("pick_grasp")
+    locked_bridge = _ready_bridge(locked_agent)
+    locked_agent._robot_motion_lock.acquire()
+    try:
+        locked = asyncio.run(
+            locked_bridge.digital_twin_execute_mg_close_test(
+                "ur5e only",
+                "ur5e",
+                "prusa-mk4-2",
+                confirmed=True,
+            )
+        )
+    finally:
+        locked_agent._robot_motion_lock.release()
+
+    assert locked["success"] is False
+    assert "already executing" in locked["message"]
+    assert locked_agent._controller.gripper_calls == []
 
 
 def test_readiness_waits_for_a_running_ur5e_mirror_to_recover() -> None:

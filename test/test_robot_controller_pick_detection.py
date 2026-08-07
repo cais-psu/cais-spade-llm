@@ -29,6 +29,7 @@ def _controller_double(*, execution_mode: str) -> tuple[GazeboPickPlaceControlle
     controller.pick_tcp_z_bias_max_m = 0.020
     controller.min_pick_tcp_z_m = 1.070
     controller.pick_z_adjustments_m = {}
+    controller.pick_tool0_z_adjustment_m = 0.005
     controller.approach_height_m = 0.200
     controller._derive_gripper_close_position = lambda **_kwargs: 0.02
     controller._get_ee_tcp_world_z_offset = lambda: -0.17
@@ -220,3 +221,53 @@ def test_physical_xyz_target_pose_remains_compatible_without_detection_metadata(
     assert result["success"] is True
     assert calls["detect_parts"] == 0
     assert calls["get_ee_pose"] == 1
+
+
+@pytest.mark.parametrize(
+    ("part_name", "part_adjustment_m"),
+    [("SG", 0.0), ("LG", -0.003)],
+)
+def test_physical_pick_tool0_z_adjustment_combines_with_existing_part_adjustment(
+    part_name: str,
+    part_adjustment_m: float,
+) -> None:
+    controller, _calls = _controller_double(execution_mode="physical")
+    controller.pick_z_adjustments_m = {part_name: part_adjustment_m}
+    controller.pick_tool0_z_adjustment_m = 0.0
+
+    baseline = controller.compute_pick_targets(
+        part_name=part_name,
+        target_pose={"x": 0.4, "y": 0.3, "z": 1.02},
+        target_pose_source="observed_pose",
+    )
+    controller.pick_tool0_z_adjustment_m = 0.005
+    adjusted = controller.compute_pick_targets(
+        part_name=part_name,
+        target_pose={"x": 0.4, "y": 0.3, "z": 1.02},
+        target_pose_source="observed_pose",
+    )
+
+    assert baseline["success"] is True
+    assert adjusted["success"] is True
+    assert adjusted["pick_z"] - baseline["pick_z"] == pytest.approx(0.005)
+    assert adjusted["pick_tcp_z"] == pytest.approx(baseline["pick_tcp_z"])
+    assert adjusted["pick_z_adjustment_m"] == pytest.approx(part_adjustment_m)
+    assert adjusted["pick_tool0_z_adjustment_m"] == pytest.approx(0.005)
+    assert adjusted["pick_z"] == pytest.approx(
+        adjusted["pick_tcp_z"] + 0.17 + part_adjustment_m + 0.005
+    )
+
+
+def test_simulation_ignores_pick_tool0_z_adjustment() -> None:
+    controller, _calls = _controller_double(execution_mode="simulation")
+    controller.pick_tool0_z_adjustment_m = 0.005
+
+    result = controller.compute_pick_targets(
+        part_name="SG",
+        target_pose={"x": 0.4, "y": 0.3, "z": 1.02},
+        target_pose_source="observed_pose",
+    )
+
+    assert result["success"] is True
+    assert result["pick_tool0_z_adjustment_m"] == pytest.approx(0.0)
+    assert result["pick_z"] == pytest.approx(result["pick_tcp_z"] + 0.17)

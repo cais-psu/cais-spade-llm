@@ -410,6 +410,16 @@ class GazeboPickPlaceController:
         self.pick_tcp_z_bias_min_m = need_float(
             motion, "pick_tcp_z_bias_min_m", "controller.motion.pick_tcp_z_bias_min_m"
         )
+        raw_pick_tool0_z_adjustment_m = motion.get("pick_tool0_z_adjustment_m")
+        self.pick_tool0_z_adjustment_m = 0.0
+        if raw_pick_tool0_z_adjustment_m is not None:
+            try:
+                self.pick_tool0_z_adjustment_m = float(raw_pick_tool0_z_adjustment_m)
+            except (TypeError, ValueError):
+                self._config_errors.append("controller.motion.pick_tool0_z_adjustment_m")
+            if not math.isfinite(self.pick_tool0_z_adjustment_m):
+                self.pick_tool0_z_adjustment_m = 0.0
+                self._config_errors.append("controller.motion.pick_tool0_z_adjustment_m")
         self.min_pick_tcp_z_m = need_float(
             motion, "min_pick_tcp_z_m", "controller.motion.min_pick_tcp_z_m"
         )
@@ -1930,17 +1940,21 @@ class GazeboPickPlaceController:
             pick_tcp_z += pick_z_adjustment_m
             tcp_offset_from_table_m = pick_tcp_z - float(table_surface_z_m)
             pad_lower_m = tcp_offset_from_table_m + float(
-                physical_stl_pick["inner_pad_lower_z_from_tcp_m"]
+                physical_stl_pick["lowest_closing_endpoint_z_from_tcp_m"]
             )
-            pad_upper_m = tcp_offset_from_table_m + float(
-                physical_stl_pick["inner_pad_upper_z_from_tcp_m"]
+            closed_pad_lower_m = tcp_offset_from_table_m + float(
+                physical_stl_pick["closed_inner_pad_lower_z_from_tcp_m"]
+            )
+            closed_pad_upper_m = tcp_offset_from_table_m + float(
+                physical_stl_pick["closed_inner_pad_upper_z_from_tcp_m"]
             )
             tooth_height_m = float(physical_stl_pick["tooth_height_m"])
             part_height_m = float(physical_stl_pick["part_height_m"])
             finger_tooth_clearance_m = pad_lower_m - tooth_height_m
             finger_hub_overlap_m = max(
                 0.0,
-                min(pad_upper_m, part_height_m) - max(pad_lower_m, tooth_height_m),
+                min(closed_pad_upper_m, part_height_m)
+                - max(closed_pad_lower_m, tooth_height_m),
             )
             required_tooth_clearance_m = float(physical_stl_pick["tooth_clearance_m"])
             required_hub_overlap_m = float(physical_stl_pick["minimum_hub_overlap_m"])
@@ -1973,6 +1987,10 @@ class GazeboPickPlaceController:
             )
             pick_z = pick_tcp_z - ee_tcp_offset_z
             pick_z += pick_z_adjustment_m
+        pick_tool0_z_adjustment_m = (
+            self.pick_tool0_z_adjustment_m if self.execution_mode == "physical" else 0.0
+        )
+        pick_z += pick_tool0_z_adjustment_m
         if self.execution_mode == "physical" and gripper_close_position is None:
             return {
                 "success": False,
@@ -2001,6 +2019,7 @@ class GazeboPickPlaceController:
             f"source_stl={source_stl or '<none>'} "
             f"surface_clearance={surface_clearance_m:.3f} "
             f"pick_tcp_z={pick_tcp_z:.3f} "
+            f"pick_tool0_z_adjustment_m={pick_tool0_z_adjustment_m:.3f} "
             f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
         )
 
@@ -2019,6 +2038,7 @@ class GazeboPickPlaceController:
             "pick_tcp_z_raw": pick_tcp_z_raw,
             "surface_clearance_m": surface_clearance_m,
             "pick_z_adjustment_m": pick_z_adjustment_m,
+            "pick_tool0_z_adjustment_m": pick_tool0_z_adjustment_m,
             "gripper_close_position": gripper_close_position,
             "apply_pick_z_adjustments": bool(apply_pick_z_adjustments),
             "effective_min_pick_tcp_z": effective_min_tcp_z,
@@ -2049,6 +2069,27 @@ class GazeboPickPlaceController:
                     ),
                     "finger_tooth_clearance_m": finger_tooth_clearance_m,
                     "finger_hub_overlap_m": finger_hub_overlap_m,
+                    "open_gripper_position": float(
+                        physical_stl_pick["open_gripper_position"]
+                    ),
+                    "mg_gripper_close_position": float(
+                        physical_stl_pick["mg_gripper_close_position"]
+                    ),
+                    "open_inner_pad_lower_z_from_tcp_m": float(
+                        physical_stl_pick["open_inner_pad_lower_z_from_tcp_m"]
+                    ),
+                    "open_inner_pad_upper_z_from_tcp_m": float(
+                        physical_stl_pick["open_inner_pad_upper_z_from_tcp_m"]
+                    ),
+                    "closed_inner_pad_lower_z_from_tcp_m": float(
+                        physical_stl_pick["closed_inner_pad_lower_z_from_tcp_m"]
+                    ),
+                    "closed_inner_pad_upper_z_from_tcp_m": float(
+                        physical_stl_pick["closed_inner_pad_upper_z_from_tcp_m"]
+                    ),
+                    "predicted_closing_z_displacement_m": float(
+                        physical_stl_pick["predicted_closing_z_displacement_m"]
+                    ),
                     "pick_tcp_z_offset_from_table_m": pick_tcp_z
                     - float(table_surface_z_m),
                 }

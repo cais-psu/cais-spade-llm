@@ -9620,6 +9620,15 @@ class SystemBridge:
             "minimum_hub_overlap_m",
             "finger_tooth_clearance_m",
             "finger_hub_overlap_m",
+            "pick_z_adjustment_m",
+            "pick_tool0_z_adjustment_m",
+            "open_gripper_position",
+            "mg_gripper_close_position",
+            "open_inner_pad_lower_z_from_tcp_m",
+            "open_inner_pad_upper_z_from_tcp_m",
+            "closed_inner_pad_lower_z_from_tcp_m",
+            "closed_inner_pad_upper_z_from_tcp_m",
+            "predicted_closing_z_displacement_m",
             "gripper_close_position",
         ):
             try:
@@ -9633,6 +9642,39 @@ class SystemBridge:
             return "pick_grasp stock RG2 fingertip clearance would contact the MG teeth."
         if values["finger_hub_overlap_m"] + 1e-9 < values["minimum_hub_overlap_m"]:
             return "pick_grasp stock RG2 fingertips do not sufficiently overlap the MG hub."
+        if abs(values["pick_tool0_z_adjustment_m"] - 0.005) > 1e-9:
+            return "pick_grasp requires the configured physical UR5e 5 mm mount correction."
+        if not 0.001 - 1e-9 <= values["pick_z_adjustment_m"] <= 0.002 + 1e-9:
+            return (
+                "pick_grasp requires the accepted MG pick_z adjustment between 1 mm "
+                "and 2 mm."
+            )
+        if abs(values["open_gripper_position"] - 0.11) > 5e-6:
+            return "pick_grasp requires the stock RG2 open position 0.11 calibration."
+        if abs(values["mg_gripper_close_position"] - 0.047) > 5e-6:
+            return "pick_grasp requires the MG RG2 close position approximately 0.047."
+        if abs(values["gripper_close_position"] - 0.047) > 5e-6:
+            return "pick_grasp calculated RG2 close position is not approximately 0.047."
+        if abs(values["predicted_closing_z_displacement_m"] - (-0.02616)) > 5e-5:
+            return (
+                "pick_grasp requires the stock RG2 closing displacement approximately "
+                "-0.02616 m."
+            )
+        lower_displacement = (
+            values["closed_inner_pad_lower_z_from_tcp_m"]
+            - values["open_inner_pad_lower_z_from_tcp_m"]
+        )
+        upper_displacement = (
+            values["closed_inner_pad_upper_z_from_tcp_m"]
+            - values["open_inner_pad_upper_z_from_tcp_m"]
+        )
+        if (
+            abs(lower_displacement - values["predicted_closing_z_displacement_m"])
+            > 5e-5
+            or abs(upper_displacement - values["predicted_closing_z_displacement_m"])
+            > 5e-5
+        ):
+            return "pick_grasp retained stock RG2 fingertip bands are inconsistent."
 
         controller = getattr(resource_agent, "_controller", None)
         try:
@@ -9788,8 +9830,6 @@ class SystemBridge:
         failed: bool = False,
     ) -> None:
         """Track whether a dispatched manual physical task left trustworthy state."""
-        if agent is not getattr(self, "_ur5e_robot_function_agent", None):
-            return
         status = (
             str(result.get("status") or "").strip().lower()
             if isinstance(result, dict)
@@ -10444,8 +10484,7 @@ class SystemBridge:
         elif resource_agent is not getattr(self, "_ur5e_robot_function_agent", None):
             return None, {}, {}, "The physical ur5e Function Execution runtime is unavailable."
         if (
-            resource_agent is getattr(self, "_ur5e_robot_function_agent", None)
-            and bool(getattr(self, "_ur5e_robot_function_state_uncertain", False))
+            bool(getattr(self, "_ur5e_robot_function_state_uncertain", False))
             and function_name != "move_home"
         ):
             return None, {}, {}, (
@@ -10680,6 +10719,18 @@ class SystemBridge:
                         ),
                         "finger_hub_overlap_m": stl_result.get(
                             "finger_hub_overlap_m"
+                        ),
+                        "pick_z_adjustment_m": stl_result.get(
+                            "pick_z_adjustment_m"
+                        ),
+                        "open_gripper_position": stl_result.get(
+                            "open_gripper_position"
+                        ),
+                        "mg_gripper_close_position": stl_result.get(
+                            "mg_gripper_close_position"
+                        ),
+                        "predicted_closing_z_displacement_m": stl_result.get(
+                            "predicted_closing_z_displacement_m"
                         ),
                     }
                 )
@@ -11150,6 +11201,238 @@ class SystemBridge:
             part_name=part_name,
             confirmed=confirmed,
         )
+
+    async def digital_twin_execute_mg_close_test(
+        self,
+        target: str,
+        robot: str,
+        origin_resource_location: str,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Close the physical RG2 on MG for inspection, then always reopen it."""
+        base = {
+            "success": False,
+            "target": target,
+            "robot": robot,
+            "function_name": "MG Close Test",
+            "origin_resource_location": origin_resource_location,
+            "part_name": "MG",
+        }
+        if confirmed is not True:
+            return {
+                **base,
+                "message": "Explicit operator confirmation is required for MG Close Test.",
+            }
+
+        execution_lock = self._ur5e_robot_function_execution_lock
+        if not execution_lock.acquire(blocking=False):
+            active = str(self._ur5e_robot_function_execution_active or "UR5e motion")
+            return {
+                **base,
+                "message": f"UR5e motion is already active: {active}.",
+                "active_function": active,
+            }
+        self._ur5e_robot_function_execution_active = "MG Close Test"
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
+        release_execution_lock_here = True
+        agent_motion_lock: Any | None = None
+        release_agent_lock_here = False
+
+        def _finish_cycle(resource_agent: Any, result: dict[str, Any]) -> None:
+            if result.get("reopen_success"):
+                resource_agent._gripper_state = "open"
+            if not result.get("close_success") or not result.get("reopen_success"):
+                self._ur5e_robot_function_state_uncertain = True
+
+        try:
+            resource_agent, _call_kwargs, readiness, error = (
+                await self._digital_twin_robot_function_execution_preflight_async(
+                    target,
+                    robot,
+                    "pick_grasp",
+                    origin_resource_location,
+                    "",
+                    "MG",
+                )
+            )
+            if error or resource_agent is None:
+                return {
+                    **base,
+                    **readiness,
+                    "message": error or "MG Close Test physical readiness failed.",
+                }
+            if str(getattr(resource_agent, "_gripper_state", "") or "").strip() != "open":
+                return {
+                    **base,
+                    **readiness,
+                    "message": "MG Close Test requires the empty RG2 to be open.",
+                }
+
+            task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+            try:
+                gripper_close_position = float(task_context["gripper_close_position"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {
+                    **base,
+                    **readiness,
+                    "message": (
+                        "MG Close Test requires the retained gripper_close_position from "
+                        "pick_approach."
+                    ),
+                }
+            if (
+                not math.isfinite(gripper_close_position)
+                or abs(gripper_close_position - 0.047) > 5e-6
+            ):
+                return {
+                    **base,
+                    **readiness,
+                    "message": (
+                        "MG Close Test requires gripper_close_position approximately 0.047."
+                    ),
+                }
+
+            controller = getattr(resource_agent, "_controller", None)
+            close_gripper = getattr(controller, "close_gripper", None)
+            open_gripper = getattr(controller, "open_gripper", None)
+            if not callable(close_gripper) or not callable(open_gripper):
+                return {
+                    **base,
+                    **readiness,
+                    "message": "MG Close Test physical RG2 controller is unavailable.",
+                }
+
+            agent_motion_lock = getattr(resource_agent, "_robot_motion_lock", None)
+            if agent_motion_lock is not None:
+                release_agent_lock_here = bool(agent_motion_lock.acquire(blocking=False))
+                if not release_agent_lock_here:
+                    return {
+                        **base,
+                        **readiness,
+                        "message": "The ur5e RobotAgent is already executing a robot task.",
+                    }
+
+            hold_sec = max(0.0, float(getattr(self, "_MG_CLOSE_TEST_HOLD_S", 3.0)))
+
+            async def _close_and_reopen() -> dict[str, Any]:
+                close_success = False
+                reopen_success = False
+                close_message = ""
+                reopen_message = ""
+                try:
+                    try:
+                        close_success = bool(
+                            await asyncio.to_thread(
+                                close_gripper,
+                                position=gripper_close_position,
+                            )
+                        )
+                        if not close_success:
+                            close_message = str(
+                                getattr(controller, "_last_failure_message", "") or ""
+                            ).strip()
+                    except Exception as exc:  # noqa: BLE001 - physical RG2 boundary.
+                        close_message = f"{type(exc).__name__}: {exc}"
+                    if close_success:
+                        await asyncio.sleep(hold_sec)
+                finally:
+                    try:
+                        reopen_success = bool(await asyncio.to_thread(open_gripper))
+                        if not reopen_success:
+                            reopen_message = str(
+                                getattr(controller, "_last_failure_message", "") or ""
+                            ).strip()
+                    except Exception as exc:  # noqa: BLE001 - physical RG2 boundary.
+                        reopen_message = f"{type(exc).__name__}: {exc}"
+                return {
+                    "close_success": close_success,
+                    "reopen_success": reopen_success,
+                    "close_message": close_message,
+                    "reopen_message": reopen_message,
+                }
+
+            self._ur5e_robot_function_execution_stage = "executing"
+            cycle_task = asyncio.create_task(_close_and_reopen())
+            try:
+                cycle_result = await asyncio.shield(cycle_task)
+            except asyncio.CancelledError:
+                release_execution_lock_here = False
+                release_agent_lock_here = False
+
+                def _release_after_cycle(task: asyncio.Task[Any]) -> None:
+                    try:
+                        completed = dict(task.result())
+                    except asyncio.CancelledError:
+                        completed = {"close_success": False, "reopen_success": False}
+                        log.warning("MG Close Test cycle was cancelled before completion")
+                    except Exception:  # noqa: BLE001 - background physical RG2 boundary.
+                        completed = {"close_success": False, "reopen_success": False}
+                        log.exception("MG Close Test failed after UI cancellation")
+                    _finish_cycle(resource_agent, completed)
+                    if agent_motion_lock is not None:
+                        agent_motion_lock.release()
+                    self._ur5e_robot_function_execution_active = None
+                    self._ur5e_robot_function_execution_stage = ""
+                    self._ur5e_robot_function_execution_started_at = 0.0
+                    execution_lock.release()
+
+                cycle_task.add_done_callback(_release_after_cycle)
+                raise
+
+            _finish_cycle(resource_agent, cycle_result)
+            if not cycle_result["close_success"] or not cycle_result["reopen_success"]:
+                failed_actions = []
+                if not cycle_result["close_success"]:
+                    failed_actions.append(
+                        "close"
+                        + (
+                            f": {cycle_result['close_message']}"
+                            if cycle_result["close_message"]
+                            else ""
+                        )
+                    )
+                if not cycle_result["reopen_success"]:
+                    failed_actions.append(
+                        "reopen"
+                        + (
+                            f": {cycle_result['reopen_message']}"
+                            if cycle_result["reopen_message"]
+                            else ""
+                        )
+                    )
+                return {
+                    **base,
+                    **readiness,
+                    **cycle_result,
+                    "gripper_close_position": gripper_close_position,
+                    "message": (
+                        f"MG Close Test failed ({'; '.join(failed_actions)}). Physical "
+                        "state is uncertain; inspect the UR5e and complete move_home "
+                        "before retrying."
+                    ),
+                }
+            return {
+                **base,
+                **readiness,
+                **cycle_result,
+                "success": True,
+                "gripper_close_position": gripper_close_position,
+                "hold_sec": hold_sec,
+                "message": (
+                    "MG Close Test closed once to the retained position, held for visual "
+                    "inspection, and reopened without moving the arm."
+                ),
+            }
+        finally:
+            if release_agent_lock_here and agent_motion_lock is not None:
+                agent_motion_lock.release()
+            if release_execution_lock_here:
+                self._ur5e_robot_function_execution_active = None
+                self._ur5e_robot_function_execution_stage = ""
+                self._ur5e_robot_function_execution_started_at = 0.0
+                execution_lock.release()
 
     def digital_twin_preview_pick_target(  # noqa: C901, PLR0912 - explicit read-only gates.
         self,

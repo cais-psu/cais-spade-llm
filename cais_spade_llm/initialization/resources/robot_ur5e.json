@@ -181,6 +181,10 @@
           "feedback_timeout_pad_sec": 1.0,
           "position_tolerance": 0.01,
           "stock_fingertip": {
+            "open_gripper_position": 0.11,
+            "mg_gripper_close_position": 0.047,
+            "open_inner_pad_lower_z_from_tcp_m": 0.01751,
+            "open_inner_pad_upper_z_from_tcp_m": 0.04726,
             "inner_pad_lower_z_from_tcp_m": -0.00865,
             "inner_pad_upper_z_from_tcp_m": 0.0211
           },
@@ -233,6 +237,7 @@
           "recovery_observed_pick_surface_clearance_m": 0.005,
           "pick_tcp_z_bias_max_m": 0.02,
           "pick_tcp_z_bias_min_m": 0.003,
+          "pick_tool0_z_adjustment_m": 0.005,
           "min_pick_tcp_z_m": 1.07,
           "place_surface_gap_m": -0.01,
           "release_preopen_settle_sec": 0.05,
@@ -249,6 +254,7 @@
         "parts_tuning": {
           "insertion_depth_m": 0.0025,
           "pick_z_adjustments_m": {
+            "MG": 0.001,
             "LG": -0.003
           }
         }
