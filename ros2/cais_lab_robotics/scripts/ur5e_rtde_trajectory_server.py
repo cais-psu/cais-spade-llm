@@ -22,6 +22,7 @@ from rclpy.action import ActionServer, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Empty
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 ARM_JOINTS = [
@@ -79,6 +80,15 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
     global UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE
     global UR5E_RTDE_MOVEJ_SPEED_RAD_S
     global UR5E_RTDE_MOVEJ_ACCEL_RAD_S2
+    global UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC
+    global UR5E_RTDE_MOTION_START_TIMEOUT_SEC
+    global UR5E_RTDE_MOTION_START_DELTA_RAD
+    global UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
+    global UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC
+    global UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
+    global UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
+    global UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
+    global UR5E_RTDE_RESULT_MARGIN_SEC
     global HARDWARE_ARMS_CONFIG_FILE
 
     HARDWARE_ARMS_CONFIG_FILE = str(Path(config_path).expanduser())
@@ -118,6 +128,78 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
         ("ur5e", "rtde", "movej_accel_rad_s2"),
         UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
     )
+    UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC = max(
+        0.1,
+        _float(
+            config,
+            ("ur5e", "rtde", "control_program_start_timeout_sec"),
+            UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC,
+        ),
+    )
+    UR5E_RTDE_MOTION_START_TIMEOUT_SEC = max(
+        0.1,
+        _float(
+            config,
+            ("ur5e", "rtde", "motion_start_timeout_sec"),
+            UR5E_RTDE_MOTION_START_TIMEOUT_SEC,
+        ),
+    )
+    UR5E_RTDE_MOTION_START_DELTA_RAD = max(
+        0.0,
+        _float(
+            config,
+            ("ur5e", "rtde", "motion_start_delta_rad"),
+            UR5E_RTDE_MOTION_START_DELTA_RAD,
+        ),
+    )
+    UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC = max(
+        0.1,
+        _float(
+            config,
+            ("ur5e", "rtde", "feedback_reconnect_after_sec"),
+            UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC,
+        ),
+    )
+    UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC = max(
+        UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC,
+        _float(
+            config,
+            ("ur5e", "rtde", "feedback_recovery_timeout_sec"),
+            UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC,
+        ),
+    )
+    UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC = max(
+        UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC,
+        _float(
+            config,
+            ("ur5e", "rtde", "feedback_reconnect_retry_sec"),
+            UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC,
+        ),
+    )
+    UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = max(
+        UR5E_RTDE_STATIONARY_HOLD_SEC,
+        _float(
+            config,
+            ("ur5e", "rtde", "stopped_away_hold_sec"),
+            UR5E_RTDE_STOPPED_AWAY_HOLD_SEC,
+        ),
+    )
+    UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = max(
+        1.0,
+        _float(
+            config,
+            ("ur5e", "moveit", "rtde_allowed_execution_duration_scaling"),
+            UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING,
+        ),
+    )
+    UR5E_RTDE_RESULT_MARGIN_SEC = max(
+        0.0,
+        _float(
+            config,
+            ("ur5e", "moveit", "rtde_allowed_goal_duration_margin"),
+            UR5E_RTDE_RESULT_MARGIN_SEC,
+        ),
+    )
 
 UR5E_RTDE_CURRENT_HOLD_SEC = 0.25
 UR5E_RTDE_MIN_POINT_SPACING_SEC = 0.10
@@ -127,12 +209,22 @@ UR5E_RTDE_MAX_JOINT_JERK_RAD_S3 = 2.025
 UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE = 1.0
 UR5E_RTDE_START_TOLERANCE_RAD = 0.15
 UR5E_RTDE_GOAL_TOLERANCE_RAD = 0.025
+UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S = 0.01
+UR5E_RTDE_STATIONARY_HOLD_SEC = 0.25
 UR5E_RTDE_MOVEJ_SPEED_RAD_S = 0.486
 UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 = 0.81
+UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC = 2.0
+UR5E_RTDE_MOTION_START_TIMEOUT_SEC = 2.0
+UR5E_RTDE_MOTION_START_DELTA_RAD = 0.001
+UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC = 0.5
+UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC = 2.0
+UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC = 1.0
+UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = 0.5
 UR5E_RTDE_INTERMEDIATE_BLEND_RAD = 0.005
 UR5E_RTDE_STOP_ACCEL_RAD_S2 = 0.50
 UR5E_RTDE_FEEDBACK_STALE_SEC = 2.0
-UR5E_RTDE_RESULT_MARGIN_SEC = 12.0
+UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
+UR5E_RTDE_RESULT_MARGIN_SEC = 20.0
 
 _apply_hardware_arms_config(DEFAULT_CONFIG_FILE)
 
@@ -161,6 +253,23 @@ def _set_duration(duration: Any, seconds: float) -> None:
 
 def _point_seconds(point: Any) -> float:
     return _duration_seconds(point.time_from_start)
+
+
+def _trajectory_result_timeout_sec(
+    requested_final_time_sec: float,
+    guarded_final_time_sec: float,
+) -> float:
+    """Return a server deadline that cannot precede MoveIt's configured allowance."""
+    allowed_execution_sec = (
+        max(0.0, float(requested_final_time_sec))
+        * UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
+    )
+    guarded_execution_sec = max(0.0, float(guarded_final_time_sec))
+    return max(
+        5.0,
+        max(allowed_execution_sec, guarded_execution_sec)
+        + UR5E_RTDE_RESULT_MARGIN_SEC,
+    )
 
 
 def _positions_by_joint(joint_names: list[str], positions: list[float]) -> dict[str, float]:
@@ -591,8 +700,29 @@ def _status_base() -> dict[str, Any]:
         "max_segment_jerk_joint": "",
         "time_scale_applied": 1.0,
         "movej_path_points": 0,
+        "trajectory_requested_final_time_sec": None,
+        "trajectory_guarded_final_time_sec": None,
+        "trajectory_result_timeout_sec": None,
+        "trajectory_elapsed_sec": None,
+        "allowed_execution_duration_scaling": (
+            UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
+        ),
+        "allowed_goal_duration_margin_sec": UR5E_RTDE_RESULT_MARGIN_SEC,
         "final_joint_error_rad": None,
         "final_joint_error_joint": "",
+        "max_actual_joint_velocity_rad_s": None,
+        "max_observed_joint_velocity_rad_s": None,
+        "stationary_hold_sec": 0.0,
+        "stationary_velocity_limit_rad_s": UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S,
+        "stationary_hold_required_sec": UR5E_RTDE_STATIONARY_HOLD_SEC,
+        "stopped_away_hold_sec": 0.0,
+        "stopped_away_hold_required_sec": UR5E_RTDE_STOPPED_AWAY_HOLD_SEC,
+        "rtde_feedback_gap_sec": 0.0,
+        "rtde_feedback_reconnect_after_sec": UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC,
+        "rtde_feedback_reconnect_retry_sec": UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC,
+        "rtde_feedback_recovery_timeout_sec": UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC,
+        "rtde_feedback_reconnect_count": 0,
+        "rtde_feedback_reconnect_error": "",
         "rtde_result": "",
         "rtde_command_mode": "",
         "rtde_async_dispatch_elapsed_sec": None,
@@ -678,6 +808,17 @@ def rtde_movej_path(
         positions = list(point.positions)
         q = [float(positions[index_by_joint[joint]]) for joint in ARM_JOINTS]
         blend = 0.0 if point_index == len(points) - 1 else max(0.0, float(blend_rad))
+        duplicate_delta = (
+            max(
+                abs(current - previous)
+                for current, previous in zip(q, path[-1][:6], strict=True)
+            )
+            if path
+            else math.inf
+        )
+        if duplicate_delta <= 1e-9:
+            path[-1][-1] = blend
+            continue
         path.append([*q, speed, acceleration, blend])
     return path
 
@@ -707,15 +848,30 @@ class UR5eRTDETrajectoryServer(Node):
         self.receive = None
         self.current_positions: list[float] | None = None
         self.current_positions_monotonic: float | None = None
+        self._last_receive_timestamp: float | None = None
+        self._receive_watch_started_monotonic = time.monotonic()
+        self._last_receive_reconnect_monotonic = 0.0
+        self._idle_receive_reconnect_count = 0
         self._receive_lock = threading.Lock()
         self._next_receive_connect_monotonic = 0.0
         self._receive_error = ""
         self._control_error = ""
         self._joint_status_announced = False
+        self._status_lock = threading.Lock()
         self._next_status_heartbeat_monotonic = 0.0
         self._active_lock = threading.Lock()
         self._active_goal = None
+        self._active_goal_status: dict[str, Any] | None = None
+        self._latched_terminal_status: dict[str, Any] | None = None
+        self.terminal_status_file = self.status_file.with_name(
+            f"{self.status_file.stem}_last_terminal{self.status_file.suffix}"
+        )
         self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
+        self._rviz_goal_state_pub = self.create_publisher(
+            Empty,
+            "/rviz/moveit/update_goal_state",
+            1,
+        )
         self._timer = self.create_timer(1.0 / max(1.0, float(publish_rate_hz)), self._publish_joint_state)
         self._action_server = None
         if not self.monitor_only:
@@ -742,7 +898,20 @@ class UR5eRTDETrajectoryServer(Node):
         body["ros_domain_id"] = self.ros_domain_id
         body["process_id"] = os.getpid()
         body["updated_at"] = time.time()
-        _atomic_json_write(self.status_file, body)
+        body["terminal_status_file"] = str(self.terminal_status_file)
+        with self._status_lock:
+            _atomic_json_write(self.status_file, body)
+
+    def _write_terminal_status(self, payload: dict[str, Any]) -> None:
+        """Persist the latest goal outcome separately from restart readiness status."""
+        body = dict(payload)
+        body["monitor_only"] = self.monitor_only
+        body["ros_domain_id"] = self.ros_domain_id
+        body["process_id"] = os.getpid()
+        body["updated_at"] = time.time()
+        body["terminal_status_file"] = str(self.terminal_status_file)
+        with self._status_lock:
+            _atomic_json_write(self.terminal_status_file, body)
 
     def _connect_rtde(self) -> None:
         status = _status_base()
@@ -828,7 +997,25 @@ class UR5eRTDETrajectoryServer(Node):
             return False
         self._receive_error = ""
         self._next_receive_connect_monotonic = 0.0
+        self._last_receive_timestamp = None
         return True
+
+    def _reconnect_receive(self) -> str:
+        """Replace only the read-only RTDE connection without redispatching motion."""
+        self._last_receive_reconnect_monotonic = time.monotonic()
+        with self._receive_lock:
+            receive = self.receive
+            disconnect = getattr(receive, "disconnect", None)
+            if callable(disconnect):
+                with suppress(OSError, RuntimeError):
+                    disconnect()
+            self.receive = None
+            self._last_receive_timestamp = None
+            self._next_receive_connect_monotonic = 0.0
+            if not self._reconnect_receive_locked():
+                return self._receive_error or "RTDE receive reconnect failed"
+        self._joint_status_announced = False
+        return ""
 
     def _connect_control_for_goal(self) -> str | None:
         if self.control is not None:
@@ -864,6 +1051,7 @@ class UR5eRTDETrajectoryServer(Node):
     def _read_actual_q(self) -> list[float] | None:
         error = ""
         recovered = False
+        sample_fresh = True
         with self._receive_lock:
             if self.receive is None:
                 if time.monotonic() < self._next_receive_connect_monotonic:
@@ -875,7 +1063,22 @@ class UR5eRTDETrajectoryServer(Node):
             if self.receive is not None:
                 try:
                     values = [float(value) for value in list(self.receive.getActualQ())]
-                except (OSError, RuntimeError) as exc:
+                    get_timestamp = getattr(self.receive, "getTimestamp", None)
+                    if callable(get_timestamp):
+                        receive_timestamp = float(get_timestamp())
+                        if math.isfinite(receive_timestamp):
+                            previous_timestamp = getattr(
+                                self,
+                                "_last_receive_timestamp",
+                                None,
+                            )
+                            sample_fresh = (
+                                previous_timestamp is None
+                                or receive_timestamp != previous_timestamp
+                            )
+                            if sample_fresh:
+                                self._last_receive_timestamp = receive_timestamp
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     error = f"{type(exc).__name__}: {exc}"
                     disconnect = getattr(self.receive, "disconnect", None)
                     if disconnect is not None:
@@ -900,7 +1103,8 @@ class UR5eRTDETrajectoryServer(Node):
         if len(values) < len(ARM_JOINTS):
             return None
         self.current_positions = values[: len(ARM_JOINTS)]
-        self.current_positions_monotonic = time.monotonic()
+        if sample_fresh:
+            self.current_positions_monotonic = time.monotonic()
         if recovered or not self._joint_status_announced:
             control_connected = self.control is not None
             status = _status_base()
@@ -932,6 +1136,36 @@ class UR5eRTDETrajectoryServer(Node):
             self._joint_status_announced = True
         return self.current_positions
 
+    def _read_actual_qd(self) -> list[float] | None:
+        """Return current joint velocities without changing receive readiness."""
+        with self._receive_lock:
+            receive = self.receive
+            get_actual_qd = getattr(receive, "getActualQd", None)
+            if not callable(get_actual_qd):
+                return None
+            try:
+                values = [float(value) for value in list(get_actual_qd())]
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return None
+        if len(values) < len(ARM_JOINTS) or not all(
+            math.isfinite(value) for value in values
+        ):
+            return None
+        return values[: len(ARM_JOINTS)]
+
+    def _read_feedback_timestamp(self) -> float | None:
+        """Return the controller timestamp used to prove RTDE feedback is advancing."""
+        with self._receive_lock:
+            receive = self.receive
+            get_timestamp = getattr(receive, "getTimestamp", None)
+            if not callable(get_timestamp):
+                return None
+            try:
+                value = float(get_timestamp())
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return None
+        return value if math.isfinite(value) else None
+
     def _current_position_map(self) -> dict[str, float] | None:
         actual = self._read_actual_q()
         if actual is None:
@@ -944,8 +1178,49 @@ class UR5eRTDETrajectoryServer(Node):
         return time.monotonic() - self.current_positions_monotonic <= UR5E_RTDE_FEEDBACK_STALE_SEC
 
     def _publish_joint_state(self) -> None:
+        previous_sample_at = self.current_positions_monotonic
         actual = self._read_actual_q()
-        if actual is None:
+        if actual is None or self.current_positions_monotonic == previous_sample_at:
+            now = time.monotonic()
+            with self._active_lock:
+                active_goal = self._active_goal is not None
+            last_fresh_at = self.current_positions_monotonic
+            feedback_gap_sec = now - (
+                last_fresh_at
+                if last_fresh_at is not None
+                else self._receive_watch_started_monotonic
+            )
+            reconnect_due = (
+                not active_goal
+                and feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
+                and now - self._last_receive_reconnect_monotonic
+                >= UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC
+            )
+            if reconnect_due:
+                reconnect_error = self._reconnect_receive()
+                self._idle_receive_reconnect_count += 1
+                status = _status_base()
+                status.update(
+                    state="recovering",
+                    message=(
+                        "recovering idle UR5e RTDE feedback"
+                        if not reconnect_error
+                        else f"recovering idle UR5e RTDE feedback: {reconnect_error}"
+                    ),
+                    blocked_reason=reconnect_error,
+                    rtde_connected=(
+                        not bool(reconnect_error) and self.control is not None
+                    ),
+                    rtde_receive_connected=not bool(reconnect_error),
+                    rtde_control_connected=self.control is not None,
+                    joint_states_fresh=False,
+                    rtde_feedback_gap_sec=feedback_gap_sec,
+                    rtde_feedback_reconnect_count=(
+                        self._idle_receive_reconnect_count
+                    ),
+                    rtde_feedback_reconnect_error=reconnect_error,
+                )
+                self._write_status(status)
             return
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -955,33 +1230,71 @@ class UR5eRTDETrajectoryServer(Node):
         now = time.monotonic()
         if now < self._next_status_heartbeat_monotonic:
             return
-        with self._active_lock:
-            if self._active_goal is not None:
-                return
         self._next_status_heartbeat_monotonic = now + 1.0
-        control_connected = self.control is not None
-        status = _status_base()
-        status.update(
-            state="ready" if control_connected else "monitoring",
-            message=(
-                "UR5e RTDE trajectory server ready"
-                if control_connected
-                else (
-                    "UR5e read-only calibration monitoring ready in Local Control"
-                    if self.monitor_only
-                    else (
-                        "UR5e joint-state monitoring ready in Local Control; "
-                        "trajectory motion requires Remote Control"
-                    )
+        with self._active_lock:
+            control_connected = self.control is not None
+            receive_connected = self.receive is not None
+            if self._active_goal is not None:
+                status = dict(self._active_goal_status or _status_base())
+                status.update(
+                    state="executing",
+                    message="executing UR5e RTDE moveJ path",
+                    blocked_reason="",
                 )
-            ),
-            blocked_reason="",
-            rtde_connected=control_connected,
-            rtde_receive_connected=True,
-            rtde_control_connected=control_connected,
-            joint_states_fresh=self._joint_states_fresh(),
-        )
-        self._write_status(status)
+            elif self._latched_terminal_status is not None:
+                status = dict(self._latched_terminal_status)
+            else:
+                status = _status_base()
+                status.update(
+                    state="ready" if control_connected else "monitoring",
+                    message=(
+                        "UR5e RTDE trajectory server ready"
+                        if control_connected
+                        else (
+                            "UR5e read-only calibration monitoring ready in Local Control"
+                            if self.monitor_only
+                            else (
+                                "UR5e joint-state monitoring ready in Local Control; "
+                                "trajectory motion requires Remote Control"
+                            )
+                        )
+                    ),
+                    blocked_reason="",
+                )
+            status.update(
+                rtde_connected=control_connected and receive_connected,
+                rtde_receive_connected=receive_connected,
+                rtde_control_connected=control_connected,
+                joint_states_fresh=self._joint_states_fresh(),
+            )
+            self._write_status(status)
+
+    def _write_active_goal_status(
+        self,
+        goal_handle: Any,
+        payload: dict[str, Any],
+    ) -> None:
+        with self._active_lock:
+            if self._active_goal is not goal_handle:
+                return
+            self._active_goal_status = dict(payload)
+            self._write_status(payload)
+
+    def _finish_active_goal_status(
+        self,
+        goal_handle: Any,
+        payload: dict[str, Any],
+        *,
+        latch_status: bool = False,
+    ) -> None:
+        with self._active_lock:
+            if self._active_goal is goal_handle:
+                self._active_goal = None
+                self._active_goal_status = None
+            if latch_status:
+                self._latched_terminal_status = dict(payload)
+            self._write_status(payload)
+            self._write_terminal_status(payload)
 
     def _cancel(self, _goal_handle: Any) -> CancelResponse:
         return CancelResponse.ACCEPT
@@ -1015,10 +1328,99 @@ class UR5eRTDETrajectoryServer(Node):
             except Exception:
                 continue
 
+    def _ensure_control_program_for_goal(self) -> str | None:
+        """Ensure the RTDE control script is running before dispatching a goal."""
+        control = self.control
+        is_program_running = getattr(control, "isProgramRunning", None)
+        if not callable(is_program_running):
+            return None
+        try:
+            if bool(is_program_running()):
+                return None
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return f"UR5e RTDE control program readiness failed: {type(exc).__name__}: {exc}"
+
+        reupload_script = getattr(control, "reuploadScript", None)
+        if not callable(reupload_script):
+            return "UR5e RTDE control program is not running and cannot be reuploaded"
+        try:
+            reuploaded = bool(reupload_script())
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return f"UR5e RTDE control program reupload failed: {type(exc).__name__}: {exc}"
+        if not reuploaded:
+            return "UR5e RTDE control program reupload returned False"
+
+        deadline = time.monotonic() + UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            try:
+                if bool(is_program_running()):
+                    return None
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                return (
+                    "UR5e RTDE control program readiness failed after reupload: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            time.sleep(0.02)
+        return (
+            "UR5e RTDE control program did not start within "
+            f"{UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC:.2f} s after reupload"
+        )
+
+    def _async_operation_status(self) -> dict[str, Any]:
+        """Read serializable RTDE asynchronous-operation progress diagnostics."""
+        status: dict[str, Any] = {
+            "rtde_async_operation_supported": False,
+            "rtde_async_operation_running": None,
+            "rtde_async_operation_progress": None,
+            "rtde_async_operation_id": None,
+            "rtde_async_operation_change_count": None,
+            "rtde_async_operation_value": None,
+        }
+        control = self.control
+        get_extended = getattr(control, "getAsyncOperationProgressEx", None)
+        if callable(get_extended):
+            try:
+                operation = get_extended()
+                status.update(
+                    rtde_async_operation_supported=True,
+                    rtde_async_operation_running=bool(operation.isAsyncOperationRunning()),
+                    rtde_async_operation_progress=int(operation.progress()),
+                    rtde_async_operation_id=int(operation.operationId()),
+                    rtde_async_operation_change_count=int(operation.changeCount()),
+                    rtde_async_operation_value=int(operation.value()),
+                )
+                return status
+            except (OSError, RuntimeError, TypeError, ValueError, AttributeError):
+                pass
+
+        get_legacy = getattr(control, "getAsyncOperationProgress", None)
+        if callable(get_legacy):
+            try:
+                value = int(get_legacy())
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return status
+            status.update(
+                rtde_async_operation_supported=True,
+                rtde_async_operation_running=value >= 0,
+                rtde_async_operation_progress=value if value >= 0 else None,
+                rtde_async_operation_value=value,
+            )
+        return status
+
+    def _publish_rviz_goal_state_update(self, outcome: str) -> None:
+        """Ask MoveIt RViz to reset its orange goal state from current feedback."""
+        try:
+            self._rviz_goal_state_pub.publish(Empty())
+        except RuntimeError as exc:
+            self.get_logger().warning(
+                f"UR5e RTDE trajectory {outcome} but RViz goal-state update failed: {exc}"
+            )
+
     def _clear_active_goal(self, goal_handle: Any) -> None:
         with self._active_lock:
             if self._active_goal is goal_handle:
                 self._active_goal = None
+                self._active_goal_status = None
 
     def _execute_movej_path(self, path: list[list[float]]) -> tuple[str, str]:
         if self.control is None:
@@ -1041,11 +1443,20 @@ class UR5eRTDETrajectoryServer(Node):
         suffix = "; ".join(type_errors)
         return f"{repr(result)}; blocking_fallback=True; {suffix}", "blocking_fallback"
 
-    def _execute(  # noqa: PLR0915 - guarded hardware execution keeps one status lifecycle.
+    def _execute(  # noqa: C901, PLR0912, PLR0915 - one guarded hardware status lifecycle.
         self,
         goal_handle: Any,
     ) -> FollowJointTrajectory.Result:
         with self._active_lock:
+            if self._latched_terminal_status is not None:
+                reason = str(
+                    self._latched_terminal_status.get("blocked_reason")
+                    or self._latched_terminal_status.get("message")
+                    or "UR5e RTDE trajectory server requires repair"
+                )
+                self._write_status(self._latched_terminal_status)
+                goal_handle.abort()
+                return self._result(-1, reason)
             if self._active_goal is not None:
                 reason = "UR5e RTDE trajectory already executing"
                 status = _status_base()
@@ -1062,6 +1473,7 @@ class UR5eRTDETrajectoryServer(Node):
                 goal_handle.abort()
                 return self._result(-1, reason)
             self._active_goal = goal_handle
+            self._active_goal_status = None
         status = _status_base()
         control_error = self._connect_control_for_goal()
         if control_error:
@@ -1074,10 +1486,23 @@ class UR5eRTDETrajectoryServer(Node):
                 rtde_control_connected=False,
                 joint_states_fresh=self._joint_states_fresh(),
             )
-            self._write_status(status)
             goal_handle.abort()
-            self._clear_active_goal(goal_handle)
+            self._finish_active_goal_status(goal_handle, status)
             return self._result(-1, control_error)
+        control_program_error = self._ensure_control_program_for_goal()
+        if control_program_error:
+            status.update(
+                state="blocked",
+                blocked_reason=control_program_error,
+                message=f"blocked: {control_program_error}",
+                rtde_connected=False,
+                rtde_receive_connected=self.receive is not None,
+                rtde_control_connected=False,
+                joint_states_fresh=self._joint_states_fresh(),
+            )
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status)
+            return self._result(-1, control_program_error)
         status["rtde_connected"] = self.control is not None and self.receive is not None
         status["rtde_receive_connected"] = self.receive is not None
         status["rtde_control_connected"] = self.control is not None
@@ -1086,13 +1511,17 @@ class UR5eRTDETrajectoryServer(Node):
         if current_positions is None or not status["joint_states_fresh"]:
             reason = "UR5e RTDE feedback stale or missing"
             status.update(state="blocked", blocked_reason=reason, message=f"blocked: {reason}")
-            self._write_status(status)
             goal_handle.abort()
-            self._clear_active_goal(goal_handle)
+            self._finish_active_goal_status(goal_handle, status)
             return self._result(-1, reason)
 
+        requested_trajectory = goal_handle.request.trajectory
+        requested_final_time = max(
+            (_point_seconds(point) for point in list(requested_trajectory.points)),
+            default=0.0,
+        )
         ok, guarded_trajectory, status = prepare_rtde_trajectory(
-            goal_handle.request.trajectory,
+            requested_trajectory,
             current_positions,
         )
         status["rtde_connected"] = self.control is not None and self.receive is not None
@@ -1100,18 +1529,61 @@ class UR5eRTDETrajectoryServer(Node):
         status["rtde_control_connected"] = self.control is not None
         status["joint_states_fresh"] = self._joint_states_fresh()
         if not ok or guarded_trajectory is None:
-            self._write_status(status)
             goal_handle.abort()
-            self._clear_active_goal(goal_handle)
+            self._finish_active_goal_status(goal_handle, status)
             return self._result(-1, str(status.get("blocked_reason") or "RTDE trajectory rejected"))
 
+        guarded_point_count = len(list(guarded_trajectory.points))
         path = rtde_movej_path(guarded_trajectory)
         status["movej_path_points"] = len(path)
+        status["movej_duplicate_points_removed"] = max(0, guarded_point_count - len(path))
         status.update(state="executing", message="executing UR5e RTDE moveJ path")
-        self._write_status(status)
         final_q = [float(value) for value in path[-1][: len(ARM_JOINTS)]]
-        final_time = max((_point_seconds(point) for point in list(guarded_trajectory.points)), default=0.0)
-        deadline = time.monotonic() + max(5.0, final_time + UR5E_RTDE_RESULT_MARGIN_SEC)
+        initial_q = [float(current_positions[joint]) for joint in ARM_JOINTS]
+        initial_target_error, _initial_target_joint = _max_named_delta(
+            ARM_JOINTS,
+            final_q,
+            dict(zip(ARM_JOINTS, initial_q, strict=True)),
+        )
+        final_time = max(
+            (_point_seconds(point) for point in list(guarded_trajectory.points)),
+            default=0.0,
+        )
+        result_timeout_sec = _trajectory_result_timeout_sec(requested_final_time, final_time)
+        execution_started = time.monotonic()
+        deadline = execution_started + result_timeout_sec
+        status.update(
+            trajectory_requested_final_time_sec=requested_final_time,
+            trajectory_guarded_final_time_sec=final_time,
+            trajectory_result_timeout_sec=result_timeout_sec,
+            trajectory_elapsed_sec=0.0,
+            control_program_start_timeout_sec=UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC,
+            motion_start_timeout_sec=UR5E_RTDE_MOTION_START_TIMEOUT_SEC,
+            motion_start_delta_rad=UR5E_RTDE_MOTION_START_DELTA_RAD,
+            motion_required=initial_target_error > UR5E_RTDE_GOAL_TOLERANCE_RAD,
+            motion_started=initial_target_error <= UR5E_RTDE_GOAL_TOLERANCE_RAD,
+            motion_start_elapsed_sec=(
+                0.0 if initial_target_error <= UR5E_RTDE_GOAL_TOLERANCE_RAD else None
+            ),
+            initial_positions_rad=list(initial_q),
+            final_target_positions_rad=list(final_q),
+            actual_positions_rad=list(initial_q),
+        )
+        self._write_active_goal_status(goal_handle, status)
+        stationary_since: float | None = None
+        stopped_away_since: float | None = None
+        previous_actual: list[float] | None = None
+        previous_actual_at: float | None = None
+        max_observed_joint_velocity: float | None = None
+        motion_started = initial_target_error <= UR5E_RTDE_GOAL_TOLERANCE_RAD
+        initial_feedback_timestamp = self._read_feedback_timestamp()
+        status["rtde_feedback_timestamp_initial_sec"] = initial_feedback_timestamp
+        status["rtde_feedback_timestamp_sec"] = initial_feedback_timestamp
+        status["rtde_feedback_timestamp_advanced"] = False
+        last_feedback_timestamp = initial_feedback_timestamp
+        last_feedback_advance_at = execution_started
+        last_feedback_reconnect_at: float | None = None
+        feedback_reconnect_count = 0
 
         try:
             dispatch_started = time.monotonic()
@@ -1119,40 +1591,259 @@ class UR5eRTDETrajectoryServer(Node):
             status["rtde_result"] = rtde_result
             status["rtde_command_mode"] = rtde_command_mode
             status["rtde_async_dispatch_elapsed_sec"] = time.monotonic() - dispatch_started
-            self._write_status(status)
+            self._write_active_goal_status(goal_handle, status)
             if str(rtde_result).strip() == "False":
                 reason = "UR5e RTDE moveJ returned False"
                 status.update(state="failed", message=reason, blocked_reason=reason)
-                self._write_status(status)
                 goal_handle.abort()
-                self._clear_active_goal(goal_handle)
+                self._finish_active_goal_status(goal_handle, status)
                 return self._result(-4, reason)
             while rclpy.ok() and time.monotonic() < deadline:
                 if goal_handle.is_cancel_requested:
                     self._stop_motion()
                     status.update(state="canceled", message="UR5e RTDE trajectory canceled")
-                    self._write_status(status)
                     goal_handle.canceled()
-                    self._clear_active_goal(goal_handle)
+                    self._finish_active_goal_status(goal_handle, status)
                     return self._result(-1, "canceled")
                 actual = self._read_actual_q()
+                actual_at = time.monotonic()
+                feedback_timestamp = self._read_feedback_timestamp()
+                status["rtde_feedback_timestamp_sec"] = feedback_timestamp
+                feedback_advanced = (
+                    feedback_timestamp is not None
+                    and (
+                        last_feedback_timestamp is None
+                        or feedback_timestamp > last_feedback_timestamp
+                    )
+                )
+                if feedback_advanced:
+                    last_feedback_timestamp = feedback_timestamp
+                    last_feedback_advance_at = actual_at
+                    status["rtde_feedback_timestamp_advanced"] = True
+                    status["rtde_feedback_gap_sec"] = 0.0
+                    status["rtde_feedback_reconnect_error"] = ""
+                else:
+                    feedback_gap_sec = actual_at - last_feedback_advance_at
+                    status["rtde_feedback_gap_sec"] = feedback_gap_sec
+                    reconnect_due = (
+                        feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
+                        and (
+                            last_feedback_reconnect_at is None
+                            or actual_at - last_feedback_reconnect_at
+                            >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
+                        )
+                    )
+                    if (
+                        feedback_gap_sec
+                        >= UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
+                    ):
+                        reason = (
+                            "UR5e RTDE trajectory feedback stopped advancing and did not "
+                            "recover within "
+                            f"{UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:.2f} s"
+                        )
+                        self._stop_motion()
+                        status.update(
+                            state="failed",
+                            message=reason,
+                            blocked_reason=reason,
+                            joint_states_fresh=False,
+                            trajectory_elapsed_sec=actual_at - execution_started,
+                        )
+                        goal_handle.abort()
+                        self._finish_active_goal_status(
+                            goal_handle,
+                            status,
+                            latch_status=True,
+                        )
+                        return self._result(-1, reason)
+                    if reconnect_due:
+                        last_feedback_reconnect_at = actual_at
+                        feedback_reconnect_count += 1
+                        reconnect_error = self._reconnect_receive()
+                        status["rtde_feedback_reconnect_count"] = (
+                            feedback_reconnect_count
+                        )
+                        status["rtde_feedback_reconnect_error"] = reconnect_error
+                        status["rtde_receive_connected"] = not bool(reconnect_error)
+                        status["rtde_connected"] = (
+                            not bool(reconnect_error) and self.control is not None
+                        )
+                        with self._active_lock:
+                            if self._active_goal is goal_handle:
+                                self._active_goal_status = dict(status)
+                    time.sleep(0.02)
+                    continue
+
                 if actual is not None:
-                    max_delta, max_joint = _max_named_delta(ARM_JOINTS, final_q, dict(zip(ARM_JOINTS, actual)))
+                    status["actual_positions_rad"] = [float(value) for value in actual]
+                    max_delta, max_joint = _max_named_delta(
+                        ARM_JOINTS,
+                        final_q,
+                        dict(zip(ARM_JOINTS, actual, strict=True)),
+                    )
                     status["final_joint_error_rad"] = max_delta
                     status["final_joint_error_joint"] = max_joint
-                    if max_delta <= UR5E_RTDE_GOAL_TOLERANCE_RAD:
-                        status.update(state="succeeded", message="UR5e RTDE trajectory reached final joint target")
-                        self._write_status(status)
+                    actual_qd = self._read_actual_qd()
+                    if actual_qd is not None:
+                        max_actual_joint_velocity = max(abs(value) for value in actual_qd)
+                    elif previous_actual is not None and previous_actual_at is not None:
+                        sample_sec = actual_at - previous_actual_at
+                        max_actual_joint_velocity = (
+                            max(
+                                abs(current - previous) / sample_sec
+                                for current, previous in zip(
+                                    actual,
+                                    previous_actual,
+                                    strict=True,
+                                )
+                            )
+                            if sample_sec > 0.0
+                            else None
+                        )
+                    else:
+                        max_actual_joint_velocity = None
+                    status["max_actual_joint_velocity_rad_s"] = max_actual_joint_velocity
+                    if max_actual_joint_velocity is not None:
+                        max_observed_joint_velocity = max(
+                            max_observed_joint_velocity or 0.0,
+                            max_actual_joint_velocity,
+                        )
+                    status["max_observed_joint_velocity_rad_s"] = (
+                        max_observed_joint_velocity
+                    )
+                    status["trajectory_elapsed_sec"] = actual_at - execution_started
+
+                    start_delta = max(
+                        abs(current - initial)
+                        for current, initial in zip(actual, initial_q, strict=True)
+                    )
+                    status["motion_start_observed_delta_rad"] = start_delta
+                    if (
+                        not motion_started
+                        and (
+                            start_delta >= UR5E_RTDE_MOTION_START_DELTA_RAD
+                            or (
+                                max_actual_joint_velocity is not None
+                                and max_actual_joint_velocity
+                                > UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                            )
+                        )
+                    ):
+                        motion_started = True
+                        status["motion_started"] = True
+                        status["motion_start_elapsed_sec"] = actual_at - execution_started
+
+                    target_reached = max_delta <= UR5E_RTDE_GOAL_TOLERANCE_RAD
+                    stationary = (
+                        max_actual_joint_velocity is not None
+                        and max_actual_joint_velocity
+                        <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                    )
+                    if target_reached and stationary:
+                        if stationary_since is None:
+                            stationary_since = actual_at
+                        status["stationary_hold_sec"] = actual_at - stationary_since
+                    else:
+                        stationary_since = None
+                        status["stationary_hold_sec"] = 0.0
+
+                    if motion_started and stationary and not target_reached:
+                        if stopped_away_since is None:
+                            stopped_away_since = actual_at
+                        status["stopped_away_hold_sec"] = (
+                            actual_at - stopped_away_since
+                        )
+                    else:
+                        stopped_away_since = None
+                        status["stopped_away_hold_sec"] = 0.0
+
+                    with self._active_lock:
+                        if self._active_goal is goal_handle:
+                            self._active_goal_status = dict(status)
+
+                    if (
+                        stationary_since is not None
+                        and actual_at - stationary_since >= UR5E_RTDE_STATIONARY_HOLD_SEC
+                    ):
+                        status.update(
+                            state="succeeded",
+                            message=(
+                                "UR5e RTDE trajectory reached final joint target and "
+                                "completed stationary hold"
+                            ),
+                            trajectory_elapsed_sec=actual_at - execution_started,
+                        )
                         goal_handle.succeed()
-                        self._clear_active_goal(goal_handle)
+                        self._finish_active_goal_status(goal_handle, status)
+                        self._publish_rviz_goal_state_update("succeeded")
                         return self._result(0, "")
+
+                    if (
+                        not motion_started
+                        and not target_reached
+                        and actual_at - execution_started
+                        >= UR5E_RTDE_MOTION_START_TIMEOUT_SEC
+                    ):
+                        if (
+                            initial_feedback_timestamp is not None
+                            and not status.get("rtde_feedback_timestamp_advanced")
+                        ):
+                            reason = (
+                                "UR5e RTDE trajectory feedback did not advance after moveJ "
+                                "was accepted"
+                            )
+                        else:
+                            reason = (
+                                "UR5e RTDE trajectory did not start after moveJ was accepted"
+                            )
+                        self._stop_motion()
+                        status.update(
+                            state="failed",
+                            message=reason,
+                            blocked_reason=reason,
+                            trajectory_elapsed_sec=actual_at - execution_started,
+                        )
+                        goal_handle.abort()
+                        self._finish_active_goal_status(
+                            goal_handle,
+                            status,
+                            latch_status=True,
+                        )
+                        return self._result(-1, reason)
+
+                    if (
+                        stopped_away_since is not None
+                        and actual_at - stopped_away_since
+                        >= UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
+                    ):
+                        reason = "UR5e RTDE trajectory ended before reaching the final joint target"
+                        status.update(
+                            state="failed",
+                            message=reason,
+                            blocked_reason=reason,
+                            trajectory_elapsed_sec=actual_at - execution_started,
+                        )
+                        goal_handle.abort()
+                        self._finish_active_goal_status(
+                            goal_handle,
+                            status,
+                            latch_status=True,
+                        )
+                        return self._result(-1, reason)
+                    previous_actual = list(actual)
+                    previous_actual_at = actual_at
                 time.sleep(0.02)
             reason = "UR5e RTDE trajectory result timeout"
             self._stop_motion()
-            status.update(state="failed", message=reason, blocked_reason=reason)
-            self._write_status(status)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                trajectory_elapsed_sec=time.monotonic() - execution_started,
+            )
             goal_handle.abort()
-            self._clear_active_goal(goal_handle)
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
             return self._result(-1, reason)
         except Exception as exc:
             reason = f"UR5e RTDE trajectory failed: {type(exc).__name__}: {exc}"
@@ -1166,8 +1857,8 @@ class UR5eRTDETrajectoryServer(Node):
             status["rtde_control_connected"] = False
             status["rtde_receive_connected"] = self.receive is not None
             status.update(state="failed", message=reason, blocked_reason=reason)
-            self._write_status(status)
             goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status)
             return self._result(-4, reason)
         finally:
             self._clear_active_goal(goal_handle)

@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install run headless setup-perception-host bootstrap-gazebo check
+.PHONY: install run run-physical-ur5e headless setup-perception-host bootstrap-gazebo check
 
 install:
 	poetry install
@@ -8,6 +8,11 @@ install:
 
 run:
 	poetry run python -m cais_spade_llm
+
+run-physical-ur5e:
+	source /opt/ros/humble/setup.bash && \
+		source "$${HOME}/ros2_ws/install/setup.bash" && \
+		ROS_DOMAIN_ID=42 poetry run python -m cais_spade_llm
 
 headless:
 	poetry run python -m cais_spade_llm.ui_main --headless

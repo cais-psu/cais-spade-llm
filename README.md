@@ -358,12 +358,24 @@ WSL2 note: Gazebo and RViz can take 30-60 seconds to show useful output.
 
 ## Run The UI
 
-Use a project terminal:
+For `dry_run` or Simulation, use a project terminal:
 
 ```bash
 cd ~/projects/cais-spade-llm
-poetry run python -m cais_spade_llm
+make run
 ```
+
+For physical `ur5e` Function Execution or the `ur5e only` passive Digital Twin,
+start the UI on the UR5e hardware domain before ROS initializes:
+
+```bash
+cd ~/projects/cais-spade-llm
+make run-physical-ur5e
+```
+
+For VS Code debugging, both the tracked `CAIS UI: Physical ur5e` configuration and
+`Python: Current File (F5 Default)` set `ROS_DOMAIN_ID=42`. Opening `ui_main.py` and
+pressing F5 therefore uses the UR5e hardware domain before ROS initializes.
 
 Open:
 
@@ -429,7 +441,7 @@ Before starting hardware digital twin:
 2. Build the ROS2 workspace with `make bootstrap-gazebo`.
 3. Put the xArm6 and UR5e on the same network as the PC.
 4. Confirm the robot IPs in the Control page.
-5. Start the UI with `poetry run python -m cais_spade_llm`.
+5. For `ur5e only`, start the UI with `make run-physical-ur5e`.
 6. Use the Control page to start the relevant Gazebo, hardware, and digital twin processes.
 7. Confirm RViz and Gazebo are open.
 8. Confirm `/joint_states` is publishing.
@@ -484,6 +496,7 @@ Python dependencies are installed.
 ```bash
 make install
 make run
+make run-physical-ur5e
 make headless
 make bootstrap-gazebo
 make check

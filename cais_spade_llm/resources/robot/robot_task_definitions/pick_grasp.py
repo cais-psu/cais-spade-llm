@@ -108,6 +108,15 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "value": _arg("part_name"),
                 },
             ),
+            RobotTaskGuard(
+                predicate="always",
+                message="pick_approach has not established a gripper_close_position.",
+                description="pick_approach calculated the gripper close target",
+                condition={
+                    "field": "task_ctx.gripper_close_position",
+                    "operator": "exists",
+                },
+            ),
         ),
         steps=(
             RobotTaskStep(
@@ -167,6 +176,11 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
             "content": _format("Picked {part_name}.", part_name=_arg("part_name")),
             "observations": {
                 "part_name": _arg("part_name"),
+                "source_stl": _state("_task_ctx", "source_stl"),
+                "grasp_width_m": _state("_task_ctx", "grasp_width_m"),
+                "gripper_close_position": _state(
+                    "_task_ctx", "gripper_close_position"
+                ),
                 "origin_pose": {
                     "x": _state("_task_ctx", "tx"),
                     "y": _state("_task_ctx", "ty"),
@@ -185,6 +199,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         notes=(
             "RobotAgent.pick_grasp closes the gripper, attaches the part in simulation, then lifts to travel height.",
             "close_gripper and attach_part are hidden from synthesis; use grasp_part as the visible composite.",
+            "pick_grasp consumes the pick_approach gripper_close_position and does not descend again.",
         ),
     ),
 )

@@ -170,6 +170,8 @@ class RealSenseRoboflowNode:
         self._bridge = CvBridge()
         self._lock = threading.RLock()
         self._latest_frame: tuple[Any, np.ndarray, np.ndarray, ColorIntrinsics] | None = None
+        self._latest_intrinsics: ColorIntrinsics | None = None
+        self._latest_intrinsics_image_size: tuple[int, int] | None = None
         self._last_rows: list[dict[str, Any]] = []
         self._last_error = "waiting for synchronized RealSense frames"
         self._roboflow_model_validated = False
@@ -183,6 +185,9 @@ class RealSenseRoboflowNode:
         self.camera_optical_frame = str(self.node.get_parameter("camera_optical_frame").value)
         self.minimum_confidence = float(self.node.get_parameter("minimum_confidence").value)
         self.background_rate_hz = float(self.node.get_parameter("background_rate_hz").value)
+        self.on_demand_inference_wait_sec = float(
+            self.node.get_parameter("on_demand_inference_wait_sec").value
+        )
         self.camera_role = str(self.node.get_parameter("camera_role").value)
         self.snapshot_path = Path(str(self.node.get_parameter("snapshot_path").value)).expanduser()
         self.preview_dir = (
@@ -216,23 +221,24 @@ class RealSenseRoboflowNode:
         self._static_broadcaster = tf2_ros.StaticTransformBroadcaster(self.node)
         self._publish_tool_to_camera_link()
 
-        color_sub = message_filters.Subscriber(
+        self._color_subscriber = message_filters.Subscriber(
             self.node,
             Image,
             str(self.node.get_parameter("color_topic").value),
         )
-        depth_sub = message_filters.Subscriber(
+        self._depth_subscriber = message_filters.Subscriber(
             self.node,
             Image,
             str(self.node.get_parameter("aligned_depth_topic").value),
         )
-        info_sub = message_filters.Subscriber(
-            self.node,
+        self._camera_info_subscription = self.node.create_subscription(
             CameraInfo,
             str(self.node.get_parameter("camera_info_topic").value),
+            self._on_camera_info,
+            10,
         )
         self._synchronizer = message_filters.ApproximateTimeSynchronizer(
-            [color_sub, depth_sub, info_sub],
+            [self._color_subscriber, self._depth_subscriber],
             queue_size=10,
             slop=0.08,
         )
@@ -301,6 +307,7 @@ class RealSenseRoboflowNode:
         self.node.declare_parameter("maximum_depth_mad_m", 0.003)
         self.node.declare_parameter("maximum_frame_age_sec", 1.0)
         self.node.declare_parameter("background_rate_hz", 0.2)
+        self.node.declare_parameter("on_demand_inference_wait_sec", 12.0)
         self.node.declare_parameter("snapshot_path", str(DEFAULT_SNAPSHOT_PATH))
         self.node.declare_parameter("preview_root", str(DEFAULT_PREVIEW_ROOT))
         self.node.declare_parameter("detect_all_service", "/perception/ur5e/detect_all")
@@ -340,22 +347,61 @@ class RealSenseRoboflowNode:
         message.transform.rotation.w = float(quaternion["w"])
         self._static_broadcaster.sendTransform(message)
 
-    def _on_synchronized_frame(self, color_msg: Any, depth_msg: Any, info_msg: Any) -> None:
+    def _on_camera_info(self, info_msg: Any) -> None:
+        """Cache color intrinsics independently from the image synchronizer."""
+        try:
+            intrinsics = ColorIntrinsics(
+                fx=float(info_msg.k[0]),
+                fy=float(info_msg.k[4]),
+                cx=float(info_msg.k[2]),
+                cy=float(info_msg.k[5]),
+            )
+            image_size = (int(info_msg.width), int(info_msg.height))
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            self._last_error = f"invalid RealSense CameraInfo: {exc}"
+            return
+        if (
+            not all(np.isfinite(value) for value in vars(intrinsics).values())
+            or intrinsics.fx <= 0.0
+            or intrinsics.fy <= 0.0
+            or image_size[0] <= 0
+            or image_size[1] <= 0
+        ):
+            self._last_error = "invalid RealSense CameraInfo intrinsics or image size"
+            return
+        with self._lock:
+            self._latest_intrinsics = intrinsics
+            self._latest_intrinsics_image_size = image_size
+
+    def _on_synchronized_frame(self, color_msg: Any, depth_msg: Any) -> None:
+        """Store one synchronized color/depth pair using the latest CameraInfo."""
+        with self._lock:
+            intrinsics = self._latest_intrinsics
+            intrinsics_image_size = self._latest_intrinsics_image_size
+        if intrinsics is None or intrinsics_image_size is None:
+            self._last_error = "waiting for RealSense CameraInfo"
+            return
         color = self._bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         depth = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+        color_height, color_width = color.shape[:2]
+        if intrinsics_image_size != (color_width, color_height):
+            self._last_error = (
+                "RealSense CameraInfo dimensions do not match the color frame: "
+                f"CameraInfo={intrinsics_image_size[0]}x{intrinsics_image_size[1]}, "
+                f"color={color_width}x{color_height}"
+            )
+            return
         depth_array = np.asarray(depth)
         if depth_array.dtype == np.uint16:
             depth_m = depth_array.astype(np.float32) * 0.001
         else:
             depth_m = depth_array.astype(np.float32)
-        intrinsics = ColorIntrinsics(
-            fx=float(info_msg.k[0]),
-            fy=float(info_msg.k[4]),
-            cx=float(info_msg.k[2]),
-            cy=float(info_msg.k[5]),
-        )
         with self._lock:
+            first_frame = self._latest_frame is None
             self._latest_frame = (color_msg.header.stamp, color.copy(), depth_m.copy(), intrinsics)
+        if first_frame:
+            self._last_error = "waiting for Roboflow model inference"
+            self._write_snapshot(self._last_rows)
 
     def _lookup_transform(self, target: str, source: str, stamp: Any | None = None) -> RigidTransform:
         lookup_time = self._rclpy.time.Time() if stamp is None else self._rclpy.time.Time.from_msg(stamp)
@@ -372,19 +418,36 @@ class RealSenseRoboflowNode:
             ) from exc
         return _transform_from_message(transform)
 
-    def _frame_copy(self) -> tuple[Any, np.ndarray, np.ndarray, ColorIntrinsics]:
-        with self._lock:
-            frame = self._latest_frame
-            if frame is None:
-                raise RuntimeError("no synchronized RealSense color/depth frame")
-            stamp, color, depth_m, intrinsics = frame
-            age = self.node.get_clock().now().nanoseconds / 1e9 - (
-                float(stamp.sec) + float(stamp.nanosec) / 1e9
-            )
-            maximum_age = float(self.node.get_parameter("maximum_frame_age_sec").value)
-            if age > maximum_age:
-                raise RuntimeError(f"RealSense frame is stale ({age:.2f} s)")
-            return stamp, color.copy(), depth_m.copy(), intrinsics
+    def _frame_copy(
+        self,
+        *,
+        captured_after_sec: float | None = None,
+        wait_timeout_sec: float = 2.0,
+    ) -> tuple[Any, np.ndarray, np.ndarray, ColorIntrinsics]:
+        """Return a current frame, optionally waiting for a newer capture."""
+        deadline = time.monotonic() + max(0.1, float(wait_timeout_sec))
+        while True:
+            with self._lock:
+                frame = self._latest_frame
+            if frame is not None:
+                stamp, color, depth_m, intrinsics = frame
+                captured_at = float(stamp.sec) + float(stamp.nanosec) / 1e9
+                if captured_after_sec is None or captured_at > float(captured_after_sec):
+                    age = self.node.get_clock().now().nanoseconds / 1e9 - captured_at
+                    maximum_age = float(
+                        self.node.get_parameter("maximum_frame_age_sec").value
+                    )
+                    if age > maximum_age:
+                        raise RuntimeError(f"RealSense frame is stale ({age:.2f} s)")
+                    return stamp, color.copy(), depth_m.copy(), intrinsics
+            if time.monotonic() >= deadline:
+                if frame is None:
+                    raise RuntimeError("no synchronized RealSense color/depth frame")
+                raise RuntimeError(
+                    "no synchronized RealSense color/depth frame was captured after "
+                    "the detection request"
+                )
+            time.sleep(0.01)
 
     def _reload_table_plane_calibration(self) -> None:
         """Apply an accepted table-plane update without restarting perception."""
@@ -407,36 +470,104 @@ class RealSenseRoboflowNode:
             f"Reloaded table-plane calibration: surface_z_m={surface_z_m}"
         )
 
+    def _wait_for_stationary_tool_pose(
+        self,
+        *,
+        timeout_sec: float = 2.0,
+    ) -> RigidTransform:
+        """Wait for two stable world-to-tool0 samples before inference."""
+        deadline = time.monotonic() + max(0.15, float(timeout_sec))
+        previous = self._lookup_transform(self.world_frame, self.tool_frame)
+        consecutive_stable_samples = 0
+        last_translation_m = 0.0
+        last_rotation_deg = 0.0
+        while True:
+            time.sleep(0.15)
+            current = self._lookup_transform(self.world_frame, self.tool_frame)
+            last_translation_m, last_rotation_deg = pose_motion(previous, current)
+            if last_translation_m <= 0.001 and last_rotation_deg <= 0.5:
+                consecutive_stable_samples += 1
+                if consecutive_stable_samples >= 2:
+                    return current
+            else:
+                consecutive_stable_samples = 0
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"{self.camera_role} did not become stationary within "
+                    f"{float(timeout_sec):.2f} s; last motion "
+                    f"({last_translation_m * 1000.0:.2f} mm, "
+                    f"{last_rotation_deg:.2f} deg); inference was not started"
+                )
+            previous = current
+
+    def _write_detection_progress(self, stage: str, *, message: str = "") -> None:
+        """Publish the current no-motion detection stage for the operator UI."""
+        preview_dir = getattr(self, "preview_dir", None)
+        if not isinstance(preview_dir, Path):
+            return
+        try:
+            _atomic_write_json(
+                preview_dir / "detection_status.json",
+                {
+                    "updated_at": time.time(),
+                    "camera_role": self.camera_role,
+                    "stage": str(stage or ""),
+                    "message": str(message or ""),
+                    "visual_detection_ready": False,
+                    "world_pose_ready": False,
+                },
+            )
+        except OSError as exc:
+            self.node.get_logger().warning(f"Detection progress update failed: {exc}")
+
     def _run_detection(
         self,
         *,
         constrain_table_plane: bool = True,
         publish_executable_snapshot: bool = True,
+        wait_for_inference_sec: float = 0.0,
     ) -> list[dict[str, Any]]:
-        if not self._inference_lock.acquire(blocking=False):
+        wait_sec = max(0.0, float(wait_for_inference_sec))
+        if wait_sec > 0.0 and self._inference_lock.locked():
+            self._write_detection_progress(
+                "settling",
+                message="Waiting for the active Roboflow inference before fresh /detect_all.",
+            )
+        acquired = (
+            self._inference_lock.acquire(timeout=wait_sec)
+            if wait_sec > 0.0
+            else self._inference_lock.acquire(blocking=False)
+        )
+        if not acquired:
+            if wait_sec > 0.0:
+                message = (
+                    "Roboflow inference did not become available within "
+                    f"{wait_sec:.1f} s"
+                )
+                self._write_detection_progress("failed", message=message)
+                raise RuntimeError(message)
             raise RuntimeError("Roboflow inference is already running")
         try:
-            stamp, color, depth_m, intrinsics = self._frame_copy()
             if publish_executable_snapshot:
                 self._last_rows = []
             self._reload_table_plane_calibration()
             tool_before: RigidTransform | None = None
             pose_error = ""
+            self._write_detection_progress("settling")
             try:
-                stationary_start = self._lookup_transform(self.world_frame, self.tool_frame)
-                time.sleep(0.15)
-                tool_before = self._lookup_transform(self.world_frame, self.tool_frame)
-                pre_translation_m, pre_rotation_deg = pose_motion(
-                    stationary_start,
-                    tool_before,
-                )
-                if pre_translation_m > 0.001 or pre_rotation_deg > 0.5:
-                    raise RuntimeError(
-                        f"{self.camera_role} is moving; inference was not started"
-                    )
+                tool_before = self._wait_for_stationary_tool_pose()
             except CalibrationError as exc:
                 pose_error = str(exc)
+            except RuntimeError as exc:
+                self._write_detection_progress("failed", message=str(exc))
+                raise
 
+            detection_requested_at = time.time()
+            stamp, color, depth_m, intrinsics = self._frame_copy(
+                captured_after_sec=detection_requested_at
+            )
+
+            self._write_detection_progress("detection")
             inference_started = time.monotonic()
             detections = self._detector.detect(color)
             self._last_inference_latency_ms = (
@@ -628,6 +759,7 @@ class RealSenseRoboflowNode:
                 "updated_at": time.time(),
                 "captured_at": captured_at,
                 "camera_role": self.camera_role,
+                "stage": "completed" if world_pose_ready else "failed",
                 "detection_count": len(annotations),
                 "detections": annotations,
                 "visual_detection_ready": True,
@@ -685,7 +817,12 @@ class RealSenseRoboflowNode:
             response.message = UNSUPPORTED_PARTS[target]
             return response
         try:
-            rows = self._run_detection()
+            rows = self._run_detection(
+                wait_for_inference_sec=max(
+                    0.0,
+                    float(getattr(self, "on_demand_inference_wait_sec", 12.0)),
+                )
+            )
             if target:
                 rows = [row for row in rows if row.get("part_name") == target]
                 if not rows:
@@ -727,6 +864,10 @@ class RealSenseRoboflowNode:
             rows = self._run_detection(
                 constrain_table_plane=False,
                 publish_executable_snapshot=False,
+                wait_for_inference_sec=max(
+                    0.0,
+                    float(getattr(self, "on_demand_inference_wait_sec", 12.0)),
+                ),
             )
             response.success = True
             response.message = json.dumps(rows)
@@ -761,6 +902,8 @@ class RealSenseRoboflowNode:
             KeyError,
             OSError,
         ) as exc:
+            if str(exc) == "Roboflow inference is already running":
+                return
             self._last_error = str(exc)
             self._last_rows = []
             self._write_snapshot([])

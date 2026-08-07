@@ -226,6 +226,63 @@ def test_real_ur5e_action_reports_result_timeout() -> None:
     assert "result timeout" in message
 
 
+def test_real_ur5e_action_uses_configured_result_timeout() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    result_future = _PendingFuture()
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: result_future,
+    )
+    teleop.ur5e_hardware_trajectory_action = (
+        "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+    )
+    teleop.ur5e_hardware_result_timeout_sec = 52.0
+    teleop.ur5e_hardware_trajectory_client = SimpleNamespace(
+        wait_for_server=lambda timeout_sec: True,
+        send_goal_async=lambda _goal: _ImmediateFuture(goal_handle),
+    )
+    teleop.joint_positions = {"ur5e": [0.0] * 6}
+    waits: list[float] = []
+
+    def _wait(future: Any, timeout: float) -> bool:
+        waits.append(float(timeout))
+        return future.done()
+
+    teleop._wait_future = _wait
+
+    ok, message = teleop._move_ur5e_arm_action(
+        list(module.ROBOTS["ur5e"]["joint_name_candidates"][1]),
+        [0.1, -1.0, -2.0, -1.2, 1.5, 0.0],
+        duration_sec=1.2,
+    )
+
+    assert ok is False
+    assert "result timeout" in message
+    assert waits == [3.0, 52.0]
+
+
+def test_named_position_request_outlasts_rtde_client_timeout() -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.list_named_positions = lambda _robot: {"home": [0.0] * 6}
+    bridge.teleop_named_position_readiness = lambda _robot: (True, "ready")
+    requests: list[tuple[dict[str, Any], float]] = []
+    bridge._teleop_request = lambda payload, timeout_sec: (
+        requests.append((dict(payload), float(timeout_sec))) or (True, "OK")
+    )
+
+    assert bridge.teleop_go_to_position("ur5e", "home") == (True, "OK")
+    assert requests == [
+        (
+            {"op": "move_joints", "robot": "ur5e", "positions": [0.0] * 6},
+            bridge_module._UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC + 5.0,
+        )
+    ]
+
+
 def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -> None:
     bridge = (ROOT / "cais_spade_llm/ui/bridge.py").read_text(encoding="utf-8")
     teleop = (ROOT / "ros2/cais_lab_robotics/scripts/keyboard_teleop.py").read_text(
@@ -238,7 +295,56 @@ def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -
     assert "external_ur5e_runtime = (" in bridge
     assert "self.infer_robot_environment(robot) == 'real'" in teleop
     assert "self._move_ur5e_arm_action(" in teleop
-    assert "--include-hidden-services --no-daemon --spin-time 0.5" in bridge
+    assert "--include-hidden-services --no-daemon --spin-time 2.0" in bridge
+
+
+def test_ros_action_discovery_rate_limits_forced_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ros2_procs = {}
+    bridge._ros_action_service_snapshot = None
+    calls = 0
+    now = [100.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
+
+    def _command(*_args, **_kwargs) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
+        return False, ""
+
+    bridge._ros2_command_output = _command
+
+    ok, _services = bridge._ros_action_service_snapshot_for_domain(
+        ros_domain_id=42,
+        timeout_sec=8.0,
+    )
+    assert ok is False
+    now[0] = 101.0
+    bridge._ros_action_service_snapshot_for_domain(
+        ros_domain_id=42,
+        timeout_sec=8.0,
+        force_refresh=True,
+    )
+    assert calls == 1
+
+    now[0] = 103.0
+    bridge._ros_action_service_snapshot_for_domain(
+        ros_domain_id=42,
+        timeout_sec=8.0,
+        force_refresh=True,
+    )
+    assert calls == 2
+
+    now[0] = 110.0
+    bridge._ros_action_service_snapshot_for_domain(
+        ros_domain_id=42,
+        timeout_sec=8.0,
+    )
+    assert calls == 2
 
 
 def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None:
@@ -278,7 +384,7 @@ def test_rtde_result_timeout_stops_and_clears_goal_without_destroying_server() -
     ].split("        except Exception as exc:", maxsplit=1)[0]
 
     assert timeout_block.index("self._stop_motion()") < timeout_block.index("goal_handle.abort()")
-    assert "self._clear_active_goal(goal_handle)" in timeout_block
+    assert "self._finish_active_goal_status(goal_handle, status, latch_status=True)" in timeout_block
     assert "self._action_server.destroy" not in timeout_block
 
 
@@ -448,6 +554,96 @@ def test_dual_twin_waiting_robot_mirror_reports_repair_needed() -> None:
 
     assert healthy_row["repair_needed"] is False
     assert healthy_row["repair_reason"] == ""
+
+
+def test_dual_twin_fresh_mirroring_heartbeats_keep_process_status_running(
+    tmp_path: Path,
+) -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    cfg = {
+        "sync_processes": {"xarm6": "sync_xarm6", "ur5e": "sync_ur5e"},
+    }
+    now = time.time()
+    for robot in ("xarm6", "ur5e"):
+        (tmp_path / f"{robot}.json").write_text(
+            json.dumps({"state": "mirroring", "updated_at": now - 0.5}),
+            encoding="utf-8",
+        )
+    bridge.ros2_proc_status = lambda _name: "stopped"
+    bridge._digital_twin_sync_status_path = (
+        lambda _target, robot="": tmp_path / f"{robot}.json"
+    )
+
+    snapshot = bridge._digital_twin_sync_status_snapshot("dual robots", cfg, now)
+
+    assert snapshot["process_status"] == "running"
+    assert all(
+        robot_status["state"] == "mirroring"
+        for robot_status in snapshot["robots"].values()
+    )
+
+
+def test_dual_twin_stale_stopped_mirror_schedules_monitor_restart() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    cfg = {
+        "hardware_supported": True,
+        "hardware": ("xarm6", "ur5e"),
+        "gazebo_process": "dual_gazebo",
+        "hardware_processes": {},
+        "sync_processes": {"xarm6": "sync_xarm6", "ur5e": "sync_ur5e"},
+    }
+    bridge._DIGITAL_TWIN_TARGETS = {"dual robots": cfg}
+    bridge._digital_twin_domain_ids = lambda: {"gazebo": 41, "hardware": 42}
+    bridge._digital_twin_gazebo_launch = lambda _target, _cfg: "gazebo_dual_passive"
+    bridge._digital_twin_hardware_status = lambda _cfg: {
+        "overall": "running",
+        "moveit": "running",
+        "ur5e": {"overall": "running"},
+    }
+    bridge._ur5e_rg2_gripper_status = lambda: {}
+    bridge.ros2_proc_status = lambda name: "running" if name == "dual_gazebo" else "stopped"
+    bridge._digital_twin_sync_status_snapshot = lambda _target, _cfg, _now: {
+        "process": "sync_xarm6, sync_ur5e",
+        "process_status": "stopped",
+        "status_data": {"state": "starting", "message": "mirror processes stopped"},
+        "status_age_ms": 7000.0,
+        "robots": {},
+    }
+    bridge._digital_twin_dual_drag_markers_status_path = lambda _target: Path(
+        "/tmp/not-used.json"
+    )
+    bridge._read_json_file = lambda _path: {}
+    bridge._digital_twin_direction = lambda _target: "hardware -> gazebo"
+    bridge._digital_twin_blocked_reason = lambda _target, _cfg: ""
+    bridge._digital_twin_sim_mode = lambda _target: "monitor"
+    bridge._digital_twin_allowed_sim_modes = lambda _cfg: ("monitor",)
+    bridge._digital_twin_hardware_domain_id = lambda _cfg, _robot, domains: domains[
+        "hardware"
+    ]
+    bridge._digital_twin_status_path = lambda _target: Path("/tmp/not-used.json")
+    restart_calls: list[tuple[str, str]] = []
+    bridge._schedule_digital_twin_monitor_sync_restart = (
+        lambda target, _cfg, *, gazebo_process, domains, reason: (
+            restart_calls.append((target, reason)) or False
+        )
+    )
+
+    row = bridge.digital_twin_statuses()["dual robots"]
+
+    assert restart_calls == [("dual robots", "sync process is stopped")]
+    assert row["repair_needed"] is True
+
+
+def test_dual_hardware_rviz_allows_external_goal_state_refresh() -> None:
+    config = (
+        ROOT / "ros2/cais_lab_robotics/rviz/dual_robots_hardware_moveit.rviz"
+    ).read_text(encoding="utf-8")
+
+    assert "MoveIt_Allow_External_Program: true" in config
 
 
 def test_repair_stop_is_scoped_and_contains_no_motion_operation() -> None:

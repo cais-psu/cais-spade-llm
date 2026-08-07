@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.product.order import load_product_order_file
+from cais_spade_llm.product.stl_geometry import actual_mg_stl_geometry_for_part
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -234,13 +235,15 @@ class ProductProfile:
         slot_xy = board.get("slots", {}).get(part_name)
         if slot_xy is None:
             return {}
-        return {
+        geometry = {
             "slot_xy": deepcopy(slot_xy),
             "part_height_m": parts.get("heights_m", {}).get(part_name),
             "model_name": parts.get("model_map", {}).get(part_name),
             "slot_floor_z_m": board.get("slot_floor_z_m"),
             "board_center": deepcopy(board.get("center", {})),
         }
+        geometry.update(actual_mg_stl_geometry_for_part(part_name, parts))
+        return geometry
 
     @staticmethod
     def has_place_geometry_fields(geometry: Mapping[str, Any] | None) -> bool:

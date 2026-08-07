@@ -1149,6 +1149,7 @@ class RobotAgent(ResourceAgent):
             "part_height",
             "tcp_offset_z",
             "pick_tcp_z",
+            "pick_tcp_z_offset_from_table_m",
             "start_x",
             "start_y",
             "start_z",
@@ -1156,6 +1157,19 @@ class RobotAgent(ResourceAgent):
             "surface_clearance_m",
             "pick_z_adjustment_m",
             "apply_pick_z_adjustments",
+            "source_stl",
+            "source_stl_sha256",
+            "hub_up",
+            "hub_diameter_m",
+            "hub_height_m",
+            "tooth_diameter_m",
+            "tooth_height_m",
+            "grasp_width_m",
+            "tooth_clearance_m",
+            "minimum_hub_overlap_m",
+            "finger_tooth_clearance_m",
+            "finger_hub_overlap_m",
+            "gripper_close_position",
         ):
             if key in step_result:
                 context[key] = deepcopy(step_result[key])
@@ -1728,6 +1742,11 @@ class RobotAgent(ResourceAgent):
                 }
             # List-returning primitives (detect_parts)
             if isinstance(result, list):
+                if primitive == "detect_parts" and not result and last_failure:
+                    return {
+                        "success": False,
+                        "message": last_failure,
+                    }
                 return {
                     "success": True,
                     "message": f"{primitive} returned {len(result)} items",

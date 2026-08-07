@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cais_spade_llm.product.stl_geometry import actual_mg_stl_geometry_for_part
+
 
 @dataclass(frozen=True)
 class ProductOrder:
@@ -111,7 +113,7 @@ def part_place_geometry(
     slot_xy = slots.get(part_name)
     if not isinstance(slot_xy, (list, tuple)) or len(slot_xy) < 2:
         return {}
-    return {
+    result = {
         "slot_xy": list(slot_xy[:2]),
         "part_height_m": dict(parts.get("heights_m") or {}).get(part_name),
         "model_name": dict(parts.get("model_map") or {}).get(part_name),
@@ -119,6 +121,8 @@ def part_place_geometry(
         "board_center": deepcopy(board.get("center") or {}),
         "target_reference": deepcopy(geometry.get("target_reference") or {}),
     }
+    result.update(actual_mg_stl_geometry_for_part(part_name, parts))
+    return result
 
 
 def derive_ordering_constraints_from_safety(

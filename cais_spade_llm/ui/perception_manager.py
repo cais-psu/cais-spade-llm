@@ -37,6 +37,8 @@ CAMERA_FIRST_FRAME_GRACE_SEC = 20.0
 CAMERA_FRAME_STALE_RECOVERY_SEC = 5.0
 CAMERA_RECOVERY_DELAYS_SEC = (2.0, 5.0, 10.0)
 CAMERA_RESET_SETTLE_SEC = 2.0
+CAMERA_DEVICE_DISCOVERY_CACHE_SEC = 30.0
+CAMERA_DEVICE_DISCOVERY_FAILURE_CACHE_SEC = 10.0
 MINIMUM_CALIBRATION_JOINT_DELTA_RAD = math.radians(5.0)
 UR5E_CALIBRATION_MONITOR_STATUS = Path(
     "/tmp/cais_ur5e_calibration_monitor_status.json"
@@ -258,8 +260,11 @@ class PerceptionManager:
         self.config_path = CONFIG_PATH
         self._devices_cache: list[dict[str, str]] = []
         self._devices_cache_at = 0.0
+        self._device_discovery_error = ""
         self._wsl_devices_cache: list[dict[str, str]] = []
         self._wsl_devices_cache_at = 0.0
+        self._devices_discovery_lock = threading.Lock()
+        self._wsl_devices_discovery_lock = threading.Lock()
         self._connection_lock = threading.RLock()
         self._desired_connected: set[str] = set()
         self._desired_perception: set[str] = set()
@@ -334,40 +339,90 @@ class PerceptionManager:
 
     def discover_devices(self, *, force: bool = False) -> list[dict[str, str]]:
         """Discover RealSense devices without requiring root."""
-        if not force and time.monotonic() - self._devices_cache_at < 3.0:
+        cache_age = time.monotonic() - self._devices_cache_at
+        cache_ttl = (
+            CAMERA_DEVICE_DISCOVERY_FAILURE_CACHE_SEC
+            if self._device_discovery_error
+            else CAMERA_DEVICE_DISCOVERY_CACHE_SEC
+        )
+        if not force and 0.0 <= cache_age < cache_ttl:
             return deepcopy(self._devices_cache)
-        executable = shutil.which("rs-enumerate-devices")
-        if executable is None:
-            return []
-        try:
-            result = self._run([executable], timeout=12.0)
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-        devices = parse_realsense_devices(result.stdout + "\n" + result.stderr)
-        self._devices_cache = devices
-        self._devices_cache_at = time.monotonic()
-        return deepcopy(devices)
+        with self._devices_discovery_lock:
+            cache_age = time.monotonic() - self._devices_cache_at
+            cache_ttl = (
+                CAMERA_DEVICE_DISCOVERY_FAILURE_CACHE_SEC
+                if self._device_discovery_error
+                else CAMERA_DEVICE_DISCOVERY_CACHE_SEC
+            )
+            if not force and 0.0 <= cache_age < cache_ttl:
+                return deepcopy(self._devices_cache)
+            executable = shutil.which("rs-enumerate-devices")
+            if executable is None:
+                self._device_discovery_error = "rs-enumerate-devices is unavailable"
+                self._devices_cache_at = time.monotonic()
+                return deepcopy(self._devices_cache)
+            try:
+                result = self._run([executable], timeout=12.0)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self._device_discovery_error = f"RealSense discovery failed: {exc}"
+                self._devices_cache_at = time.monotonic()
+                return deepcopy(self._devices_cache)
+            devices = parse_realsense_devices(result.stdout + "\n" + result.stderr)
+            if result.returncode != 0:
+                lines = [
+                    line.strip()
+                    for line in (result.stderr + "\n" + result.stdout).splitlines()
+                    if line.strip()
+                ]
+                detail = next(
+                    (
+                        line
+                        for line in lines
+                        if "could not initialize udev monitor" in line.lower()
+                    ),
+                    lines[-1] if lines else "rs-enumerate-devices failed",
+                )
+                self._device_discovery_error = detail
+                self._devices_cache_at = time.monotonic()
+                return deepcopy(self._devices_cache)
+            self._device_discovery_error = ""
+            self._devices_cache = devices
+            self._devices_cache_at = time.monotonic()
+            return deepcopy(devices)
 
     def discover_wsl_attachments(self, *, force: bool = False) -> list[dict[str, str]]:
         """List Windows RealSense USB rows available through usbipd-win."""
         if "microsoft" not in Path("/proc/version").read_text(encoding="utf-8").lower():
             return []
-        if not force and time.monotonic() - self._wsl_devices_cache_at < 3.0:
+        if (
+            not force
+            and 0.0 <= time.monotonic() - self._wsl_devices_cache_at
+            < CAMERA_DEVICE_DISCOVERY_CACHE_SEC
+        ):
             return deepcopy(self._wsl_devices_cache)
-        executable = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-        if executable is None:
-            return []
-        try:
-            result = self._run(
-                [executable, "-NoProfile", "-Command", "usbipd list"],
-                timeout=8.0,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-        rows = parse_usbipd_realsense_devices(result.stdout)
-        self._wsl_devices_cache = rows
-        self._wsl_devices_cache_at = time.monotonic()
-        return deepcopy(rows)
+        with self._wsl_devices_discovery_lock:
+            if (
+                not force
+                and 0.0 <= time.monotonic() - self._wsl_devices_cache_at
+                < CAMERA_DEVICE_DISCOVERY_CACHE_SEC
+            ):
+                return deepcopy(self._wsl_devices_cache)
+            executable = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+            if executable is None:
+                self._wsl_devices_cache_at = time.monotonic()
+                return deepcopy(self._wsl_devices_cache)
+            try:
+                result = self._run(
+                    [executable, "-NoProfile", "-Command", "usbipd list"],
+                    timeout=8.0,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                self._wsl_devices_cache_at = time.monotonic()
+                return deepcopy(self._wsl_devices_cache)
+            rows = parse_usbipd_realsense_devices(result.stdout)
+            self._wsl_devices_cache = rows
+            self._wsl_devices_cache_at = time.monotonic()
+            return deepcopy(rows)
 
     def attach_wsl_camera(self, busid: str) -> str | None:
         """Attach a previously administrator-bound Windows USB device to WSL."""
@@ -721,16 +776,13 @@ class PerceptionManager:
         )
 
     def _ur5e_full_state_publisher_running(self) -> bool:
+        """Return whether this UI owns a live full UR5e state publisher."""
         process_names = {
             "hardware_ur5e_moveit",
             "digital_twin_ur5e_only_hardware_ur5e_moveit",
             "digital_twin_dual_robots_hardware_moveit",
         }
-        active_from_status = getattr(self.bridge, "_active_digital_twin_target_from_status", None)
-        active_target = active_from_status() if callable(active_from_status) else None
-        return any(
-            self.bridge.ros2_proc_status(name) == "running" for name in process_names
-        ) or active_target in {"ur5e only", "dual robots"}
+        return any(self.bridge.ros2_proc_status(name) == "running" for name in process_names)
 
     def _ur5e_joint_state_publisher_running(self) -> bool:
         process_names = {
@@ -745,13 +797,13 @@ class PerceptionManager:
 
     def _ensure_ur5e_calibration_monitor(self, *, domain_id: int | None = None) -> None:
         """Start only the read-only UR5e state and TF publishers needed by calibration."""
-        if self._ur5e_full_state_publisher_running():
-            return
-
         names = self._process_names("ur5e")
         resolved_domain_id = self._domain_id() if domain_id is None else int(domain_id)
         state_publisher = names["calibration_state_publisher"]
-        if self.bridge.ros2_proc_status(state_publisher) != "running":
+        if (
+            not self._ur5e_full_state_publisher_running()
+            and self.bridge.ros2_proc_status(state_publisher) != "running"
+        ):
             command = (
                 "ros2 launch cais_lab_robotics ur5e_rg2_hardware_moveit.launch.py "
                 "launch_move_group:=false launch_rviz:=false"
@@ -802,12 +854,13 @@ class PerceptionManager:
                 if bool(status.get("rtde_receive_connected")) and bool(
                     status.get("joint_states_fresh")
                 ):
-                    time.sleep(0.5)
                     return
                 if self.bridge.ros2_proc_status(rtde_monitor) != "running":
                     break
                 time.sleep(0.1)
-            detail = str(status.get("blocked_reason") or status.get("message") or "").strip()
+            detail = str(
+                status.get("blocked_reason") or status.get("message") or ""
+            ).strip()
             raise RuntimeError(
                 "read-only UR5e calibration monitor did not provide fresh joint feedback"
                 + (f": {detail}" if detail else "")
@@ -1109,6 +1162,11 @@ class PerceptionManager:
             return f"Calibration is missing for {key}: {calibration_path}"
         if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
             return "ROBOFLOW_API_KEY is not configured in the ignored .env file."
+        if key == "ur5e":
+            try:
+                self._ensure_ur5e_calibration_monitor(domain_id=self._domain_id())
+            except RuntimeError as exc:
+                return f"UR5e state/TF monitoring is not ready: {exc}"
         if key == "ur5e" and self._ur5e_digital_twin_process_running("perception"):
             return None
         process_name = self._process_names(key)["perception"]
@@ -2076,8 +2134,10 @@ class PerceptionManager:
             }
         preflight = self.preflight()
         preflight["camera_inventory"] = camera_inventory
+        preflight["device_discovery_error"] = self._device_discovery_error
         return {
             "config_path": str(self.config_path),
+            "device_discovery_error": self._device_discovery_error,
             "preflight": preflight,
             "camera_inventory": camera_inventory,
             "devices": devices,

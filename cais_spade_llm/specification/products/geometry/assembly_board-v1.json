@@ -93,6 +93,24 @@
         "SCP": 0.06,
         "MCP": 0.08,
         "LCP": 0.1
+      },
+      "source_stl_map": {
+        "MG": "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL"
+      },
+      "source_stl_scale_m_per_unit": {
+        "MG": 0.001
+      },
+      "hub_up": {
+        "MG": true
+      },
+      "grasp_width_preload_m": {
+        "MG": 0.002
+      },
+      "tooth_clearance_m": {
+        "MG": 0.002
+      },
+      "minimum_hub_overlap_m": {
+        "MG": 0.006
       }
     },
     "target_reference": {

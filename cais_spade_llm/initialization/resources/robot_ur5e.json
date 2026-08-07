@@ -162,6 +162,7 @@
     "real": {
       "static_capabilities": {},
       "controller": {
+        "hardware_trajectory_action": "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
         "move_group": {
           "group_name": "ur_manipulator",
           "ee_link": "tool0",
@@ -179,6 +180,10 @@
           "settle_sec": 0.05,
           "feedback_timeout_pad_sec": 1.0,
           "position_tolerance": 0.01,
+          "stock_fingertip": {
+            "inner_pad_lower_z_from_tcp_m": -0.00865,
+            "inner_pad_upper_z_from_tcp_m": 0.0211
+          },
           "rtde": {
             "hostname": "192.168.1.172",
             "open_width_mm": 70.0,

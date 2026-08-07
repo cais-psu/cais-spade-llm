@@ -96,6 +96,18 @@ class _Agent:
                 "part_height": 0.08,
                 "tcp_offset_z": -0.17,
                 "pick_tcp_z": 0.4,
+                "source_stl": "/actual/Gear_Medium.STL",
+                "source_stl_sha256": "a" * 64,
+                "hub_up": True,
+                "hub_diameter_m": 0.03,
+                "hub_height_m": 0.01,
+                "tooth_diameter_m": 0.042,
+                "tooth_height_m": 0.01,
+                "grasp_width_m": 0.028,
+                "tooth_clearance_m": 0.002,
+                "minimum_hub_overlap_m": 0.006,
+                "finger_tooth_clearance_m": 0.002,
+                "finger_hub_overlap_m": 0.008,
                 "gripper_close_position": 0.37,
                 "start_x": 0.0,
                 "start_y": 0.0,
@@ -335,6 +347,10 @@ def test_physical_pick_passes_one_detection_to_compute_and_uses_live_targets(
     assert move_calls[0]["speed"] == pytest.approx(0.12)
     assert move_calls[1] == pytest.approx({"x": 0.1, "y": 0.2, "z": 0.4})
     assert agent._task_ctx["travel_z"] == pytest.approx(0.8)
+    assert agent._task_ctx["source_stl"] == "/actual/Gear_Medium.STL"
+    assert agent._task_ctx["hub_diameter_m"] == pytest.approx(0.03)
+    assert agent._task_ctx["finger_tooth_clearance_m"] == pytest.approx(0.002)
+    assert agent._task_ctx["finger_hub_overlap_m"] == pytest.approx(0.008)
     assert agent._task_ctx["gripper_close_position"] == pytest.approx(0.37)
     assert agent._position == pytest.approx({"x": 0.1, "y": 0.2, "z": 0.4})
 
@@ -356,6 +372,32 @@ def test_physical_pick_passes_one_detection_to_compute_and_uses_live_targets(
     assert agent.primitive_calls[0][1]["position"] == pytest.approx(0.37)
     lift_params = agent.primitive_calls[-1][1]
     assert lift_params["dz"] == pytest.approx(0.4)
+
+
+def test_pick_grasp_requires_pick_approach_gripper_close_position() -> None:
+    agent = _Agent(execution_mode="physical")
+    agent._current_state = "at_pick"
+    agent._task_ctx = {
+        "part_name": "MG",
+        "origin_resource_location": "prusa-mk4-2",
+        "model_name": "gear_medium",
+        "travel_z": 0.8,
+    }
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result == {
+        "status": "blocked",
+        "content": "pick_approach has not established a gripper_close_position.",
+    }
+    assert agent.primitive_calls == []
 
 
 def test_physical_pick_target_rejection_stops_before_open_gripper_or_motion(
@@ -430,6 +472,10 @@ def test_physical_pick_staging_failure_stops_before_detection_or_gripper() -> No
 def test_physical_pick_detection_failure_stops_after_staging_before_gripper() -> None:
     agent = _Agent(execution_mode="physical")
     execute_primitive = agent._execute_primitive
+    failure = (
+        "ur5e did not become stationary within 2.00 s; last motion "
+        "(2.00 mm, 0.60 deg); inference was not started"
+    )
 
     async def reject_detection(
         primitive: str,
@@ -437,7 +483,7 @@ def test_physical_pick_detection_failure_stops_after_staging_before_gripper() ->
     ) -> dict[str, Any]:
         if primitive == "detect_parts":
             agent.primitive_calls.append((primitive, deepcopy(params)))
-            return {"success": False, "message": "MG was not detected"}
+            return {"success": False, "message": failure}
         return await execute_primitive(primitive, params)
 
     agent._execute_primitive = reject_detection  # type: ignore[method-assign]
@@ -453,7 +499,7 @@ def test_physical_pick_detection_failure_stops_after_staging_before_gripper() ->
 
     assert result["status"] == "failed"
     assert result["step"] == "pick_approach.detect_parts"
-    assert "MG was not detected" in result["content"]
+    assert failure in result["content"]
     assert [primitive for primitive, _params in agent.primitive_calls] == [
         "move_to_named_pose",
         "detect_parts",

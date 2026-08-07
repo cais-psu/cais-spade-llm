@@ -135,6 +135,19 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "part_height": 0.08,
                     "tcp_offset_z": -0.17,
                     "pick_tcp_z": 0.0,
+                    "pick_tcp_z_offset_from_table_m": 0.0,
+                    "source_stl": "",
+                    "source_stl_sha256": "",
+                    "hub_up": False,
+                    "hub_diameter_m": 0.0,
+                    "hub_height_m": 0.0,
+                    "tooth_diameter_m": 0.0,
+                    "tooth_height_m": 0.0,
+                    "grasp_width_m": 0.0,
+                    "tooth_clearance_m": 0.0,
+                    "minimum_hub_overlap_m": 0.0,
+                    "finger_tooth_clearance_m": 0.0,
+                    "finger_hub_overlap_m": 0.0,
                     "gripper_close_position": None,
                     "start_x": 0.0,
                     "start_y": 0.0,
@@ -199,6 +212,33 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "part_height": _step_output("pick_targets", "part_height"),
                     "tcp_offset_z": _step_output("pick_targets", "tcp_offset_z"),
                     "pick_tcp_z": _step_output("pick_targets", "pick_tcp_z"),
+                    "pick_tcp_z_offset_from_table_m": _step_output(
+                        "pick_targets", "pick_tcp_z_offset_from_table_m"
+                    ),
+                    "source_stl": _step_output("pick_targets", "source_stl"),
+                    "source_stl_sha256": _step_output(
+                        "pick_targets", "source_stl_sha256"
+                    ),
+                    "hub_up": _step_output("pick_targets", "hub_up"),
+                    "hub_diameter_m": _step_output("pick_targets", "hub_diameter_m"),
+                    "hub_height_m": _step_output("pick_targets", "hub_height_m"),
+                    "tooth_diameter_m": _step_output(
+                        "pick_targets", "tooth_diameter_m"
+                    ),
+                    "tooth_height_m": _step_output("pick_targets", "tooth_height_m"),
+                    "grasp_width_m": _step_output("pick_targets", "grasp_width_m"),
+                    "tooth_clearance_m": _step_output(
+                        "pick_targets", "tooth_clearance_m"
+                    ),
+                    "minimum_hub_overlap_m": _step_output(
+                        "pick_targets", "minimum_hub_overlap_m"
+                    ),
+                    "finger_tooth_clearance_m": _step_output(
+                        "pick_targets", "finger_tooth_clearance_m"
+                    ),
+                    "finger_hub_overlap_m": _step_output(
+                        "pick_targets", "finger_hub_overlap_m"
+                    ),
                     "gripper_close_position": _step_output(
                         "pick_targets", "gripper_close_position"
                     ),
@@ -240,6 +280,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         notes=(
             "RobotAgent.pick_approach computes pick geometry, opens the gripper, moves above the part, then descends to the pick pose.",
             "open_gripper and direct controller pose helpers are hidden from synthesis; use compute_pick_targets plus move_cartesian approach/target poses.",
+            "Physical MG geometry is derived from the actual source_stl and leaves the gripper open at the smooth raised hub target.",
         ),
     ),
 )

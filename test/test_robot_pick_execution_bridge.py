@@ -15,6 +15,59 @@ import pytest
 from cais_spade_llm.resources.robot import robot_task_runtime
 from cais_spade_llm.ui.bridge import SystemBridge
 
+ROOT = Path(__file__).resolve().parents[1]
+ACTUAL_MG_STL = str(
+    (ROOT / "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL").resolve()
+)
+ACTUAL_MG_STL_SHA256 = "73d2c5d06497db2042ec6624a45558398ee47c9e55ccd87d49184c179a501507"
+
+
+def _mg_product_geometry(part_name: str = "MG") -> dict[str, Any]:
+    return {
+        "part_name": part_name,
+        "model_name": "gear_medium",
+        "part_height_m": 0.02,
+        "source_stl": ACTUAL_MG_STL,
+        "source_stl_sha256": ACTUAL_MG_STL_SHA256,
+        "hub_up": True,
+        "hub_diameter_m": 0.03,
+        "hub_height_m": 0.01,
+        "tooth_diameter_m": 0.042,
+        "tooth_height_m": 0.01,
+        "grasp_width_m": 0.028,
+        "tooth_clearance_m": 0.002,
+        "minimum_hub_overlap_m": 0.006,
+    }
+
+
+def _mg_task_context() -> dict[str, Any]:
+    return {
+        **_mg_product_geometry(),
+        "origin_resource_location": "prusa-mk4-2",
+        "pick_tcp_z": 1.0323,
+        "finger_tooth_clearance_m": 0.002,
+        "finger_hub_overlap_m": 0.008,
+        "gripper_close_position": 0.047,
+        "travel_z": 1.2,
+    }
+
+
+class _PhysicalController:
+    gripper_open = 0.11
+    gripper_close = 0.02
+
+    @staticmethod
+    def _physical_stl_pick_readiness(geometry: dict[str, Any]) -> dict[str, Any]:
+        if not geometry.get("source_stl"):
+            return {"success": False, "message": "actual source_stl is missing"}
+        return {
+            "success": True,
+            **geometry,
+            "gripper_close_position": 0.047,
+            "finger_tooth_clearance_m": 0.002,
+            "finger_hub_overlap_m": 0.008,
+        }
+
 
 class _PhysicalUR5eAgent:
     def __init__(
@@ -27,7 +80,7 @@ class _PhysicalUR5eAgent:
         self.agent_name = "ur5e"
         self.jid = "ur5e@localhost"
         self.execution_mode = "physical"
-        self._controller = object()
+        self._controller = _PhysicalController()
         self.named_positions = {
             "home": [0.0, -1.0, -2.0, -1.5, 1.5, 0.0],
             "prusa-mk4-2": [0.1, -0.8, -2.1, -1.6, 1.5, -3.1],
@@ -56,9 +109,9 @@ class _PhysicalUR5eAgent:
     async def pick_approach(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("pick_approach", kwargs))
         self._task_ctx = {
+            **_mg_task_context(),
             "part_name": kwargs["part_name"],
             "origin_resource_location": kwargs["origin_resource_location"],
-            "gripper_close_position": 0.04,
         }
         self._current_state = "at_pick"
         return {"status": "completed", "content": "Arrived at the live pick target."}
@@ -115,7 +168,7 @@ def _ready_bridge(agent: _PhysicalUR5eAgent) -> SystemBridge:
     bridge.digital_twin_statuses = lambda: {
         target: _healthy_status(target) for target in ("ur5e only", "dual robots")
     }
-    bridge._digital_twin_ur5e_motion_readiness = lambda _target, _cfg: (
+    bridge._digital_twin_ur5e_motion_readiness = lambda _target, _cfg, _agent=None: (
         {
             "hardware_domain_id": 42,
             "trajectory_action_ready": True,
@@ -125,7 +178,7 @@ def _ready_bridge(agent: _PhysicalUR5eAgent) -> SystemBridge:
         },
         "",
     )
-    bridge._digital_twin_ur5e_gripper_readiness = lambda _target, _domain: (
+    bridge._digital_twin_ur5e_gripper_readiness = lambda _target, _domain, _agent=None: (
         {"gripper_action_ready": True},
         "",
     )
@@ -135,11 +188,7 @@ def _ready_bridge(agent: _PhysicalUR5eAgent) -> SystemBridge:
         "blocked_reason": "",
     }
     bridge.physical_perception_ready = lambda: (True, "")
-    bridge._robot_function_product_geometry_for_part = lambda part_name: {
-        "part_name": part_name,
-        "model_name": "gear_medium",
-        "part_height_m": 0.02,
-    }
+    bridge._robot_function_product_geometry_for_part = _mg_product_geometry
     bridge._digital_twin_place_approach_recording_error = lambda _agent, _destination, _part: (
         "/tmp/assembly_board-v1__MG__hardware.json",
         "",
@@ -157,12 +206,7 @@ def _agent_for(function_name: str) -> _PhysicalUR5eAgent:
         return _PhysicalUR5eAgent()
     if function_name == "pick_grasp":
         agent = _PhysicalUR5eAgent(state="at_pick")
-        agent._task_ctx = {
-            "part_name": "MG",
-            "origin_resource_location": "prusa-mk4-2",
-            "gripper_close_position": 0.04,
-            "travel_z": 1.2,
-        }
+        agent._task_ctx = _mg_task_context()
         return agent
     if function_name == "place_approach":
         return _PhysicalUR5eAgent(state="picked", held_part="MG", gripper_state="closed")
@@ -185,11 +229,7 @@ def _agent_for(function_name: str) -> _PhysicalUR5eAgent:
             {
                 "origin_resource_location": "prusa-mk4-2",
                 "part_name": "MG",
-                "product_geometry": {
-                    "part_name": "MG",
-                    "model_name": "gear_medium",
-                    "part_height_m": 0.02,
-                },
+                "product_geometry": _mg_product_geometry(),
             },
         ),
         (
@@ -203,11 +243,7 @@ def _agent_for(function_name: str) -> _PhysicalUR5eAgent:
             {
                 "destination_location": "assembly_board-v1",
                 "part_name": "MG",
-                "product_geometry": {
-                    "part_name": "MG",
-                    "model_name": "gear_medium",
-                    "part_height_m": 0.02,
-                },
+                "product_geometry": _mg_product_geometry(),
             },
         ),
         (
@@ -257,6 +293,120 @@ def test_readiness_accepts_each_hardware_led_ur5e_monitor_target(target: str) ->
 
     assert result["ready"] is True
     assert result["target"] == target
+
+
+def test_pick_approach_readiness_blocks_without_actual_mg_stl_geometry() -> None:
+    agent = _agent_for("pick_approach")
+    bridge = _ready_bridge(agent)
+    bridge._robot_function_product_geometry_for_part = lambda _part: {
+        "part_name": "MG",
+        "model_name": "gear_medium",
+        "part_height_m": 0.02,
+    }
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_approach",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert "actual source_stl" in result["message"]
+    assert agent.calls == []
+
+
+def test_pick_grasp_readiness_blocks_invalid_stl_grounded_context() -> None:
+    agent = _agent_for("pick_grasp")
+    agent._task_ctx["finger_hub_overlap_m"] = 0.004
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert "do not sufficiently overlap" in result["message"]
+    assert agent.calls == []
+
+
+def test_readiness_waits_for_a_running_ur5e_mirror_to_recover() -> None:
+    bridge = _ready_bridge(_agent_for("move_home"))
+    bridge._ROBOT_FUNCTION_MIRROR_RECOVERY_TIMEOUT_S = 1.0
+    calls = [0]
+
+    def _statuses() -> dict[str, dict[str, Any]]:
+        calls[0] += 1
+        if calls[0] == 1:
+            return {
+                "ur5e only": {
+                    "target": "ur5e only",
+                    "repair_needed": True,
+                    "repair_reason": "ur5e mirror is waiting",
+                    "gazebo": {"status": "running"},
+                    "hardware": {"overall": "running"},
+                    "sync/status": {
+                        "process_status": "running",
+                        "state": "waiting",
+                    },
+                }
+            }
+        return {"ur5e only": _healthy_status("ur5e only")}
+
+    bridge.digital_twin_statuses = _statuses
+
+    error = asyncio.run(
+        bridge._wait_for_digital_twin_robot_function_target_error(
+            "ur5e only",
+            bridge._DIGITAL_TWIN_TARGETS["ur5e only"],
+        )
+    )
+
+    assert error == ""
+    assert calls[0] == 2
+
+
+def test_readiness_does_not_wait_for_a_stopped_ur5e_mirror_process() -> None:
+    bridge = _ready_bridge(_agent_for("move_home"))
+    bridge._ROBOT_FUNCTION_MIRROR_RECOVERY_TIMEOUT_S = 1.0
+    calls = [0]
+
+    def _statuses() -> dict[str, dict[str, Any]]:
+        calls[0] += 1
+        return {
+            "ur5e only": {
+                "target": "ur5e only",
+                "repair_needed": True,
+                "repair_reason": "hardware -> gazebo mirror process is stopped",
+                "gazebo": {"status": "running"},
+                "hardware": {"overall": "running"},
+                "sync/status": {
+                    "process_status": "stopped",
+                    "state": "waiting",
+                },
+            }
+        }
+
+    bridge.digital_twin_statuses = _statuses
+
+    error = asyncio.run(
+        bridge._wait_for_digital_twin_robot_function_target_error(
+            "ur5e only",
+            bridge._DIGITAL_TWIN_TARGETS["ur5e only"],
+        )
+    )
+
+    assert "requires Repair Twin" in error
+    assert calls[0] == 1
 
 
 @pytest.mark.parametrize(
@@ -309,14 +459,56 @@ def test_readiness_rejects_nonexact_or_irrelevant_requests(
 
 
 @pytest.mark.parametrize("function_name", ["pick_approach", "place_approach"])
-def test_approach_functions_require_selected_product_before_geometry_lookup(
+def test_approach_functions_use_only_configured_product_when_unselected(
     function_name: str,
 ) -> None:
     agent = _agent_for(function_name)
     bridge = _ready_bridge(agent)
     bridge.selected_product = ""
+    product_file = "/tmp/assembly_board-v1.json"
+    bridge.list_product_files = lambda: [product_file]
+    arguments = (
+        {"origin_resource_location": "prusa-mk4-2", "part_name": "MG"}
+        if function_name == "pick_approach"
+        else {"destination_location": "assembly_board-v1", "part_name": "MG"}
+    )
+
+    readiness = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            function_name,
+            **arguments,
+        )
+    )
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            function_name,
+            **arguments,
+            confirmed=True,
+        )
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["selected_product"] == product_file
+    assert result["success"] is True
+    assert agent.calls[0][0] == function_name
+    assert agent.calls[0][1]["part_name"] == "MG"
+    assert agent.calls[0][1]["product_geometry"]["part_name"] == "MG"
+
+
+@pytest.mark.parametrize("function_name", ["pick_approach", "place_approach"])
+def test_approach_functions_require_selection_when_multiple_products_are_configured(
+    function_name: str,
+) -> None:
+    agent = _agent_for(function_name)
+    bridge = _ready_bridge(agent)
+    bridge.selected_product = ""
+    bridge.list_product_files = lambda: ["product-a.json", "product-b.json"]
     bridge._robot_function_product_geometry_for_part = lambda _part: pytest.fail(
-        "geometry lookup must not fall back to the first product"
+        "geometry lookup must not choose between multiple products"
     )
     arguments = (
         {"origin_resource_location": "prusa-mk4-2", "part_name": "MG"}
@@ -425,7 +617,7 @@ def test_place_functions_require_logically_closed_gripper(function_name: str) ->
 def test_gripper_functions_require_exact_target_domain_rg2_action() -> None:
     agent = _agent_for("pick_grasp")
     bridge = _ready_bridge(agent)
-    bridge._digital_twin_ur5e_gripper_readiness = lambda target, domain: (
+    bridge._digital_twin_ur5e_gripper_readiness = lambda target, domain, _agent=None: (
         {"gripper_action_ready": False},
         (
             "/ur5e_rg2_gripper_traj_controller/follow_joint_trajectory is unavailable "

@@ -98,6 +98,34 @@ _UR5E_RTDE_TRAJECTORY_ACTION = ros2_processes.hardware_arms_str(
     ("ur5e", "hardware_trajectory_action"),
     "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
 )
+_ROS_ACTION_SERVICE_SNAPSHOT_TTL_SEC = 15.0
+_ROS_ACTION_SERVICE_MIN_REFRESH_INTERVAL_SEC = 2.5
+_UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = max(
+    1.0,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "moveit", "rtde_allowed_execution_duration_scaling"),
+        8.0,
+    ),
+)
+_UR5E_RTDE_ALLOWED_GOAL_DURATION_MARGIN_SEC = max(
+    0.0,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "moveit", "rtde_allowed_goal_duration_margin"),
+        20.0,
+    ),
+)
+_UR5E_RTDE_TELEOP_REQUESTED_DURATION_SEC = 1.2
+_UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC = max(
+    45.0,
+    (
+        _UR5E_RTDE_TELEOP_REQUESTED_DURATION_SEC
+        * _UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
+    )
+    + _UR5E_RTDE_ALLOWED_GOAL_DURATION_MARGIN_SEC
+    + 5.0,
+)
 _UR5E_RTDE_TRAJECTORY_STATUS = Path(
     ros2_processes.hardware_arms_str(
         _HARDWARE_ARMS_CONFIG,
@@ -105,6 +133,11 @@ _UR5E_RTDE_TRAJECTORY_STATUS = Path(
         "/tmp/cais_ur5e_rtde_trajectory_status.json",
     )
 )
+_UR5E_DETECTION_STATUS = Path(
+    "/tmp/cais_perception_previews/ur5e/detection_status.json"
+)
+_UR5E_CAMERA_STATUS = Path("/tmp/cais_perception_previews/ur5e/status.json")
+_PHYSICAL_PERCEPTION_SNAPSHOT = Path("/tmp/cais_physical_perception.json")
 _UR5E_RG2_GRIPPER_ACTION = ros2_processes.hardware_arms_str(
     _HARDWARE_ARMS_CONFIG,
     ("ur5e", "gripper", "action"),
@@ -340,6 +373,18 @@ class SystemBridge:
     _DIGITAL_TWIN_PREPARED_REPLAY_VERSION = 7
     _DIGITAL_TWIN_INITIALIZE_TIMEOUT_S = 90.0
     _ROBOT_FUNCTION_PREFLIGHT_TIMEOUT_S = 30.0
+    _ROBOT_FUNCTION_MIRROR_RECOVERY_TIMEOUT_S = max(
+        0.0,
+        ros2_processes.hardware_arms_float(
+            _HARDWARE_ARMS_CONFIG,
+            (
+                "dual_robots",
+                "mirror",
+                "execution_readiness_recovery_timeout_sec",
+            ),
+            5.0,
+        ),
+    )
     _DIGITAL_TWIN_MIRROR_STABILIZATION_SEC = 0.75
     # Per-robot home/initial joint pose (arm joints, radians) for the "Go Home" button.
     # xArm6 matches the dual-boot startup pose injected into the gazebo launch.
@@ -453,6 +498,14 @@ class SystemBridge:
 
         # ROS2 subprocess tracking.
         self._ros2_procs: dict[str, subprocess.Popen] = {}
+        self._ros2_intentional_stops: set[str] = set()
+        self._ros_action_service_snapshot_lock = threading.Lock()
+        self._ros_action_service_snapshot: tuple[
+            tuple[int | None, tuple[tuple[str, int, int], ...]],
+            float,
+            bool,
+            frozenset[str],
+        ] | None = None
         self._ui_process_registry = UIProcessRegistry()
         self.perception_manager = PerceptionManager(
             self,
@@ -472,6 +525,12 @@ class SystemBridge:
         self._ur5e_robot_function_execution_lock = threading.Lock()
         self._ur5e_robot_function_preflight_lock = threading.Lock()
         self._ur5e_robot_function_execution_active: str | None = None
+        self._ur5e_robot_function_execution_stage: str = ""
+        self._ur5e_robot_function_execution_started_at: float = 0.0
+        self._ur5e_robot_function_agent: Any | None = None
+        self._ur5e_robot_function_agent_domain_id: int | None = None
+        self._ur5e_robot_function_agent_lifecycle_lock = asyncio.Lock()
+        self._ur5e_robot_function_state_uncertain: bool = False
         self._digital_twin_prepare_lock = threading.Lock()
         self._digital_twin_prepare_threads: dict[str, threading.Thread] = {}
         self._digital_twin_sync_restart_threads: dict[str, threading.Thread] = {}
@@ -4120,6 +4179,48 @@ class SystemBridge:
     # System lifecycle
     # ------------------------------------------------------------------
     async def start_system(self) -> None:
+        """Safely hand off manual UR5e ownership before starting full CAIS."""
+        if self.system_running or self._starting:
+            return
+
+        execution_lock = getattr(self, "_ur5e_robot_function_execution_lock", None)
+        if execution_lock is None:
+            execution_lock = threading.Lock()
+            self._ur5e_robot_function_execution_lock = execution_lock
+        if not execution_lock.acquire(blocking=False):
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "UR5e motion"
+            )
+            self.last_error = f"Cannot start the CAIS system while UR5e motion is active: {active}."
+            return
+
+        lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
+        try:
+            if lifecycle_lock.locked():
+                self.last_error = (
+                    "Cannot start the CAIS system while ur5e Function Execution readiness "
+                    "is active. Wait for the readiness check to finish."
+                )
+                return
+            preflight_lock = getattr(self, "_ur5e_robot_function_preflight_lock", None)
+            if preflight_lock is not None and preflight_lock.locked():
+                self.last_error = (
+                    "Cannot start the CAIS system while ur5e Function Execution readiness "
+                    "is active. Wait for the readiness check to finish."
+                )
+                return
+            async with lifecycle_lock:
+                handoff_error = self._ur5e_robot_function_agent_handoff_error()
+                if handoff_error:
+                    self.last_error = handoff_error
+                    return
+                await self._dispose_ur5e_robot_function_agent()
+                await self._start_system_after_ur5e_handoff()
+        finally:
+            execution_lock.release()
+
+    async def _start_system_after_ur5e_handoff(self) -> None:
         """Start the SPADE agent system (CCA, robots, user agent, XMPP)."""
         if self.system_running or self._starting:
             return
@@ -4196,10 +4297,11 @@ class SystemBridge:
                 else:
                     log.info("No prewarmed controllers available for handoff.")
 
-            self._set_startup_phase("physical_readiness")
-            ready, reason = self.physical_perception_ready()
-            if not ready:
-                raise RuntimeError(reason)
+            if mode == "physical":
+                self._set_startup_phase("physical_readiness")
+                ready, reason = self.physical_perception_ready()
+                if not ready:
+                    raise RuntimeError(reason)
 
             # Ensure XMPP server is up.
             self._set_startup_phase("xmpp_server")
@@ -4494,14 +4596,44 @@ class SystemBridge:
         """Stop all SPADE agents."""
         if not self.system_running or self._stopping:
             return
-        self._stopping = True
+
+        execution_lock = self._ur5e_robot_function_execution_lock
+        if not execution_lock.acquire(blocking=False):
+            active = str(self._ur5e_robot_function_execution_active or "UR5e motion")
+            self.last_error = f"Cannot stop the CAIS system while UR5e motion is active: {active}."
+            return
+        running_agent = self._running_physical_ur5e_robot_agent()
+        agent_motion_lock = getattr(running_agent, "_robot_motion_lock", None)
+        agent_lock_acquired = False
+        if agent_motion_lock is not None:
+            agent_lock_acquired = bool(agent_motion_lock.acquire(blocking=False))
+            if not agent_lock_acquired:
+                execution_lock.release()
+                self.last_error = (
+                    "Cannot stop the CAIS system while the ur5e RobotAgent is executing a task."
+                )
+                return
+
+        lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
         try:
-            await self._run_on_agent_runtime(self._cleanup_agents())
-            self.system_running = False
-            self._clear_cached_plan_safety_alerts()
-            log.info("All agents stopped.")
+            if lifecycle_lock.locked():
+                self.last_error = (
+                    "Cannot stop the CAIS system while ur5e Function Execution readiness is active."
+                )
+                return
+            async with lifecycle_lock:
+                self._stopping = True
+                try:
+                    await self._run_on_agent_runtime(self._cleanup_agents())
+                    self.system_running = False
+                    self._clear_cached_plan_safety_alerts()
+                    log.info("All agents stopped.")
+                finally:
+                    self._stopping = False
         finally:
-            self._stopping = False
+            if agent_lock_acquired:
+                agent_motion_lock.release()
+            execution_lock.release()
 
     async def _cleanup_agents(self) -> None:
         all_agents = (
@@ -4513,8 +4645,14 @@ class SystemBridge:
         for a in all_agents:
             try:
                 await a.stop()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - continue releasing every owned agent.
+                log.exception("Failed to stop agent %s", getattr(a, "jid", "<unknown>"))
+            try:
+                await self._teardown_and_unregister_agent(a)
+            except Exception:  # noqa: BLE001 - continue releasing every owned agent.
+                log.exception(
+                    "Failed to teardown agent %s", getattr(a, "jid", "<unknown>")
+                )
         self.product_agents = []
         self.resource_agents = []
         self.cca = None
@@ -4762,9 +4900,118 @@ class SystemBridge:
         rc = proc.poll()
         if rc is None:
             return "running"
+        intentional_stop = name in getattr(self, "_ros2_intentional_stops", set())
         self._ros2_procs.pop(name, None)
-        self._unregister_ui_process(name, proc)
+        if intentional_stop:
+            self._unregister_ui_process(name, proc)
+        else:
+            self._cleanup_exited_ui_process(name, proc)
+        if (
+            not intentional_stop
+            and (
+                name == "hardware_ur5e_rtde_trajectory_server"
+                or name == "digital_twin_ur5e_only_hardware_ur5e_rtde_trajectory_server"
+                or name
+                == "digital_twin_dual_robots_hardware_ur5e_rtde_trajectory_server"
+            )
+        ):
+            self._record_ur5e_rtde_trajectory_process_exit(name, int(rc))
         return "stopped"
+
+    @staticmethod
+    def _ur5e_rtde_trajectory_process_log_path(process_name: str) -> Path:
+        """Return the persistent log path for one exact RTDE trajectory process."""
+        return _LOG_DIR / f"{process_name}.log"
+
+    def _record_ur5e_rtde_trajectory_process_exit(
+        self,
+        process_name: str,
+        return_code: int,
+    ) -> None:
+        """Persist an unexpected RTDE trajectory process exit for operator diagnosis."""
+        log_path = self._ur5e_rtde_trajectory_process_log_path(process_name)
+        message = (
+            f"UR5e RTDE trajectory server process {process_name} exited with return code "
+            f"{return_code}. Log: {log_path}"
+        )
+        status = self._read_json_file(_UR5E_RTDE_TRAJECTORY_STATUS)
+        status.update(
+            state="failed",
+            blocked_reason=message,
+            message=message,
+            monitor_only=False,
+            action=_UR5E_RTDE_TRAJECTORY_ACTION,
+            action_name=_UR5E_RTDE_TRAJECTORY_ACTION,
+            process_name=process_name,
+            process_return_code=int(return_code),
+            process_log_path=str(log_path),
+            rtde_connected=False,
+            rtde_receive_connected=False,
+            rtde_control_connected=False,
+            joint_states_fresh=False,
+            updated_at=time.time(),
+        )
+        try:
+            atomic_json_write(_UR5E_RTDE_TRAJECTORY_STATUS, status)
+        except OSError:
+            log.exception(
+                "Could not persist unexpected UR5e RTDE trajectory process exit: %s",
+                message,
+            )
+        self._quiesce_ur5e_mirror_after_rtde_exit(process_name, message)
+        log.error("%s", message)
+
+    def _quiesce_ur5e_mirror_after_rtde_exit(
+        self,
+        process_name: str,
+        failure_message: str,
+    ) -> None:
+        """Stop the exact UR5e mirror whose hardware producer exited."""
+        for target, cfg in self._DIGITAL_TWIN_TARGETS.items():
+            hardware_processes = self._digital_twin_hardware_processes_for_robot(
+                cfg,
+                "ur5e",
+            )
+            if str(hardware_processes.get("rtde") or "") != process_name:
+                continue
+            sync_items = self._digital_twin_sync_process_items(cfg)
+            for robot, sync_process in sync_items:
+                if str(robot).strip().lower() != "ur5e":
+                    continue
+                if self.ros2_proc_status(sync_process) != "running":
+                    continue
+                self.ros2_stop(sync_process, reason="ur5e_rtde_process_exit")
+                status_path = (
+                    self._digital_twin_status_path(target)
+                    if len(sync_items) <= 1
+                    else self._digital_twin_sync_status_path(target, "ur5e")
+                )
+                try:
+                    atomic_json_write(
+                        status_path,
+                        {
+                            "target": target,
+                            "robot": "ur5e",
+                            "state": "failed",
+                            "direction": self._digital_twin_direction(target),
+                            "message": (
+                                "UR5e RTDE trajectory server exited; hardware -> gazebo "
+                                "mirror stopped. Click Repair Twin to restart it."
+                            ),
+                            "last_error": failure_message,
+                            "updated_at": time.time(),
+                        },
+                    )
+                except OSError:
+                    log.exception(
+                        "Could not persist stopped UR5e mirror status for %s",
+                        target,
+                    )
+                log.warning(
+                    "Stopped %s because %s exited unexpectedly",
+                    sync_process,
+                    process_name,
+                )
 
     def _register_ui_process(
         self,
@@ -4791,6 +5038,29 @@ class SystemBridge:
         except OSError as exc:
             log.warning("Could not unregister UI process %s: %s", name, exc)
 
+    def _cleanup_exited_ui_process(self, name: str, proc: subprocess.Popen) -> None:
+        """Reap children left behind when a tracked launcher exits unexpectedly."""
+        registry = getattr(self, "_ui_process_registry", None)
+        if registry is None:
+            self._unregister_ui_process(name, proc)
+            return
+        try:
+            process_group = int(proc.pid)
+        except (AttributeError, TypeError, ValueError):
+            return
+        try:
+            error = registry.cleanup_exited_process(
+                name,
+                process_group=process_group,
+            )
+        except OSError as exc:
+            log.warning("Could not clean exited UI process %s: %s", name, exc)
+            return
+        if error:
+            log.warning("Could not clean exited UI process %s: %s", name, error)
+        else:
+            log.info("Cleaned process group for exited UI process %s", name)
+
     def cleanup_previous_ui_processes(self) -> dict[str, list[str]]:
         """Stop verified processes owned by a previous UI that exited uncleanly."""
         summary = self._ui_process_registry.cleanup_previous()
@@ -4815,6 +5085,14 @@ class SystemBridge:
     def ros2_all_statuses(self) -> dict[str, str]:
         names = set(self.ROS2_LAUNCH_CMDS) | self._DIGITAL_TWIN_PROCESS_NAMES
         return {name: self.ros2_proc_status(name) for name in sorted(names)}
+
+    def simulation_environment_running(self) -> bool:
+        """Return whether a no-hardware Gazebo environment is running."""
+        return self._any_running(self._BASE_GAZEBO_PROCESS_NAMES)
+
+    def passive_digital_twin_environment_running(self) -> bool:
+        """Return whether a hardware-authoritative passive Gazebo twin is running."""
+        return self._any_running(self._DIGITAL_TWIN_GAZEBO_PROCESS_NAMES)
 
     @classmethod
     def _default_ros_domain_id(cls) -> int:
@@ -5075,9 +5353,8 @@ class SystemBridge:
                 "UR5e joint-state monitoring is available, but motion requires "
                 "Remote Control on the teach pendant"
             )
-        action_error = self._wait_for_ros_action(
+        action_error = self._ros_action_readiness_error(
             _UR5E_RTDE_TRAJECTORY_ACTION,
-            timeout_sec=8.0,
             ros_domain_id=ros_domain_id,
         )
         if action_error:
@@ -5355,8 +5632,6 @@ class SystemBridge:
 
     def physical_perception_ready(self) -> tuple[bool, str]:
         """Gate physical execution on the validated RealSense/Roboflow node."""
-        if self._perception_backend_for_mode() != "yolo":
-            return True, ""
         status = self.physical_perception_status()
         if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
             return False, "Physical mode is blocked: ROBOFLOW_API_KEY is not configured in .env."
@@ -5374,8 +5649,16 @@ class SystemBridge:
                 "the perception process."
             )
         frame_age = status.get("frame_age_sec")
-        if frame_age is None or float(frame_age) > 8.0:
-            return False, "Physical mode is blocked: the RealSense frame snapshot is stale."
+        if frame_age is None:
+            return False, (
+                "Physical mode is blocked: no live synchronized RealSense color/depth "
+                "frame has been received."
+            )
+        if float(frame_age) > 8.0:
+            return False, (
+                "Physical mode is blocked: the synchronized RealSense color/depth stream "
+                f"is stale ({float(frame_age):.1f} s old)."
+            )
         if not status.get("roboflow_ready"):
             reason = str(status.get("last_error") or "Roboflow model inference is not validated")
             return False, f"Physical mode is blocked: Roboflow is not ready: {reason}"
@@ -5383,7 +5666,8 @@ class SystemBridge:
 
     def physical_perception_status(self) -> dict[str, Any]:
         """Return process, frame, model, calibration, detection, and twin status."""
-        snapshot_path = Path("/tmp/cais_physical_perception.json")
+        snapshot_path = _PHYSICAL_PERCEPTION_SNAPSHOT
+        camera_status_path = _UR5E_CAMERA_STATUS
         twin_path = Path("/tmp/cais_physical_part_twin_status.json")
 
         def _load(path: Path) -> dict[str, Any]:
@@ -5394,6 +5678,7 @@ class SystemBridge:
             return payload if isinstance(payload, dict) else {}
 
         snapshot = _load(snapshot_path)
+        camera_status = _load(camera_status_path)
         twin = _load(twin_path)
         calibration_path = Path(
             str(self.perception_manager.config()["cameras"]["ur5e"]["calibration_path"])
@@ -5445,7 +5730,13 @@ class SystemBridge:
             "digital_twin_ur5e_only_physical_perception",
             "digital_twin_dual_robots_physical_perception",
         }
-        frame_captured_at = snapshot.get("frame_captured_at")
+        snapshot_frame_captured_at = snapshot.get("frame_captured_at")
+        snapshot_frame_age_sec = (
+            max(0.0, time.time() - float(snapshot_frame_captured_at))
+            if snapshot_frame_captured_at is not None
+            else None
+        )
+        frame_captured_at = camera_status.get("frame_captured_at")
         frame_age_sec = (
             max(0.0, time.time() - float(frame_captured_at))
             if frame_captured_at is not None
@@ -5454,6 +5745,11 @@ class SystemBridge:
         return {
             **snapshot,
             "snapshot_path": str(snapshot_path),
+            "snapshot_frame_captured_at": snapshot_frame_captured_at,
+            "snapshot_frame_age_sec": snapshot_frame_age_sec,
+            "camera_status": camera_status,
+            "camera_status_path": str(camera_status_path),
+            "frame_captured_at": frame_captured_at,
             "frame_age_sec": frame_age_sec,
             "camera_process_running": any(
                 self.ros2_proc_status(name) == "running" for name in camera_processes
@@ -5523,13 +5819,16 @@ class SystemBridge:
         """Return three-camera status for the Perception operator page."""
         return self.perception_manager.status()
 
-    def perception_discover_devices(self) -> list[dict[str, str]]:
+    def perception_discover_devices(self, force: bool = False) -> list[dict[str, str]]:
         """Return connected RealSense devices without changing host state."""
-        return self.perception_manager.discover_devices()
+        return self.perception_manager.discover_devices(force=force)
 
-    def perception_discover_wsl_attachments(self) -> list[dict[str, str]]:
+    def perception_discover_wsl_attachments(
+        self,
+        force: bool = False,
+    ) -> list[dict[str, str]]:
         """Return Windows RealSense USB rows visible to usbipd-win."""
-        return self.perception_manager.discover_wsl_attachments()
+        return self.perception_manager.discover_wsl_attachments(force=force)
 
     def perception_attach_wsl_camera(self, busid: str) -> str | None:
         """Attach one previously administrator-bound RealSense to WSL."""
@@ -5631,7 +5930,7 @@ class SystemBridge:
     def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
         """Return whether Gazebo simulation startup is ready enough for agent start."""
         now = time.monotonic()
-        if not self._any_running(self._GAZEBO_PROCESS_NAMES):
+        if not self.simulation_environment_running():
             result = (False, "Gazebo stack is not running. Launch Gazebo + MoveIt first.")
             self._sim_ready_cache_ts = now
             self._sim_ready_cache = result
@@ -5993,6 +6292,109 @@ class SystemBridge:
         missing_text = ", ".join(last_missing or targets)
         return f"{missing_text} not available within {timeout_sec:.0f}s"
 
+    def _ros_action_service_process_identity(
+        self,
+        ros_domain_id: int | None,
+    ) -> tuple[int | None, tuple[tuple[str, int, int], ...]]:
+        """Identify the target domain and current UI-owned ROS process instances."""
+        procs = getattr(self, "_ros2_procs", {})
+        try:
+            items = list(procs.items())
+        except RuntimeError:
+            items = []
+        identities: list[tuple[str, int, int]] = []
+        for name, proc in items:
+            try:
+                pid = int(proc.pid)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            identities.append((str(name), pid, id(proc)))
+        return ros_domain_id, tuple(sorted(identities))
+
+    def _ros_action_service_snapshot_for_domain(
+        self,
+        *,
+        ros_domain_id: int | None,
+        timeout_sec: float,
+        force_refresh: bool = False,
+    ) -> tuple[bool, frozenset[str]]:
+        """Return one rate-limited daemon-free hidden-service graph snapshot."""
+        lock = getattr(self, "_ros_action_service_snapshot_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._ros_action_service_snapshot_lock = lock
+        with lock:
+            identity = self._ros_action_service_process_identity(ros_domain_id)
+            now = time.monotonic()
+            cached = getattr(self, "_ros_action_service_snapshot", None)
+            if cached is not None:
+                cached_identity, cached_at, cached_ok, cached_services = cached
+                cache_age = now - cached_at
+                use_cached = (
+                    cached_identity == identity
+                    and 0.0 <= cache_age <= _ROS_ACTION_SERVICE_SNAPSHOT_TTL_SEC
+                    and (
+                        not force_refresh
+                        or cache_age < _ROS_ACTION_SERVICE_MIN_REFRESH_INTERVAL_SEC
+                    )
+                )
+                if use_cached:
+                    return cached_ok, cached_services
+
+            ok, out = self._ros2_command_output(
+                "ros2 service list --include-hidden-services --no-daemon --spin-time 2.0",
+                timeout_sec=timeout_sec,
+                ros_domain_id=ros_domain_id,
+                emit_slow_diag=False,
+                emit_failure_diag=False,
+                emit_timeout_diag=False,
+            )
+            services = frozenset(
+                line.strip() for line in out.splitlines() if line.strip()
+            )
+            self._ros_action_service_snapshot = (
+                identity,
+                time.monotonic(),
+                bool(ok),
+                services,
+            )
+            return ok, services
+
+    def _clear_ros_action_service_snapshot(self) -> None:
+        """Discard a partial graph snapshot before retrying discovery."""
+        lock = getattr(self, "_ros_action_service_snapshot_lock", None)
+        if lock is None:
+            self._ros_action_service_snapshot = None
+            return
+        with lock:
+            self._ros_action_service_snapshot = None
+
+    def _ros_action_readiness_error(
+        self,
+        action_name: str,
+        *,
+        ros_domain_id: int | None,
+    ) -> str | None:
+        """Check one action from the shared graph snapshot without a polling loop."""
+        target = str(action_name or "").strip()
+        if not target:
+            return "action name is empty"
+        required_services = {
+            f"{target}/_action/send_goal",
+            f"{target}/_action/get_result",
+            f"{target}/_action/cancel_goal",
+        }
+        ok, services = self._ros_action_service_snapshot_for_domain(
+            ros_domain_id=ros_domain_id,
+            timeout_sec=8.0,
+        )
+        if not ok:
+            return f"{target} ROS graph discovery failed"
+        missing = sorted(required_services.difference(services))
+        if missing:
+            return f"{target} is missing action services: {', '.join(missing)}"
+        return None
+
     def _wait_for_ros_action(
         self,
         action_name: str,
@@ -6012,6 +6414,7 @@ class SystemBridge:
             f"{target}/_action/cancel_goal",
         }
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        force_refresh = False
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
                 return f"{target} wait cancelled"
@@ -6019,18 +6422,14 @@ class SystemBridge:
             if process_name and self.ros2_proc_status(process_name) != "running":
                 return f"{process_name} exited before {target} became available"
 
-            ok, out = self._ros2_command_output(
-                "ros2 service list --include-hidden-services --no-daemon --spin-time 0.5",
-                timeout_sec=max(8.0, min(12.0, float(timeout_sec) + 2.0)),
+            ok, services = self._ros_action_service_snapshot_for_domain(
                 ros_domain_id=ros_domain_id,
-                emit_slow_diag=False,
-                emit_failure_diag=False,
-                emit_timeout_diag=False,
+                timeout_sec=max(8.0, min(12.0, float(timeout_sec) + 2.0)),
+                force_refresh=force_refresh,
             )
-            if ok:
-                services = {line.strip() for line in out.splitlines() if line.strip()}
-                if action_service_names.issubset(services):
-                    return None
+            if ok and action_service_names.issubset(services):
+                return None
+            force_refresh = True
             time.sleep(max(0.1, float(poll_interval_sec)))
 
         if process_name and self.ros2_proc_status(process_name) != "running":
@@ -6542,6 +6941,35 @@ class SystemBridge:
             return "Blocked: stop Launch Environment processes first: " + ", ".join(normal_running)
         return ""
 
+    @staticmethod
+    def _digital_twin_sync_process_status(
+        process_states: list[str],
+        status_entries: list[dict[str, Any]],
+        now: float,
+    ) -> str:
+        """Return mirror liveness from tracked processes and fresh worker heartbeats."""
+        effective_states: list[str] = []
+        for tracked_state, status_data in zip(
+            process_states,
+            status_entries,
+            strict=True,
+        ):
+            updated_at = float(status_data.get("updated_at") or 0.0)
+            age_ms = (now - updated_at) * 1000.0 if updated_at > 0 else None
+            heartbeat_running = (
+                str(status_data.get("state") or "").strip().lower() == "mirroring"
+                and age_ms is not None
+                and 0.0 <= age_ms <= 3000.0
+            )
+            effective_states.append("running" if heartbeat_running else tracked_state)
+        if not effective_states:
+            return "unknown"
+        if all(state == "running" for state in effective_states):
+            return "running"
+        if all(state == "stopped" for state in effective_states):
+            return "stopped"
+        return "partial"
+
     def _digital_twin_sync_status_snapshot(
         self,
         target: str,
@@ -6551,19 +6979,17 @@ class SystemBridge:
         items = self._digital_twin_sync_process_items(cfg)
         process_names = [process for _robot, process in items if process]
         process_states = [self.ros2_proc_status(process) for process in process_names]
-        if not process_names:
-            process_status = "unknown"
-        elif all(state == "running" for state in process_states):
-            process_status = "running"
-        elif all(state == "stopped" for state in process_states):
-            process_status = "stopped"
-        else:
-            process_status = "partial"
 
         if len(items) <= 1:
             status_file = self._digital_twin_status_path(target)
             status_data = self._read_json_file(status_file)
             updated_at = float(status_data.get("updated_at") or 0.0)
+            status_age_ms = (now - updated_at) * 1000.0 if updated_at > 0 else None
+            process_status = self._digital_twin_sync_process_status(
+                process_states,
+                [status_data] if process_states else [],
+                now,
+            )
             robot = str(items[0][0] or "").strip().lower() if items else ""
             robot_statuses = {}
             if robot:
@@ -6581,7 +7007,7 @@ class SystemBridge:
                 "status_file": str(status_file),
                 "status_files": [str(status_file)],
                 "status_data": status_data,
-                "status_age_ms": (now - updated_at) * 1000.0 if updated_at > 0 else None,
+                "status_age_ms": status_age_ms,
                 "robots": robot_statuses,
             }
 
@@ -6589,6 +7015,11 @@ class SystemBridge:
         for robot, _process in items:
             path = self._digital_twin_sync_status_path(target, robot)
             entries.append((robot, path, self._read_json_file(path)))
+        process_status = self._digital_twin_sync_process_status(
+            process_states,
+            [data for _robot, _path, data in entries],
+            now,
+        )
 
         updated_values = [
             float(data.get("updated_at") or 0.0)
@@ -6771,8 +7202,7 @@ class SystemBridge:
 
             sim_mode = self._digital_twin_sim_mode(target)
             if (
-                target == "ur5e only"
-                and hardware_supported
+                hardware_supported
                 and sim_mode == "monitor"
                 and direction == "hardware -> gazebo"
                 and gazebo_status == "running"
@@ -7025,7 +7455,15 @@ class SystemBridge:
             prereq_err = self._ros2_launch_prereq_error("hardware_ur5e_rtde_trajectory_server")
             if prereq_err:
                 return prereq_err
+            log_path = self._ur5e_rtde_trajectory_process_log_path(name)
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return f"cannot create UR5e RTDE trajectory server log directory: {exc}"
             command = self._render_ros2_launch_cmd("hardware_ur5e_rtde_trajectory_server")
+            command = (
+                f"PYTHONFAULTHANDLER=1 {command} >> {shlex.quote(str(log_path))} 2>&1"
+            )
             err = self._start_tracked_ros2_command(
                 name,
                 command,
@@ -8040,6 +8478,7 @@ class SystemBridge:
         if repair:
             self._stop_digital_twin_stack(cfg, reason="digital_twin_repair")
 
+        self.execution_mode = "physical"
         self.robot_env = "real"
         self._stop_teleop_server()
         self._write_digital_twin_direction(target, self._digital_twin_direction(target))
@@ -9144,8 +9583,78 @@ class SystemBridge:
         )
         return ProductProfile.geometry_for_part_from_geometry(part_name, geometry)
 
-    def _physical_ur5e_robot_agent(self) -> Any | None:
-        """Return the running physical UR5e agent used for guarded task execution."""
+    def _physical_mg_pick_context_error(
+        self,
+        resource_agent: Any,
+        task_context: dict[str, Any],
+    ) -> str:
+        """Validate the actual-STL MG target retained by pick_approach."""
+        expected_stl = self._abs_project_path(
+            "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL"
+        ).resolve()
+        source_stl = str(task_context.get("source_stl") or "").strip()
+        if not source_stl:
+            return "pick_grasp requires the actual MG source_stl from pick_approach."
+        try:
+            resolved_stl = Path(source_stl).expanduser().resolve()
+        except OSError as exc:
+            return f"pick_grasp actual MG source_stl is invalid: {exc}"
+        if resolved_stl != expected_stl:
+            return (
+                "pick_grasp actual MG geometry must come from "
+                "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL."
+            )
+        if not resolved_stl.is_file():
+            return f"pick_grasp actual MG source_stl is unavailable: {resolved_stl}"
+        if task_context.get("hub_up") is not True:
+            return "pick_grasp requires the physical MG smooth raised hub to face up."
+        source_hash = str(task_context.get("source_stl_sha256") or "").strip()
+        if len(source_hash) != 64:
+            return "pick_grasp actual MG source_stl hash is missing or invalid."
+
+        values: dict[str, float] = {}
+        for field_name in (
+            "pick_tcp_z",
+            "grasp_width_m",
+            "tooth_clearance_m",
+            "minimum_hub_overlap_m",
+            "finger_tooth_clearance_m",
+            "finger_hub_overlap_m",
+            "gripper_close_position",
+        ):
+            try:
+                value = float(task_context[field_name])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return f"pick_grasp requires finite {field_name} from pick_approach."
+            if not math.isfinite(value):
+                return f"pick_grasp requires finite {field_name} from pick_approach."
+            values[field_name] = value
+        if values["finger_tooth_clearance_m"] + 1e-9 < values["tooth_clearance_m"]:
+            return "pick_grasp stock RG2 fingertip clearance would contact the MG teeth."
+        if values["finger_hub_overlap_m"] + 1e-9 < values["minimum_hub_overlap_m"]:
+            return "pick_grasp stock RG2 fingertips do not sufficiently overlap the MG hub."
+
+        controller = getattr(resource_agent, "_controller", None)
+        try:
+            lower_position = min(
+                float(getattr(controller, "gripper_close")),
+                float(getattr(controller, "gripper_open")),
+            )
+            upper_position = max(
+                float(getattr(controller, "gripper_close")),
+                float(getattr(controller, "gripper_open")),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return "pick_grasp RG2 configured position range is unavailable."
+        if not lower_position <= values["gripper_close_position"] <= upper_position:
+            return (
+                "pick_grasp gripper_close_position is outside the configured RG2 range: "
+                f"{values['gripper_close_position']:.6f}."
+            )
+        return ""
+
+    def _running_physical_ur5e_robot_agent(self) -> Any | None:
+        """Return the started physical UR5e agent owned by the full CAIS system."""
         return next(
             (
                 agent
@@ -9163,6 +9672,295 @@ class SystemBridge:
             ),
             None,
         )
+
+    def _physical_ur5e_robot_agent(self) -> Any | None:
+        """Return the physical UR5e agent currently authorized for guarded tasks."""
+        running_agent = self._running_physical_ur5e_robot_agent()
+        if running_agent is not None:
+            return running_agent
+        return getattr(self, "_ur5e_robot_function_agent", None)
+
+    def _get_ur5e_robot_function_agent_lifecycle_lock(self) -> asyncio.Lock:
+        """Return the lock serializing manual UR5e agent creation and disposal."""
+        lock = getattr(self, "_ur5e_robot_function_agent_lifecycle_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._ur5e_robot_function_agent_lifecycle_lock = lock
+        return lock
+
+    @classmethod
+    def _ui_process_ros_domain_id(cls) -> int:
+        """Return the domain of the process-wide rclpy context without initializing it."""
+        fallback = cls._default_ros_domain_id()
+        try:
+            import rclpy  # noqa: PLC0415 - ROS2 remains optional for non-ROS UI paths.
+        except ImportError:
+            return fallback
+        try:
+            if rclpy.ok():
+                return int(rclpy.get_default_context().get_domain_id())
+        except (RuntimeError, TypeError, ValueError):
+            return fallback
+        return fallback
+
+    async def _teardown_and_unregister_agent(self, agent: Any) -> None:
+        """Release one agent's project resources and exact local SPADE registration."""
+        teardown = getattr(agent, "teardown", None)
+        if callable(teardown):
+            await teardown()
+
+        container = getattr(agent, "container", None)
+        jid = str(getattr(agent, "jid", "") or "").strip()
+        if container is None or not jid:
+            return
+        try:
+            if container.get_agent(jid) is agent:
+                container.unregister(jid)
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+            log.debug("Could not unregister agent %s from its local SPADE container.", jid)
+
+    async def _dispose_ur5e_robot_function_agent(self) -> None:
+        """Dispose the cached unstarted physical UR5e Function Execution agent."""
+        agent = getattr(self, "_ur5e_robot_function_agent", None)
+        self._ur5e_robot_function_agent = None
+        self._ur5e_robot_function_agent_domain_id = None
+        self._ur5e_robot_function_state_uncertain = False
+        if agent is None:
+            return
+        await self._run_on_agent_runtime(self._teardown_and_unregister_agent(agent))
+
+    async def shutdown_ur5e_robot_function_agent(self) -> None:
+        """Wait for guarded UR5e work, then dispose the manual Function Execution agent."""
+        execution_lock = getattr(self, "_ur5e_robot_function_execution_lock", None)
+        if execution_lock is None:
+            execution_lock = threading.Lock()
+            self._ur5e_robot_function_execution_lock = execution_lock
+        while not execution_lock.acquire(blocking=False):
+            await asyncio.sleep(0.05)
+        try:
+            lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
+            async with lifecycle_lock:
+                preflight_lock = getattr(self, "_ur5e_robot_function_preflight_lock", None)
+                if preflight_lock is not None:
+                    while not preflight_lock.acquire(blocking=False):
+                        await asyncio.sleep(0.05)
+                    preflight_lock.release()
+                await self._dispose_ur5e_robot_function_agent()
+        finally:
+            execution_lock.release()
+
+    def _ur5e_robot_function_agent_handoff_error(self) -> str:
+        """Return why a manual UR5e agent cannot be replaced by full CAIS startup."""
+        agent = getattr(self, "_ur5e_robot_function_agent", None)
+        if agent is None:
+            return ""
+        if bool(getattr(self, "_ur5e_robot_function_state_uncertain", False)):
+            return (
+                "Cannot start the CAIS system because the manual ur5e physical state is "
+                "uncertain. Inspect and recover the robot, then complete move_home before "
+                "starting the full system."
+            )
+
+        current_state = str(getattr(agent, "_current_state", "") or "").strip()
+        held_part = getattr(agent, "_held_part", None)
+        gripper_state = str(getattr(agent, "_gripper_state", "") or "").strip()
+        task_context = dict(getattr(agent, "_task_ctx", {}) or {})
+        if (
+            current_state == "idle"
+            and held_part in (None, "")
+            and gripper_state == "open"
+            and not task_context
+        ):
+            return ""
+        return (
+            "Cannot start the CAIS system while manual ur5e Function Execution is in "
+            f"state '{current_state or '<empty>'}' with gripper_state "
+            f"'{gripper_state or '<empty>'}'. Complete or recover the manual sequence, "
+            "leave the gripper empty, and complete move_home first."
+        )
+
+    def _record_ur5e_robot_function_result(
+        self,
+        agent: Any,
+        function_name: str,
+        result: Any = None,
+        *,
+        failed: bool = False,
+    ) -> None:
+        """Track whether a dispatched manual physical task left trustworthy state."""
+        if agent is not getattr(self, "_ur5e_robot_function_agent", None):
+            return
+        status = (
+            str(result.get("status") or "").strip().lower()
+            if isinstance(result, dict)
+            else ""
+        )
+        if not failed and status == "completed":
+            if function_name == "move_home":
+                self._ur5e_robot_function_state_uncertain = False
+            return
+        self._ur5e_robot_function_state_uncertain = True
+
+    async def _prewarm_ur5e_robot_function_agent(self, agent: Any) -> str:
+        """Initialize one cached physical controller without commanding motion."""
+        controller = getattr(agent, "_controller", None)
+        wait_for_services = getattr(controller, "wait_for_services", None)
+        if not callable(wait_for_services):
+            return ""
+        if bool(getattr(agent, "_controller_prewarm_done", False)):
+            return ""
+        timeout_sec = min(
+            20.0,
+            max(1.0, float(getattr(agent, "controller_prewarm_timeout_s", 20.0))),
+        )
+        started = time.monotonic()
+        try:
+            ready = bool(
+                await asyncio.to_thread(
+                    wait_for_services,
+                    timeout_sec,
+                )
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return f"physical ur5e controller prewarm failed: {exc}"
+        elapsed = time.monotonic() - started
+        if not ready:
+            detail = str(getattr(controller, "_last_failure_message", "") or "").strip()
+            return detail or (
+                f"physical ur5e controller was not ready after {elapsed:.2f}s"
+            )
+        agent._controller_prewarm_attempted = True
+        agent._controller_prewarm_done = True
+        log.info("physical ur5e Function Execution controller ready in %.2fs", elapsed)
+        return ""
+
+    async def _ensure_ur5e_robot_function_agent_locked(
+        self,
+        target: str,
+        robot: str,
+    ) -> tuple[Any | None, str]:
+        """Return one physical UR5e agent while the lifecycle lock is held."""
+        if bool(getattr(self, "_starting", False)):
+            return None, "Wait for CAIS system startup to finish before Function Execution."
+        if bool(getattr(self, "_stopping", False)):
+            return None, "Wait for CAIS system shutdown to finish before Function Execution."
+
+        if bool(getattr(self, "system_running", False)):
+            if str(getattr(self, "execution_mode", "") or "").strip().lower() != "physical":
+                return None, (
+                    "Stop the non-Physical CAIS system before executing a physical robot function."
+                )
+            running_agent = self._running_physical_ur5e_robot_agent()
+            if running_agent is None:
+                return None, "The full CAIS system has no physical ur5e robot agent."
+            return running_agent, ""
+
+        if robot != "ur5e":
+            return None, "Physical robot function execution is implemented for ur5e first."
+        cfg = self._digital_twin_target(target)
+        if cfg is None:
+            return None, f"unknown digital twin target: {target}"
+        domains = self._digital_twin_domain_ids()
+        hardware_domain_id = self._digital_twin_hardware_domain_id(cfg, "ur5e", domains)
+        ui_domain_id = self._ui_process_ros_domain_id()
+        if ui_domain_id != hardware_domain_id:
+            return None, (
+                "Physical ur5e Function Execution requires the CAIS UI process on "
+                f"ROS_DOMAIN_ID={hardware_domain_id}, but it is on ROS_DOMAIN_ID={ui_domain_id}. "
+                f"Relaunch the CAIS UI with ROS_DOMAIN_ID={hardware_domain_id}."
+            )
+
+        cached = getattr(self, "_ur5e_robot_function_agent", None)
+        cached_domain = getattr(self, "_ur5e_robot_function_agent_domain_id", None)
+        if cached is not None:
+            if cached_domain != hardware_domain_id:
+                return None, (
+                    "The prepared physical ur5e Function Execution runtime belongs to "
+                    f"ROS_DOMAIN_ID={cached_domain}, not ROS_DOMAIN_ID={hardware_domain_id}. "
+                    f"Relaunch the CAIS UI with ROS_DOMAIN_ID={hardware_domain_id}."
+                )
+            if (
+                str(getattr(cached, "execution_mode", "") or "").strip().lower()
+                == "physical"
+                and getattr(cached, "_controller", None) is not None
+            ):
+                prewarm_error = await self._prewarm_ur5e_robot_function_agent(cached)
+                if prewarm_error:
+                    return None, prewarm_error
+                return cached, ""
+            await self._dispose_ur5e_robot_function_agent()
+
+        async def _create_agent() -> list[Any]:
+            agent_creator_module = getattr(self, "_agent_creator_cached", None)
+            if agent_creator_module is None:
+                agent_creator_module = self._import_agent_creator_module()
+                self._agent_creator_cached = agent_creator_module
+            self._configure_agent_creator_runtime(
+                agent_creator_module,
+                "real",
+                "physical",
+                "yolo",
+            )
+            return list(
+                agent_creator_module.create_resource_agents(
+                    [str(_UR5E_RESOURCE)],
+                    str(_CCA_INIT),
+                )
+            )
+
+        agents: list[Any] = []
+        try:
+            agents = await self._run_on_agent_runtime(_create_agent())
+            if len(agents) != 1:
+                raise RuntimeError(
+                    "physical ur5e Function Execution preparation did not create exactly one agent"
+                )
+            agent = agents[0]
+            if str(getattr(agent, "agent_name", "") or "").strip() != "ur5e":
+                raise RuntimeError("physical ur5e Function Execution created the wrong agent")
+            if str(getattr(agent, "execution_mode", "") or "").strip().lower() != "physical":
+                raise RuntimeError("physical ur5e Function Execution fell back from physical mode")
+            if getattr(agent, "_controller", None) is None:
+                raise RuntimeError("physical ur5e Function Execution controller is unavailable")
+            executables = getattr(agent, "executables", None)
+            required = {
+                "pick_approach",
+                "pick_grasp",
+                "place_approach",
+                "place_insert",
+                "move_home",
+            }
+            if not isinstance(executables, dict) or not required.issubset(executables):
+                raise RuntimeError(
+                    "physical ur5e Function Execution agent is missing registered functions"
+                )
+            prewarm_error = await self._prewarm_ur5e_robot_function_agent(agent)
+            if prewarm_error:
+                raise RuntimeError(prewarm_error)
+        except Exception as exc:
+            for candidate in agents:
+                try:
+                    await self._run_on_agent_runtime(
+                        self._teardown_and_unregister_agent(candidate)
+                    )
+                except Exception:  # noqa: BLE001 - preserve the preparation failure.
+                    log.exception("Failed to clean up partial physical ur5e agent preparation")
+            return None, f"Could not prepare the physical ur5e Function Execution runtime: {exc}"
+
+        self._ur5e_robot_function_agent = agent
+        self._ur5e_robot_function_agent_domain_id = hardware_domain_id
+        self._ur5e_robot_function_state_uncertain = False
+        return agent, ""
+
+    async def _ensure_ur5e_robot_function_agent(
+        self,
+        target: str,
+        robot: str,
+    ) -> tuple[Any | None, str]:
+        """Prepare or reuse the physical UR5e agent without starting full CAIS."""
+        lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
+        async with lifecycle_lock:
+            return await self._ensure_ur5e_robot_function_agent_locked(target, robot)
 
     def _digital_twin_robot_function_request_error(  # noqa: C901 - explicit exact-token validation.
         self,
@@ -9222,6 +10020,8 @@ class SystemBridge:
         self,
         target: str,
         cfg: dict[str, Any],
+        *,
+        twin_status: dict[str, Any] | None = None,
     ) -> str:
         """Return a target-specific passive-twin health error, if any."""
         if self._digital_twin_sim_mode(target) != "monitor":
@@ -9232,7 +10032,11 @@ class SystemBridge:
         ):
             return f"Physical robot function execution requires hardware-led {target} Monitor mode."
 
-        twin_status = dict(self.digital_twin_statuses().get(target) or {})
+        twin_status = (
+            dict(self.digital_twin_statuses().get(target) or {})
+            if twin_status is None
+            else dict(twin_status)
+        )
         if not twin_status:
             return f"{target} status is unavailable; click Repair Twin."
         if bool(twin_status.get("repair_needed")):
@@ -9254,10 +10058,134 @@ class SystemBridge:
             return f"{target} hardware -> gazebo mirror is not mirroring; click Repair Twin."
         return ""
 
+    async def _wait_for_digital_twin_robot_function_target_error(
+        self,
+        target: str,
+        cfg: dict[str, Any],
+    ) -> str:
+        """Allow a running hardware -> gazebo mirror to recover fresh feedback."""
+        deadline = (
+            time.monotonic() + self._ROBOT_FUNCTION_MIRROR_RECOVERY_TIMEOUT_S
+        )
+        while True:
+            twin_status = dict(self.digital_twin_statuses().get(target) or {})
+            target_error = self._digital_twin_robot_function_target_error(
+                target,
+                cfg,
+                twin_status=twin_status,
+            )
+            if not target_error:
+                return ""
+
+            gazebo_status = str(
+                dict(twin_status.get("gazebo") or {}).get("status") or ""
+            )
+            hardware_status = str(
+                dict(twin_status.get("hardware") or {}).get("overall") or ""
+            )
+            sync_status = dict(twin_status.get("sync/status") or {})
+            sync_process_status = str(sync_status.get("process_status") or "")
+            sync_state = str(sync_status.get("state") or "").strip().lower()
+            repair_reasons = [
+                reason.strip().lower()
+                for reason in str(twin_status.get("repair_reason") or "").split(";")
+                if reason.strip()
+            ]
+            transient_repair = not repair_reasons or all(
+                "mirror is waiting" in reason
+                or "mirror is stale" in reason
+                or "mirror status is stale" in reason
+                for reason in repair_reasons
+            )
+            recovering = (
+                gazebo_status == "running"
+                and hardware_status == "running"
+                and sync_process_status == "running"
+                and sync_state in {"starting", "waiting", "stale"}
+                and transient_repair
+            )
+            if not recovering or time.monotonic() >= deadline:
+                return target_error
+            await asyncio.sleep(0.1)
+
+    @staticmethod
+    def _prepared_action_client_ready(
+        client: Any,
+        *,
+        action_name: str,
+    ) -> tuple[bool | None, str]:
+        """Probe an initialized controller action client without ROS CLI discovery."""
+        if client is None:
+            return None, ""
+        wait_for_server = getattr(client, "wait_for_server", None)
+        if not callable(wait_for_server):
+            return None, ""
+        try:
+            ready = bool(wait_for_server(timeout_sec=0.2))
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return False, f"{action_name}: wait failed ({exc})"
+        return ready, "" if ready else f"{action_name} is unavailable"
+
+    def _robot_function_execution_pose_readiness(
+        self,
+        target: str,
+        robot: str,
+        resource_agent: Any,
+    ) -> dict[str, Any]:
+        """Read fresh world-to-tool0 readiness from the prepared controller."""
+        controller = getattr(resource_agent, "_controller", None)
+        get_current_pose = getattr(controller, "get_current_pose", None)
+        frame_id = str(getattr(controller, "frame_id", "") or "").strip()
+        tool_frame = str(getattr(controller, "ee_link", "") or "").strip()
+        if not callable(get_current_pose) or frame_id != "world" or tool_frame != "tool0":
+            return self._robot_function_capture_snapshot(target, robot)
+        try:
+            result = get_current_pose()
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "success": False,
+                "world_tool0_ready": False,
+                "blocked_reason": f"TF world -> tool0 is unavailable: {exc}",
+            }
+        pose = dict(result.get("pose") or {}) if isinstance(result, dict) else {}
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        world_tool0_ready = bool(
+            isinstance(result, dict)
+            and result.get("success")
+            and all(
+                isinstance(pose.get(field), (int, float))
+                and not isinstance(pose.get(field), bool)
+                and math.isfinite(float(pose[field]))
+                for field in fields
+            )
+        )
+        return {
+            "success": world_tool0_ready,
+            "world_tool0_ready": world_tool0_ready,
+            "blocked_reason": (
+                ""
+                if world_tool0_ready
+                else str(result.get("message") or "TF world -> tool0 is unavailable.")
+            ),
+            "waypoint": (
+                {
+                    "source": "hardware",
+                    "pose": {
+                        **{field: float(pose[field]) for field in fields},
+                        "frame_id": "world",
+                        "child_frame_id": "tool0",
+                    },
+                }
+                if world_tool0_ready
+                else {}
+            ),
+        }
+
     def _digital_twin_ur5e_motion_readiness(
         self,
         target: str,
         cfg: dict[str, Any],
+        resource_agent: Any | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Validate target-specific UR5e RTDE state and the exact action services."""
         domains = self._digital_twin_domain_ids()
@@ -9270,6 +10198,19 @@ class SystemBridge:
             "rtde_control_connected": False,
             "trajectory_action_ready": False,
         }
+        if resource_agent is not None:
+            controller = getattr(resource_agent, "_controller", None)
+            if controller is not None:
+                configured_action = str(
+                    getattr(controller, "_ur5e_hardware_trajectory_action", "") or ""
+                ).strip()
+                readiness["configured_trajectory_action"] = configured_action
+                if configured_action != _UR5E_RTDE_TRAJECTORY_ACTION:
+                    return readiness, (
+                        "Physical ur5e controller arm action is "
+                        f"'{configured_action or '<empty>'}'; expected "
+                        f"'{_UR5E_RTDE_TRAJECTORY_ACTION}'."
+                    )
         rtde_status = self._ur5e_rtde_trajectory_status()
         try:
             rtde_status_domain_id = int(rtde_status["ros_domain_id"])
@@ -9328,11 +10269,23 @@ class SystemBridge:
                 "UR5e motion requires RTDE control and Remote Control on the teach pendant."
             )
 
-        action_error = self._wait_for_ros_action(
-            _UR5E_RTDE_TRAJECTORY_ACTION,
-            timeout_sec=8.0,
-            ros_domain_id=hardware_domain_id,
+        controller = getattr(resource_agent, "_controller", None)
+        prepared_ready, action_error = self._prepared_action_client_ready(
+            getattr(controller, "_ur5e_hardware_trajectory_client", None),
+            action_name=_UR5E_RTDE_TRAJECTORY_ACTION,
         )
+        if prepared_ready is None:
+            hardware_processes = self._digital_twin_hardware_processes_for_robot(
+                cfg,
+                "ur5e",
+            )
+            rtde_process = str(hardware_processes.get("rtde") or "").strip()
+            action_error = self._wait_for_ros_action(
+                _UR5E_RTDE_TRAJECTORY_ACTION,
+                timeout_sec=8.0,
+                process_name=rtde_process or None,
+                ros_domain_id=hardware_domain_id,
+            )
         if action_error:
             return readiness, (
                 f"{_UR5E_RTDE_TRAJECTORY_ACTION} is unavailable on "
@@ -9346,17 +10299,43 @@ class SystemBridge:
         self,
         target: str,
         hardware_domain_id: int,
+        resource_agent: Any | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Validate the exact target-domain RG2 action before a gripper task."""
         readiness = {
             "gripper_action": _UR5E_RG2_GRIPPER_ACTION,
             "gripper_action_ready": False,
         }
-        action_error = self._wait_for_ros_action(
-            _UR5E_RG2_GRIPPER_ACTION,
-            timeout_sec=8.0,
-            ros_domain_id=hardware_domain_id,
+        if resource_agent is not None:
+            controller = getattr(resource_agent, "_controller", None)
+            configured_action = str(
+                getattr(controller, "_rg2_action_name", "") or ""
+            ).strip()
+            readiness["configured_gripper_action"] = configured_action
+            if configured_action != _UR5E_RG2_GRIPPER_ACTION:
+                return readiness, (
+                    "Physical ur5e controller gripper action is "
+                    f"'{configured_action or '<empty>'}'; expected "
+                    f"'{_UR5E_RG2_GRIPPER_ACTION}'."
+                )
+        controller = getattr(resource_agent, "_controller", None)
+        prepared_ready, action_error = self._prepared_action_client_ready(
+            getattr(controller, "_rg2_action_client", None),
+            action_name=_UR5E_RG2_GRIPPER_ACTION,
         )
+        if prepared_ready is None:
+            cfg = self._digital_twin_target(target) or {}
+            hardware_processes = self._digital_twin_hardware_processes_for_robot(
+                cfg,
+                "ur5e",
+            )
+            gripper_process = str(hardware_processes.get("gripper") or "").strip()
+            action_error = self._wait_for_ros_action(
+                _UR5E_RG2_GRIPPER_ACTION,
+                timeout_sec=8.0,
+                process_name=gripper_process or None,
+                ros_domain_id=hardware_domain_id,
+            )
         if action_error:
             return readiness, (
                 f"{_UR5E_RG2_GRIPPER_ACTION} is unavailable on "
@@ -9448,12 +10427,6 @@ class SystemBridge:
         if error or cfg is None:
             return None, {}, {}, error
 
-        if not bool(getattr(self, "system_running", False)):
-            return None, {}, {}, "Start the CAIS system before executing a robot function."
-        if str(getattr(self, "execution_mode", "") or "").strip().lower() != "physical":
-            return None, {}, {}, (
-                "Start the CAIS system in Physical mode before executing motion."
-            )
         target_error = self._digital_twin_robot_function_target_error(target, cfg)
         if target_error:
             return None, {}, {}, target_error
@@ -9463,9 +10436,22 @@ class SystemBridge:
             return None, {}, {}, (
                 "Start the ur5e robot agent in Physical mode before executing motion."
             )
-        is_alive = getattr(resource_agent, "is_alive", None)
-        if callable(is_alive) and not bool(is_alive()):
-            return None, {}, {}, "The physical ur5e robot agent is not running."
+        running_agent = self._running_physical_ur5e_robot_agent()
+        if resource_agent is running_agent:
+            is_alive = getattr(resource_agent, "is_alive", None)
+            if callable(is_alive) and not bool(is_alive()):
+                return None, {}, {}, "The physical ur5e robot agent is not running."
+        elif resource_agent is not getattr(self, "_ur5e_robot_function_agent", None):
+            return None, {}, {}, "The physical ur5e Function Execution runtime is unavailable."
+        if (
+            resource_agent is getattr(self, "_ur5e_robot_function_agent", None)
+            and bool(getattr(self, "_ur5e_robot_function_state_uncertain", False))
+            and function_name != "move_home"
+        ):
+            return None, {}, {}, (
+                "The manual ur5e physical state is uncertain. Inspect the robot and complete "
+                "move_home before executing another robot function."
+            )
         if getattr(resource_agent, "_controller", None) is None:
             return None, {}, {}, "The physical ur5e controller is unavailable."
         agent_motion_lock = getattr(resource_agent, "_robot_motion_lock", None)
@@ -9524,6 +10510,13 @@ class SystemBridge:
                 return None, {}, {}, (
                     "pick_grasp origin_resource_location does not match the active pick context."
                 )
+            if part_name == "MG":
+                grasp_context_error = self._physical_mg_pick_context_error(
+                    resource_agent,
+                    task_context,
+                )
+                if grasp_context_error:
+                    return None, {}, {}, grasp_context_error
             lift_error = self._ur5e_return_height_error(resource_agent, function_name)
             if lift_error:
                 return None, {}, {}, lift_error
@@ -9592,7 +10585,7 @@ class SystemBridge:
                 return None, {}, {}, named_error
 
         motion_readiness, motion_error = self._digital_twin_ur5e_motion_readiness(
-            target, cfg
+            target, cfg, resource_agent
         )
         readiness.update(motion_readiness)
         if motion_error:
@@ -9602,13 +10595,18 @@ class SystemBridge:
             gripper_readiness, gripper_error = self._digital_twin_ur5e_gripper_readiness(
                 target,
                 int(motion_readiness["hardware_domain_id"]),
+                resource_agent,
             )
             readiness.update(gripper_readiness)
             if gripper_error:
                 return None, {}, readiness, gripper_error
 
         if function_name == "pick_approach":
-            capture_readiness = self._robot_function_capture_snapshot(target, robot)
+            capture_readiness = self._robot_function_execution_pose_readiness(
+                target,
+                robot,
+                resource_agent,
+            )
             readiness["world_tool0_ready"] = bool(
                 capture_readiness.get("world_tool0_ready")
             )
@@ -9624,9 +10622,13 @@ class SystemBridge:
         if function_name in {"pick_approach", "place_approach"}:
             selected_product = str(getattr(self, "selected_product", "") or "").strip()
             if not selected_product:
-                return None, {}, readiness, (
-                    f"Select a product before executing {function_name}."
-                )
+                product_files = self.list_product_files()
+                if len(product_files) == 1:
+                    selected_product = product_files[0]
+                else:
+                    return None, {}, readiness, (
+                        f"Select a product before executing {function_name}."
+                    )
             try:
                 product_geometry = self._robot_function_product_geometry_for_part(part_name)
             except Exception as exc:  # noqa: BLE001 - selected manifest/config boundary.
@@ -9640,12 +10642,96 @@ class SystemBridge:
                 return None, {}, readiness, (
                     f"No product geometry is configured for part_name '{part_name}'."
                 )
+            if function_name == "pick_approach" and part_name == "MG":
+                controller = getattr(resource_agent, "_controller", None)
+                stl_readiness = getattr(controller, "_physical_stl_pick_readiness", None)
+                if not callable(stl_readiness):
+                    return None, {}, readiness, (
+                        "The physical ur5e controller does not support the actual STL MG grasp."
+                    )
+                stl_result = dict(stl_readiness(product_geometry) or {})
+                if not bool(stl_result.get("success")):
+                    return None, {}, readiness, str(
+                        stl_result.get("message")
+                        or "The actual STL MG grasp geometry is not ready."
+                    )
+                expected_stl = self._abs_project_path(
+                    "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL"
+                ).resolve()
+                try:
+                    resolved_stl = Path(str(stl_result.get("source_stl") or "")).resolve()
+                except OSError as exc:
+                    return None, {}, readiness, f"Actual MG source_stl is invalid: {exc}"
+                if resolved_stl != expected_stl:
+                    return None, {}, readiness, (
+                        "Physical MG geometry must come from "
+                        "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL."
+                    )
+                readiness.update(
+                    {
+                        "source_stl": stl_result.get("source_stl"),
+                        "source_stl_sha256": stl_result.get("source_stl_sha256"),
+                        "grasp_width_m": stl_result.get("grasp_width_m"),
+                        "gripper_close_position": stl_result.get(
+                            "gripper_close_position"
+                        ),
+                        "finger_tooth_clearance_m": stl_result.get(
+                            "finger_tooth_clearance_m"
+                        ),
+                        "finger_hub_overlap_m": stl_result.get(
+                            "finger_hub_overlap_m"
+                        ),
+                    }
+                )
             call_kwargs["product_geometry"] = deepcopy(product_geometry)
             readiness["selected_product"] = selected_product
 
         return resource_agent, call_kwargs, readiness, ""
 
     async def _digital_twin_robot_function_execution_preflight_async(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        origin_resource_location: str,
+        destination_location: str,
+        part_name: str,
+    ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
+        """Prepare one physical UR5e runtime and hold it through no-motion preflight."""
+        cfg, request_error = self._digital_twin_robot_function_request_error(
+            target,
+            robot,
+            function_name,
+            origin_resource_location,
+            destination_location,
+            part_name,
+        )
+        if request_error or cfg is None:
+            return None, {}, {}, request_error
+        target_error = await self._wait_for_digital_twin_robot_function_target_error(
+            target,
+            cfg,
+        )
+        if target_error:
+            return None, {}, {}, target_error
+
+        lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
+        async with lifecycle_lock:
+            _agent, preparation_error = (
+                await self._ensure_ur5e_robot_function_agent_locked(target, robot)
+            )
+            if preparation_error:
+                return None, {}, {}, preparation_error
+            return await self._digital_twin_robot_function_execution_preflight_prepared_async(
+                target,
+                robot,
+                function_name,
+                origin_resource_location,
+                destination_location,
+                part_name,
+            )
+
+    async def _digital_twin_robot_function_execution_preflight_prepared_async(
         self,
         target: str,
         robot: str,
@@ -9736,6 +10822,17 @@ class SystemBridge:
             )
         )
         ready = not error
+        ready_message = error or f"{function_name} is ready for operator confirmation."
+        if ready and function_name == "pick_approach" and part_name == "MG":
+            ready_message = (
+                "pick_approach is ready for operator confirmation using the actual "
+                "Gear_Medium.STL smooth raised hub target."
+            )
+        elif ready and function_name == "pick_grasp" and part_name == "MG":
+            ready_message = (
+                "pick_grasp is ready to close the stock RG2 on the STL-grounded smooth "
+                "raised hub and lift without another descent."
+            )
         return {
             "success": ready,
             "ready": ready,
@@ -9745,8 +10842,51 @@ class SystemBridge:
             "origin_resource_location": origin_resource_location,
             "destination_location": destination_location,
             "part_name": part_name,
-            "message": error or f"{function_name} is ready for operator confirmation.",
+            "message": ready_message,
             **readiness,
+        }
+
+    def digital_twin_robot_function_execution_progress(self) -> dict[str, Any]:
+        """Return the current exact physical Function Execution stage."""
+        active_function = str(
+            getattr(self, "_ur5e_robot_function_execution_active", None) or ""
+        )
+        stage = str(
+            getattr(self, "_ur5e_robot_function_execution_stage", "") or ""
+        )
+        started_at = float(
+            getattr(self, "_ur5e_robot_function_execution_started_at", 0.0) or 0.0
+        )
+        detection_message = ""
+        if active_function == "pick_approach" and stage == "settling":
+            detection_status = self._read_json_file(_UR5E_DETECTION_STATUS)
+            try:
+                detection_updated_at = float(detection_status.get("updated_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                detection_updated_at = 0.0
+            detection_stage = str(detection_status.get("stage") or "").strip()
+            if detection_updated_at >= started_at and detection_stage in {
+                "settling",
+                "detection",
+                "failed",
+            }:
+                stage = detection_stage
+                detection_message = str(detection_status.get("message") or "").strip()
+        messages = {
+            "fresh_readiness": "Checking fresh RTDE, world -> tool0, and perception readiness.",
+            "dispatch": f"Dispatching {active_function}.",
+            "staging": "Staging ur5e at origin_resource_location.",
+            "settling": "Waiting for ur5e to become stationary.",
+            "detection": "Running fresh /detect_all inference.",
+            "executing": f"Executing {active_function}.",
+            "failed": "Fresh /detect_all did not complete.",
+        }
+        return {
+            "active": bool(active_function),
+            "function_name": active_function,
+            "stage": stage,
+            "message": detection_message or messages.get(stage, ""),
+            "started_at": started_at,
         }
 
     async def digital_twin_execute_robot_function(  # noqa: PLR0915 - explicit motion gates.
@@ -9787,6 +10927,8 @@ class SystemBridge:
                 "active_function": active,
             }
         self._ur5e_robot_function_execution_active = function_name
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
         release_lock_here = True
         try:
             preflight_task = asyncio.create_task(
@@ -9818,6 +10960,8 @@ class SystemBridge:
                         )
                     finally:
                         self._ur5e_robot_function_execution_active = None
+                        self._ur5e_robot_function_execution_stage = ""
+                        self._ur5e_robot_function_execution_started_at = 0.0
                         lock.release()
 
                 preflight_task.add_done_callback(_release_after_preflight)
@@ -9829,6 +10973,34 @@ class SystemBridge:
                     "message": error or "UR5e robot function execution is not ready.",
                 }
 
+            self._ur5e_robot_function_execution_stage = "dispatch"
+            callback_was_set = hasattr(resource_agent, "_robot_task_progress_callback")
+            previous_progress_callback = getattr(
+                resource_agent,
+                "_robot_task_progress_callback",
+                None,
+            )
+
+            def _task_progress(task_name: str, step_id: str) -> None:
+                if task_name != function_name:
+                    return
+                if step_id == "move_to_origin_resource_location":
+                    self._ur5e_robot_function_execution_stage = "staging"
+                elif step_id == "detect_parts":
+                    self._ur5e_robot_function_execution_stage = "settling"
+                else:
+                    self._ur5e_robot_function_execution_stage = "executing"
+
+            def _restore_progress_callback() -> None:
+                if callback_was_set:
+                    resource_agent._robot_task_progress_callback = previous_progress_callback
+                else:
+                    try:
+                        delattr(resource_agent, "_robot_task_progress_callback")
+                    except AttributeError:
+                        pass
+
+            resource_agent._robot_task_progress_callback = _task_progress
             generated_function = getattr(resource_agent, function_name)
             runtime_task = asyncio.create_task(
                 self._run_on_agent_runtime(generated_function(**call_kwargs))
@@ -9840,21 +11012,45 @@ class SystemBridge:
 
                 def _release_after_runtime(task: asyncio.Task[Any]) -> None:
                     try:
-                        task.result()
+                        completed_result = task.result()
+                        self._record_ur5e_robot_function_result(
+                            resource_agent,
+                            function_name,
+                            completed_result,
+                        )
                     except asyncio.CancelledError:
+                        self._record_ur5e_robot_function_result(
+                            resource_agent,
+                            function_name,
+                            failed=True,
+                        )
                         log.warning("physical %s runtime was cancelled", function_name)
                     except Exception:  # noqa: BLE001 - background runtime failure.
+                        self._record_ur5e_robot_function_result(
+                            resource_agent,
+                            function_name,
+                            failed=True,
+                        )
                         log.exception(
                             "physical %s runtime failed after UI cancellation",
                             function_name,
                         )
                     finally:
+                        _restore_progress_callback()
                         self._ur5e_robot_function_execution_active = None
+                        self._ur5e_robot_function_execution_stage = ""
+                        self._ur5e_robot_function_execution_started_at = 0.0
                         lock.release()
 
                 runtime_task.add_done_callback(_release_after_runtime)
                 raise
             except Exception as exc:  # noqa: BLE001 - agent runtime boundary.
+                _restore_progress_callback()
+                self._record_ur5e_robot_function_result(
+                    resource_agent,
+                    function_name,
+                    failed=True,
+                )
                 log.exception("physical %s execution failed", function_name)
                 return {
                     **base,
@@ -9864,8 +11060,20 @@ class SystemBridge:
                     ),
                 }
 
+            _restore_progress_callback()
+
             if not isinstance(result, dict):
+                self._record_ur5e_robot_function_result(
+                    resource_agent,
+                    function_name,
+                    failed=True,
+                )
                 return {**base, "message": f"{function_name} returned an invalid result."}
+            self._record_ur5e_robot_function_result(
+                resource_agent,
+                function_name,
+                result,
+            )
             status = str(result.get("status") or "").strip().lower()
             message = str(result.get("content") or result.get("message") or "").strip()
             success = status == "completed"
@@ -9901,6 +11109,8 @@ class SystemBridge:
         finally:
             if release_lock_here:
                 self._ur5e_robot_function_execution_active = None
+                self._ur5e_robot_function_execution_stage = ""
+                self._ur5e_robot_function_execution_started_at = 0.0
                 lock.release()
 
     async def digital_twin_execute_pick_approach(
@@ -12834,27 +14044,46 @@ class SystemBridge:
     def ros2_stop(self, name: str, *, reason: str = "explicit_stop") -> str | None:
         """Stop a tracked ROS2 process. Returns error string or None on success."""
         proc = self._ros2_procs.get(name)
-        if proc is None or proc.poll() is not None:
+        return_code = None if proc is None else proc.poll()
+        if proc is None or return_code is not None:
             self._ros2_procs.pop(name, None)
-            self._unregister_ui_process(name, proc)
+            if proc is not None:
+                self._cleanup_exited_ui_process(name, proc)
+            else:
+                self._unregister_ui_process(name, proc)
+            if return_code is not None and (
+                name == "hardware_ur5e_rtde_trajectory_server"
+                or name == "digital_twin_ur5e_only_hardware_ur5e_rtde_trajectory_server"
+                or name
+                == "digital_twin_dual_robots_hardware_ur5e_rtde_trajectory_server"
+            ):
+                self._record_ur5e_rtde_trajectory_process_exit(name, int(return_code))
             if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(
                 self._GAZEBO_PROCESS_NAMES
             ):
                 self._shutdown_gazebo_prewarm_controllers()
                 self._kill_stale_gazebo_helpers()
             return None
+        intentional_stops = getattr(self, "_ros2_intentional_stops", None)
+        if intentional_stops is None:
+            intentional_stops = set()
+            self._ros2_intentional_stops = intentional_stops
+        intentional_stops.add(name)
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
             try:
-                proc.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait(timeout=3)
-            log.info("Stopped ROS2 process %s", name)
-        except Exception as exc:
-            log.warning("Error stopping %s: %s", name, exc)
-        self._ros2_procs.pop(name, None)
-        self._unregister_ui_process(name, proc)
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                try:
+                    proc.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=3)
+                log.info("Stopped ROS2 process %s", name)
+            except Exception as exc:
+                log.warning("Error stopping %s: %s", name, exc)
+            self._ros2_procs.pop(name, None)
+            self._unregister_ui_process(name, proc)
+        finally:
+            intentional_stops.discard(name)
         if name in self._GAZEBO_PROCESS_NAMES and not self._any_running(self._GAZEBO_PROCESS_NAMES):
             self._shutdown_gazebo_prewarm_controllers()
             self._kill_stale_gazebo_helpers()
@@ -13354,7 +14583,9 @@ class SystemBridge:
         trajectory_action = shlex.quote(_UR5E_RTDE_TRAJECTORY_ACTION)
         cmd = (
             f"python3.10 {quoted_script} --server --service-timeout-sec 8 "
-            f"--tf-warmup-sec 0.2 --ur5e-hardware-trajectory-action {trajectory_action}"
+            f"--tf-warmup-sec 0.2 --ur5e-hardware-trajectory-action {trajectory_action} "
+            "--ur5e-hardware-result-timeout-sec "
+            f"{_UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC}"
         )
         try:
             proc = subprocess.Popen(
@@ -13474,7 +14705,8 @@ class SystemBridge:
         trajectory_action = shlex.quote(_UR5E_RTDE_TRAJECTORY_ACTION)
         cmd = (
             f"python3.10 {quoted_script} --ur5e-hardware-trajectory-action "
-            f"{trajectory_action} {quoted_args}"
+            f"{trajectory_action} --ur5e-hardware-result-timeout-sec "
+            f"{_UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC} {quoted_args}"
         ).strip()
         return self.ros2_exec(
             self._ros2_domain_export(ros_domain_id) + cmd,
@@ -13594,12 +14826,17 @@ class SystemBridge:
         robot = str(robot).strip().lower()
         if robot not in {"xarm6", "ur5e"}:
             return False, f"unknown robot: {robot}"
+        timeout_sec = (
+            _UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC + 5.0
+            if robot == "ur5e"
+            else 25.0
+        )
         return self._teleop_request(
             payload={
                 "op": "home",
                 "robot": robot,
             },
-            timeout_sec=25.0,
+            timeout_sec=timeout_sec,
         )
 
     def list_named_positions(self, robot: str) -> dict[str, list[float]]:
@@ -13631,13 +14868,18 @@ class SystemBridge:
         ready, readiness_message = self.teleop_named_position_readiness(robot)
         if not ready:
             return False, readiness_message
+        timeout_sec = (
+            _UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC + 5.0
+            if robot == "ur5e"
+            else 25.0
+        )
         return self._teleop_request(
             payload={
                 "op": "move_joints",
                 "robot": robot,
                 "positions": [float(j) for j in joints],
             },
-            timeout_sec=25.0,
+            timeout_sec=timeout_sec,
         )
 
     def teleop_joint(

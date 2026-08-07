@@ -22,6 +22,7 @@ from cais_spade_llm.resources.sensor.physical.realsense_roboflow_node import (
     annotate_detection_frame,
 )
 from cais_spade_llm.ui import perception_manager as manager_module
+from cais_spade_llm.ui.pages.perception import _PerceptionPage
 from cais_spade_llm.ui.perception_manager import (
     CAMERA_ROLES,
     PerceptionManager,
@@ -317,6 +318,87 @@ def test_realsense_and_usbipd_discovery_parsing() -> None:
     assert rows[0]["vid_pid"] == "8086:0b07"
     assert rows[0]["description"] == "Intel(R) RealSense(TM) Depth Camera 435"
     assert rows[0]["state"] == "Shared"
+
+
+def test_failed_realsense_discovery_preserves_last_successful_inventory(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    perception_manager._devices_cache = [
+        {"serial": "103422070738", "model": "Intel RealSense D435"}
+    ]
+    perception_manager._devices_cache_at = 0.0
+    monkeypatch.setattr(manager_module.shutil, "which", lambda _name: "/usr/bin/rs-enum")
+    monkeypatch.setattr(
+        perception_manager,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="could not initialize udev monitor\n",
+        ),
+    )
+
+    devices = perception_manager.discover_devices(force=True)
+
+    assert devices == [{"serial": "103422070738", "model": "Intel RealSense D435"}]
+    assert perception_manager._device_discovery_error == "could not initialize udev monitor"
+
+
+def test_failed_realsense_discovery_is_rate_limited(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    now = [100.0]
+    perception_manager._devices_cache_at = 0.0
+    monkeypatch.setattr(manager_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(manager_module.shutil, "which", lambda _name: "/usr/bin/rs-enum")
+
+    def _run(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(returncode=1, stdout="", stderr="device disconnected\n")
+
+    monkeypatch.setattr(perception_manager, "_run", _run)
+
+    assert perception_manager.discover_devices() == []
+    now[0] = 101.0
+    assert perception_manager.discover_devices() == []
+    assert calls == 1
+
+    now[0] = 111.0
+    assert perception_manager.discover_devices() == []
+    assert calls == 2
+
+
+def test_camera_assignment_options_retain_saved_serials_when_discovery_is_empty() -> None:
+    class _Select:
+        def __init__(self) -> None:
+            self.options: dict[str, str] = {"": "Unassigned"}
+            self.value = ""
+            self.update_count = 0
+
+        def update(self) -> None:
+            self.update_count += 1
+
+    page = object.__new__(_PerceptionPage)
+    page.assigned_serials = {
+        "ur5e": "103422070738",
+        "xarm6": "048522073304",
+        "stationary": "",
+    }
+    page.serial_selects = {role: _Select() for role in CAMERA_ROLES}
+
+    page._set_serial_options([])
+
+    for select in page.serial_selects.values():
+        assert "103422070738" in select.options
+        assert "048522073304" in select.options
+        assert select.update_count == 1
+    assert page.serial_selects["ur5e"].value == "103422070738"
+    assert page.serial_selects["xarm6"].value == "048522073304"
+    assert page.serial_selects["stationary"].value == ""
 
 
 def test_bound_realsense_rows_attach_until_assigned_serial_is_visible(
@@ -730,6 +812,11 @@ def test_role_specific_services_keep_ur5e_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ROBOFLOW_API_KEY", "test-only")
+    monkeypatch.setattr(
+        perception_manager,
+        "_ensure_ur5e_calibration_monitor",
+        lambda **_kwargs: None,
+    )
     payload = perception_manager.config()
     for role in CAMERA_ROLES:
         calibration = tmp_path / f"{role}.yaml"

@@ -181,6 +181,7 @@ class KeyboardTeleop(Node):
         ur5e_hardware_trajectory_action=(
             '/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory'
         ),
+        ur5e_hardware_result_timeout_sec=45.0,
         node_name='keyboard_teleop',
     ):
         super().__init__(str(node_name or 'keyboard_teleop'))
@@ -195,6 +196,10 @@ class KeyboardTeleop(Node):
             ur5e_hardware_trajectory_action
             or '/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory'
         ).strip()
+        self.ur5e_hardware_result_timeout_sec = max(
+            10.0,
+            float(ur5e_hardware_result_timeout_sec),
+        )
 
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
         self.tf_buffer = tf2_ros.Buffer()
@@ -886,7 +891,11 @@ class KeyboardTeleop(Node):
             return False, f'{self.ur5e_hardware_trajectory_action}: goal rejected'
 
         result_future = goal_handle.get_result_async()
-        result_timeout = max(10.0, float(duration_sec) + 20.0)
+        result_timeout = max(
+            10.0,
+            float(duration_sec) + 20.0,
+            float(getattr(self, 'ur5e_hardware_result_timeout_sec', 45.0)),
+        )
         if not self._wait_future(result_future, timeout=result_timeout):
             return False, f'{self.ur5e_hardware_trajectory_action}: result timeout'
         try:
@@ -1316,6 +1325,7 @@ def run_server(args):
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
         ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
+        ur5e_hardware_result_timeout_sec=args.ur5e_hardware_result_timeout_sec,
     )
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
@@ -1550,6 +1560,7 @@ def run_once(args):
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
         ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
+        ur5e_hardware_result_timeout_sec=args.ur5e_hardware_result_timeout_sec,
     )
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
@@ -1654,6 +1665,12 @@ def main():
         default='/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory',
         help='guarded FollowJointTrajectory action for real UR5e arm commands',
     )
+    parser.add_argument(
+        '--ur5e-hardware-result-timeout-sec',
+        type=float,
+        default=45.0,
+        help='maximum wait for a guarded real UR5e trajectory result',
+    )
     parser.add_argument('--key-poll-ms', type=float, default=8.0,
                         help='keyboard polling interval in milliseconds')
     parser.add_argument('--robot', choices=['xarm6', 'ur5e'], default='xarm6')
@@ -1699,6 +1716,7 @@ def main():
         joint_duration_sec=args.joint_duration_sec,
         gripper_duration_sec=args.gripper_duration_sec,
         ur5e_hardware_trajectory_action=args.ur5e_hardware_trajectory_action,
+        ur5e_hardware_result_timeout_sec=args.ur5e_hardware_result_timeout_sec,
     )
 
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)

@@ -111,6 +111,12 @@ _KILL_CMDS: list[str] = [
     # it does not hold /spawn_entity calls that block the next Gazebo startup.
     "pkill -9 -f spawn_entity.py 2>/dev/null",
     "pkill -9 -f keyboard_teleop.py 2>/dev/null",
+    "pkill -9 -f digital_twin_sync.py 2>/dev/null",
+    "pkill -9 -f physical_part_twin_sync.py 2>/dev/null",
+    "pkill -9 -f ur5e_rtde_trajectory_server.py 2>/dev/null",
+    "pkill -9 -f realsense_roboflow_node.py 2>/dev/null",
+    "pkill -9 -f realsense_preview_node.py 2>/dev/null",
+    "pkill -9 -f realsense2_camera_node 2>/dev/null",
     "pkill -9 -f 'spawner' 2>/dev/null",
     "pkill -9 -f xarm_driver_node 2>/dev/null",
     "pkill -9 -f xarm6_hardware_driver.launch.py 2>/dev/null",

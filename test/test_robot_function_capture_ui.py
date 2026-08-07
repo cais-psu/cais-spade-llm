@@ -163,6 +163,117 @@ def test_preview_detection_uses_selected_ur5e_hardware_domain(
     assert selected_domains == [43]
 
 
+def test_physical_perception_readiness_uses_live_camera_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    snapshot_path = tmp_path / "cais_physical_perception.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "frame_captured_at": now - 30.0,
+                "last_error": "",
+                "realsense_connected": True,
+                "roboflow_ready": True,
+                "table_plane_ready": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    camera_status_path = tmp_path / "status.json"
+    camera_status_path.write_text(
+        json.dumps({"frame_captured_at": now, "last_error": ""}),
+        encoding="utf-8",
+    )
+    calibration_path = tmp_path / "hand_eye.yaml"
+    calibration_path.write_text(
+        """validation:
+  accepted: true
+table_plane:
+  accepted: true
+  world_frame: world
+  frame_count: 10
+  mad_m: 0.001
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge_module, "_PHYSICAL_PERCEPTION_SNAPSHOT", snapshot_path)
+    monkeypatch.setattr(bridge_module, "_UR5E_CAMERA_STATUS", camera_status_path)
+    monkeypatch.setenv("ROBOFLOW_API_KEY", "test-only")
+
+    bridge = object.__new__(SystemBridge)
+    bridge.perception_manager = SimpleNamespace(
+        config=lambda: {
+            "cameras": {"ur5e": {"calibration_path": str(calibration_path)}}
+        }
+    )
+    bridge.ros2_proc_status = lambda _name: "running"
+
+    status = bridge.physical_perception_status()
+    ready, reason = bridge.physical_perception_ready()
+
+    assert status["frame_age_sec"] < 1.0
+    assert status["snapshot_frame_age_sec"] >= 29.0
+    assert status["frame_captured_at"] == now
+    assert status["snapshot_frame_captured_at"] == now - 30.0
+    assert ready is True
+    assert reason == ""
+
+
+def test_physical_perception_readiness_rejects_stale_live_camera_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    snapshot_path = tmp_path / "cais_physical_perception.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "frame_captured_at": now,
+                "last_error": "",
+                "realsense_connected": True,
+                "roboflow_ready": True,
+                "table_plane_ready": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    camera_status_path = tmp_path / "status.json"
+    camera_status_path.write_text(
+        json.dumps({"frame_captured_at": now - 30.0, "last_error": ""}),
+        encoding="utf-8",
+    )
+    calibration_path = tmp_path / "hand_eye.yaml"
+    calibration_path.write_text(
+        """validation:
+  accepted: true
+table_plane:
+  accepted: true
+  world_frame: world
+  frame_count: 10
+  mad_m: 0.001
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge_module, "_PHYSICAL_PERCEPTION_SNAPSHOT", snapshot_path)
+    monkeypatch.setattr(bridge_module, "_UR5E_CAMERA_STATUS", camera_status_path)
+    monkeypatch.setenv("ROBOFLOW_API_KEY", "test-only")
+
+    bridge = object.__new__(SystemBridge)
+    bridge.perception_manager = SimpleNamespace(
+        config=lambda: {
+            "cameras": {"ur5e": {"calibration_path": str(calibration_path)}}
+        }
+    )
+    bridge.ros2_proc_status = lambda _name: "running"
+
+    ready, reason = bridge.physical_perception_ready()
+
+    assert ready is False
+    assert "synchronized RealSense color/depth stream is stale" in reason
+
+
 def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
     bridge = object.__new__(SystemBridge)
     bridge._digital_twin_function_steps = {}

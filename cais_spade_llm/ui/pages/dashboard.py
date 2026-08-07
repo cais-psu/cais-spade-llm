@@ -25,6 +25,7 @@ _MODE_MAP = {
     "Physical": "physical",
 }
 _MODE_LABELS = list(_MODE_MAP.keys())
+_MODE_LABEL_BY_VALUE = {value: label for label, value in _MODE_MAP.items()}
 _RECOVERY_MODE_OPTIONS = {
     "auto": "Auto",
     "manual": "Manual",
@@ -237,7 +238,12 @@ def render(bridge: SystemBridge) -> None:
                 with ui.row().classes("items-end gap-4 flex-wrap mt-2"):
                     mode_select = _NativeSelect(
                         {label: label for label in _MODE_LABELS},
-                        value="Simulation",
+                        value=_MODE_LABEL_BY_VALUE.get(
+                            str(getattr(bridge, "execution_mode", "simulation") or "simulation")
+                            .strip()
+                            .lower(),
+                            "Simulation",
+                        ),
                         label="Mode",
                         width_class="w-48",
                     )
@@ -3289,19 +3295,52 @@ def _check_prerequisites(
 
     if mode == "simulation":
         # Simulation needs Gazebo stack plus MoveIt/services ready.
-        statuses = bridge.ros2_all_statuses()
-        gazebo_running = any(
-            statuses.get(k) == "running" for k in ("gazebo_dual", "gazebo_xarm6", "gazebo_ur5e")
-        )
+        statuses: dict[str, str] | None = None
+        if hasattr(bridge, "simulation_environment_running"):
+            gazebo_running = bridge.simulation_environment_running()
+        else:
+            statuses = bridge.ros2_all_statuses()
+            gazebo_running = any(
+                statuses.get(name) == "running"
+                for name in ("gazebo_dual", "gazebo_xarm6", "gazebo_ur5e")
+            )
+        if hasattr(bridge, "passive_digital_twin_environment_running"):
+            passive_digital_twin_running = bridge.passive_digital_twin_environment_running()
+        else:
+            if statuses is None:
+                statuses = bridge.ros2_all_statuses()
+            passive_digital_twin_running = any(
+                statuses.get(name) == "running"
+                for name in (
+                    "digital_twin_xarm_only_gazebo",
+                    "digital_twin_ur5e_only_gazebo",
+                    "digital_twin_dual_robots_gazebo",
+                    "digital_twin_dual_robots_gazebo_moveit",
+                )
+            )
         sim_ready = False
         sim_reason = ""
-        if gazebo_running and hasattr(bridge, "simulation_start_ready"):
+        if (
+            gazebo_running
+            and not passive_digital_twin_running
+            and hasattr(bridge, "simulation_start_ready")
+        ):
             sim_ready, sim_reason = bridge.simulation_start_ready()
-        elif gazebo_running:
+        elif gazebo_running and not passive_digital_twin_running:
             sim_ready = True
 
         def _render_simulation() -> None:
-            if (
+            if passive_digital_twin_running:
+                with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
+                    ui.icon("warning").classes("text-lg")
+                    with ui.column().classes("gap-1"):
+                        ui.label(
+                            "A passive hardware-authoritative Digital Twin is running."
+                        ).classes("text-sm font-semibold")
+                        ui.label(
+                            "Select Physical mode to start CAIS with this Digital Twin."
+                        ).classes("text-sm")
+            elif (
                 gazebo_running
                 and sim_ready
                 and sim_reason
@@ -3349,6 +3388,7 @@ def _check_prerequisites(
             (
                 "simulation",
                 gazebo_running,
+                passive_digital_twin_running,
                 sim_ready,
                 sim_reason,
                 bool(launch_simulation),
@@ -3356,7 +3396,7 @@ def _check_prerequisites(
             ),
             _render_simulation,
         )
-        return gazebo_running and sim_ready
+        return not passive_digital_twin_running and gazebo_running and sim_ready
 
     if mode == "physical":
         # Physical mode requires real perception backend availability.

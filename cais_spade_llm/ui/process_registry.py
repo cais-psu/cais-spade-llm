@@ -68,6 +68,36 @@ class UIProcessRegistry:
             processes.pop(normalized_name, None)
             self._write(payload)
 
+    def cleanup_exited_process(
+        self,
+        name: str,
+        *,
+        process_group: int,
+    ) -> str | None:
+        """Stop children left in a tracked group after its launcher exits."""
+        normalized_name = str(name or "").strip()
+        if not normalized_name or int(process_group) <= 0:
+            return None
+        with self._lock:
+            payload = self._read()
+            processes = payload.setdefault("processes", {})
+            entry = processes.get(normalized_name)
+            if not isinstance(entry, dict):
+                return None
+            recorded_owner = self._safe_int(entry.get("owner_pid"))
+            recorded_group = self._safe_int(entry.get("process_group"))
+            if recorded_owner != self.owner_pid or recorded_group != int(process_group):
+                return None
+            error = None
+            if self._process_group_alive(recorded_group):
+                if recorded_group == os.getpgrp() or not self._verified_cais_group(recorded_group):
+                    return f"refused to stop unverified process group {recorded_group}"
+                error = self._terminate_process_group(recorded_group)
+            if error is None:
+                processes.pop(normalized_name, None)
+                self._write(payload)
+            return error
+
     def release_current_owner(self) -> None:
         """Forget current UI ownership without stopping preserved debug processes."""
         with self._lock:

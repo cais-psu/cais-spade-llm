@@ -1846,6 +1846,43 @@ class GazeboPickPlaceController:
             geo.get("model_name") or (target or {}).get("model_name") or pose_model_name or ""
         )
 
+        physical_stl_pick: dict[str, Any] = {}
+        source_stl = str(geo.get("source_stl") or "").strip()
+        stl_readiness = getattr(self, "_physical_stl_pick_readiness", None)
+        if (
+            self.execution_mode == "physical"
+            and target_part_name == "MG"
+            and callable(stl_readiness)
+            and not source_stl
+        ):
+            return {
+                "success": False,
+                "message": "physical MG grasp requires the actual source_stl geometry",
+            }
+        if self.execution_mode == "physical" and source_stl:
+            if target is None:
+                return {
+                    "success": False,
+                    "message": (
+                        "physical MG actual STL grasp requires a fresh validated /detect_all "
+                        "result with table_surface_z_m"
+                    ),
+                }
+            if not callable(stl_readiness):
+                return {
+                    "success": False,
+                    "message": "physical controller does not support the actual STL MG grasp",
+                }
+            physical_stl_pick = dict(stl_readiness(geo) or {})
+            if not bool(physical_stl_pick.get("success")):
+                return {
+                    "success": False,
+                    "message": str(
+                        physical_stl_pick.get("message")
+                        or "physical MG actual STL grasp is not ready"
+                    ),
+                }
+
         if supplied_detected_parts and not self.init():
             return {
                 "success": False,
@@ -1867,11 +1904,18 @@ class GazeboPickPlaceController:
             min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
         )
         surface_clearance_m = max(0.0, _as_float(surface_clearance_override_m, 0.0))
-        pick_tcp_z_raw = tz + pick_bias + surface_clearance_m
+        if physical_stl_pick:
+            table_surface_z_m = float((target or {})["table_surface_z_m"])
+            pick_tcp_z_raw = table_surface_z_m + float(
+                physical_stl_pick["pick_tcp_z_offset_from_table_m"]
+            )
+        else:
+            table_surface_z_m = None
+            pick_tcp_z_raw = tz + pick_bias + surface_clearance_m
         if min_pick_tcp_z_override_m is not None:
             effective_min_tcp_z = float(min_pick_tcp_z_override_m)
             pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
-        elif bool(use_global_min_pick_tcp_z):
+        elif bool(use_global_min_pick_tcp_z) and not physical_stl_pick:
             effective_min_tcp_z = self.min_pick_tcp_z_m
             pick_tcp_z = max(pick_tcp_z_raw, effective_min_tcp_z)
         else:
@@ -1882,12 +1926,61 @@ class GazeboPickPlaceController:
             if bool(apply_pick_z_adjustments)
             else 0.0
         )
-        gripper_close_position = self._derive_gripper_close_position(
-            model_name=target_model,
-            product_geometry=geo,
-        )
-        pick_z = pick_tcp_z - ee_tcp_offset_z
-        pick_z += pick_z_adjustment_m
+        if physical_stl_pick:
+            pick_tcp_z += pick_z_adjustment_m
+            tcp_offset_from_table_m = pick_tcp_z - float(table_surface_z_m)
+            pad_lower_m = tcp_offset_from_table_m + float(
+                physical_stl_pick["inner_pad_lower_z_from_tcp_m"]
+            )
+            pad_upper_m = tcp_offset_from_table_m + float(
+                physical_stl_pick["inner_pad_upper_z_from_tcp_m"]
+            )
+            tooth_height_m = float(physical_stl_pick["tooth_height_m"])
+            part_height_m = float(physical_stl_pick["part_height_m"])
+            finger_tooth_clearance_m = pad_lower_m - tooth_height_m
+            finger_hub_overlap_m = max(
+                0.0,
+                min(pad_upper_m, part_height_m) - max(pad_lower_m, tooth_height_m),
+            )
+            required_tooth_clearance_m = float(physical_stl_pick["tooth_clearance_m"])
+            required_hub_overlap_m = float(physical_stl_pick["minimum_hub_overlap_m"])
+            if finger_tooth_clearance_m + 1e-9 < required_tooth_clearance_m:
+                return {
+                    "success": False,
+                    "message": (
+                        "physical MG actual STL target would contact the teeth: "
+                        f"clearance={finger_tooth_clearance_m * 1000.0:.2f} mm, "
+                        f"required={required_tooth_clearance_m * 1000.0:.2f} mm"
+                    ),
+                }
+            if finger_hub_overlap_m + 1e-9 < required_hub_overlap_m:
+                return {
+                    "success": False,
+                    "message": (
+                        "physical MG actual STL target has insufficient smooth hub overlap: "
+                        f"overlap={finger_hub_overlap_m * 1000.0:.2f} mm, "
+                        f"required={required_hub_overlap_m * 1000.0:.2f} mm"
+                    ),
+                }
+            gripper_close_position = float(physical_stl_pick["gripper_close_position"])
+            pick_z = pick_tcp_z - ee_tcp_offset_z
+        else:
+            finger_tooth_clearance_m = None
+            finger_hub_overlap_m = None
+            gripper_close_position = self._derive_gripper_close_position(
+                model_name=target_model,
+                product_geometry=geo,
+            )
+            pick_z = pick_tcp_z - ee_tcp_offset_z
+            pick_z += pick_z_adjustment_m
+        if self.execution_mode == "physical" and gripper_close_position is None:
+            return {
+                "success": False,
+                "message": str(
+                    self._last_failure_message
+                    or "physical grasp geometry did not produce an RG2 close position"
+                ),
+            }
 
         approach_height = _as_float(approach_height_override_m, self.approach_height_m)
         travel_candidates = [
@@ -1905,6 +1998,7 @@ class GazeboPickPlaceController:
             f"current=({ee.position.x:.3f}, {ee.position.y:.3f}, {ee.position.z:.3f}) "
             f"target=({tx:.3f}, {ty:.3f}, {tz:.3f}) "
             f"source={target_pose_source_used or 'perception'} "
+            f"source_stl={source_stl or '<none>'} "
             f"surface_clearance={surface_clearance_m:.3f} "
             f"pick_tcp_z={pick_tcp_z:.3f} "
             f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
@@ -1928,13 +2022,37 @@ class GazeboPickPlaceController:
             "gripper_close_position": gripper_close_position,
             "apply_pick_z_adjustments": bool(apply_pick_z_adjustments),
             "effective_min_pick_tcp_z": effective_min_tcp_z,
-            "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z),
+            "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z)
+            and not bool(physical_stl_pick),
             "target_pose_source": target_pose_source_used,
             "prefer_live_detection": bool(prefer_live_detection),
             "start_x": ee.position.x,
             "start_y": ee.position.y,
             "start_z": ee.position.z,
         }
+        if physical_stl_pick:
+            result.update(
+                {
+                    "source_stl": source_stl,
+                    "source_stl_sha256": str(
+                        physical_stl_pick.get("source_stl_sha256") or ""
+                    ),
+                    "hub_up": True,
+                    "hub_diameter_m": float(physical_stl_pick["hub_diameter_m"]),
+                    "hub_height_m": float(physical_stl_pick["hub_height_m"]),
+                    "tooth_diameter_m": float(physical_stl_pick["tooth_diameter_m"]),
+                    "tooth_height_m": float(physical_stl_pick["tooth_height_m"]),
+                    "grasp_width_m": float(physical_stl_pick["grasp_width_m"]),
+                    "tooth_clearance_m": float(physical_stl_pick["tooth_clearance_m"]),
+                    "minimum_hub_overlap_m": float(
+                        physical_stl_pick["minimum_hub_overlap_m"]
+                    ),
+                    "finger_tooth_clearance_m": finger_tooth_clearance_m,
+                    "finger_hub_overlap_m": finger_hub_overlap_m,
+                    "pick_tcp_z_offset_from_table_m": pick_tcp_z
+                    - float(table_surface_z_m),
+                }
+            )
         if target is not None:
             for provenance_field in (
                 "confidence",
@@ -2130,22 +2248,28 @@ class GazeboPickPlaceController:
         effects: {}
         ---
         """
+        self._last_failure_message = ""
         if not self.wait_for_services():
+            if not self._last_failure_message:
+                self._last_failure_message = self._unavailable_message("services not ready")
             return []
         future = self._detect_all_client_legacy.call_async(self._Trigger.Request())
         result = self._wait_future(future, timeout_sec=30.0, label="detect_all_legacy")
         if not result or not result.success:
             msg = result.message if result else "timeout"
-            self._log().error(f"/detect_all failed: {msg}")
+            self._last_failure_message = f"/detect_all failed: {msg}"
+            self._log().error(self._last_failure_message)
             return []
         try:
             parsed = json.loads(result.message)
-        except Exception:
+        except Exception as exc:
+            self._last_failure_message = f"failed to parse /detect_all payload: {exc}"
             self._log().exception("Failed to parse /detect_all payload")
             return []
         parts = parsed if isinstance(parsed, list) else []
         if part_name:
             parts = [p for p in parts if p.get("part_name") == part_name]
+        self._last_failure_message = ""
         return parts
 
     # ------------------------------------------------------------------ #

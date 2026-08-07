@@ -145,6 +145,7 @@ def create_app() -> None:
     bridge = SystemBridge.instance()
     watchdog_task: asyncio.Task | None = None
     perception_recovery_task: asyncio.Task | None = None
+    ros2_process_watchdog_task: asyncio.Task | None = None
 
     # Serve static assets and set Penn State favicon.
     app.add_static_files("/static", str(_STATIC_DIR))
@@ -306,8 +307,15 @@ def create_app() -> None:
             with suppress(OSError, RuntimeError, ValueError):
                 await asyncio.to_thread(bridge.perception_reconcile_connections)
 
+    async def _ros2_process_watchdog() -> None:
+        """Reap failed launchers and their child groups without ROS discovery."""
+        while True:
+            await asyncio.sleep(3.0)
+            with suppress(OSError, RuntimeError, ValueError):
+                await asyncio.to_thread(bridge.ros2_all_statuses)
+
     async def _on_startup() -> None:
-        nonlocal perception_recovery_task, watchdog_task
+        nonlocal perception_recovery_task, ros2_process_watchdog_task, watchdog_task
         if keep_gazebo_on_exit():
             import logging
 
@@ -318,17 +326,22 @@ def create_app() -> None:
             await asyncio.to_thread(bridge.cleanup_previous_ui_processes)
         watchdog_task = asyncio.create_task(_ui_watchdog())
         perception_recovery_task = asyncio.create_task(_perception_recovery_watchdog())
+        ros2_process_watchdog_task = asyncio.create_task(_ros2_process_watchdog())
 
     async def _on_shutdown() -> None:
         """Clean up all background resources when the app exits."""
-        nonlocal perception_recovery_task, watchdog_task
+        nonlocal perception_recovery_task, ros2_process_watchdog_task, watchdog_task
         import logging
 
         log = logging.getLogger("ui.app")
         log.info("App shutdown: cleaning up resources...")
 
         # Stop watchdogs first.
-        background_tasks = (watchdog_task, perception_recovery_task)
+        background_tasks = (
+            watchdog_task,
+            perception_recovery_task,
+            ros2_process_watchdog_task,
+        )
         for task in background_tasks:
             if task is None:
                 continue
@@ -341,6 +354,7 @@ def create_app() -> None:
                 log.debug("App shutdown: watchdog cleanup skipped")
         watchdog_task = None
         perception_recovery_task = None
+        ros2_process_watchdog_task = None
 
         # 1) Stop SPADE agents (which also shuts down robot controllers).
         if bridge.system_running:
@@ -348,6 +362,13 @@ def create_app() -> None:
                 await bridge.stop_system()
             except Exception:
                 log.exception("App shutdown: stop_system failed")
+
+        # A manual Robot Functions session owns a physical UR5e controller even
+        # when the SPADE system was never started.
+        try:
+            await bridge.shutdown_ur5e_robot_function_agent()
+        except Exception:
+            log.exception("App shutdown: manual ur5e Function Execution cleanup failed")
 
         # 1b) Stop tracked ROS2 launch processes unless the operator is
         # preserving Gazebo for a debug session.

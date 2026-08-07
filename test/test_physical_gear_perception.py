@@ -433,7 +433,7 @@ def test_missing_world_tf_still_writes_visual_detection(
     stamp = SimpleNamespace(sec=10, nanosec=0)
     color = np.zeros((100, 100, 3), dtype=np.uint8)
     depth = np.full((100, 100), 0.5, dtype=np.float32)
-    perception._frame_copy = lambda: (
+    perception._frame_copy = lambda **_kwargs: (
         stamp,
         color,
         depth,
@@ -485,7 +485,7 @@ def test_valid_tf_keeps_world_pose_payload_unchanged(
     stamp = SimpleNamespace(sec=10, nanosec=0)
     color = np.zeros((100, 100, 3), dtype=np.uint8)
     depth = np.full((100, 100), 0.5, dtype=np.float32)
-    perception._frame_copy = lambda: (
+    perception._frame_copy = lambda **_kwargs: (
         stamp,
         color,
         depth,
@@ -543,7 +543,7 @@ def test_valid_tf_keeps_world_pose_payload_unchanged(
 def test_pose_rejection_clears_executable_detection_rows() -> None:
     perception = object.__new__(RealSenseRoboflowNode)
     perception._last_rows = [{"part_name": "SG", "frame_id": "world"}]
-    perception._run_detection = lambda: (_ for _ in ()).throw(
+    perception._run_detection = lambda **_kwargs: (_ for _ in ()).throw(
         CalibrationError("TF unavailable for world <- tool0")
     )
     snapshots: list[list[dict[str, object]]] = []

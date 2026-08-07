@@ -208,6 +208,36 @@ ROBOTS: dict[str, dict[str, Any]] = {
 # Re-target period for streamed mirror trajectory points (seconds). Small enough to
 # track hardware closely, large enough to give the JTC a smooth interpolation window.
 MIRROR_POINT_TIME_SEC = _float(HARDWARE_ARMS_CONFIG, ("dual_robots", "mirror", "point_time_sec"), 0.1)
+MIRROR_HARDWARE_HEARTBEAT_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "hardware_heartbeat_sec"),
+    1.0,
+)
+MIRROR_HARDWARE_STALE_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "hardware_stale_sec"),
+    3.0,
+)
+MIRROR_GAZEBO_JOINT_STATE_STALE_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "gazebo_joint_state_stale_sec"),
+    2.0,
+)
+MIRROR_GAZEBO_CONVERGENCE_TOLERANCE_RAD = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "gazebo_convergence_tolerance_rad"),
+    0.01,
+)
+MIRROR_GAZEBO_CONVERGENCE_TIMEOUT_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "gazebo_convergence_timeout_sec"),
+    2.0,
+)
+MIRROR_GAZEBO_REPUBLISH_PERIOD_SEC = _float(
+    HARDWARE_ARMS_CONFIG,
+    ("dual_robots", "mirror", "gazebo_republish_period_sec"),
+    0.25,
+)
 MIRROR_MIN_PUBLISH_PERIOD_SEC = 0.0
 MIRROR_MIN_JOINT_DELTA_RAD = 0.0
 UR5E_MIRROR_POINT_TIME_SEC = _float(
@@ -551,6 +581,173 @@ def _should_publish_mirror_update(
         return False, "rate_limited"
 
     return True, ""
+
+
+def _should_enqueue_hardware_update(
+    robot: str,
+    *,
+    positions: list[float],
+    last_positions: list[float] | None,
+    gripper_position: float | None,
+    last_gripper_position: float | None,
+    last_enqueue_ts: float,
+    now: float,
+) -> bool:
+    min_period = max(0.0, _mirror_min_publish_period_sec(robot))
+    if last_enqueue_ts > 0.0 and now - float(last_enqueue_ts) < min_period:
+        return False
+
+    heartbeat_sec = max(0.0, MIRROR_HARDWARE_HEARTBEAT_SEC)
+    if (
+        last_enqueue_ts > 0.0
+        and heartbeat_sec > 0.0
+        and now - float(last_enqueue_ts) >= heartbeat_sec
+    ):
+        return True
+
+    max_joint_delta = _max_position_delta_rad(last_positions, positions)
+    if gripper_position is None and last_gripper_position is None:
+        gripper_delta = 0.0
+    elif gripper_position is None or last_gripper_position is None:
+        gripper_delta = math.inf
+    else:
+        gripper_delta = abs(float(gripper_position) - float(last_gripper_position))
+    min_delta = max(0.0, _mirror_min_joint_delta_rad(robot))
+    return max_joint_delta >= min_delta or gripper_delta >= min_delta
+
+
+def _hardware_mirror_status_without_update(
+    *,
+    last_hardware_update_ts: float,
+    last_published_positions: list[float] | None,
+    hardware_diagnostic_message: str,
+    now: float,
+) -> tuple[str, str, str, float | None]:
+    if hardware_diagnostic_message:
+        return "waiting", hardware_diagnostic_message, hardware_diagnostic_message, None
+    if last_hardware_update_ts <= 0.0 or last_published_positions is None:
+        return "waiting", "waiting for hardware /joint_states.", "", None
+
+    hardware_joint_state_age_sec = max(0.0, now - float(last_hardware_update_ts))
+    if hardware_joint_state_age_sec <= max(0.0, MIRROR_HARDWARE_STALE_SEC):
+        return (
+            "mirroring",
+            "hardware -> gazebo active; hardware pose unchanged; "
+            f"hardware_joint_state_age_sec={hardware_joint_state_age_sec:.2f}.",
+            "",
+            hardware_joint_state_age_sec,
+        )
+
+    message = (
+        "hardware /joint_states is stale; "
+        f"hardware_joint_state_age_sec={hardware_joint_state_age_sec:.2f}; "
+        f"hardware_stale_sec={max(0.0, MIRROR_HARDWARE_STALE_SEC):.2f}."
+    )
+    return "waiting", message, message, hardware_joint_state_age_sec
+
+
+def _gazebo_target_status(
+    robot: str,
+    *,
+    target_positions: list[float] | None,
+    gazebo_joint_snapshot: dict[str, float],
+    gazebo_joint_state_received_at: float,
+    target_changed_at: float,
+    now: float,
+) -> dict[str, Any]:
+    """Report whether Gazebo has actually reached the hardware joint target."""
+    status: dict[str, Any] = {
+        "gazebo_converged": False,
+        "gazebo_joint_state_age_sec": None,
+        "gazebo_max_joint_error_rad": None,
+        "gazebo_max_joint_error_joint": "",
+        "gazebo_convergence_tolerance_rad": max(
+            0.0,
+            MIRROR_GAZEBO_CONVERGENCE_TOLERANCE_RAD,
+        ),
+        "gazebo_convergence_timeout_sec": max(
+            0.0,
+            MIRROR_GAZEBO_CONVERGENCE_TIMEOUT_SEC,
+        ),
+        "gazebo_republish_period_sec": max(
+            0.0,
+            MIRROR_GAZEBO_REPUBLISH_PERIOD_SEC,
+        ),
+    }
+    if target_positions is None:
+        status.update(
+            state="waiting",
+            message="waiting for the first hardware joint target.",
+            last_error="",
+        )
+        return status
+
+    if gazebo_joint_state_received_at <= 0.0:
+        message = "waiting for Gazebo /joint_states before confirming hardware -> gazebo mirror."
+        status.update(state="waiting", message=message, last_error=message)
+        return status
+
+    gazebo_joint_state_age_sec = max(0.0, now - gazebo_joint_state_received_at)
+    status["gazebo_joint_state_age_sec"] = gazebo_joint_state_age_sec
+    if gazebo_joint_state_age_sec > max(0.0, MIRROR_GAZEBO_JOINT_STATE_STALE_SEC):
+        message = (
+            "Gazebo /joint_states is stale; "
+            f"gazebo_joint_state_age_sec={gazebo_joint_state_age_sec:.2f}; "
+            "hardware -> gazebo convergence cannot be confirmed."
+        )
+        status.update(state="waiting", message=message, last_error=message)
+        return status
+
+    gazebo_joint_names, gazebo_positions, missing = _resolve_gazebo_positions(
+        gazebo_joint_snapshot,
+        robot,
+    )
+    if missing:
+        message = "Gazebo /joint_states missing required joints: " + ", ".join(missing)
+        status.update(state="waiting", message=message, last_error=message)
+        return status
+
+    errors = [
+        _angular_delta(observed, target)
+        for observed, target in zip(gazebo_positions, target_positions, strict=True)
+    ]
+    max_error = max(errors, default=0.0)
+    max_error_index = errors.index(max_error) if errors else 0
+    max_error_joint = gazebo_joint_names[max_error_index] if gazebo_joint_names else ""
+    status["gazebo_max_joint_error_rad"] = max_error
+    status["gazebo_max_joint_error_joint"] = max_error_joint
+    if max_error <= max(0.0, MIRROR_GAZEBO_CONVERGENCE_TOLERANCE_RAD):
+        status.update(
+            state="mirroring",
+            message=(
+                "hardware -> gazebo active; Gazebo reached the hardware joint target; "
+                f"gazebo_max_joint_error_rad={max_error:.4f}."
+            ),
+            last_error="",
+            gazebo_converged=True,
+        )
+        return status
+
+    convergence_elapsed_sec = max(0.0, now - target_changed_at)
+    status["gazebo_convergence_elapsed_sec"] = convergence_elapsed_sec
+    if convergence_elapsed_sec <= max(0.0, MIRROR_GAZEBO_CONVERGENCE_TIMEOUT_SEC):
+        status.update(
+            state="mirroring",
+            message=(
+                "hardware -> gazebo active; Gazebo is following the hardware joint target; "
+                f"gazebo_max_joint_error_rad={max_error:.4f}."
+            ),
+            last_error="",
+        )
+        return status
+
+    message = (
+        "Gazebo did not reach the hardware joint target; "
+        f"gazebo_max_joint_error_rad={max_error:.4f}; "
+        f"gazebo_max_joint_error_joint={max_error_joint}."
+    )
+    status.update(state="waiting", message=message, last_error=message)
+    return status
 
 
 def _resolve_gripper(snapshot: dict[str, float], robot: str) -> tuple[str | None, float | None]:
@@ -1067,6 +1264,9 @@ def _hardware_joint_state_worker(domain_id: int, robot: str, updates: mp.Queue) 
             self._started_at = time.time()
             self._seen_arm_match = False
             self._last_unmatched_seen_names: list[str] = []
+            self._last_enqueued_positions: list[float] | None = None
+            self._last_enqueued_gripper_position: float | None = None
+            self._last_enqueued_at = 0.0
 
         def _cb(self, msg: JointState) -> None:
             snapshot = _snapshot_from_joint_state_msg(msg)
@@ -1101,7 +1301,27 @@ def _hardware_joint_state_worker(domain_id: int, robot: str, updates: mp.Queue) 
                     self._last_missing_report_ts = now
                 return
             self._seen_arm_match = True
+            positions = [float(value) for value in list(item.get("positions") or [])]
+            now = time.time()
+            gripper_value = item.get("gripper_position")
+            if not _should_enqueue_hardware_update(
+                robot,
+                positions=positions,
+                last_positions=self._last_enqueued_positions,
+                gripper_position=(
+                    float(gripper_value) if gripper_value is not None else None
+                ),
+                last_gripper_position=self._last_enqueued_gripper_position,
+                last_enqueue_ts=self._last_enqueued_at,
+                now=now,
+            ):
+                return
             _put_latest(item)
+            self._last_enqueued_positions = positions
+            self._last_enqueued_gripper_position = (
+                float(gripper_value) if gripper_value is not None else None
+            )
+            self._last_enqueued_at = now
 
     node = HardwareNode()
     try:
@@ -1112,7 +1332,7 @@ def _hardware_joint_state_worker(domain_id: int, robot: str, updates: mp.Queue) 
         rclpy.shutdown()
 
 
-def _gazebo_mirror_worker(
+def _gazebo_mirror_worker(  # noqa: C901, PLR0912, PLR0915 - one mirror status lifecycle.
     domain_id: int,
     robot: str,
     target: str,
@@ -1129,6 +1349,7 @@ def _gazebo_mirror_worker(
     """
     rclpy = _init_ros_domain(domain_id)
     from rclpy.node import Node
+    from sensor_msgs.msg import JointState
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
     gripper_cfg = ROBOTS[robot].get("gripper") or {}
@@ -1145,6 +1366,23 @@ def _gazebo_mirror_worker(
                 self.create_publisher(JointTrajectory, topic, 10)
                 for topic in gripper_topics
             ]
+            self._gazebo_joint_snapshot: dict[str, float] = {}
+            self._gazebo_joint_state_received_at = 0.0
+            self._gazebo_joint_state_subscription = self.create_subscription(
+                JointState,
+                "/joint_states",
+                self._on_joint_state,
+                10,
+            )
+
+        def _on_joint_state(self, message: Any) -> None:
+            positions = {
+                str(name): float(position)
+                for name, position in zip(message.name, message.position, strict=True)
+            }
+            if positions:
+                self._gazebo_joint_snapshot.update(positions)
+                self._gazebo_joint_state_received_at = time.time()
 
     node = GazeboMirrorNode()
 
@@ -1190,6 +1428,10 @@ def _gazebo_mirror_worker(
         last_status_ts = 0.0
         last_skip_reason = "none"
         last_mirror_max_joint_delta_rad = math.inf
+        last_hardware_update_ts = 0.0
+        hardware_diagnostic_message = ""
+        last_published_joint_names: list[str] = []
+        target_changed_at = 0.0
         while rclpy.ok():
             direction = _direction(direction_file)
             if direction != "hardware -> gazebo":
@@ -1220,15 +1462,66 @@ def _gazebo_mirror_worker(
             except queue.Empty:
                 pass
 
+            rclpy.spin_once(node, timeout_sec=0.0)
+
             if latest is None:
                 now = time.time()
+                state, message, last_error, hardware_joint_state_age_sec = (
+                    _hardware_mirror_status_without_update(
+                        last_hardware_update_ts=last_hardware_update_ts,
+                        last_published_positions=last_published_positions,
+                        hardware_diagnostic_message=hardware_diagnostic_message,
+                        now=now,
+                    )
+                )
+                gazebo_status = _gazebo_target_status(
+                    robot,
+                    target_positions=last_published_positions,
+                    gazebo_joint_snapshot=node._gazebo_joint_snapshot,
+                    gazebo_joint_state_received_at=node._gazebo_joint_state_received_at,
+                    target_changed_at=target_changed_at,
+                    now=now,
+                )
+                if state == "mirroring" and last_published_positions is not None:
+                    state = str(gazebo_status["state"])
+                    message = str(gazebo_status["message"])
+                    last_error = str(gazebo_status["last_error"])
+                status_fields = dict(gazebo_status)
+                status_fields.update(
+                    state=state,
+                    message=message,
+                    last_error=last_error,
+                )
+
+                should_republish = (
+                    state in {"mirroring", "waiting"}
+                    and last_published_positions is not None
+                    and last_published_joint_names
+                    and not bool(gazebo_status["gazebo_converged"])
+                    and now - last_publish_ts
+                    >= max(0.0, MIRROR_GAZEBO_REPUBLISH_PERIOD_SEC)
+                    and hardware_joint_state_age_sec is not None
+                    and hardware_joint_state_age_sec
+                    <= max(0.0, MIRROR_HARDWARE_STALE_SEC)
+                )
+                if should_republish:
+                    connected = _connected_publishers() or node._mirror_publishers
+                    arm_traj = _make_point_traj(
+                        last_published_joint_names,
+                        last_published_positions,
+                    )
+                    for publisher in connected:
+                        publisher.publish(arm_traj)
+                    last_publish_ts = now
                 if now - last_status_ts > 1.0:
                     _write_status(
                         status_file,
                         target=target,
-                        state="waiting",
                         direction=direction,
-                        message="waiting for hardware /joint_states.",
+                        hardware_joint_state_age_sec=hardware_joint_state_age_sec,
+                        hardware_heartbeat_sec=max(0.0, MIRROR_HARDWARE_HEARTBEAT_SEC),
+                        hardware_stale_sec=max(0.0, MIRROR_HARDWARE_STALE_SEC),
+                        **status_fields,
                     )
                     last_status_ts = now
                 continue
@@ -1239,6 +1532,7 @@ def _gazebo_mirror_worker(
                 message = f"hardware /joint_states missing required {robot} joints: {missing}"
                 if seen_names:
                     message += f". Seen joints: {seen_names}"
+                hardware_diagnostic_message = message
                 _write_status(
                     status_file,
                     target=target,
@@ -1256,6 +1550,7 @@ def _gazebo_mirror_worker(
                 message = f"hardware /joint_states has no {robot} arm joints yet"
                 if seen_names:
                     message += f". Seen joints: {seen_names}"
+                hardware_diagnostic_message = message
                 _write_status(
                     status_file,
                     target=target,
@@ -1271,9 +1566,18 @@ def _gazebo_mirror_worker(
             connected = _connected_publishers() or node._mirror_publishers
             latest_positions = [float(value) for value in list(latest["positions"])]
             now = time.time()
+            last_hardware_update_ts = max(
+                last_hardware_update_ts,
+                float(latest.get("source_stamp") or now),
+            )
+            hardware_diagnostic_message = ""
             mirror_max_joint_delta_rad = _max_position_delta_rad(
                 last_published_positions,
                 latest_positions,
+            )
+            target_changed = mirror_max_joint_delta_rad >= max(
+                0.0,
+                mirror_min_joint_delta_rad,
             )
             should_publish, skip_reason = _should_publish_mirror_update(
                 robot,
@@ -1282,6 +1586,22 @@ def _gazebo_mirror_worker(
                 last_publish_ts=last_publish_ts,
                 now=now,
             )
+            gazebo_status = _gazebo_target_status(
+                robot,
+                target_positions=last_published_positions,
+                gazebo_joint_snapshot=node._gazebo_joint_snapshot,
+                gazebo_joint_state_received_at=node._gazebo_joint_state_received_at,
+                target_changed_at=target_changed_at,
+                now=now,
+            )
+            if (
+                not should_publish
+                and not bool(gazebo_status["gazebo_converged"])
+                and now - last_publish_ts
+                >= max(0.0, MIRROR_GAZEBO_REPUBLISH_PERIOD_SEC)
+            ):
+                should_publish = True
+                skip_reason = "gazebo_not_converged"
             if not should_publish:
                 last_skip_reason = skip_reason or "skipped"
                 status_now = time.time()
@@ -1290,18 +1610,9 @@ def _gazebo_mirror_worker(
                     _write_status(
                         status_file,
                         target=target,
-                        state="mirroring",
                         direction=direction,
                         latency_ms=latency_ms,
-                        message=(
-                            "hardware -> gazebo active; "
-                            f"mirror_point_time_sec={mirror_point_time_sec:.3f}; "
-                            f"mirror_min_publish_period_sec={mirror_min_publish_period_sec:.3f}; "
-                            f"mirror_min_joint_delta_rad={mirror_min_joint_delta_rad:.4f}; "
-                            f"mirror_max_joint_delta_rad={mirror_max_joint_delta_rad:.4f}; "
-                            f"last_skip_reason={last_skip_reason}."
-                        ),
-                        last_error="",
+                        **gazebo_status,
                     )
                     last_status_ts = status_now
                 if skip_reason == "below_delta":
@@ -1313,7 +1624,10 @@ def _gazebo_mirror_worker(
             for publisher in connected:
                 publisher.publish(arm_traj)
             last_published_positions = list(latest_positions)
+            last_published_joint_names = [str(name) for name in latest["joint_names"]]
             last_publish_ts = now
+            if target_changed or target_changed_at <= 0.0:
+                target_changed_at = now
             last_mirror_max_joint_delta_rad = mirror_max_joint_delta_rad
             last_skip_reason = "none"
 
@@ -1329,23 +1643,28 @@ def _gazebo_mirror_worker(
             now = time.time()
             latency_ms = (now - float(latest.get("source_stamp") or now)) * 1000.0
             if now - last_status_ts > 0.5:
+                gazebo_status = _gazebo_target_status(
+                    robot,
+                    target_positions=last_published_positions,
+                    gazebo_joint_snapshot=node._gazebo_joint_snapshot,
+                    gazebo_joint_state_received_at=node._gazebo_joint_state_received_at,
+                    target_changed_at=target_changed_at,
+                    now=now,
+                )
                 _write_status(
                     status_file,
                     target=target,
-                    state="mirroring",
                     direction=direction,
                     latency_ms=latency_ms,
-                    message=(
-                        "hardware -> gazebo active; "
-                        f"mirror_point_time_sec={mirror_point_time_sec:.3f}; "
-                        f"mirror_min_publish_period_sec={mirror_min_publish_period_sec:.3f}; "
-                        f"mirror_min_joint_delta_rad={mirror_min_joint_delta_rad:.4f}; "
-                        f"mirror_max_joint_delta_rad={last_mirror_max_joint_delta_rad:.4f}; "
-                        f"last_skip_reason={last_skip_reason}."
-                    ),
-                    last_error="",
+                    mirror_point_time_sec=mirror_point_time_sec,
+                    mirror_min_publish_period_sec=mirror_min_publish_period_sec,
+                    mirror_min_joint_delta_rad=mirror_min_joint_delta_rad,
+                    mirror_max_joint_delta_rad=last_mirror_max_joint_delta_rad,
+                    last_skip_reason=last_skip_reason,
+                    **gazebo_status,
                 )
                 last_status_ts = now
+            latest = None
     finally:
         node.destroy_node()
         rclpy.shutdown()

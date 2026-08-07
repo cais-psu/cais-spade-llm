@@ -33,6 +33,7 @@ class _PerceptionPage:
         self.detection_view_labels: dict[str, Any] = {}
         self.detection_codes: dict[str, Any] = {}
         self.serial_selects: dict[str, Any] = {}
+        self.assigned_serials: dict[str, str] = {}
         self.control_buttons: dict[str, Any] = {}
         self.board_inputs: dict[str, Any] = {}
         self.wsl_rows_by_busid: dict[str, dict[str, str]] = {}
@@ -225,6 +226,8 @@ class _PerceptionPage:
 
     def _refresh_images(self) -> None:
         """Request fresh preview JPEGs without invoking perception or motion."""
+        if getattr(self.preflight_summary, "is_deleted", True):
+            return
         self.image_refresh_sequence += 1
         for image, source in self.stream_images:
             if not image.is_deleted:
@@ -442,8 +445,16 @@ class _PerceptionPage:
             )
 
     async def _refresh_wsl_devices(self) -> None:
-        rows = await asyncio.to_thread(self.bridge.perception_discover_wsl_attachments)
+        rows = await asyncio.to_thread(
+            self.bridge.perception_discover_wsl_attachments,
+            True,
+        )
+        devices = await asyncio.to_thread(
+            self.bridge.perception_discover_devices,
+            True,
+        )
         self._set_wsl_device_options(rows)
+        self._set_serial_options(devices)
         ui.notify(f"Found {len(rows)} Windows RealSense USB row(s)", type="info")
 
     async def _attach_wsl_device(self) -> None:
@@ -496,36 +507,59 @@ class _PerceptionPage:
         self.wsl_guidance.set_text(text)
 
     def _set_serial_options(self, devices: list[dict[str, str]]) -> None:
-        options = {"": "Unassigned"}
-        options.update(
-            {
-                str(row.get("serial") or ""): (
-                    f"{row.get('serial')} — {row.get('model', 'RealSense')}"
-                )
-                for row in devices
-                if str(row.get("serial") or "")
-            }
-        )
-        for select in self.serial_selects.values():
+        discovered_options = {
+            str(row.get("serial") or ""): (
+                f"{row.get('serial')} — {row.get('model', 'RealSense')}"
+            )
+            for row in devices
+            if str(row.get("serial") or "")
+        }
+        saved_options = {
+            serial: (
+                f"{serial} — saved {_ROLE_LABELS[role]} assignment (not discovered)"
+            )
+            for role, serial in self.assigned_serials.items()
+            if serial and serial not in discovered_options
+        }
+        for role, select in self.serial_selects.items():
             current = str(select.value or "")
+            options = {"": "Unassigned", **saved_options, **discovered_options}
+            if current and current not in options:
+                options[current] = f"{current} — saved assignment (not discovered)"
+            assigned = self.assigned_serials.get(role, "")
             select.options = options
-            select.value = current
+            select.value = current or assigned
             select.update()
 
     async def _discover(self) -> None:
-        devices = await asyncio.to_thread(self.bridge.perception_discover_devices)
+        devices = await asyncio.to_thread(
+            self.bridge.perception_discover_devices,
+            True,
+        )
         self._set_serial_options(devices)
-        ui.notify(f"Discovered {len(devices)} RealSense camera(s)", type="info")
+        if devices:
+            ui.notify(f"Discovered {len(devices)} RealSense camera(s)", type="info")
+        else:
+            ui.notify(
+                "No live RealSense cameras were discovered; saved assignments were retained.",
+                type="warning",
+                timeout=5000,
+            )
 
     async def _save_assignments(self) -> None:
+        assignments = {
+            role: str(select.value or "")
+            for role, select in self.serial_selects.items()
+        }
         try:
             await asyncio.to_thread(
                 self.bridge.perception_save_assignments,
-                {role: str(select.value or "") for role, select in self.serial_selects.items()},
+                assignments,
             )
         except (RuntimeError, ValueError) as exc:
             ui.notify(str(exc), type="warning", timeout=5000)
             return
+        self.assigned_serials = assignments
         ui.notify("Camera assignments saved", type="positive")
 
     async def _start_all_detection(self) -> None:
@@ -695,6 +729,8 @@ class _PerceptionPage:
         ui.notify(f"Diagnostic recording saved: {path}", type="positive", timeout=6000)
 
     async def _refresh(self) -> None:
+        if getattr(self.preflight_summary, "is_deleted", True):
+            return
         if self.refreshing:
             return
         self.refreshing = True
@@ -702,6 +738,13 @@ class _PerceptionPage:
             status = await asyncio.to_thread(self.bridge.perception_status)
             self._refresh_preflight(status.get("preflight", {}))
             cameras = status.get("cameras", {})
+            assignments = {
+                role: str((cameras.get(role, {}) or {}).get("serial") or "")
+                for role in CAMERA_ROLES
+            }
+            if assignments != self.assigned_serials:
+                self.assigned_serials = assignments
+                self._set_serial_options(status.get("devices", []))
             for role in CAMERA_ROLES:
                 self._refresh_camera(role, cameras.get(role, {}))
             self._refresh_comparison(status.get("cross_camera_comparisons", []))
@@ -717,7 +760,13 @@ class _PerceptionPage:
 
     def _refresh_preflight(self, preflight: dict[str, Any]) -> None:
         checks = preflight.get("checks", {})
-        self.preflight_summary.text = str(preflight.get("setup_message") or "")
+        setup_message = str(preflight.get("setup_message") or "")
+        discovery_error = str(preflight.get("device_discovery_error") or "").strip()
+        self.preflight_summary.text = (
+            f"{setup_message} RealSense discovery: {discovery_error}"
+            if discovery_error
+            else setup_message
+        )
         inventory = dict(preflight.get("camera_inventory") or {})
         self.camera_inventory_summary.set_text(
             f"Windows D435: {int(inventory.get('windows_d435_devices', 0) or 0)} | "

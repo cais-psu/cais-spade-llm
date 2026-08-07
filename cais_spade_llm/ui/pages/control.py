@@ -556,37 +556,47 @@ def _digital_twin_launch_section(bridge: SystemBridge) -> None:
                 )
             return tuple(compact_rows)
 
-        def _refresh(*, force: bool = False) -> None:
+        async def _refresh_async(*, force: bool = False) -> None:
             if not _client_alive(container):
                 return
             if refresh_state["busy"]:
                 return
             refresh_state["busy"] = True
             try:
-                rows = bridge.digital_twin_statuses()
+                rows = await asyncio.to_thread(bridge.digital_twin_statuses)
+                if not _client_alive(container):
+                    return
                 signature = _signature(rows)
                 if not force and signature == refresh_state["signature"]:
                     return
                 refresh_state["signature"] = signature
+                container.clear()
+                with container:
+                    active_target = _digital_twin_active_target(rows)
+                    with ui.row().classes(
+                        "w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"
+                    ):
+                        ui.label("target").classes("w-44")
+                        ui.label("gazebo").classes("w-48")
+                        ui.label("moviet").classes("w-36")
+                        ui.label("hardware").classes("w-52")
+                        ui.label("sync/status").classes("flex-1 min-w-64")
+                    for target, row in rows.items():
+                        _digital_twin_row(
+                            bridge,
+                            target,
+                            row,
+                            _refresh,
+                            active_target=active_target,
+                        )
             finally:
                 refresh_state["busy"] = False
 
-            container.clear()
-            with container:
-                active_target = _digital_twin_active_target(rows)
-                with ui.row().classes(
-                    "w-full items-center gap-3 px-2 py-1 bg-slate-50 rounded text-xs font-semibold text-slate-600"
-                ):
-                    ui.label("target").classes("w-44")
-                    ui.label("gazebo").classes("w-48")
-                    ui.label("moviet").classes("w-36")
-                    ui.label("hardware").classes("w-52")
-                    ui.label("sync/status").classes("flex-1 min-w-64")
-                for target, row in rows.items():
-                    _digital_twin_row(bridge, target, row, _refresh, active_target=active_target)
+        def _refresh(*, force: bool = False) -> None:
+            asyncio.create_task(_refresh_async(force=force))
 
         _refresh(force=True)
-        ui.timer(3.0, _refresh)
+        ui.timer(3.0, _refresh_async)
 
 
 def _digital_twin_status_color(status: str) -> str:
@@ -923,6 +933,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     execution: dict[str, object] = {
         "busy": False,
         "checking": False,
+        "preparing": False,
         "active_function": "",
         "selection_revision": 0,
     }
@@ -977,7 +988,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     ui.label(
         "The function and step IDs come from the Python robot task registry. "
         "Run executes only the exact selected function. This is manual commissioning and does "
-        "not advance ProductAgent/CCA workflow state."
+        "not advance ProductAgent/CCA workflow state. Start System is not required for manual "
+        "Function Execution."
     ).classes("text-xs text-slate-500")
 
     ui.label("Function Execution").classes("text-sm font-semibold mt-2")
@@ -1088,12 +1100,25 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     def _confirmation_description(function_name: str, values: dict[str, str]) -> str:
         part_name = values.get("part_name", "")
         if function_name == "pick_approach":
+            if part_name == "MG":
+                return (
+                    f"The UR5e will stage at {values.get('origin_resource_location', '')}, "
+                    "request a fresh MG detection, open the stock RG2, and descend to the "
+                    "smooth raised hub target calculated from the actual Gear_Medium.STL. "
+                    "The gripper remains open for visual confirmation; the Gazebo MG is not "
+                    "used for physical geometry."
+                )
             return (
                 f"The UR5e will stage at {values.get('origin_resource_location', '')}, request "
                 f"a fresh {part_name} detection, open the gripper, move above the detected "
                 "gear, and descend to the computed pick target."
             )
         if function_name == "pick_grasp":
+            if part_name == "MG":
+                return (
+                    "The stock RG2 will close at the STL-calculated width around the MG "
+                    "smooth raised hub and then lift. It will not descend again."
+                )
             return f"The UR5e will grasp and lift {part_name}."
         if function_name == "place_approach":
             return (
@@ -1136,6 +1161,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     run_button.props("loading")
                     _render_execution()
                     _render_steps()
+                    if function_name == "pick_approach":
+                        execution_status.set_text(
+                            "Dispatching pick_approach after fresh RTDE, world -> tool0, "
+                            "and perception checks; then staging, settling, and detecting."
+                        )
+                    else:
+                        execution_status.set_text(
+                            f"Dispatching {function_name} after fresh physical readiness checks."
+                        )
+                    execution_status.classes(replace="text-xs text-amber-700")
                     try:
                         result = await bridge.digital_twin_execute_robot_function(
                             target,
@@ -1198,7 +1233,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             run_button.props("loading")
             _render_execution()
             _render_steps()
-            execution_status.set_text(f"Checking {function_name} readiness without motion...")
+            if robot == "ur5e":
+                execution_status.set_text(
+                    "Checking fresh RTDE, world -> tool0, and perception readiness..."
+                )
+            else:
+                execution_status.set_text(f"Checking {function_name} readiness without motion...")
             execution_status.classes(replace="text-xs text-amber-700")
             try:
                 result = await bridge.digital_twin_robot_function_execution_readiness(
@@ -1267,7 +1307,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     def _render_execution() -> None:
         function_name = _current_function()
         run_button.set_text(f"Run {function_name}" if function_name else "Run")
-        controls_enabled = not execution.get("busy") and not execution.get("checking")
+        controls_enabled = (
+            not execution.get("busy")
+            and not execution.get("checking")
+            and not execution.get("preparing")
+        )
         for selector in (
             robot_select,
             function_select,
@@ -1707,6 +1751,69 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     _reset_execution_status()
     _render_execution()
     _render_steps()
+
+    def _refresh_function_execution_progress() -> None:
+        if not execution.get("busy"):
+            return
+        progress = bridge.digital_twin_robot_function_execution_progress()
+        if not progress.get("active"):
+            return
+        message = str(progress.get("message") or "").strip()
+        if message and _client_alive(execution_status):
+            execution_status.set_text(message)
+            execution_status.classes(replace="text-xs text-amber-700")
+
+    async def _prepare_function_execution_runtime() -> None:
+        """Warm the physical ur5e Function Execution path without motion."""
+        if _current_robot() != "ur5e" or execution.get("preparing"):
+            return
+        selection_signature = _selection_signature()
+        selection_revision = int(execution["selection_revision"])
+        values = _execution_kwargs()
+        function_name = _current_function()
+        execution["preparing"] = True
+        _render_execution()
+        execution_status.set_text(
+            "Preparing and caching the physical ur5e Function Execution runtime; no motion."
+        )
+        execution_status.classes(replace="text-xs text-amber-700")
+        try:
+            result = await bridge.digital_twin_robot_function_execution_readiness(
+                target,
+                "ur5e",
+                function_name,
+                origin_resource_location=values["origin_resource_location"],
+                destination_location=values["destination_location"],
+                part_name=values["part_name"],
+            )
+            if (
+                selection_revision != int(execution["selection_revision"])
+                or selection_signature != _selection_signature()
+                or execution.get("busy")
+                or execution.get("checking")
+            ):
+                return
+            if result.get("success"):
+                execution_status.set_text(
+                    "Physical ur5e Function Execution is prepared; Run performs fresh "
+                    "readiness checks without rebuilding the runtime."
+                )
+                execution_status.classes(replace="text-xs text-green-700")
+            else:
+                execution_status.set_text(str(result.get("message") or "Preparation failed."))
+                execution_status.classes(replace="text-xs text-red-700")
+        except Exception as exc:
+            log.exception("physical ur5e Function Execution background preparation failed")
+            if selection_revision == int(execution["selection_revision"]):
+                execution_status.set_text(f"Function Execution preparation failed: {exc}")
+                execution_status.classes(replace="text-xs text-red-700")
+        finally:
+            execution["preparing"] = False
+            if _client_alive(run_button):
+                _render_execution()
+
+    asyncio.create_task(_prepare_function_execution_runtime())
+    ui.timer(0.2, _refresh_function_execution_progress)
     ui.label(
         "Capture checks read-only readiness automatically and works with the UR5e pendant in "
         "Local Control. Run and Test Position are separate motion actions requiring Physical "

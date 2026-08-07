@@ -11,6 +11,7 @@ Visualization Manager:
       Enabled: true
       Name: MotionPlanning
       Move Group Namespace: ""
+      MoveIt_Allow_External_Program: true
       Planning Scene Topic: /monitored_planning_scene
       Robot Description: robot_description
       Velocity_Scaling_Factor: 0.20

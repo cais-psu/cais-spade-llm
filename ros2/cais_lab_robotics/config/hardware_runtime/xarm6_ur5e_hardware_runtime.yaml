@@ -63,6 +63,13 @@ ur5e:
     shoulder_pan_extra_scale: 2.0
     movej_speed_rad_s: 1.263
     movej_accel_rad_s2: 1.539
+    control_program_start_timeout_sec: 2.0
+    motion_start_timeout_sec: 2.0
+    motion_start_delta_rad: 0.001
+    feedback_reconnect_after_sec: 0.5
+    feedback_reconnect_retry_sec: 1.0
+    feedback_recovery_timeout_sec: 2.0
+    stopped_away_hold_sec: 0.5
   joint_state_topics:
     - "/joint_states"
   trajectory_topics: []
@@ -110,6 +117,13 @@ dual_robots:
   mirror:
     direction: "hardware -> gazebo"
     point_time_sec: 0.1
+    hardware_heartbeat_sec: 1.0
+    hardware_stale_sec: 3.0
+    gazebo_joint_state_stale_sec: 2.0
+    gazebo_convergence_tolerance_rad: 0.01
+    gazebo_convergence_timeout_sec: 2.0
+    gazebo_republish_period_sec: 0.25
+    execution_readiness_recovery_timeout_sec: 5.0
     ur5e_point_time_sec: 0.12
     ur5e_min_publish_period_sec: 0.05
     ur5e_min_joint_delta_rad: 0.0010

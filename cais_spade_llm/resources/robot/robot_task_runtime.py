@@ -452,7 +452,7 @@ def _apply_effect(
     runtime_state[f"_{effect.target}"] = deepcopy(value)
 
 
-async def execute_robot_task(  # noqa: C901
+async def execute_robot_task(  # noqa: C901, PLR0912
     agent: Any,
     task_name: str,
     **kwargs: Any,
@@ -547,6 +547,17 @@ async def execute_robot_task(  # noqa: C901
 
     completed_step_ids: set[str] = set()
     for step in task.program.steps:
+        progress_callback = getattr(agent, "_robot_task_progress_callback", None)
+        if callable(progress_callback):
+            try:
+                progress_callback(task.name, step.id)
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                agent.logger.warning(
+                    "[Robot] %s.%s progress update failed: %s",
+                    task.name,
+                    step.id,
+                    exc,
+                )
         result = await _execute_task_step(
             agent=agent,
             task=task,
