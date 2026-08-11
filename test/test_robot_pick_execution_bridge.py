@@ -362,9 +362,134 @@ def test_pick_approach_readiness_blocks_without_actual_mg_stl_geometry() -> None
     assert agent.calls == []
 
 
+def test_pick_approach_readiness_accepts_resettable_at_pick_without_mutation() -> None:
+    agent = _PhysicalUR5eAgent(state="at_pick")
+    agent._task_ctx = _mg_task_context()
+    retained_context = deepcopy(agent._task_ctx)
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_approach",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is True
+    assert result["pick_approach_reset_to_idle"] is True
+    assert "will reset to 'idle' without robot motion" in result["message"]
+    assert agent._current_state == "at_pick"
+    assert agent._task_ctx == retained_context
+    assert agent.calls == []
+
+
+def test_confirmed_pick_approach_resets_at_pick_before_dispatch() -> None:
+    agent = _PhysicalUR5eAgent(state="at_pick")
+    agent._task_ctx = _mg_task_context()
+    agent._recovery_pose_ref = "stale-pick"
+    observed: dict[str, Any] = {}
+
+    async def _pick_approach_after_reset(**kwargs: Any) -> dict[str, Any]:
+        observed["state"] = agent._current_state
+        observed["task_ctx"] = deepcopy(agent._task_ctx)
+        observed["recovery_pose_ref"] = agent._recovery_pose_ref
+        agent.calls.append(("pick_approach", kwargs))
+        agent._current_state = "at_pick"
+        return {"status": "completed", "content": "Arrived at the live pick target."}
+
+    agent.pick_approach = _pick_approach_after_reset  # type: ignore[method-assign]
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "pick_approach",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert observed == {
+        "state": "idle",
+        "task_ctx": {},
+        "recovery_pose_ref": None,
+    }
+    assert result["message"].startswith(
+        "Reset ur5e state from 'at_pick' to 'idle' without robot motion"
+    )
+    assert agent._current_state == "at_pick"
+
+
+@pytest.mark.parametrize(
+    ("held_part", "gripper_state", "expected"),
+    [
+        ("MG", "closed", "empty ur5e gripper"),
+        (None, "closed", "gripper_state is 'open'"),
+    ],
+)
+def test_pick_approach_does_not_reset_unsafe_at_pick_state(
+    held_part: str | None,
+    gripper_state: str,
+    expected: str,
+) -> None:
+    agent = _PhysicalUR5eAgent(
+        state="at_pick",
+        held_part=held_part,
+        gripper_state=gripper_state,
+    )
+    agent._task_ctx = _mg_task_context()
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_approach",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert expected in result["message"]
+    assert agent._current_state == "at_pick"
+    assert agent._task_ctx
+    assert agent.calls == []
+
+
+def test_pick_approach_uncertain_state_blocks_before_at_pick_reset() -> None:
+    agent = _PhysicalUR5eAgent(state="at_pick")
+    agent._task_ctx = _mg_task_context()
+    bridge = _ready_bridge(agent)
+    bridge._ur5e_robot_function_state_uncertain = True
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_approach",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is True
+    assert "state is uncertain" not in result["message"]
+    assert result["pick_approach_reset_to_idle"] is True
+    assert agent._current_state == "at_pick"
+    assert agent._task_ctx
+    assert agent.calls == []
+
+
 def test_pick_grasp_readiness_blocks_invalid_stl_grounded_context() -> None:
     agent = _agent_for("pick_grasp")
-    agent._task_ctx["finger_hub_overlap_m"] = 0.004
+    agent._task_ctx["source_stl"] = "/tmp/not-the-actual-mg.STL"
     bridge = _ready_bridge(agent)
 
     result = asyncio.run(
@@ -378,7 +503,27 @@ def test_pick_grasp_readiness_blocks_invalid_stl_grounded_context() -> None:
     )
 
     assert result["ready"] is False
-    assert "do not sufficiently overlap" in result["message"]
+    assert "actual MG geometry must come from" in result["message"]
+    assert agent.calls == []
+
+
+def test_pick_grasp_readiness_allows_zero_fingertip_hub_overlap() -> None:
+    agent = _agent_for("pick_grasp")
+    agent._task_ctx["finger_hub_overlap_m"] = 0.0
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is True
+    assert "overlap" not in result["message"]
     assert agent.calls == []
 
 
@@ -412,6 +557,47 @@ def test_mg_close_test_closes_once_holds_and_reopens_without_arm_motion(
 
 
 @pytest.mark.parametrize(
+    ("part_name", "gripper_close_position"),
+    [("SG", 0.061), ("MG", 0.047), ("LG", 0.033)],
+)
+def test_gripper_close_test_uses_each_retained_part_position_without_arm_motion(
+    part_name: str,
+    gripper_close_position: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_to_thread_inline(monkeypatch)
+    agent = _agent_for("pick_grasp")
+    agent._task_ctx.update(
+        {
+            "part_name": part_name,
+            "gripper_close_position": gripper_close_position,
+        }
+    )
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_gripper_close_test(
+            "ur5e only",
+            "ur5e",
+            "prusa-mk4-2",
+            part_name,
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["part_name"] == part_name
+    assert result["gripper_close_position"] == pytest.approx(gripper_close_position)
+    assert agent._controller.gripper_calls == [
+        ("close_gripper", pytest.approx(gripper_close_position)),
+        ("open_gripper", None),
+    ]
+    assert agent.calls == []
+    assert agent._current_state == "at_pick"
+    assert agent._gripper_state == "open"
+
+
+@pytest.mark.parametrize(
     ("close_success", "reopen_success", "failed_action"),
     [
         (False, True, "close"),
@@ -441,12 +627,13 @@ def test_mg_close_test_reopens_in_finally_and_failed_cycle_requires_move_home(
 
     assert result["success"] is False
     assert failed_action in result["message"]
-    assert "complete move_home" in result["message"]
+    assert "complete move_home" not in result["message"]
+    assert "inspect the UR5e" in result["message"]
     assert agent._controller.gripper_calls[-1] == ("open_gripper", None)
     assert agent.calls == []
     assert bridge._ur5e_robot_function_state_uncertain is True
 
-    blocked = asyncio.run(
+    readiness = asyncio.run(
         bridge.digital_twin_robot_function_execution_readiness(
             "dual robots",
             "ur5e",
@@ -455,19 +642,8 @@ def test_mg_close_test_reopens_in_finally_and_failed_cycle_requires_move_home(
             part_name="MG",
         )
     )
-    assert blocked["ready"] is False
-    assert "state is uncertain" in blocked["message"]
-
-    recovered = asyncio.run(
-        bridge.digital_twin_execute_robot_function(
-            "dual robots",
-            "ur5e",
-            "move_home",
-            confirmed=True,
-        )
-    )
-    assert recovered["success"] is True
-    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert readiness["ready"] is True
+    assert "state is uncertain" not in readiness["message"]
 
 
 def test_mg_close_test_requires_at_pick_empty_mg_context_and_motion_locks(
@@ -600,7 +776,7 @@ def test_readiness_does_not_wait_for_a_stopped_ur5e_mirror_process() -> None:
     [
         ("xarm only", "ur5e", "move_home", {}, "ur5e is not part"),
         ("unknown", "ur5e", "move_home", {}, "unknown digital twin target"),
-        ("dual robots", "UR5E", "move_home", {}, "implemented for ur5e"),
+        ("dual robots", "UR5E", "move_home", {}, "unknown robot"),
         ("dual robots", "ur5e", "Pick_Approach", {}, "unknown robot function"),
         (
             "dual robots",
@@ -889,13 +1065,38 @@ def _recorded_step(step_name: str, z: float) -> dict[str, Any]:
         "primitive": "move_cartesian",
         "params": deepcopy(pose),
         "capture_source": "hardware",
+        "position_sources": {
+            "x": "captured_relative",
+            "y": "captured_relative",
+            "z": "captured_relative",
+        },
+        "relative_position_m": {
+            "x": -0.61,
+            "y": -0.18,
+            "z": z - 0.3,
+        },
+        "relative_reference": {
+            "kind": "destination_target",
+            "frame_id": "world",
+            "name": "assembly_board-v1",
+            "position_m": {"x": 0.5, "y": 0.6, "z": 0.3},
+            "source": "computed_destination",
+            "captured_at": time.time(),
+        },
         "waypoint": {
             "pose": {
                 "frame_id": "world",
                 "child_frame_id": "tool0",
                 **deepcopy(pose),
             },
-            "joint_names": [f"joint_{index}" for index in range(6)],
+            "joint_names": [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
             "joint_positions": [0.0] * 6,
             "source": "hardware",
         },
@@ -1226,3 +1427,32 @@ def test_part_options_cover_all_four_exact_part_functions() -> None:
     ):
         assert bridge.digital_twin_function_part_options(function_name) == ["MG", "SG"]
     assert bridge.digital_twin_function_part_options("move_home") == []
+
+
+def test_dual_hardware_function_execution_uses_selected_robot_cartesian_readiness() -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge._selected_normal_hardware_stack = lambda: "dual robots"
+    bridge._teleop_smooth_session = None
+    bridge._hardware_cartesian_readiness = {
+        "xarm6": {
+            "cartesian_jog_ready": True,
+            "cartesian_function_ready": True,
+            "message": "xArm6 Cartesian frame validation ready",
+        },
+        "ur5e": {
+            "cartesian_jog_ready": False,
+            "cartesian_function_ready": False,
+            "message": "world -> tool0 disagrees with live RTDE TCP",
+        },
+    }
+
+    assert bridge._physical_robot_function_cartesian_error("xarm6") == ""
+    assert bridge._physical_robot_function_cartesian_error("ur5e") == (
+        "Cartesian frame validation failed: "
+        "world -> tool0 disagrees with live RTDE TCP"
+    )
+    bridge._teleop_smooth_session = {"robot": "xarm6", "axis": "z"}
+    assert bridge._physical_robot_function_cartesian_error("xarm6") == (
+        "Release Cartesian Smooth Hold before Function Execution. "
+        "Active robot=xarm6 axis=World Z."
+    )

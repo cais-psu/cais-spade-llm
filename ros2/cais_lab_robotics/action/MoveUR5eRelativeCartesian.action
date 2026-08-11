@@ -1,0 +1,12 @@
+# Translation-only world-frame jog. The live RTDE TCP orientation is retained.
+geometry_msgs/Vector3 world_translation_m
+float64 speed_m_s
+float64 acceleration_m_s2
+---
+int32 error_code
+string error_string
+float64 final_translation_error_m
+float64 final_orientation_drift_rad
+---
+float64 translation_error_m
+float64 orientation_drift_rad

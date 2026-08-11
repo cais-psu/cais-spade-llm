@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import io
 import json
+import math
+import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +26,37 @@ def _teleop_module() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _rtde_server_module() -> Any:
+    path = ROOT / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py"
+    spec = importlib.util.spec_from_file_location("ur5e_rtde_server_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cartesian_readiness_waits_for_joint_state_before_environment_inference() -> None:
+    module = _teleop_module()
+    source = inspect.getsource(module.run_server)
+    readiness_branch = source.split("if op == 'cartesian_readiness':", 1)[1].split(
+        "if op == 'cartesian_smooth':",
+        1,
+    )[0]
+
+    assert readiness_branch.index('wait_for_joint_positions(') < readiness_branch.index(
+        'infer_robot_environment(robot)'
+    )
+    assert "readiness_deadline" not in readiness_branch
+    assert "_xarm6_restore_trajectory_control" not in readiness_branch
+    assert "_xarm6_prepare_firmware_cartesian_mode" not in readiness_branch
+    smooth_branch = source.split("if op == 'cartesian_smooth':", 1)[1].split(
+        "if op == 'cartesian':",
+        1,
+    )[0]
+    assert "node._xarm6_last_stop_motion_confirmed" in smooth_branch
+    assert "response['state_uncertain']" in smooth_branch
 
 
 class _ImmediateFuture:
@@ -60,6 +96,1401 @@ def test_real_ur5e_joint_target_uses_rtde_action_not_topic() -> None:
     assert calls == [(joint_names, targets, 1.2)]
 
 
+def test_real_xarm6_joint_target_uses_action_not_topic() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    joint_names = list(module.ROBOTS["xarm6"]["joint_name_candidates"][1])
+    targets = [0.1, -1.0, -2.0, -1.2, 1.5, 0.0]
+    teleop.active_joint_names = {"xarm6": joint_names}
+    teleop.joint_duration_sec = 0.08
+    teleop.xarm6_hardware_joint_duration_scale = 4.0
+    calls: list[tuple[list[str], list[float], float]] = []
+    teleop._move_xarm6_arm_action = lambda names, positions, duration_sec: (
+        calls.append((list(names), list(positions), float(duration_sec))) or (True, "xArm6")
+    )
+    teleop._pick_publisher = lambda _publishers: pytest.fail(
+        "real xArm6 must use FollowJointTrajectory instead of topic publication"
+    )
+
+    assert teleop.move_arm_to_joints("xarm6", targets, duration_sec=1.2) == (
+        True,
+        "xArm6",
+    )
+    assert calls == [(joint_names, targets, 4.8)]
+
+
+@pytest.mark.parametrize("robot", ["xarm6", "ur5e"])
+def test_real_cartesian_jog_uses_direct_hardware_not_moveit(robot: str) -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.active_joint_names = {
+        robot: list(module.ROBOTS[robot]["joint_name_candidates"][1])
+    }
+    teleop.active_ee_link = {}
+    teleop.active_frame_id = {}
+    current = module.Pose()
+    current.position.x = 0.1
+    current.position.y = -0.2 if robot == "xarm6" else 0.3
+    current.position.z = 1.2
+    current.orientation.w = 1.0
+    teleop._get_world_ee_pose = lambda _robot: current
+    teleop.get_ee_pose = lambda _robot: pytest.fail(
+        "real Cartesian jog must require exact world TF"
+    )
+    direct_calls: list[tuple[str, Any, float]] = []
+    teleop._move_xarm6_relative_cartesian = lambda delta, scale: (
+        direct_calls.append(("xarm6", tuple(delta), float(scale)))
+        or (True, "xArm6 direct relative")
+    )
+    teleop._move_ur5e_relative_cartesian = lambda delta, scale: (
+        direct_calls.append(("ur5e", tuple(delta), float(scale)))
+        or (True, "UR5e direct relative")
+    )
+    teleop.cartesian_client = SimpleNamespace(
+        call_async=lambda _request: pytest.fail(
+            "real Cartesian jog must not call /compute_cartesian_path"
+        )
+    )
+    teleop.execute_client = SimpleNamespace(
+        send_goal_async=lambda _goal: pytest.fail(
+            "real Cartesian jog must not call /execute_trajectory"
+        )
+    )
+
+    ok, message = teleop.move_cartesian(
+        robot,
+        dx_mm=10.0,
+        dy_mm=-2.0,
+        dz_mm=1.0,
+        velocity_scale=0.35,
+    )
+
+    assert ok is True
+    assert "direct" in message
+    assert len(direct_calls) == 1
+    called_robot, delta, scale = direct_calls[0]
+    assert called_robot == robot
+    assert delta == pytest.approx((0.010, -0.002, 0.001))
+    assert scale == pytest.approx(0.35)
+
+
+def test_real_ur5e_cartesian_jog_sends_guarded_rtde_action() -> None:
+    module = _teleop_module()
+    class _CartesianGoal:
+        def __init__(self) -> None:
+            self.target_tool0_pose = None
+            self.speed_m_s = 0.0
+            self.acceleration_m_s2 = 0.0
+
+    module.MoveUR5eCartesian = SimpleNamespace(Goal=_CartesianGoal)
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.ur5e_hardware_cartesian_action = module.UR5E_HARDWARE_CARTESIAN_ACTION
+    teleop.ur5e_hardware_cartesian_speed_m_s = 0.05
+    teleop.ur5e_hardware_cartesian_acceleration_m_s2 = 0.10
+    teleop.ur5e_hardware_result_timeout_sec = 45.0
+    teleop.get_clock = lambda: SimpleNamespace(
+        now=lambda: module.rclpy.time.Time()
+    )
+    teleop._wait_future = lambda future, timeout: future.done()
+    result = SimpleNamespace(
+        error_code=0,
+        error_string="",
+        final_position_error_m=0.0005,
+        final_orientation_error_rad=0.001,
+    )
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: _ImmediateFuture(
+            SimpleNamespace(status=4, result=result)
+        ),
+    )
+    sent_goals: list[Any] = []
+    teleop.ur5e_hardware_cartesian_client = SimpleNamespace(
+        wait_for_server=lambda timeout_sec: timeout_sec == pytest.approx(2.0),
+        send_goal_async=lambda goal: (
+            sent_goals.append(goal) or _ImmediateFuture(goal_handle)
+        ),
+    )
+    target = module.Pose()
+    target.position.x = 0.2
+    target.position.y = 0.4
+    target.position.z = 1.3
+    target.orientation.w = 1.0
+
+    ok, message = teleop._move_ur5e_hardware_cartesian(
+        target,
+        velocity_scale=0.35,
+    )
+
+    assert ok is True
+    assert "succeeded" in message
+    assert len(sent_goals) == 1
+    goal = sent_goals[0]
+    assert goal.target_tool0_pose.header.frame_id == "world"
+    assert goal.target_tool0_pose.pose.position.x == pytest.approx(0.2)
+    assert goal.speed_m_s == pytest.approx(0.0175)
+    assert goal.acceleration_m_s2 == pytest.approx(0.035)
+
+
+def test_real_ur5e_joint_jog_sends_exact_speed_to_guarded_action() -> None:
+    module = _teleop_module()
+
+    class _JointJogGoal:
+        def __init__(self) -> None:
+            self.joint = 0
+            self.delta_rad = 0.0
+            self.speed_rad_s = 0.0
+            self.acceleration_rad_s2 = 0.0
+
+    module.MoveUR5eJointJog = SimpleNamespace(Goal=_JointJogGoal)
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.ur5e_hardware_joint_jog_action = module.UR5E_HARDWARE_JOINT_JOG_ACTION
+    teleop.ur5e_hardware_max_joint_speed_rad_s = 1.125
+    teleop.ur5e_hardware_max_joint_acceleration_rad_s2 = 1.263
+    teleop.ur5e_hardware_result_timeout_sec = 45.0
+    teleop._wait_future = lambda future, timeout: future.done()
+    result = SimpleNamespace(
+        error_code=0,
+        error_string="",
+        final_joint_error_rad=0.0005,
+        state_uncertain=False,
+    )
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: _ImmediateFuture(
+            SimpleNamespace(status=4, result=result)
+        ),
+    )
+    sent_goals: list[Any] = []
+    teleop.ur5e_hardware_joint_jog_client = SimpleNamespace(
+        wait_for_server=lambda timeout_sec: timeout_sec == pytest.approx(2.0),
+        send_goal_async=lambda goal: (
+            sent_goals.append(goal) or _ImmediateFuture(goal_handle)
+        ),
+    )
+
+    ok, message = teleop._move_ur5e_joint_jog(3, -2.0, 24.5)
+
+    assert ok is True, message
+    assert len(sent_goals) == 1
+    goal = sent_goals[0]
+    assert goal.joint == 3
+    assert goal.delta_rad == pytest.approx(math.radians(-2.0))
+    assert goal.speed_rad_s == pytest.approx(math.radians(24.5))
+    assert goal.acceleration_rad_s2 == pytest.approx(1.263)
+    assert teleop._last_ur5e_joint_jog_state_uncertain is False
+
+
+def test_ur5e_joint_jog_server_convergence_cancellation_and_uncertainty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _rtde_server_module()
+
+    class _Result:
+        def __init__(self) -> None:
+            self.error_code = 0
+            self.error_string = ""
+            self.final_joint_error_rad = math.inf
+            self.state_uncertain = False
+
+    class _Feedback:
+        def __init__(self) -> None:
+            self.joint_error_rad = math.inf
+
+    class _Goal:
+        def __init__(self, *, cancel: bool = False) -> None:
+            self.request = SimpleNamespace(
+                joint=1,
+                delta_rad=0.1,
+                speed_rad_s=0.5,
+                acceleration_rad_s2=1.0,
+            )
+            self.is_cancel_requested = cancel
+            self.outcome = ""
+            self.feedback: list[float] = []
+
+        def abort(self) -> None:
+            self.outcome = "aborted"
+
+        def succeed(self) -> None:
+            self.outcome = "succeeded"
+
+        def canceled(self) -> None:
+            self.outcome = "canceled"
+
+        def publish_feedback(self, feedback: Any) -> None:
+            self.feedback.append(float(feedback.joint_error_rad))
+
+    module.MoveUR5eJointJog = SimpleNamespace(Result=_Result, Feedback=_Feedback)
+    monkeypatch.setattr(module, "UR5E_RTDE_STATIONARY_HOLD_SEC", 0.0)
+
+    def _server(actual_samples: list[list[float]], *, safety: bool = True) -> Any:
+        server = object.__new__(module.UR5eRTDETrajectoryServer)
+        server._active_lock = threading.Lock()
+        server._shutdown_requested = False
+        server._rtde_reset_required = False
+        server._rtde_reset_reason = ""
+        server._latched_terminal_status = None
+        server._active_goal = None
+        server._active_goal_status = None
+        server._active_motion_kind = ""
+        samples = iter(actual_samples)
+        server.control = SimpleNamespace(
+            isJointsWithinSafetyLimits=lambda _target: safety
+        )
+        server._connect_control_for_goal = lambda: None
+        server._joint_states_fresh = lambda: True
+        server._ensure_control_program_for_goal = lambda: None
+        server._read_actual_q = lambda: list(next(samples))
+        server._read_actual_qd = lambda: [0.0] * 6
+        server._execute_movej_target = lambda *_args, **_kwargs: True
+        server._write_active_goal_status = lambda *_args, **_kwargs: None
+        server._finish_active_goal_status = lambda *_args, **_kwargs: None
+        server._clear_active_goal = lambda _goal: setattr(server, "_active_goal", None)
+        server._stop_motion = lambda: None
+        server._mark_rtde_reset_required = lambda *_args, **_kwargs: None
+        return server
+
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    success_goal = _Goal()
+    success = _server([[0.0] * 6, [0.1, 0.0, 0.0, 0.0, 0.0, 0.0]])
+    success_result = success._execute_joint_jog(success_goal)
+    assert success_goal.outcome == "succeeded"
+    assert success_result.error_code == 0
+    assert success_result.state_uncertain is False
+    assert success_goal.feedback[-1] == pytest.approx(0.0)
+
+    cancel_goal = _Goal(cancel=True)
+    canceled = _server([[0.0] * 6])
+    canceled_result = canceled._execute_joint_jog(cancel_goal)
+    assert cancel_goal.outcome == "canceled"
+    assert canceled_result.state_uncertain is False
+
+    monkeypatch.setattr(module.rclpy, "ok", lambda: False)
+    timeout_goal = _Goal()
+    timed_out = _server([[0.0] * 6])
+    timeout_result = timed_out._execute_joint_jog(timeout_goal)
+    assert timeout_goal.outcome == "aborted"
+    assert timeout_result.state_uncertain is True
+
+    unsafe_goal = _Goal()
+    unsafe = _server([[0.0] * 6], safety=False)
+    unsafe_result = unsafe._execute_joint_jog(unsafe_goal)
+    assert unsafe_goal.outcome == "aborted"
+    assert "outside safety limits" in unsafe_result.error_string
+    assert unsafe_result.state_uncertain is False
+
+
+def test_ur5e_world_z_step_preserves_exact_rtde_rotation_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _rtde_server_module()
+
+    class _Result:
+        pass
+
+    class _Feedback:
+        pass
+
+    module.MoveUR5eRelativeCartesian = SimpleNamespace(
+        Result=_Result,
+        Feedback=_Feedback,
+    )
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    monkeypatch.setattr(module, "UR5E_RTDE_STATIONARY_HOLD_SEC", 0.0)
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._shutdown_requested = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._active_goal = None
+    server._active_goal_status = None
+    server._active_motion_kind = ""
+    server._latched_terminal_status = None
+    server._connect_control_for_goal = lambda: None
+    server._joint_states_fresh = lambda: True
+    server._read_actual_q = lambda: [0.0] * 6
+    server._ensure_control_program_for_goal = lambda: None
+    server._cartesian_frame_validation = lambda: (True, "ready", 0.0, 0.0)
+    server._lookup_rigid_transform = lambda target, source: (
+        ((0.0, 0.0, 0.9), (0.0, 0.0, 0.0, 1.0))
+        if (target, source) == ("world", "base")
+        else pytest.fail(f"unexpected TF lookup: {target} <- {source}")
+    )
+    server._active_tcp_offset = lambda: (
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    start_pose = [0.2, 0.3, 0.3, 2.123456, -0.456789, 0.912345]
+    target_pose = [0.2, 0.3, 0.31, *start_pose[3:6]]
+    poses = iter((start_pose, target_pose))
+    server._read_actual_tcp_pose = lambda: list(next(poses))
+    server._read_actual_qd = lambda: [0.0] * 6
+    server.control = SimpleNamespace(isPoseWithinSafetyLimits=lambda _pose: True)
+    move_l_targets: list[list[float]] = []
+    server._execute_movel_pose = lambda pose, **_kwargs: (
+        move_l_targets.append(list(pose)) or True
+    )
+    server._write_status = lambda _status: None
+    server._write_terminal_status = lambda _status: None
+    server._stop_motion = lambda: None
+    request = SimpleNamespace(
+        world_translation_m=SimpleNamespace(x=0.0, y=0.0, z=0.010),
+        speed_m_s=0.05,
+        acceleration_m_s2=0.10,
+    )
+    goal = SimpleNamespace(
+        request=request,
+        is_cancel_requested=False,
+        publish_feedback=lambda _feedback: None,
+        succeed=lambda: None,
+        abort=lambda: pytest.fail("valid translation-only Step was aborted"),
+        canceled=lambda: pytest.fail("valid translation-only Step was canceled"),
+    )
+
+    result = server._execute_relative_cartesian(goal)
+
+    assert result.error_code == 0
+    assert move_l_targets == [target_pose]
+    assert move_l_targets[0][3:6] == start_pose[3:6]
+
+
+def test_ur5e_active_tcp_offset_round_trip_uses_base_and_tool0_only() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    world_base = ((0.5, -0.2, 0.8), (0.0, 0.0, 1.0, 0.0))
+    base_tool0 = ((0.2, -0.3, 0.4), (0.0, 0.0, 0.0, 1.0))
+    tool0_tcp = ((0.0, 0.0, 0.218), (0.0, 0.0, 0.0, 1.0))
+    actual_base_tcp = module._compose_transform(base_tool0, tool0_tcp)
+    expected_world_tool0 = module._compose_transform(world_base, base_tool0)
+
+    reconstructed = server._world_tool0_from_actual_tcp(
+        actual_base_tcp,
+        world_base=world_base,
+        tool0_tcp=tool0_tcp,
+    )
+
+    position_error, orientation_error = module._pose_errors(
+        reconstructed,
+        expected_world_tool0,
+    )
+    assert position_error < 1e-12
+    assert orientation_error < 1e-12
+    conversion_source = inspect.getsource(server._resolve_cartesian_target)
+    validation_source = inspect.getsource(server._cartesian_frame_validation)
+    assert '_lookup_rigid_transform("world", "base")' in conversion_source
+    assert '"base_link"' not in conversion_source + validation_source
+    assert '"flange"' not in conversion_source + validation_source
+
+
+def test_ur5e_prusa_mk4_2_mg_target_is_inside_configured_coarse_reach() -> None:
+    module = _rtde_server_module()
+    target = (
+        (0.3627526806567198, -0.1363532373779684, 1.4525105390809694),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert module.UR5E_RTDE_CARTESIAN_REACH_ORIGIN == pytest.approx(
+        (0.0, 0.5, 1.021)
+    )
+    assert module.UR5E_RTDE_CARTESIAN_REACH_RADIUS_M == pytest.approx(0.8)
+    assert module._workspace_error(target) is None
+
+
+@pytest.mark.parametrize(
+    ("world_delta", "expected_base_delta"),
+    [
+        ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0)),
+        ((-0.01, 0.0, 0.0), (0.01, 0.0, 0.0)),
+        ((0.0, 0.01, 0.0), (0.0, -0.01, 0.0)),
+        ((0.0, -0.01, 0.0), (0.0, 0.01, 0.0)),
+        ((0.0, 0.0, 0.01), (0.0, 0.0, 0.01)),
+        ((0.0, 0.0, -0.01), (0.0, 0.0, -0.01)),
+    ],
+)
+def test_xarm6_world_axes_rotate_into_pi_yaw_base(
+    world_delta: tuple[float, float, float],
+    expected_base_delta: tuple[float, float, float],
+) -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    yaw_pi = SimpleNamespace(
+        transform=SimpleNamespace(
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=1.0, w=0.0)
+        )
+    )
+    teleop.tf_buffer = SimpleNamespace(
+        lookup_transform=lambda target, source, _time: (
+            yaw_pi
+            if (target, source) == ("world", "link_base")
+            else pytest.fail(f"unexpected TF lookup: {target} <- {source}")
+        )
+    )
+
+    base_delta = teleop._world_vector_in_robot_base(world_delta)
+
+    assert base_delta == pytest.approx(expected_base_delta, abs=1e-12)
+
+
+def test_xarm6_step_sends_relative_translation_with_zero_rotation() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_hardware_cartesian_service = module.XARM6_HARDWARE_CARTESIAN_SERVICE
+    teleop.xarm6_hardware_cartesian_speed_mm_s = 50.0
+    teleop.xarm6_hardware_cartesian_acceleration_mm_s2 = 100.0
+    teleop.xarm6_hardware_cartesian_position_tolerance_m = 0.003
+    teleop.xarm6_hardware_workspace_bounds = {
+        "x_min_m": -0.6,
+        "x_max_m": 0.6,
+        "y_min_m": -1.0,
+        "y_max_m": 0.1,
+        "z_min_m": 0.9,
+        "z_max_m": 1.5,
+    }
+    teleop.xarm6_hardware_cartesian_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    teleop._xarm6_cartesian_readiness = lambda: (True, "ready", {})
+    current = module.Pose()
+    current.position.x = 0.1
+    current.position.y = -0.4
+    current.position.z = 1.2
+    current.orientation.w = 1.0
+    teleop._get_world_ee_pose = lambda _robot: current
+    teleop._world_vector_in_robot_base = lambda _delta: (0.01, 0.0, 0.0)
+    snapshots = iter(
+        (
+            {"pose": [100.0, -400.0, 1200.0, 0.0, 0.0, 1.2]},
+            {"pose": [110.0, -400.0, 1200.0, 0.0, 0.0, 1.2]},
+        )
+    )
+    teleop._xarm6_robot_state_snapshot = lambda: (next(snapshots), "")
+    handoffs: list[str] = []
+    teleop._xarm6_prepare_firmware_cartesian_mode = lambda: (
+        handoffs.append("prepare_mode_0") or (True, "ready")
+    )
+    teleop._xarm6_restore_trajectory_control = lambda: (
+        handoffs.append("restore_mode_1") or (True, "restored")
+    )
+    requests: list[Any] = []
+    teleop._call_service = lambda _client, request, timeout_sec: (
+        requests.append(request) or (SimpleNamespace(ret=0, message="OK"), None)
+    )
+
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.01, 0.0, 0.0),
+        velocity_scale=0.35,
+    )
+
+    assert ok is True
+    assert "relative Step succeeded" in message
+    assert len(requests) == 1
+    assert list(requests[0].pose) == pytest.approx(
+        [10.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    assert requests[0].relative is True
+    assert teleop._xarm6_cartesian_motion_attempted is True
+    assert handoffs == ["prepare_mode_0", "restore_mode_1"]
+
+
+def test_xarm6_step_session_reuses_mode_zero_and_exact_speed() -> None:
+    module = _teleop_module()
+    assert module.MoveCartesian is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_cartesian_session_mode = "step"
+    teleop._xarm6_cartesian_motion_attempted = False
+    teleop.xarm6_hardware_cartesian_service = module.XARM6_HARDWARE_CARTESIAN_SERVICE
+    teleop.xarm6_hardware_cartesian_speed_mm_s = 50.0
+    teleop.xarm6_hardware_cartesian_max_speed_mm_s = 100.0
+    teleop.xarm6_hardware_cartesian_acceleration_mm_s2 = 42.25
+    teleop.xarm6_hardware_cartesian_position_tolerance_m = 0.003
+    teleop.xarm6_hardware_workspace_bounds = {
+        "x_min_m": -0.6,
+        "x_max_m": 0.6,
+        "y_min_m": -1.0,
+        "y_max_m": 0.1,
+        "z_min_m": 0.9,
+        "z_max_m": 1.5,
+    }
+    teleop.xarm6_hardware_cartesian_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    current_world = module.Pose()
+    current_world.position.x = 0.1
+    current_world.position.y = -0.4
+    current_world.position.z = 1.2
+    current_world.orientation.w = 1.0
+    teleop._get_world_ee_pose = lambda _robot: current_world
+    teleop._world_vector_in_robot_base = lambda delta: tuple(delta)
+    state = {"mode": 0, "state": 0, "pose": [100.0, -400.0, 1200.0, 0.0, 0.0, 0.0]}
+    teleop._xarm6_robot_state_snapshot = lambda: (dict(state), "")
+    teleop._xarm6_cartesian_readiness = lambda **_kwargs: pytest.fail(
+        "prepared Step commands must not rerun full Cartesian readiness"
+    )
+    teleop._xarm6_confirm_cartesian_mode = lambda _mode: pytest.fail(
+        "prepared Step commands must not poll controller lifecycle"
+    )
+    requests: list[Any] = []
+
+    def _call_service(_client: Any, request: Any, timeout_sec: float) -> tuple[Any, None]:
+        assert timeout_sec == pytest.approx(10.0)
+        requests.append(request)
+        state["pose"][0] += float(request.pose[0])
+        state["pose"][1] += float(request.pose[1])
+        state["pose"][2] += float(request.pose[2])
+        return SimpleNamespace(ret=0, message="OK"), None
+
+    teleop._call_service = _call_service
+
+    for delta in ((0.01, 0.0, 0.0), (0.0, 0.01, 0.0)):
+        ok, message = teleop._move_xarm6_relative_cartesian(
+            delta,
+            velocity_scale=0.1,
+            speed_mm_s=12.3,
+            restore_trajectory_control=False,
+        )
+        assert ok is True, message
+
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.0, 0.0, 0.01),
+        velocity_scale=0.1,
+        speed_mm_s=100.0,
+        restore_trajectory_control=False,
+    )
+    assert ok is True, message
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.0, 0.0, 0.01),
+        velocity_scale=1.0,
+        restore_trajectory_control=False,
+    )
+    assert ok is True, message
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.0, 0.0, 0.01),
+        velocity_scale=1.0,
+        speed_mm_s=100.025,
+        restore_trajectory_control=False,
+    )
+    assert ok is False
+    assert "[5.0, 100.000] mm/s" in message
+
+    assert len(requests) == 4
+    assert [request.speed for request in requests] == pytest.approx(
+        [12.3, 12.3, 100.0, 50.0]
+    )
+    assert [request.relative for request in requests] == [True, True, True, True]
+
+
+def test_xarm6_workspace_rejection_is_identified_before_motion_attempt() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_hardware_cartesian_service = module.XARM6_HARDWARE_CARTESIAN_SERVICE
+    teleop.xarm6_hardware_workspace_bounds = {
+        "x_min_m": -0.6,
+        "x_max_m": 0.6,
+        "y_min_m": -1.0,
+        "y_max_m": 0.1,
+        "z_min_m": 0.9,
+        "z_max_m": 1.6,
+    }
+    teleop.xarm6_hardware_cartesian_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    teleop._xarm6_cartesian_readiness = lambda: (True, "ready", {})
+    current = module.Pose()
+    current.position.x = 0.1
+    current.position.y = -0.4
+    current.position.z = 1.59
+    current.orientation.w = 1.0
+    teleop._get_world_ee_pose = lambda _robot: current
+    teleop._call_service = lambda *_args, **_kwargs: pytest.fail(
+        "workspace rejection must precede the xArm6 service call"
+    )
+
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.0, 0.0, 0.02),
+        velocity_scale=0.35,
+    )
+
+    assert ok is False
+    assert "outside [0.900000, 1.600000]" in message
+    assert teleop._xarm6_cartesian_motion_attempted is False
+
+
+def test_xarm6_smooth_hold_uses_the_same_cartesian_speed_limit() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_hardware_cartesian_speed_mm_s = 50.0
+    teleop.xarm6_hardware_cartesian_max_speed_mm_s = 100.0
+    commands: list[tuple[list[float], float]] = []
+    teleop._set_xarm6_cartesian_jog = lambda world_velocity, watchdog_sec: (
+        commands.append((list(world_velocity), float(watchdog_sec))) or (True, "OK")
+    )
+
+    assert teleop.set_cartesian_jog(
+        "xarm6",
+        "x",
+        30.0,
+        watchdog_sec=0.3,
+    ) == (True, "OK")
+    assert teleop.set_cartesian_jog(
+        "xarm6",
+        "y",
+        -100.0,
+        watchdog_sec=0.3,
+    ) == (True, "OK")
+    ok, message = teleop.set_cartesian_jog(
+        "xarm6",
+        "x",
+        100.025,
+        watchdog_sec=0.3,
+    )
+    assert ok is False
+    assert "[5.0, 100.000] mm/s" in message
+    assert commands == [
+        ([0.03, 0.0, 0.0], 0.3),
+        ([0.0, -0.1, 0.0], 0.3),
+    ]
+
+
+def test_xarm6_cartesian_handoff_releases_and_restores_trajectory_controller() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_cartesian_motion_attempted = False
+    calls: list[tuple[str, int | str]] = []
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        calls.append((suffix, value)) or (True, "OK")
+    )
+    teleop._xarm6_wait_for_mode = lambda mode: (
+        calls.append(("wait_mode", mode)) or (True, "OK")
+    )
+    teleop._xarm6_wait_for_trajectory_controller_state = lambda state: (
+        calls.append(("wait_controller", state)) or (True, "OK")
+    )
+
+    assert teleop._xarm6_prepare_firmware_cartesian_mode() == (
+        True,
+        "xArm6 firmware Cartesian Mode 0 ready",
+    )
+    assert teleop._xarm6_restore_trajectory_control() == (
+        True,
+        "xArm6 trajectory controller Mode 1 restored",
+    )
+    assert calls == [
+        ("set_mode", 0),
+        ("set_state", 0),
+        ("wait_mode", 0),
+        ("wait_controller", "inactive"),
+        ("set_mode", 1),
+        ("set_state", 0),
+        ("wait_mode", 1),
+        ("wait_controller", "active"),
+    ]
+
+
+def _initialize_xarm6_smooth_state(teleop: Any) -> None:
+    teleop._xarm6_smooth_state_lock = threading.Lock()
+    teleop._xarm6_smooth_service_lock = threading.Lock()
+    teleop._xarm6_smooth_speeds = [0.0] * 6
+    teleop._xarm6_smooth_watchdog_sec = 0.50
+    teleop._xarm6_smooth_heartbeat_monotonic = time.monotonic()
+    teleop._xarm6_smooth_pending_error = ""
+    teleop._xarm6_smooth_refresh_stop = threading.Event()
+    teleop._xarm6_smooth_refresh_thread = None
+
+
+def test_xarm6_controller_state_wait_observes_ufactory_transition() -> None:
+    module = _teleop_module()
+    assert module.ListControllers is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_controller_list_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: 0.0 < timeout_sec <= 0.5
+    )
+    states = iter(("inactive", "active"))
+    observed_states: list[str] = []
+
+    def _list_controllers(_client: Any, _request: Any, timeout_sec: float) -> Any:
+        state = next(states)
+        observed_states.append(state)
+        return (
+            SimpleNamespace(
+                controller=[
+                    SimpleNamespace(name="xarm6_traj_controller", state=state)
+                ]
+            ),
+            None,
+        )
+
+    teleop._call_service = _list_controllers
+
+    assert teleop._xarm6_wait_for_trajectory_controller_state("active") == (
+        True,
+        "xArm6 trajectory controller is active",
+    )
+    assert observed_states == ["inactive", "active"]
+    source = (
+        ROOT / "ros2/cais_lab_robotics/scripts/keyboard_teleop.py"
+    ).read_text(encoding="utf-8")
+    assert "SwitchController" not in source
+    assert "_xarm6_switch_trajectory_controller" not in source
+
+
+def test_xarm6_mode_services_use_exact_persistent_clients() -> None:
+    module = _teleop_module()
+    assert module.SetInt16 is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    waits: list[tuple[str, float]] = []
+    mode_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: (
+            waits.append(("set_mode", float(timeout_sec))) or True
+        )
+    )
+    state_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: (
+            waits.append(("set_state", float(timeout_sec))) or True
+        )
+    )
+    teleop.xarm6_set_mode_client = mode_client
+    teleop.xarm6_set_state_client = state_client
+    calls: list[tuple[Any, int, float]] = []
+    teleop._call_service = lambda client, request, timeout_sec: (
+        calls.append((client, int(request.data), float(timeout_sec)))
+        or (SimpleNamespace(ret=0, message=""), None)
+    )
+
+    assert teleop._xarm6_set_int16("set_mode", 1) == (True, "OK")
+    assert teleop._xarm6_set_int16("set_state", 0) == (True, "OK")
+    assert waits == [
+        ("set_mode", module.XARM6_HARDWARE_CONTROL_SERVICE_WAIT_SEC),
+        ("set_state", module.XARM6_HARDWARE_CONTROL_SERVICE_WAIT_SEC),
+    ]
+    assert calls == [
+        (mode_client, 1, 3.0),
+        (state_client, 0, 3.0),
+    ]
+
+
+def test_xarm6_mode_service_reports_exact_discovery_timeout() -> None:
+    module = _teleop_module()
+    assert module.SetInt16 is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_set_mode_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: False
+    )
+    teleop.xarm6_set_state_client = object()
+
+    assert teleop._xarm6_set_int16("set_mode", 1) == (
+        False,
+        "/xarm6/xarm/set_mode is unavailable after 5.0s",
+    )
+
+
+def test_xarm6_smooth_hold_enters_verified_mode_five() -> None:
+    module = _teleop_module()
+    assert module.MoveVelocity is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = False
+    _initialize_xarm6_smooth_state(teleop)
+    teleop.xarm6_hardware_cartesian_velocity_service = "/xarm6/xarm/vc_set_cartesian_velocity"
+    teleop.xarm6_hardware_cartesian_velocity_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    teleop._xarm6_cartesian_readiness = lambda **_kwargs: (True, "ready", {})
+    teleop._world_vector_in_robot_base = lambda velocity: tuple(velocity)
+    calls: list[tuple[str, int | str]] = []
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        calls.append((suffix, value)) or (True, "OK")
+    )
+    teleop._xarm6_wait_for_mode = lambda mode: (
+        calls.append(("wait_mode", mode)) or (True, "OK")
+    )
+    teleop._xarm6_wait_for_trajectory_controller_state = lambda state: (
+        calls.append(("wait_controller", state)) or (True, "OK")
+    )
+    teleop._xarm6_set_tcp_maxacc = lambda: (
+        calls.append(("set_tcp_maxacc", 0)) or (True, "OK")
+    )
+    teleop._call_service = lambda _client, _request, timeout_sec: (
+        calls.append(("velocity", int(timeout_sec)))
+        or (SimpleNamespace(ret=0), None)
+    )
+    teleop._start_xarm6_cartesian_jog_refresh = lambda: (True, "OK")
+
+    ok, message = teleop._set_xarm6_cartesian_jog((0.01, 0.0, 0.0), 0.30)
+
+    assert ok is True
+    assert message == "xArm6 Cartesian Smooth Hold active"
+    assert teleop._xarm6_smooth_active is True
+    assert calls == [
+        ("set_mode", 5),
+        ("set_state", 0),
+        ("wait_mode", 5),
+        ("wait_controller", "inactive"),
+        ("set_tcp_maxacc", 0),
+        ("velocity", 2),
+    ]
+
+
+def test_xarm6_smooth_hold_update_uses_fresh_mode_five_feedback() -> None:
+    module = _teleop_module()
+    assert module.MoveVelocity is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop.xarm6_hardware_cartesian_velocity_service = (
+        "/xarm6/xarm/vc_set_cartesian_velocity"
+    )
+    teleop.xarm6_hardware_cartesian_velocity_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    teleop._xarm6_robot_state_snapshot = lambda: (
+        {"mode": 5, "state": 0},
+        "",
+    )
+    teleop._xarm6_cartesian_readiness = lambda **_kwargs: pytest.fail(
+        "active Smooth Hold updates must not repeat the full TF validation"
+    )
+    teleop._world_vector_in_robot_base = lambda velocity: tuple(velocity)
+    requests: list[Any] = []
+    teleop._call_service = lambda _client, request, timeout_sec: (
+        requests.append(request) or (SimpleNamespace(ret=0), None)
+    )
+
+    assert teleop._set_xarm6_cartesian_jog((0.01, 0.0, 0.0), 0.50) == (
+        True,
+        "xArm6 Cartesian Smooth Hold active",
+    )
+    assert requests == []
+    assert teleop._xarm6_smooth_speeds == pytest.approx(
+        [10.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    assert teleop._xarm6_smooth_watchdog_sec == pytest.approx(0.50)
+
+
+def test_xarm6_smooth_hold_refresh_runs_next_to_ros2_driver() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop._xarm6_smooth_speeds = [21.125, 0.0, 0.0, 0.0, 0.0, 0.0]
+    refreshes: list[tuple[list[float], float, float]] = []
+    teleop._send_xarm6_cartesian_velocity = (
+        lambda speeds, *, duration, timeout_sec: (
+            refreshes.append((list(speeds), float(duration), float(timeout_sec)))
+            or (True, "OK")
+        )
+    )
+
+    assert teleop._xarm6_refresh_cartesian_jog_once() is True
+    assert refreshes == [
+        ([21.125, 0.0, 0.0, 0.0, 0.0, 0.0], 0.30, 0.40)
+    ]
+
+
+def test_xarm6_smooth_hold_expired_ui_heartbeat_stops_with_exact_error() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop._xarm6_smooth_heartbeat_monotonic = time.monotonic() - 1.0
+    stops: list[bool] = []
+
+    def _stop(*, clear_pending_error: bool = True) -> tuple[bool, str]:
+        stops.append(clear_pending_error)
+        teleop._xarm6_smooth_active = False
+        return True, "stopped"
+
+    teleop._stop_xarm6_cartesian_jog = _stop
+
+    assert teleop._xarm6_refresh_cartesian_jog_once() is False
+    assert stops == [False]
+    assert teleop._xarm6_smooth_pending_error.startswith(
+        "xArm6 Cartesian Smooth Hold UI heartbeat expired after "
+    )
+
+
+def test_xarm6_smooth_hold_stop_uses_verified_trajectory_restore() -> None:
+    module = _teleop_module()
+    assert module.MoveVelocity is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop._xarm6_last_stop_motion_confirmed = False
+    teleop.xarm6_hardware_cartesian_velocity_service = "/xarm6/xarm/vc_set_cartesian_velocity"
+    teleop.xarm6_hardware_cartesian_velocity_client = object()
+    calls: list[str] = []
+    teleop._call_service = lambda _client, request, timeout_sec: (
+        calls.append(f"zero_velocity:{request.duration}:{timeout_sec}")
+        or (SimpleNamespace(ret=0), None)
+    )
+    teleop._xarm6_restore_trajectory_control = lambda: (
+        calls.append("restore_mode_1") or (True, "restored")
+    )
+
+    ok, message = teleop._stop_xarm6_cartesian_jog()
+
+    assert ok is True
+    assert message == "xArm6 Cartesian Smooth Hold stopped"
+    assert teleop._xarm6_smooth_active is False
+    assert teleop._xarm6_last_stop_motion_confirmed is True
+    assert calls == ["zero_velocity:0.3:2.0", "restore_mode_1"]
+
+
+def test_xarm6_smooth_hold_confirmed_stop_separates_restore_readiness() -> None:
+    module = _teleop_module()
+    assert module.MoveVelocity is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop._xarm6_last_stop_motion_confirmed = False
+    teleop.xarm6_hardware_cartesian_velocity_service = (
+        "/xarm6/xarm/vc_set_cartesian_velocity"
+    )
+    teleop.xarm6_hardware_cartesian_velocity_client = object()
+    teleop._call_service = lambda *_args, **_kwargs: (
+        SimpleNamespace(ret=0),
+        None,
+    )
+    teleop._xarm6_restore_trajectory_control = lambda: (
+        False,
+        "xArm6 trajectory controller did not become active; state=inactive",
+    )
+
+    ok, message = teleop._stop_xarm6_cartesian_jog()
+
+    assert ok is False
+    assert "trajectory control restore failed" in message
+    assert teleop._xarm6_last_stop_motion_confirmed is True
+    assert teleop._xarm6_smooth_active is False
+
+
+def test_xarm6_smooth_hold_unconfirmed_stop_remains_uncertain() -> None:
+    module = _teleop_module()
+    assert module.MoveVelocity is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_smooth_active = True
+    _initialize_xarm6_smooth_state(teleop)
+    teleop._xarm6_last_stop_motion_confirmed = True
+    teleop.xarm6_hardware_cartesian_velocity_service = (
+        "/xarm6/xarm/vc_set_cartesian_velocity"
+    )
+    teleop.xarm6_hardware_cartesian_velocity_client = object()
+    teleop._call_service = lambda *_args, **_kwargs: (
+        SimpleNamespace(ret=-1),
+        None,
+    )
+    teleop._xarm6_restore_trajectory_control = lambda: (True, "restored")
+
+    ok, message = teleop._stop_xarm6_cartesian_jog()
+
+    assert ok is False
+    assert "ret=-1" in message
+    assert teleop._xarm6_last_stop_motion_confirmed is False
+    assert teleop._xarm6_smooth_active is False
+    assert teleop._stop_xarm6_cartesian_jog()[0] is False
+    assert teleop._xarm6_last_stop_motion_confirmed is False
+
+
+def test_real_xarm6_cartesian_jog_calls_exact_driver_service() -> None:
+    module = _teleop_module()
+    assert module.MoveCartesian is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_hardware_cartesian_service = module.XARM6_HARDWARE_CARTESIAN_SERVICE
+    teleop.xarm6_hardware_cartesian_speed_mm_s = 50.0
+    teleop.xarm6_hardware_cartesian_acceleration_mm_s2 = 100.0
+    teleop.xarm6_hardware_cartesian_position_tolerance_m = 0.003
+    teleop.xarm6_hardware_cartesian_orientation_tolerance_rad = 0.0523598776
+    teleop.xarm6_hardware_workspace_bounds = {
+        "x_min_m": -0.6,
+        "x_max_m": 0.6,
+        "y_min_m": -1.0,
+        "y_max_m": 0.1,
+        "z_min_m": 0.9,
+        "z_max_m": 1.5,
+    }
+    identity_transform = SimpleNamespace(
+        transform=SimpleNamespace(
+            translation=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        )
+    )
+    teleop.tf_buffer = SimpleNamespace(
+        lookup_transform=lambda target, source, _time: (
+            identity_transform
+            if (target, source) == ("world", "link_base")
+            else pytest.fail(f"unexpected TF lookup: {target} <- {source}")
+        )
+    )
+    teleop.xarm6_hardware_cartesian_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    requests: list[Any] = []
+    teleop._call_service = lambda _client, request, timeout_sec: (
+        requests.append(request) or (SimpleNamespace(ret=0, message="OK"), None)
+    )
+    handoffs: list[str] = []
+    teleop._xarm6_prepare_firmware_cartesian_mode = lambda: (
+        handoffs.append("prepare_mode_0") or (True, "ready")
+    )
+    teleop._xarm6_restore_trajectory_control = lambda: (
+        handoffs.append("restore_mode_1") or (True, "restored")
+    )
+    target = module.Pose()
+    target.position.x = 0.2
+    target.position.y = -0.4
+    target.position.z = 1.2
+    target.orientation.w = 1.0
+    teleop._get_world_ee_pose = lambda _robot: target
+
+    ok, message = teleop._move_xarm6_hardware_cartesian(
+        target,
+        velocity_scale=0.35,
+    )
+
+    assert ok is True
+    assert "succeeded" in message
+    assert len(requests) == 1
+    request = requests[0]
+    assert list(request.pose) == pytest.approx([200.0, -400.0, 1200.0, 0.0, 0.0, 0.0])
+    assert request.speed == pytest.approx(17.5)
+    assert request.acc == pytest.approx(35.0)
+    assert request.wait is True
+    assert request.relative is False
+    assert handoffs == ["prepare_mode_0", "restore_mode_1"]
+
+
+@pytest.mark.parametrize(
+    ("controller_state", "expected_ready"),
+    [(0, True), (1, True), (2, True), (3, False), (4, False)],
+)
+def test_xarm6_cartesian_readiness_matches_driver_ready_states(
+    controller_state: int,
+    expected_ready: bool,
+) -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.xarm6_hardware_cartesian_position_tolerance_m = 0.003
+    teleop.xarm6_hardware_cartesian_orientation_tolerance_rad = 0.0523598776
+    identity_transform = SimpleNamespace(
+        transform=SimpleNamespace(
+            translation=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        )
+    )
+    teleop.tf_buffer = SimpleNamespace(
+        lookup_transform=lambda _target, _source, _time: identity_transform
+    )
+    teleop._xarm6_robot_state_snapshot = lambda: (
+        {
+            "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "offset": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "mode": 1,
+            "state": controller_state,
+        },
+        "",
+    )
+
+    ready, message, diagnostics = teleop._xarm6_cartesian_readiness()
+
+    assert ready is expected_ready
+    assert diagnostics["controller_state"] == controller_state
+    if expected_ready:
+        assert message.startswith("xArm6 Cartesian frame validation ready")
+    else:
+        assert "expected a driver-ready state from 0 to 2" in message
+
+
+def test_xarm6_trajectory_mode_preparation_restores_mode_one() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    snapshots = iter(
+        [
+            ({"mode": 0, "state": 0}, ""),
+            ({"mode": 0, "state": 0}, ""),
+            ({"mode": 1, "state": 0}, ""),
+        ]
+    )
+    service_calls: list[tuple[str, int]] = []
+    teleop._xarm6_robot_state_snapshot = lambda: next(snapshots)
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        service_calls.append((suffix, value)) or (True, "OK")
+    )
+    controller_states: list[str] = []
+    observed_controller_states = iter(("active", "inactive", "active"))
+
+    def _controller_state(**_kwargs: Any) -> tuple[str, str]:
+        state = next(observed_controller_states)
+        controller_states.append(state)
+        return state, ""
+
+    teleop._xarm6_trajectory_controller_state = _controller_state
+
+    ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+
+    assert ready is True
+    assert message == "xArm6 trajectory controller Mode 1 is ready"
+    assert diagnostics == {"controller_mode": 1, "controller_state": 0}
+    assert service_calls == [("set_mode", 1), ("set_state", 0)]
+    assert controller_states == ["active", "inactive", "active"]
+
+
+def test_xarm6_trajectory_mode_preparation_waits_for_feedback_without_recommanding() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    snapshots = iter(
+        [
+            (None, "xArm6 robot_states feedback has not been received"),
+            ({"mode": 1, "state": 0}, "OK"),
+        ]
+    )
+    service_calls: list[tuple[str, int]] = []
+    teleop._xarm6_robot_state_snapshot = lambda: next(snapshots)
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        service_calls.append((suffix, value)) or (True, "OK")
+    )
+    teleop._xarm6_trajectory_controller_state = lambda **_kwargs: ("active", "")
+
+    ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+
+    assert ready is True
+    assert message == "xArm6 trajectory controller Mode 1 is ready"
+    assert diagnostics == {"controller_mode": 1, "controller_state": 0}
+    assert service_calls == []
+
+
+def test_xarm6_trajectory_mode_preparation_reports_discovered_publishers() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_robot_state_subscription = SimpleNamespace(
+        get_publisher_count=lambda: 1
+    )
+    teleop._xarm6_robot_state_snapshot = lambda: (
+        None,
+        "xArm6 robot_states feedback has not been received",
+    )
+    teleop._xarm6_trajectory_controller_state = lambda **_kwargs: ("missing", "")
+    monotonic_values = iter((0.0, 0.0, 9.0))
+    original_monotonic = module.time.monotonic
+    original_sleep = module.time.sleep
+    module.time.monotonic = lambda: next(monotonic_values)
+    module.time.sleep = lambda _seconds: None
+    try:
+        ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+    finally:
+        module.time.monotonic = original_monotonic
+        module.time.sleep = original_sleep
+
+    assert ready is False
+    assert message.endswith("discovered_publishers=1")
+    assert diagnostics == {}
+
+
+def test_xarm6_trajectory_mode_preparation_only_clears_non_ready_state() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    snapshots = iter(
+        [
+            ({"mode": 1, "state": 5}, "OK"),
+            ({"mode": 1, "state": 0}, "OK"),
+        ]
+    )
+    service_calls: list[tuple[str, int]] = []
+    teleop._xarm6_robot_state_snapshot = lambda: next(snapshots)
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        service_calls.append((suffix, value)) or (True, "OK")
+    )
+    controller_states = iter(("inactive", "active"))
+    teleop._xarm6_trajectory_controller_state = lambda **_kwargs: (
+        next(controller_states),
+        "",
+    )
+
+    ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+
+    assert ready is True
+    assert message == "xArm6 trajectory controller Mode 1 is ready"
+    assert diagnostics == {"controller_mode": 1, "controller_state": 0}
+    assert service_calls == [("set_state", 0)]
+
+
+def test_xarm6_trajectory_mode_preparation_tolerates_state_five_controller_race() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    snapshots = iter(
+        [
+            ({"mode": 0, "state": 0}, "OK"),
+            ({"mode": 1, "state": 5}, "OK"),
+            ({"mode": 1, "state": 5}, "OK"),
+            ({"mode": 1, "state": 0}, "OK"),
+        ]
+    )
+    controller_states = iter(("active", "inactive", "inactive", "active"))
+    service_calls: list[tuple[str, int]] = []
+    teleop._xarm6_robot_state_snapshot = lambda: next(snapshots)
+    teleop._xarm6_trajectory_controller_state = lambda **_kwargs: (
+        next(controller_states),
+        "",
+    )
+    teleop._xarm6_set_int16 = lambda suffix, value: (
+        service_calls.append((suffix, value)) or (True, "OK")
+    )
+
+    ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+
+    assert ready is True
+    assert message == "xArm6 trajectory controller Mode 1 is ready"
+    assert diagnostics == {"controller_mode": 1, "controller_state": 0}
+    assert service_calls == [("set_mode", 1), ("set_state", 0)]
+
+
+def test_xarm6_trajectory_mode_preparation_fails_when_activation_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _teleop_module()
+    monkeypatch.setattr(
+        module,
+        "XARM6_TRAJECTORY_MODE_NO_PROGRESS_TIMEOUT_SEC",
+        0.02,
+    )
+    monkeypatch.setattr(
+        module,
+        "XARM6_TRAJECTORY_MODE_POLL_INTERVAL_SEC",
+        0.005,
+    )
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._xarm6_robot_state_snapshot = lambda: (
+        {"mode": 1, "state": 0},
+        "OK",
+    )
+    teleop._xarm6_trajectory_controller_state = lambda **_kwargs: (
+        "inactive",
+        "",
+    )
+    teleop._xarm6_set_int16 = lambda *_args: pytest.fail(
+        "ready Mode 1 feedback must not resend mode services"
+    )
+
+    ready, message, diagnostics = teleop._prepare_xarm6_trajectory_mode()
+
+    assert ready is False
+    assert "activation stopped progressing; state=inactive" in message
+    assert "trajectory_controller=inactive" in message
+    assert diagnostics == {"controller_mode": 1, "controller_state": 0}
+
+
+def test_bridge_mode_one_transport_encloses_dynamic_preparation_watchdog() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    module = _teleop_module()
+    bridge = object.__new__(SystemBridge)
+    requests: list[tuple[dict[str, Any], float, int | None]] = []
+    bridge._teleop_request_payload = lambda payload, timeout_sec, ros_domain_id: (
+        requests.append((dict(payload), float(timeout_sec), ros_domain_id))
+        or (True, "ready", {})
+    )
+
+    result = bridge._prepare_xarm6_trajectory_mode(ros_domain_id=42)
+
+    assert result is None
+    assert requests[0][0] == {
+        "op": "prepare_xarm6_trajectory_mode",
+        "robot": "xarm6",
+    }
+    assert requests[0][1] > module.XARM6_TRAJECTORY_MODE_HARD_SAFETY_TIMEOUT_SEC
+    assert requests[0][2] == 42
+
+
+@pytest.mark.parametrize(
+    ("robot", "driver_process"),
+    [
+        ("xarm6", "hardware_xarm6_driver"),
+        ("ur5e", "hardware_ur5e_rtde_trajectory_server"),
+    ],
+)
+def test_direct_hardware_stack_enables_cartesian_jog(
+    robot: str,
+    driver_process: str,
+) -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.robot_env = "real"
+    bridge._hardware_stack_selected = "dual robots"
+    bridge._hardware_stack_lifecycle_state = "running"
+    bridge._hardware_stack_lifecycle_generation = 4
+    bridge._hardware_cartesian_readiness = {
+        robot: {
+            "cartesian_jog_ready": True,
+            "cartesian_function_ready": True,
+            "generation": 4,
+            "message": "ready",
+        }
+    }
+    bridge._default_ros_domain_id = lambda: 0
+    bridge._digital_twin_domain_ids = lambda: {"hardware": 0, "gazebo": 1}
+    bridge._digital_twin_teleop_target = lambda _robot: None
+    bridge._normal_hardware_teleop_processes = lambda _robot: {
+        "driver": driver_process,
+        "gripper": driver_process,
+    }
+    bridge._teleop_process_running = lambda process_name: process_name == driver_process
+    bridge._any_teleop_environment_running = lambda: True
+
+    target = bridge.teleop_target(robot, "cartesian")
+
+    assert target["environment"] == "real"
+    assert target["source"] == "hardware"
+    assert target["required_processes"] == [driver_process]
+    assert target["ready"] is True
+    assert target["warning"] == ""
+
+
+def test_failed_hardware_stack_blocks_cartesian_jog_with_surviving_driver() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.robot_env = "real"
+    bridge._hardware_stack_selected = "dual robots"
+    bridge._hardware_stack_lifecycle_state = "failed"
+    bridge._hardware_stack_lifecycle_generation = 4
+    bridge._hardware_cartesian_readiness = {
+        "xarm6": {
+            "cartesian_jog_ready": False,
+            "cartesian_function_ready": False,
+            "generation": 4,
+            "message": "failed",
+        }
+    }
+    bridge._default_ros_domain_id = lambda: 0
+    bridge._digital_twin_domain_ids = lambda: {"hardware": 0, "gazebo": 1}
+    bridge._digital_twin_teleop_target = lambda _robot: None
+    bridge._normal_hardware_teleop_processes = lambda _robot: {
+        "driver": "hardware_xarm6_driver",
+        "gripper": "hardware_xarm6_driver",
+    }
+    bridge._teleop_process_running = lambda _process_name: True
+    bridge._any_teleop_environment_running = lambda: True
+
+    target = bridge.teleop_target("xarm6", "cartesian")
+
+    assert target["ready"] is False
+    assert target["warning"] == (
+        "dual robots Hardware Stack lifecycle is failed. Motion is available only "
+        "after Hardware Stack reaches running."
+    )
+
+
+def test_xarm6_hardware_action_candidates_include_namespaced_driver_action() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.get_action_names_and_types = lambda: []
+
+    candidates = teleop._candidate_action_names(
+        "xarm6_traj_controller/follow_joint_trajectory"
+    )
+
+    assert candidates[0] == "/xarm6/xarm6_traj_controller/follow_joint_trajectory"
+
+
 def test_gazebo_ur5e_joint_target_preserves_topic_path() -> None:
     module = _teleop_module()
     teleop = object.__new__(module.KeyboardTeleop)
@@ -95,6 +1526,845 @@ def test_teleop_state_reports_joint_state_freshness() -> None:
     state = teleop.get_robot_state("ur5e")
 
     assert state["joint_state_age_sec"] == pytest.approx(0.25, abs=0.05)
+
+
+def test_teleop_response_discards_late_request_before_current_response() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "r", encoding="utf-8")
+    bridge._teleop_server_proc = SimpleNamespace(
+        stdout=stdout,
+        stderr=None,
+        poll=lambda: None,
+    )
+    os.write(
+        write_fd,
+        b'{"ok":true,"msg":"old","request_id":"teleop-1"}\n',
+    )
+
+    def _write_current_response() -> None:
+        time.sleep(0.02)
+        os.write(
+            write_fd,
+            b'{"ok":true,"msg":"current","request_id":"teleop-2"}\n',
+        )
+
+    writer = threading.Thread(target=_write_current_response)
+    writer.start()
+    try:
+        ok, message, payload = bridge._read_teleop_response_locked(
+            1.0,
+            expected_request_id="teleop-2",
+        )
+    finally:
+        writer.join(timeout=1.0)
+        os.close(write_fd)
+        stdout.close()
+
+    assert ok is True
+    assert message == "current"
+    assert payload["request_id"] == "teleop-2"
+
+
+def test_teleop_request_writes_and_waits_for_same_request_id() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    stdin = io.StringIO()
+    bridge._teleop_server_lock = threading.Lock()
+    bridge._teleop_server_proc = SimpleNamespace(
+        stdin=stdin,
+        poll=lambda: None,
+    )
+    bridge._teleop_request_sequence = 0
+    bridge._ensure_teleop_server_locked = lambda _domain_id: None
+    expected_ids: list[str] = []
+
+    def _read_response(
+        timeout_sec: float,
+        *,
+        expected_request_id: str | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        assert timeout_sec == pytest.approx(5.0)
+        expected_ids.append(str(expected_request_id or ""))
+        return True, "OK", {"request_id": expected_request_id}
+
+    bridge._read_teleop_response_locked = _read_response
+
+    result = bridge._teleop_request_payload(
+        {"op": "cartesian", "robot": "ur5e", "axis": "z", "step_mm": 1.0},
+        timeout_sec=5.0,
+        ros_domain_id=42,
+    )
+
+    request = json.loads(stdin.getvalue())
+    assert result == (True, "OK", {"request_id": "teleop-1"})
+    assert request["request_id"] == "teleop-1"
+    assert expected_ids == ["teleop-1"]
+
+
+def test_teleop_server_echoes_request_id_in_every_command_response() -> None:
+    source = (
+        ROOT / "ros2/cais_lab_robotics/scripts/keyboard_teleop.py"
+    ).read_text(encoding="utf-8")
+
+    assert "active_request_id = str(cmd.get('request_id') or '').strip() or None" in source
+    assert "body['request_id'] = active_request_id" in source
+
+
+def test_ur5e_teleop_waits_for_pick_approach_motion_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    monkeypatch.setattr(bridge_module, "_UR5E_TELEOP_HANDOFF_TIMEOUT_SEC", 0.5)
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = "pick_approach"
+    agent = SimpleNamespace(_robot_motion_lock=threading.Lock())
+    bridge._physical_ur5e_robot_agent = lambda: agent
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "ros_domain_id": 42,
+    }
+    requests: list[dict[str, Any]] = []
+    bridge._teleop_request_payload = lambda payload, timeout_sec, ros_domain_id: (
+        requests.append(dict(payload)) or (True, "OK", {})
+    )
+
+    def _release_pick_approach_handoff() -> None:
+        time.sleep(0.02)
+        bridge._ur5e_robot_function_execution_lock.release()
+
+    releaser = threading.Thread(target=_release_pick_approach_handoff)
+    releaser.start()
+    try:
+        result = bridge._teleop_request(
+            {"op": "cartesian", "robot": "ur5e", "axis": "z", "step_mm": 1.0},
+            timeout_sec=5.0,
+        )
+    finally:
+        releaser.join(timeout=1.0)
+
+    assert result == (True, "OK")
+    assert requests == [
+        {"op": "cartesian", "robot": "ur5e", "axis": "z", "step_mm": 1.0}
+    ]
+    assert bridge._ur5e_robot_function_execution_lock.locked() is False
+
+
+def test_ur5e_cartesian_jog_uses_rtde_result_response_window() -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    requests: list[tuple[dict[str, Any], float]] = []
+    bridge._teleop_request = lambda payload, timeout_sec: (
+        requests.append((dict(payload), float(timeout_sec))) or (True, "OK")
+    )
+
+    assert bridge.teleop_jog("ur5e", "z", 1.0, 0.35) == (True, "OK")
+    assert requests == [
+        (
+            {
+                "op": "cartesian",
+                "robot": "ur5e",
+                "axis": "z",
+                "step_mm": 1.0,
+                "velocity_scale": 0.35,
+            },
+            bridge_module._UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC + 5.0,
+        )
+    ]
+
+
+def test_xarm6_pre_motion_cartesian_rejection_does_not_latch_uncertainty() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._xarm6_robot_function_state_uncertain = False
+    bridge._xarm6_robot_function_state_uncertain_reason = ""
+    bridge._physical_xarm6_robot_agent = lambda: None
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    bridge._teleop_request_payload = lambda **_kwargs: (
+        False,
+        "xArm6 Cartesian target z=1.610000 m is outside [0.900000, 1.600000] m",
+        {"state_uncertain": False},
+    )
+
+    ok, message = bridge._teleop_request(
+        {"op": "cartesian", "robot": "xarm6", "axis": "z", "step_mm": 10.0},
+        timeout_sec=5.0,
+    )
+
+    assert ok is False
+    assert "outside" in message
+    assert bridge._xarm6_robot_function_state_uncertain is False
+    assert bridge._xarm6_robot_function_state_uncertain_reason == ""
+
+
+def test_xarm6_gripper_timeout_does_not_latch_arm_uncertainty() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._xarm6_robot_function_state_uncertain = False
+    bridge._xarm6_robot_function_state_uncertain_reason = ""
+    bridge._physical_xarm6_robot_agent = lambda: None
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    bridge._teleop_request_payload = lambda **_kwargs: (
+        False,
+        "teleop response timeout; command outcome is still pending",
+        {},
+    )
+
+    ok, message = bridge._teleop_request(
+        {"op": "gripper", "robot": "xarm6", "action": "open"},
+        timeout_sec=10.0,
+    )
+
+    assert ok is False
+    assert "pending" in message
+    assert bridge._xarm6_robot_function_state_uncertain is False
+    assert bridge._xarm6_robot_function_state_uncertain_reason == ""
+
+
+def test_xarm6_gripper_uses_hardware_service_budget() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    requests: list[tuple[dict[str, Any], float]] = []
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "environment": "real",
+    }
+    bridge._teleop_request = lambda payload, timeout_sec: (
+        requests.append((dict(payload), float(timeout_sec))) or (True, "OK")
+    )
+
+    assert bridge.teleop_gripper("xarm6", "open", 0.1, 0.5) == (True, "OK")
+    assert requests == [
+        (
+            {
+                "op": "gripper",
+                "robot": "xarm6",
+                "action": "open",
+                "velocity_scale": 0.5,
+                "step": 0.1,
+            },
+            10.0,
+        )
+    ]
+
+
+def test_real_ur5e_jog_preflight_surfaces_rtde_readiness_failure() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+    }
+    bridge.teleop_named_position_readiness = lambda _robot: (
+        False,
+        "UR5e RTDE trajectory status is stale",
+    )
+
+    target = bridge._teleop_preflight("ur5e", "cartesian")
+
+    assert target["ready"] is False
+    assert target["warning"] == "UR5e RTDE trajectory status is stale"
+
+
+def test_smooth_hold_keeps_motion_locks_until_explicit_stop() -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+    bridge._teleop_xarm6_cartesian_session_lock = threading.RLock()
+    bridge._teleop_xarm6_cartesian_session = None
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    bridge._teleop_cartesian_modes = {"xarm6": "off", "ur5e": "off"}
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_state_uncertain = False
+    bridge._xarm6_robot_function_state_uncertain = False
+    agent_motion_lock = threading.Lock()
+    bridge._physical_xarm6_robot_agent = lambda: SimpleNamespace(
+        _robot_motion_lock=agent_motion_lock
+    )
+    bridge._physical_ur5e_robot_agent = lambda: None
+    bridge.teleop_target = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 0,
+    }
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 0,
+    }
+    requests: list[tuple[dict[str, Any], float]] = []
+    bridge._teleop_request_payload = lambda payload, timeout_sec, **_kwargs: (
+        requests.append((dict(payload), float(timeout_sec))) or (True, "OK", {})
+    )
+
+    assert bridge.teleop_cartesian_mode("xarm6", "smooth")[0] is True
+    assert bridge.teleop_cartesian_smooth("xarm6", "x", 10.0, "start") == (
+        True,
+        "OK",
+    )
+    assert bridge._ur5e_robot_function_execution_lock.locked()
+    assert agent_motion_lock.locked()
+    assert bridge.teleop_cartesian_smooth("xarm6", "x", 10.0, "update") == (
+        True,
+        "OK",
+    )
+    assert bridge.teleop_cartesian_smooth("xarm6", "x", 0.0, "stop") == (
+        True,
+        "OK",
+    )
+    assert bridge._ur5e_robot_function_execution_lock.locked()
+    assert agent_motion_lock.locked()
+    assert bridge.teleop_cartesian_mode("xarm6", "off")[0] is True
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+    assert [
+        request.get("command") or request.get("mode")
+        for request, _timeout in requests
+    ] == [
+        "smooth",
+        "start",
+        "update",
+        "stop",
+        "off",
+    ]
+    assert [
+        request["watchdog_sec"]
+        for request, _timeout in requests
+        if request.get("op") == "cartesian_smooth"
+    ] == [
+        0.50,
+        0.50,
+        0.50,
+    ]
+    assert [timeout for _request, timeout in requests] == [
+        bridge_module._XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC,
+        bridge_module._XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC,
+        4.0,
+        bridge_module._XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC,
+        bridge_module._XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC,
+    ]
+
+
+def test_xarm6_cartesian_idle_restores_mode_one_once() -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_xarm6_cartesian_session_lock = threading.RLock()
+    bridge._teleop_xarm6_cartesian_session = None
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    bridge._teleop_cartesian_modes = {"xarm6": "off", "ur5e": "off"}
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._xarm6_cartesian_jog_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain_reason = ""
+    bridge._physical_xarm6_robot_agent = lambda: None
+    target = {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    bridge.teleop_target = lambda _robot, _op: dict(target)
+    bridge._teleop_preflight = lambda _robot, _op: dict(target)
+    requests: list[dict[str, Any]] = []
+    bridge._teleop_request_payload = lambda payload, **_kwargs: (
+        requests.append(dict(payload)) or (True, "OK", {"state_uncertain": False})
+    )
+
+    assert bridge.teleop_cartesian_mode("xarm6", "step")[0] is True
+    timer = bridge._teleop_xarm6_cartesian_idle_timer
+    assert timer is not None
+    timer.cancel()
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    assert bridge._teleop_xarm6_cartesian_session is not None
+    bridge._teleop_xarm6_cartesian_session["last_activity_monotonic"] = (
+        time.monotonic() - bridge_module._XARM6_CARTESIAN_SESSION_IDLE_SEC - 1.0
+    )
+
+    bridge._teleop_xarm6_cartesian_session["busy"] = True
+    bridge._expire_xarm6_cartesian_session()
+    assert [request["mode"] for request in requests] == ["step"]
+    retry_timer = bridge._teleop_xarm6_cartesian_idle_timer
+    assert retry_timer is not None
+    retry_timer.cancel()
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    bridge._teleop_xarm6_cartesian_session["busy"] = False
+    bridge._expire_xarm6_cartesian_session()
+    bridge._expire_xarm6_cartesian_session()
+
+    assert [request["mode"] for request in requests] == ["step", "off"]
+    assert bridge._teleop_xarm6_cartesian_session is None
+    assert bridge._teleop_cartesian_modes["xarm6"] == "off"
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+
+
+def test_bridge_sends_exact_physical_speeds_and_rejects_invalid_values() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    requests: list[dict[str, Any]] = []
+    bridge._teleop_request = lambda payload, timeout_sec: (
+        requests.append({**payload, "timeout_sec": timeout_sec}) or (True, "OK")
+    )
+    bridge.teleop_motion_settings = lambda _robot: {
+        "cartesian_speed_min_mm_s": 5.0,
+        "cartesian_speed_max_mm_s": 50.0,
+        "joint_speed_min_deg_s": 0.1,
+        "joint_speed_max_deg_s": 64.0,
+    }
+
+    assert bridge.teleop_jog("ur5e", "x", 2.0, speed_mm_s=37.5) == (
+        True,
+        "OK",
+    )
+    assert bridge.teleop_joint("ur5e", 3, -2.0, speed_deg_s=24.5) == (
+        True,
+        "OK",
+    )
+    assert requests[0]["speed_mm_s"] == pytest.approx(37.5)
+    assert requests[1]["speed_deg_s"] == pytest.approx(24.5)
+    assert bridge.teleop_jog("ur5e", "x", 2.0, speed_mm_s=math.nan)[0] is False
+    assert bridge.teleop_joint("ur5e", 3, -2.0, speed_deg_s=100.0)[0] is False
+    assert len(requests) == 2
+
+
+def test_bridge_reports_distinct_xarm6_cartesian_default_and_maximum() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _op: {"environment": "real"}
+
+    settings = bridge.teleop_motion_settings("xarm6")
+
+    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(5.0)
+    assert settings["cartesian_speed_default_mm_s"] == pytest.approx(50.0)
+    assert settings["cartesian_speed_max_mm_s"] == pytest.approx(100.0)
+    assert settings["cartesian_acceleration_mm_s2"] == pytest.approx(42.25)
+
+
+def test_bridge_reports_distinct_ur5e_cartesian_default_and_maximum() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge.teleop_target = lambda _robot, _op: {"environment": "real"}
+
+    settings = bridge.teleop_motion_settings("ur5e")
+
+    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(5.0)
+    assert settings["cartesian_speed_default_mm_s"] == pytest.approx(50.0)
+    assert settings["cartesian_speed_max_mm_s"] == pytest.approx(100.0)
+
+
+def test_ur5e_rtde_cartesian_default_and_maximum_are_distinct() -> None:
+    module = _rtde_server_module()
+
+    assert 0.05 == pytest.approx(module.UR5E_RTDE_CARTESIAN_SPEED_M_S)
+    assert 0.10 == pytest.approx(module.UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S)
+    status = module._status_base()
+    assert status["cartesian_speed_default_m_s"] == pytest.approx(0.05)
+    assert status["cartesian_speed_limit_m_s"] == pytest.approx(0.10)
+
+
+def test_xarm6_smooth_hold_confirmed_stop_readiness_failure_allows_next_axis() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+    bridge._teleop_xarm6_cartesian_session_lock = threading.RLock()
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    bridge._teleop_cartesian_modes = {"xarm6": "smooth", "ur5e": "off"}
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._xarm6_robot_function_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain_reason = ""
+    agent_motion_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    agent_motion_lock.acquire()
+    bridge._teleop_xarm6_cartesian_session = {
+        "mode": "smooth",
+        "ros_domain_id": 42,
+        "execution_lock_acquired": True,
+        "agent_motion_lock": agent_motion_lock,
+        "agent_lock_acquired": True,
+        "last_activity_monotonic": time.monotonic(),
+        "busy": False,
+    }
+    bridge._physical_xarm6_robot_agent = lambda: SimpleNamespace(
+        _robot_motion_lock=agent_motion_lock
+    )
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    responses = iter(
+        (
+            (True, "xArm6 Cartesian Smooth Hold active", {}),
+            (
+                False,
+                "xArm6 trajectory controller did not become active; state=inactive",
+                {"state_uncertain": False},
+            ),
+            (True, "xArm6 Cartesian Smooth Hold active", {}),
+            (True, "xArm6 Cartesian Smooth Hold stopped", {"state_uncertain": False}),
+        )
+    )
+    requests: list[dict[str, Any]] = []
+    bridge._teleop_request_payload = lambda payload, **_kwargs: (
+        requests.append(dict(payload)) or next(responses)
+    )
+
+    assert bridge.teleop_cartesian_smooth("xarm6", "x", 10.0, "start")[0] is True
+    stop_ok, stop_message = bridge.teleop_cartesian_smooth(
+        "xarm6", "x", 0.0, "stop"
+    )
+
+    assert stop_ok is False
+    assert "did not become active" in stop_message
+    assert bridge._xarm6_cartesian_jog_state_uncertain is False
+    assert bridge._xarm6_cartesian_jog_state_uncertain_reason == ""
+    assert bridge.teleop_cartesian_smooth("xarm6", "y", 10.0, "start")[0] is True
+    assert bridge.teleop_cartesian_smooth("xarm6", "y", 0.0, "stop")[0] is True
+    assert [request["command"] for request in requests] == [
+        "start",
+        "stop",
+        "start",
+        "stop",
+    ]
+    assert bridge._ur5e_robot_function_execution_lock.locked()
+    assert agent_motion_lock.locked()
+    with bridge._teleop_xarm6_cartesian_session_lock:
+        bridge._release_xarm6_cartesian_session_locked()
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_xarm6_smooth_hold_unconfirmed_stop_latches_uncertainty() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+    bridge._teleop_xarm6_cartesian_session_lock = threading.RLock()
+    bridge._teleop_xarm6_cartesian_idle_timer = None
+    bridge._teleop_cartesian_modes = {"xarm6": "smooth", "ur5e": "off"}
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._xarm6_robot_function_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain_reason = ""
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._teleop_xarm6_cartesian_session = {
+        "mode": "smooth",
+        "ros_domain_id": 42,
+        "execution_lock_acquired": True,
+        "agent_motion_lock": None,
+        "agent_lock_acquired": False,
+        "last_activity_monotonic": time.monotonic(),
+        "busy": False,
+    }
+    bridge._physical_xarm6_robot_agent = lambda: None
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    responses = iter(
+        (
+            (True, "xArm6 Cartesian Smooth Hold active", {}),
+            (False, "zero velocity returned ret=-1", {"state_uncertain": True}),
+        )
+    )
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: next(responses)
+
+    assert bridge.teleop_cartesian_smooth("xarm6", "z", 10.0, "start")[0] is True
+    ok, message = bridge.teleop_cartesian_smooth("xarm6", "z", 0.0, "stop")
+
+    assert ok is False
+    assert message == "zero velocity returned ret=-1"
+    assert bridge._xarm6_cartesian_jog_state_uncertain is True
+    assert bridge._xarm6_cartesian_jog_state_uncertain_reason == (
+        "Cartesian Smooth Hold stop failed: zero velocity returned ret=-1"
+    )
+    with bridge._teleop_xarm6_cartesian_session_lock:
+        bridge._release_xarm6_cartesian_session_locked()
+
+
+def test_smooth_hold_command_failure_with_confirmed_stop_does_not_latch_uncertain() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_state_uncertain = False
+    bridge._ur5e_robot_function_state_uncertain_reason = ""
+    bridge._ur5e_cartesian_jog_state_uncertain = False
+    bridge._ur5e_cartesian_jog_state_uncertain_reason = ""
+    agent_motion_lock = threading.Lock()
+    bridge._physical_ur5e_robot_agent = lambda: SimpleNamespace(
+        _robot_motion_lock=agent_motion_lock
+    )
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    responses = iter(
+        (
+            (True, "UR5e Cartesian Smooth Hold active", {}),
+            (False, "teleop response timeout", {}),
+            (True, "UR5e Cartesian jog watchdog stopped motion", {}),
+        )
+    )
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: next(responses)
+
+    assert bridge.teleop_cartesian_smooth("ur5e", "z", 10.0, "start")[0] is True
+    ok, message = bridge.teleop_cartesian_smooth("ur5e", "z", 10.0, "update")
+
+    assert ok is False
+    assert "motion stop confirmed" in message
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
+    assert bridge._teleop_smooth_session is None
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_smooth_hold_stop_failure_latches_exact_uncertain_reason() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_state_uncertain = False
+    bridge._ur5e_robot_function_state_uncertain_reason = ""
+    bridge._physical_ur5e_robot_agent = lambda: None
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "ready": True,
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    responses = iter(
+        (
+            (True, "UR5e Cartesian Smooth Hold active", {}),
+            (False, "RTDE jogStop returned False", {}),
+        )
+    )
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: next(responses)
+
+    assert bridge.teleop_cartesian_smooth("ur5e", "x", 10.0, "start")[0] is True
+    ok, message = bridge.teleop_cartesian_smooth("ur5e", "x", 0.0, "stop")
+
+    assert ok is False
+    assert message == "RTDE jogStop returned False"
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_cartesian_jog_state_uncertain is True
+    assert bridge._ur5e_cartesian_jog_state_uncertain_reason == (
+        "Cartesian Smooth Hold stop failed: RTDE jogStop returned False"
+    )
+
+
+def test_repair_stop_releases_active_smooth_hold_without_preflight() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = (
+        "Interactive Teleop ur5e Cartesian Smooth Hold"
+    )
+    agent_motion_lock = threading.Lock()
+    agent_motion_lock.acquire()
+    bridge._teleop_smooth_session = {
+        "robot": "ur5e",
+        "axis": "z",
+        "ros_domain_id": 42,
+        "execution_lock_acquired": True,
+        "agent_motion_lock": agent_motion_lock,
+        "agent_lock_acquired": True,
+    }
+    requests: list[dict[str, object]] = []
+    bridge._teleop_request_payload = lambda payload, **_kwargs: (
+        requests.append(dict(payload)) or (True, "jog stopped", {})
+    )
+
+    message = bridge._stop_cartesian_smooth_for_repair("dual robots")
+
+    assert message == "Cartesian Smooth Hold stop confirmed: jog stopped"
+    assert requests == [
+        {
+            "op": "cartesian_smooth",
+            "robot": "ur5e",
+            "command": "stop",
+            "axis": "z",
+            "speed_mm_s": 0.0,
+            "watchdog_sec": 0.30,
+        }
+    ]
+    assert bridge._teleop_smooth_session is None
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_repair_waits_for_xarm6_smooth_hold_mode_restore() -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = (
+        "Interactive Teleop xarm6 Cartesian Smooth Hold"
+    )
+    agent_motion_lock = threading.Lock()
+    agent_motion_lock.acquire()
+    bridge._teleop_smooth_session = {
+        "robot": "xarm6",
+        "axis": "x",
+        "ros_domain_id": 42,
+        "execution_lock_acquired": True,
+        "agent_motion_lock": agent_motion_lock,
+        "agent_lock_acquired": True,
+    }
+    timeouts: list[float] = []
+    bridge._teleop_request_payload = lambda _payload, timeout_sec, **_kwargs: (
+        timeouts.append(float(timeout_sec)) or (True, "jog stopped", {})
+    )
+
+    message = bridge._stop_cartesian_smooth_for_repair("dual robots")
+
+    assert message == "Cartesian Smooth Hold stop confirmed: jog stopped"
+    assert timeouts == [bridge_module._XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC]
+    assert bridge._teleop_smooth_session is None
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_repair_does_not_latch_confirmed_xarm6_stop_as_uncertain() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    bridge._ur5e_robot_function_execution_active = (
+        "Interactive Teleop xarm6 Cartesian Smooth Hold"
+    )
+    bridge._xarm6_cartesian_jog_state_uncertain = False
+    bridge._xarm6_cartesian_jog_state_uncertain_reason = ""
+    agent_motion_lock = threading.Lock()
+    agent_motion_lock.acquire()
+    bridge._teleop_smooth_session = {
+        "robot": "xarm6",
+        "axis": "x",
+        "ros_domain_id": 42,
+        "execution_lock_acquired": True,
+        "agent_motion_lock": agent_motion_lock,
+        "agent_lock_acquired": True,
+    }
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: (
+        False,
+        "xArm6 trajectory controller did not become active; state=inactive",
+        {"state_uncertain": False},
+    )
+
+    message = bridge._stop_cartesian_smooth_for_repair("dual robots")
+
+    assert message.startswith(
+        "Cartesian Smooth Hold stop confirmed; trajectory readiness failed:"
+    )
+    assert bridge._xarm6_cartesian_jog_state_uncertain is False
+    assert bridge._xarm6_cartesian_jog_state_uncertain_reason == ""
+    assert bridge._teleop_smooth_session is None
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_ur5e_jog_stop_false_requires_rtde_reset() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._jog_session_token = object()
+    server._active_goal = server._jog_session_token
+    server._active_goal_status = {"state": "executing"}
+    server._active_motion_kind = "cartesian_jog"
+    server._jog_stop_in_progress = False
+    server._jog_watchdog_deadline = module.time.monotonic() + 0.3
+    server.control = SimpleNamespace(jogStop=lambda: False)
+    reset_reasons: list[str] = []
+    server._mark_rtde_reset_required = lambda reason, **_kwargs: reset_reasons.append(
+        reason
+    )
+
+    ok, message = server._stop_cartesian_jog("release")
+
+    assert ok is False
+    assert "jogStop returned False" in message
+    assert reset_reasons == [message]
+    assert server._active_goal is None
+    assert server._active_motion_kind == ""
+
+
+def test_ur5e_jog_stop_does_not_hide_latched_rtde_reset() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._jog_session_token = object()
+    server._active_goal = None
+    server._jog_stop_in_progress = False
+    server._jog_watchdog_deadline = 0.0
+    server._rtde_reset_required = True
+    server._rtde_reset_reason = "UR5e RTDE jogStop returned False"
+
+    ok, message = server._stop_cartesian_jog("release")
+
+    assert ok is False
+    assert message == "UR5e RTDE jogStop returned False"
 
 
 @pytest.mark.parametrize(
@@ -277,10 +2547,105 @@ def test_named_position_request_outlasts_rtde_client_timeout() -> None:
     assert bridge.teleop_go_to_position("ur5e", "home") == (True, "OK")
     assert requests == [
         (
-            {"op": "move_joints", "robot": "ur5e", "positions": [0.0] * 6},
+            {
+                "op": "move_joints",
+                "robot": "ur5e",
+                "positions": [0.0] * 6,
+                "named_position": "home",
+            },
             bridge_module._UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC + 5.0,
         )
     ]
+
+
+def test_completed_physical_ur5e_named_home_clears_robot_function_recovery() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = "RTDE feedback stopped"
+    agent_motion_lock = threading.Lock()
+    agent = SimpleNamespace(
+        _robot_motion_lock=agent_motion_lock,
+        _held_part=None,
+        _current_state="at_pick",
+        _task_ctx={"part_name": "MG"},
+        _recovery_pose_ref="",
+    )
+    bridge._physical_ur5e_robot_agent = lambda: agent
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: (
+        True,
+        "UR5e trajectory completed",
+        {"state_uncertain": False},
+    )
+
+    ok, message = bridge._teleop_request(
+        {
+            "op": "move_joints",
+            "robot": "ur5e",
+            "positions": [0.0] * 6,
+            "named_position": "home",
+        },
+        timeout_sec=60.0,
+    )
+
+    assert ok is True
+    assert "UR5e home verified" in message
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
+    assert agent._current_state == "idle"
+    assert agent._task_ctx == {}
+    assert agent._recovery_pose_ref == "home"
+    assert not bridge._ur5e_robot_function_execution_lock.locked()
+    assert not agent_motion_lock.locked()
+
+
+def test_non_home_named_position_does_not_clear_ur5e_recovery() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = "RTDE feedback stopped"
+    agent = SimpleNamespace(
+        _robot_motion_lock=threading.Lock(),
+        _held_part=None,
+        _current_state="idle",
+        _task_ctx={},
+    )
+    bridge._physical_ur5e_robot_agent = lambda: agent
+    bridge._teleop_preflight = lambda _robot, _op: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+    }
+    bridge._teleop_request_payload = lambda *_args, **_kwargs: (
+        True,
+        "UR5e trajectory completed",
+        {"state_uncertain": False},
+    )
+
+    ok, _message = bridge._teleop_request(
+        {
+            "op": "move_joints",
+            "robot": "ur5e",
+            "positions": [0.0] * 6,
+            "named_position": "prusa-mk4-2",
+        },
+        timeout_sec=60.0,
+    )
+
+    assert ok is True
+    assert bridge._ur5e_robot_function_state_uncertain is True
+    assert bridge._ur5e_robot_function_state_uncertain_reason == "RTDE feedback stopped"
 
 
 def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -> None:
@@ -352,7 +2717,7 @@ def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None
         encoding="utf-8"
     )
     connect_method = server.split("    def _connect_rtde(self)", maxsplit=1)[1].split(
-        "    def _reconnect_receive_locked", maxsplit=1
+        "    def _mark_rtde_reset_required", maxsplit=1
     )[0]
 
     assert connect_method.index("self.receive = self.receive_factory") < connect_method.index(
@@ -370,6 +2735,8 @@ def test_rtde_server_keeps_read_only_joint_monitoring_in_local_control() -> None
     assert 'body["action_name"] = ""' in server
     assert 'body["ros_domain_id"] = self.ros_domain_id' in server
     assert 'body["process_id"] = os.getpid()' in server
+    assert 'body["rtde_reset_required"]' in server
+    assert "def _reconnect_receive" not in server
     assert "self._next_status_heartbeat_monotonic = now + 1.0" in server
     assert 'state="stopped"' in server
     assert "UR5e RTDE trajectory server exited:" in server
@@ -719,7 +3086,7 @@ def test_control_page_bounds_ros_readiness_refresh_work() -> None:
     assert 'named_pos_readiness_state["ready"] = bool(ready)' in control
     assert 'and not named_pos_busy["moving"]' in control
     assert 'if named_pos_readiness_state["busy"]:' in control
-    assert 'active_target_refresh = {"busy": False}' in control
+    assert "active_target_refresh: dict[str, object] = {" in control
     assert 'if active_target_refresh["busy"]:' in control
     assert "await asyncio.to_thread(bridge.digital_twin_statuses)" in control
     assert "signature = _signature(rows)" in control

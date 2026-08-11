@@ -1,0 +1,13 @@
+# Exact desired world -> tool0 pose.
+geometry_msgs/PoseStamped target_tool0_pose
+float64 speed_m_s
+float64 acceleration_m_s2
+---
+int32 error_code
+string error_string
+float64 final_position_error_m
+float64 final_orientation_error_rad
+---
+geometry_msgs/PoseStamped actual_tool0_pose
+float64 position_error_m
+float64 orientation_error_rad

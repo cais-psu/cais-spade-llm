@@ -175,7 +175,8 @@ def build_ros2_launch_cmds(
             "ros2 launch cais_lab_robotics xarm6_hardware_driver.launch.py robot_ip:={xarm6_ip}"
         ),
         "hardware_xarm6_moveit": (
-            "ros2 launch cais_lab_robotics xarm6_hardware_moveit.launch.py robot_ip:={xarm6_ip}"
+            "ros2 launch cais_lab_robotics xarm6_hardware_moveit.launch.py "
+            "robot_ip:={xarm6_ip} show_rviz:=false launch_rviz:=false"
         ),
         "hardware_ur5e_rtde_trajectory_server": (
             f"{venv_python} {ur5e_rtde_trajectory_script} "
@@ -188,11 +189,15 @@ def build_ros2_launch_cmds(
         ),
         "hardware_ur5e_moveit": (
             "ros2 launch cais_lab_robotics ur5e_rg2_hardware_moveit.launch.py "
-            "launch_rviz:=true"
+            "launch_rviz:=false"
         ),
         "hardware_dual_robots_moveit": (
             "ros2 launch cais_lab_robotics dual_robots_hardware_moveit.launch.py "
-            "launch_rviz:=true"
+            "launch_rviz:=false"
+        ),
+        "hardware_robot_state_publisher": (
+            "ros2 launch cais_lab_robotics "
+            "dual_robots_hardware_state_publisher.launch.py"
         ),
         "realsense_camera": "ros2 launch cais_lab_robotics realsense_camera.launch.py",
         "physical_perception": (
@@ -341,6 +346,13 @@ def ros2_launch_required_paths(
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
+    xarm_description_ws = (
+        (
+            ros2_workspace_install_pkg_path("xarm_description"),
+            "ROS2 workspace is missing package 'xarm_description'. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+    )
     moveit_core = (
         (
             ros2_system_share_pkg_path("moveit_ros_move_group"),
@@ -355,6 +367,12 @@ def ros2_launch_required_paths(
         (
             ros2_system_share_pkg_path("ur_moveit_config"),
             "UR MoveIt config is not installed. Install `ros-humble-ur-moveit-config`.",
+        ),
+    )
+    ur_description = (
+        (
+            ros2_system_share_pkg_path("ur_description"),
+            "UR description is not installed. Install `ros-humble-ur-description`.",
         ),
     )
     onrobot_ws = (
@@ -438,9 +456,19 @@ def ros2_launch_required_paths(
             "ROS2 workspace is missing the dual robots hardware MoveIt launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
+    )
+    hardware_state_publisher_assets = (
+        hardware_config_asset,
         (
-            cais_lab_robotics_share / "rviz" / "dual_robots_hardware_moveit.rviz",
-            "ROS2 workspace is missing the dual robots hardware RViz config. "
+            cais_lab_robotics_share
+            / "launch"
+            / "dual_robots_hardware_state_publisher.launch.py",
+            "ROS2 workspace is missing the dual robots hardware state publisher launch file. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "launch" / "dual_robots_hardware_moveit.launch.py",
+            "ROS2 workspace is missing the combined hardware model launch file. "
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
@@ -459,11 +487,6 @@ def ros2_launch_required_paths(
         (
             cais_lab_robotics_share / "launch" / "ur5e_rg2_hardware_moveit.launch.py",
             "ROS2 workspace is missing the UR5e RG2 hardware MoveIt launch file. "
-            "Re-run `make bootstrap-gazebo`.",
-        ),
-        (
-            cais_lab_robotics_share / "rviz" / "ur5e_rg2_hardware_moveit.rviz",
-            "ROS2 workspace is missing the UR5e RG2 hardware RViz config. "
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
@@ -543,6 +566,14 @@ def ros2_launch_required_paths(
             *ur_stack,
             *onrobot_ws,
             *dual_hardware_moveit_assets,
+        ]
+    if launch_key == "hardware_robot_state_publisher":
+        return [
+            *workspace_cais,
+            *xarm_description_ws,
+            *ur_description,
+            *onrobot_ws,
+            *hardware_state_publisher_assets,
         ]
     if launch_key == "hardware_ur5e_moveit":
         return [

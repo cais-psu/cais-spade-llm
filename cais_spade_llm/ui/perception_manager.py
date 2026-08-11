@@ -43,6 +43,7 @@ MINIMUM_CALIBRATION_JOINT_DELTA_RAD = math.radians(5.0)
 UR5E_CALIBRATION_MONITOR_STATUS = Path(
     "/tmp/cais_ur5e_calibration_monitor_status.json"
 )
+UR5E_RTDE_TRAJECTORY_STATUS = Path("/tmp/cais_ur5e_rtde_trajectory_status.json")
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 logger = logging.getLogger(__name__)
@@ -782,17 +783,61 @@ class PerceptionManager:
             "digital_twin_ur5e_only_hardware_ur5e_moveit",
             "digital_twin_dual_robots_hardware_moveit",
         }
-        return any(self.bridge.ros2_proc_status(name) == "running" for name in process_names)
+        if any(
+            self.bridge.ros2_proc_status(name) == "running"
+            for name in process_names
+        ):
+            return True
+        if self.bridge.ros2_proc_status("hardware_robot_state_publisher") != "running":
+            return False
+        active_stack_lookup = getattr(
+            self.bridge,
+            "_active_normal_hardware_stack",
+            None,
+        )
+        selected_stack_lookup = getattr(
+            self.bridge,
+            "_selected_normal_hardware_stack",
+            None,
+        )
+        active_stack = (
+            str(active_stack_lookup() or "").strip().lower()
+            if callable(active_stack_lookup)
+            else ""
+        )
+        selected_stack = (
+            str(selected_stack_lookup() or "").strip().lower()
+            if callable(selected_stack_lookup)
+            else ""
+        )
+        return active_stack in {"ur5e", "dual robots"} or selected_stack in {
+            "ur5e",
+            "dual robots",
+        }
 
     def _ur5e_joint_state_publisher_running(self) -> bool:
+        monitor_process = self._process_names("ur5e")["calibration_rtde_monitor"]
+        if self.bridge.ros2_proc_status(monitor_process) == "running":
+            return True
         process_names = {
             "hardware_ur5e_rtde_trajectory_server",
             "digital_twin_ur5e_only_hardware_ur5e_rtde_trajectory_server",
             "digital_twin_dual_robots_hardware_ur5e_rtde_trajectory_server",
-            self._process_names("ur5e")["calibration_rtde_monitor"],
         }
-        return any(
+        if not any(
             self.bridge.ros2_proc_status(name) == "running" for name in process_names
+        ):
+            return False
+        status = self._read_json(UR5E_RTDE_TRAJECTORY_STATUS)
+        try:
+            status_age_sec = time.time() - float(status["updated_at"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            0.0 <= status_age_sec <= 3.0
+            and status.get("rtde_receive_connected")
+            and status.get("joint_states_fresh")
+            and not status.get("rtde_reset_required")
         )
 
     def _ensure_ur5e_calibration_monitor(self, *, domain_id: int | None = None) -> None:
@@ -800,10 +845,11 @@ class PerceptionManager:
         names = self._process_names("ur5e")
         resolved_domain_id = self._domain_id() if domain_id is None else int(domain_id)
         state_publisher = names["calibration_state_publisher"]
-        if (
-            not self._ur5e_full_state_publisher_running()
-            and self.bridge.ros2_proc_status(state_publisher) != "running"
-        ):
+        full_state_publisher_running = self._ur5e_full_state_publisher_running()
+        if full_state_publisher_running:
+            if self.bridge.ros2_proc_status(state_publisher) == "running":
+                self.bridge.ros2_stop(state_publisher)
+        elif self.bridge.ros2_proc_status(state_publisher) != "running":
             command = (
                 "ros2 launch cais_lab_robotics ur5e_rg2_hardware_moveit.launch.py "
                 "launch_move_group:=false launch_rviz:=false"

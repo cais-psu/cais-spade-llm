@@ -2,6 +2,16 @@ cmake_minimum_required(VERSION 3.8)
 project(cais_lab_robotics)
 
 find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/MoveUR5eCartesian.action"
+  "action/MoveUR5eJointJog.action"
+  "action/MoveUR5eRelativeCartesian.action"
+  "srv/SetUR5eCartesianJog.srv"
+  DEPENDENCIES geometry_msgs
+)
 
 ament_environment_hooks(env-hooks/cais_lab_robotics_gazebo.dsv.in)
 

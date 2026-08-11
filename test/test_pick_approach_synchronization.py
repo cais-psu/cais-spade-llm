@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,6 +240,130 @@ def _unsupported_async_operation_status() -> dict[str, Any]:
     }
 
 
+def test_rtde_cartesian_target_converts_world_tool0_through_live_tcp_offset() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server.control = SimpleNamespace(
+        getTCPOffset=lambda: [0.0, 0.0, 0.1, 0.0, 0.0, 0.0]
+    )
+    transforms = {
+        ("world", "base"): ((0.1, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+    }
+    server._lookup_rigid_transform = lambda target, source: transforms[(target, source)]
+    target = SimpleNamespace(
+        header=SimpleNamespace(frame_id="world"),
+        pose=SimpleNamespace(
+            position=SimpleNamespace(x=0.3, y=0.2, z=1.2),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        ),
+    )
+
+    world_tool0, base_tcp, world_base, tool0_tcp = (
+        server._resolve_cartesian_target(target)
+    )
+
+    assert world_tool0[0] == pytest.approx((0.3, 0.2, 1.2))
+    assert base_tcp[0] == pytest.approx((0.2, 0.2, 1.3))
+    assert world_base == transforms[("world", "base")]
+    assert tool0_tcp[0] == pytest.approx((0.0, 0.0, 0.1))
+
+
+def test_rtde_cartesian_target_rejects_workspace_before_rtde_motion() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server.control = SimpleNamespace(
+        getTCPOffset=lambda: pytest.fail("workspace rejection must precede RTDE access")
+    )
+    target = SimpleNamespace(
+        header=SimpleNamespace(frame_id="world"),
+        pose=SimpleNamespace(
+            position=SimpleNamespace(x=2.0, y=0.2, z=1.2),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"outside \[-0\.700000, 0\.700000\]"):
+        server._resolve_cartesian_target(target)
+
+
+def test_rtde_joint_and_cartesian_goals_share_one_active_goal_lock() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._active_goal = object()
+    server._shutdown_requested = False
+    server._rtde_reset_required = False
+    server._latched_terminal_status = None
+    aborted: list[bool] = []
+    goal = SimpleNamespace(abort=lambda: aborted.append(True))
+
+    result = server._execute_cartesian(goal)
+
+    assert result.error_code == -1
+    assert result.error_string == "UR5e RTDE motion already executing"
+    assert aborted == [True]
+
+
+def test_rtde_goal_path_never_constructs_a_second_control_interface() -> None:
+    module = _load_rtde_server_module()
+    source = inspect.getsource(module.UR5eRTDETrajectoryServer._connect_control_for_goal)
+
+    assert "control_factory" not in source
+    assert "RTDEControlInterface(" not in source
+
+
+def test_rtde_interfaces_use_bounded_frequency_and_receive_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_rtde_server_module()
+    receive_calls: list[tuple[str, float, list[str]]] = []
+    control_calls: list[tuple[str, float]] = []
+
+    class _Receive:
+        def __init__(self, robot_ip: str, frequency_hz: float, variables: list[str]) -> None:
+            receive_calls.append((robot_ip, frequency_hz, variables))
+
+    class _Control:
+        def __init__(self, robot_ip: str, frequency_hz: float) -> None:
+            control_calls.append((robot_ip, frequency_hz))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "rtde_receive",
+        SimpleNamespace(RTDEReceiveInterface=_Receive),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rtde_control",
+        SimpleNamespace(RTDEControlInterface=_Control),
+    )
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server.robot_ip = "192.168.1.172"
+    server.monitor_only = False
+    server.receive_factory = None
+    server.control_factory = None
+    server.receive = None
+    server.control = None
+    server._receive_error = ""
+    server._receive_transport_failed = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._write_status = lambda _status: None
+
+    server._connect_rtde()
+
+    assert receive_calls == [
+        (
+            "192.168.1.172",
+            125.0,
+            ["timestamp", "actual_q", "actual_qd", "actual_TCP_pose"],
+        )
+    ]
+    assert control_calls == [("192.168.1.172", 125.0)]
+    assert server.receive_factory is None
+    assert server.control_factory is None
+
+
 def test_rtde_movej_path_removes_duplicate_current_hold_point() -> None:
     module = _load_rtde_server_module()
 
@@ -270,11 +396,12 @@ def test_rtde_cached_timestamp_does_not_refresh_or_publish_joint_states(
     server.receive_factory = None
     server.control = object()
     server._receive_lock = threading.Lock()
-    server._next_receive_connect_monotonic = 0.0
     server._receive_error = ""
+    server._receive_transport_failed = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
     server._last_receive_timestamp = None
     server._receive_watch_started_monotonic = 0.0
-    server._last_receive_reconnect_monotonic = 0.0
     server._idle_receive_reconnect_count = 0
     server.current_positions = None
     server.current_positions_monotonic = None
@@ -301,32 +428,131 @@ def test_rtde_cached_timestamp_does_not_refresh_or_publish_joint_states(
     assert server._read_actual_q() == [0.25] * 6
     assert server.current_positions_monotonic == 1.0
 
-    now[0] = 4.0
-    reconnects: list[float] = []
-
-    def _reconnect_receive() -> str:
-        reconnects.append(now[0])
-        server.receive = SimpleNamespace(
-            getActualQ=lambda: [0.3] * 6,
-            getTimestamp=lambda: 101.0,
-        )
-        return ""
-
-    server._reconnect_receive = _reconnect_receive
+    now[0] = 1.6
     server._publish_joint_state()
 
     assert server.current_positions_monotonic == 1.0
-    assert server._joint_states_fresh() is False
     assert published == []
-    assert reconnects == [4.0]
     assert statuses[-1]["state"] == "recovering"
+    assert statuses[-1]["rtde_feedback_reconnect_count"] == 0
+    assert server._rtde_reset_required is False
 
     server._next_status_heartbeat_monotonic = 10.0
-    now[0] = 4.02
+    server.receive = SimpleNamespace(
+        getActualQ=lambda: [0.3] * 6,
+        getTimestamp=lambda: 101.0,
+    )
+    now[0] = 1.62
     server._publish_joint_state()
 
-    assert server.current_positions_monotonic == 4.02
+    assert server.current_positions_monotonic == 1.62
     assert len(published) == 1
+
+
+def test_rtde_receive_transport_loss_disconnects_once_without_reconnect() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    disconnects: list[bool] = []
+    factory_calls: list[str] = []
+    server.receive = SimpleNamespace(
+        getActualQ=lambda: (_ for _ in ()).throw(RuntimeError("End of file")),
+        disconnect=lambda: disconnects.append(True),
+    )
+    server.receive_factory = lambda robot_ip: factory_calls.append(robot_ip)
+    control_disconnects: list[bool] = []
+    server.control = SimpleNamespace(
+        disconnect=lambda: control_disconnects.append(True),
+    )
+    server._receive_lock = threading.Lock()
+    server._receive_error = ""
+    server._receive_transport_failed = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._last_receive_timestamp = None
+    server._joint_status_announced = True
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+
+    assert server._read_actual_q() is None
+    assert server._read_actual_q() is None
+
+    assert server._rtde_reset_required is True
+    assert server._receive_transport_failed is True
+    assert "Reset UR5e RTDE" in server._rtde_reset_reason
+    assert statuses[-1]["rtde_reset_required"] is True
+    assert disconnects == [True]
+    assert control_disconnects == [True]
+    assert server.receive is None
+    assert server.control is None
+    assert factory_calls == []
+
+
+def test_rtde_stall_status_preserves_transport_diagnostics() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    disconnects: list[str] = []
+    server.receive = SimpleNamespace(
+        isConnected=lambda: True,
+        disconnect=lambda: disconnects.append("receive"),
+    )
+    server.control = SimpleNamespace(
+        isConnected=lambda: True,
+        disconnect=lambda: disconnects.append("control"),
+    )
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._last_receive_timestamp = 222.5
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+
+    server._mark_rtde_reset_required(
+        "UR5e RTDE feedback stopped advancing for 2.01 s",
+        write_status=True,
+        failure_kind="feedback_timestamp_stalled",
+        feedback_gap_sec=2.01,
+    )
+
+    assert server._rtde_failure_kind == "feedback_timestamp_stalled"
+    assert server._rtde_failure_feedback_gap_sec == pytest.approx(2.01)
+    assert server._rtde_receive_reported_connected_before_reset is True
+    assert server._rtde_control_reported_connected_before_reset is True
+    assert server._last_receive_timestamp == pytest.approx(222.5)
+    assert statuses[-1]["state"] == "failed"
+    assert disconnects == ["control", "receive"]
+
+    server._mark_rtde_reset_required(
+        "later timer callback",
+        write_status=True,
+        failure_kind="later_failure",
+        feedback_gap_sec=3.0,
+    )
+
+    assert server._rtde_failure_kind == "feedback_timestamp_stalled"
+    assert server._rtde_failure_feedback_gap_sec == pytest.approx(2.01)
+    assert server._rtde_receive_reported_connected_before_reset is True
+    assert server._rtde_control_reported_connected_before_reset is True
+    assert server._rtde_reset_reason == "UR5e RTDE feedback stopped advancing for 2.01 s"
+    assert disconnects == ["control", "receive"]
+
+
+def test_rtde_rejects_new_goal_while_reset_is_required() -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._active_goal = None
+    server._rtde_reset_required = True
+    server._rtde_reset_reason = "UR5e RTDE feedback transport failed"
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+    aborted: list[bool] = []
+    goal = SimpleNamespace(abort=lambda: aborted.append(True))
+
+    result = server._execute(goal)
+
+    assert result.error_code == -1
+    assert result.error_string == server._rtde_reset_reason
+    assert aborted == [True]
+    assert statuses[-1]["state"] == "failed"
 
 
 def test_rtde_reuploads_stopped_control_program_before_goal() -> None:
@@ -359,8 +585,6 @@ def test_rtde_success_requires_continuous_stationary_hold(
     server._active_lock = threading.Lock()
     server._active_goal_status = None
     server._latched_terminal_status = None
-    published: list[object] = []
-    server._rviz_goal_state_pub = SimpleNamespace(publish=lambda message: published.append(message))
     server.get_logger = lambda: SimpleNamespace(warning=lambda _message: None)
     server._connect_control_for_goal = lambda: None
     server._current_position_map = lambda: dict.fromkeys(module.ARM_JOINTS, 0.0)
@@ -424,7 +648,6 @@ def test_rtde_success_requires_continuous_stationary_hold(
     assert goal.succeeded is True
     assert result.error_code == 0
     assert actual_calls[0] >= 22
-    assert len(published) == 1
     assert statuses[-1]["max_actual_joint_velocity_rad_s"] == 0.0
     assert statuses[-1]["max_observed_joint_velocity_rad_s"] == 0.02
     assert statuses[-1]["stationary_hold_sec"] >= 0.25
@@ -515,7 +738,7 @@ def test_rtde_accepted_command_that_does_not_move_fails_before_result_timeout(
     assert published == []
 
 
-def test_rtde_recovers_receive_feedback_without_redispatching_motion(
+def test_rtde_tolerates_transient_feedback_loss_without_redispatching_motion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_rtde_server_module()
@@ -525,10 +748,6 @@ def test_rtde_recovers_receive_feedback_without_redispatching_motion(
     server._active_lock = threading.Lock()
     server._active_goal_status = None
     server._latched_terminal_status = None
-    published: list[object] = []
-    server._rviz_goal_state_pub = SimpleNamespace(
-        publish=lambda message: published.append(message)
-    )
     server.get_logger = lambda: SimpleNamespace(warning=lambda _message: None)
     server._connect_control_for_goal = lambda: None
     server._current_position_map = lambda: dict.fromkeys(module.ARM_JOINTS, 0.0)
@@ -561,18 +780,11 @@ def test_rtde_recovers_receive_feedback_without_redispatching_motion(
     monkeypatch.setattr(module, "rtde_movej_path", lambda _trajectory: path)
     monkeypatch.setattr(module.rclpy, "ok", lambda: True)
     now = [0.0]
-    recovered = [False]
-    reconnects: list[float] = []
-
-    def _reconnect_receive() -> str:
-        reconnects.append(now[0])
-        recovered[0] = True
-        return ""
-
-    server._reconnect_receive = _reconnect_receive
-    server._read_feedback_timestamp = lambda: 100.0 + now[0] if recovered[0] else 100.0
-    server._read_actual_q = lambda: [min(now[0], 1.0) if recovered[0] else 0.0] * 6
-    server._read_actual_qd = lambda: [0.2 if recovered[0] and now[0] < 1.0 else 0.0] * 6
+    server._read_feedback_timestamp = lambda: (
+        100.0 + max(0.0, now[0] - 0.6) if now[0] >= 0.6 else 100.0
+    )
+    server._read_actual_q = lambda: [min(now[0], 1.0) if now[0] >= 0.6 else 0.0] * 6
+    server._read_actual_qd = lambda: [0.2 if 0.6 <= now[0] < 1.0 else 0.0] * 6
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(module.time, "time", lambda: now[0])
     monkeypatch.setattr(
@@ -604,10 +816,7 @@ def test_rtde_recovers_receive_feedback_without_redispatching_motion(
     assert goal.succeeded is True
     assert result.error_code == 0
     assert dispatches == [path]
-    assert len(reconnects) == 1
-    assert reconnects[0] >= module.UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
-    assert statuses[-1]["rtde_feedback_reconnect_count"] == 1
-    assert len(published) == 1
+    assert statuses[-1]["rtde_feedback_reconnect_count"] == 0
 
 
 def test_rtde_persistent_feedback_loss_stops_and_fails_without_redispatch(
@@ -620,6 +829,8 @@ def test_rtde_persistent_feedback_loss_stops_and_fails_without_redispatch(
     server._active_lock = threading.Lock()
     server._active_goal_status = None
     server._latched_terminal_status = None
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
     published: list[object] = []
     server._rviz_goal_state_pub = SimpleNamespace(
         publish=lambda message: published.append(message)
@@ -650,9 +861,6 @@ def test_rtde_persistent_feedback_loss_stops_and_fails_without_redispatch(
     server._read_actual_q = lambda: [0.0] * 6
     server._read_actual_qd = lambda: [0.0] * 6
     server._read_feedback_timestamp = lambda: 100.0
-    reconnects: list[bool] = []
-    server._reconnect_receive = lambda: reconnects.append(True) or "End of file"
-
     point = SimpleNamespace(time_from_start=SimpleNamespace(sec=2, nanosec=0))
     trajectory = SimpleNamespace(points=[point])
     monkeypatch.setattr(
@@ -694,16 +902,18 @@ def test_rtde_persistent_feedback_loss_stops_and_fails_without_redispatch(
 
     expected = (
         "UR5e RTDE trajectory feedback stopped advancing and did not recover within "
-        f"{module.UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:.2f} s"
+        f"{module.UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:.2f} s. Physical state is "
+        "uncertain; use Reset UR5e RTDE in Interactive Teleop."
     )
     assert goal.aborted is True
     assert result.error_code == -1
     assert result.error_string == expected
     assert dispatches == [path]
-    assert reconnects
     assert stopped == [True]
     assert latched[-1] is True
     assert statuses[-1]["joint_states_fresh"] is False
+    assert statuses[-1]["rtde_reset_required"] is True
+    assert server._rtde_reset_required is True
     assert published == []
 
 

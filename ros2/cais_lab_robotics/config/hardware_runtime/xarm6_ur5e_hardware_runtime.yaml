@@ -6,11 +6,11 @@ xarm6:
     dof: 6
     hw_ns: "xarm"
     add_gripper: true
-    default_velocity_scaling: 0.50
-    default_acceleration_scaling: 0.50
+    default_velocity_scaling: 0.65
+    default_acceleration_scaling: 0.65
     arm_joint_limits:
-      max_velocity: 2.14
-      max_acceleration: 10.0
+      max_velocity: 1.391
+      max_acceleration: 6.5
     gripper_joint_limits:
       max_velocity: 3.14
       max_acceleration: 10.0
@@ -26,6 +26,15 @@ xarm6:
     - "/xarm_traj_controller/joint_trajectory"
     - "/xarm6_xarm6_traj_controller/joint_trajectory"
   hardware_trajectory_action: "/xarm6/xarm6_traj_controller/follow_joint_trajectory"
+  hardware_cartesian_service: "/xarm6/xarm/set_position"
+  hardware_cartesian_velocity_service: "/xarm6/xarm/vc_set_cartesian_velocity"
+  hardware_robot_states_topic: "/xarm6/xarm/robot_states"
+  cartesian:
+    speed_mm_s: 50.0
+    max_speed_mm_s: 100.0
+    acceleration_mm_s2: 42.25
+    position_tolerance_m: 0.003
+    orientation_tolerance_rad: 0.0523598776
   gazebo_trajectory_topics:
     - "/xarm6_xarm6_traj_controller/joint_trajectory"
     - "/xarm6_traj_controller/joint_trajectory"
@@ -57,6 +66,9 @@ ur5e:
     rtde_allowed_goal_duration_margin: 20.0
     rtde_trajectory_controller: "cais_ur5e_rtde_trajectory_controller"
   rtde:
+    # The server consumes feedback at 50 Hz. A 125 Hz RTDE session leaves
+    # sampling headroom without running two 500 Hz native clients in WSL.
+    frequency_hz: 125.0
     max_joint_vel_rad_s: 1.125
     max_joint_accel_rad_s2: 1.263
     max_joint_jerk_rad_s3: 2.571
@@ -70,10 +82,32 @@ ur5e:
     feedback_reconnect_retry_sec: 1.0
     feedback_recovery_timeout_sec: 2.0
     stopped_away_hold_sec: 0.5
+    cartesian_speed_m_s: 0.05
+    cartesian_max_speed_m_s: 0.10
+    cartesian_accel_m_s2: 0.10
+    cartesian_position_tolerance_m: 0.002
+    cartesian_orientation_tolerance_rad: 0.0349065850
+    cartesian_workspace_bounds:
+      x_min_m: -0.7
+      x_max_m: 0.7
+      y_min_m: -0.35
+      y_max_m: 1.1
+      z_min_m: 0.85
+      z_max_m: 1.6
+    cartesian_reach:
+      origin_x_m: 0.0
+      origin_y_m: 0.5
+      origin_z_m: 1.021
+      # Keep a 50 mm coarse margin inside the UR5e's 850 mm nominal reach.
+      # The controller's isPoseWithinSafetyLimits check remains authoritative.
+      max_xy_radius_m: 0.8
   joint_state_topics:
     - "/joint_states"
   trajectory_topics: []
   hardware_trajectory_action: "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+  hardware_cartesian_action: "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
+  hardware_relative_cartesian_action: "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
+  hardware_cartesian_jog_service: "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
   gazebo_trajectory_topics:
     - "/ur5e_joint_trajectory_controller/joint_trajectory"
   gripper:

@@ -252,7 +252,9 @@ def robot_function_path(
     robot_key = str(robot or "").strip().lower()
     function_key = robot_function_safe_function_name(function_name)
     safe_name = robot_function_safe_name(name)
-    if function_key == "place_approach" and str(part_name or "").strip():
+    if function_key in {"pick_approach", "place_approach"} and str(
+        part_name or ""
+    ).strip():
         safe_name = f"{safe_name}__{robot_function_safe_name(part_name)}"
     source_key = str(storage_source or "hardware").strip()
     return Path(taught_functions_dir) / robot_key / function_key / f"{safe_name}__{source_key}.json"

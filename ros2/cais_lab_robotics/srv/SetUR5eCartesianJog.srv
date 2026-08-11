@@ -1,0 +1,8 @@
+# Translation-only world-frame velocity jog. Angular velocity is always zero.
+geometry_msgs/Vector3 world_linear_velocity_m_s
+float64 acceleration_m_s2
+float64 watchdog_sec
+bool stop
+---
+bool accepted
+string message

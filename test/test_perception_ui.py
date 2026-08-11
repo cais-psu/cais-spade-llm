@@ -39,6 +39,8 @@ class _FakeBridge:
         self.commands: list[tuple[str, str, int | None]] = []
         self.stopped: list[str] = []
         self.running: set[str] = set()
+        self.active_hardware_stack = ""
+        self.selected_hardware_stack = ""
 
     @staticmethod
     def _default_ros_domain_id() -> int:
@@ -64,6 +66,12 @@ class _FakeBridge:
     def ros2_stop(self, name: str) -> None:
         self.stopped.append(name)
         self.running.discard(name)
+
+    def _active_normal_hardware_stack(self) -> str:
+        return self.active_hardware_stack
+
+    def _selected_normal_hardware_stack(self) -> str:
+        return self.selected_hardware_stack
 
 
 @pytest.fixture
@@ -223,6 +231,77 @@ def test_ur5e_calibration_starts_only_read_only_state_and_tf_monitor(
     assert "RG2" not in state_command
     assert rtde_domain == 0
     assert state_domain == 0
+
+
+@pytest.mark.parametrize("hardware_stack", ["ur5e", "dual robots"])
+def test_normal_ur5e_hardware_state_publisher_stops_calibration_state_publisher(
+    perception_manager: PerceptionManager,
+    hardware_stack: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = perception_manager.bridge
+    bridge.active_hardware_stack = hardware_stack
+    bridge.running.update(
+        {
+            "hardware_robot_state_publisher",
+            "ur5e_calibration_state_publisher",
+        }
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "_ur5e_joint_state_publisher_running",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "_run_ros_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    perception_manager._ensure_ur5e_calibration_monitor()
+
+    assert "ur5e_calibration_state_publisher" in bridge.stopped
+    assert "ur5e_calibration_state_publisher" not in {
+        name for name, _command, _domain in bridge.commands
+    }
+
+
+def test_xarm6_hardware_state_publisher_does_not_replace_ur5e_calibration_tf(
+    perception_manager: PerceptionManager,
+) -> None:
+    bridge = perception_manager.bridge
+    bridge.active_hardware_stack = "xarm6"
+    bridge.running.add("hardware_robot_state_publisher")
+
+    assert perception_manager._ur5e_full_state_publisher_running() is False
+
+
+def test_failed_main_rtde_process_does_not_suppress_read_only_monitor(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_status = tmp_path / "ur5e_rtde_trajectory_status.json"
+    main_status.write_text(
+        json.dumps(
+            {
+                "updated_at": time.time(),
+                "state": "failed",
+                "rtde_receive_connected": False,
+                "joint_states_fresh": False,
+                "rtde_reset_required": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(manager_module, "UR5E_RTDE_TRAJECTORY_STATUS", main_status)
+    perception_manager.bridge.running.add("hardware_ur5e_rtde_trajectory_server")
+
+    assert perception_manager._ur5e_joint_state_publisher_running() is False
 
 
 def test_calibration_rejects_near_duplicate_pose_and_accepts_new_pose() -> None:

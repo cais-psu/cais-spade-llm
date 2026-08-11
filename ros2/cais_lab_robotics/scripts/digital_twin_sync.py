@@ -205,6 +205,8 @@ ROBOTS: dict[str, dict[str, Any]] = {
     },
 }
 
+_XARM6_RELAYED_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 7))
+
 # Re-target period for streamed mirror trajectory points (seconds). Small enough to
 # track hardware closely, large enough to give the JTC a smooth interpolation window.
 MIRROR_POINT_TIME_SEC = _float(HARDWARE_ARMS_CONFIG, ("dual_robots", "mirror", "point_time_sec"), 0.1)
@@ -1114,6 +1116,12 @@ def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnost
                 self.unmatched_seen_names: list[str] = []
                 self.pose: dict[str, Any] | None = None
                 self.pose_error = ""
+                self.pose_child_frame = "link_eef" if robot == "xarm6" else "tool0"
+                self.world_base_pose: dict[str, Any] | None = None
+                self.world_base_pose_error = ""
+                self.world_base_child_frame = (
+                    "link_base" if robot == "xarm6" else "base_link"
+                )
                 self.tf_buffer = Buffer() if include_world_tool_pose else None
                 self.tf_listener = (
                     TransformListener(self.tf_buffer, self, spin_thread=False)
@@ -1151,24 +1159,41 @@ def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnost
                 self.seen_names = sorted(self.accumulated_snapshot)
 
             def read_world_tool_pose(self) -> None:
-                if self.tf_buffer is None or self.pose is not None:
+                if self.tf_buffer is None:
                     return
-                try:
-                    message = self.tf_buffer.lookup_transform(
-                        "world",
-                        "tool0",
-                        Time(),
-                        timeout=Duration(seconds=0.1),
-                    )
-                except TransformException as exc:
-                    self.pose_error = str(exc)
-                    return
-                self.pose = _pose_from_transform_msg(message)
+                if self.pose is None:
+                    try:
+                        message = self.tf_buffer.lookup_transform(
+                            "world",
+                            self.pose_child_frame,
+                            Time(),
+                            timeout=Duration(seconds=0.1),
+                        )
+                    except TransformException as exc:
+                        self.pose_error = str(exc)
+                    else:
+                        self.pose = _pose_from_transform_msg(message)
+                if self.world_base_pose is None:
+                    try:
+                        message = self.tf_buffer.lookup_transform(
+                            "world",
+                            self.world_base_child_frame,
+                            Time(),
+                            timeout=Duration(seconds=0.1),
+                        )
+                    except TransformException as exc:
+                        self.world_base_pose_error = str(exc)
+                    else:
+                        self.world_base_pose = _pose_from_transform_msg(message)
 
         node = SnapshotNode()
         deadline = time.time() + max(0.5, float(timeout_sec))
         while rclpy.ok() and time.time() < deadline and (
-            node.snapshot is None or (include_world_tool_pose and node.pose is None)
+            node.snapshot is None
+            or (
+                include_world_tool_pose
+                and (node.pose is None or node.world_base_pose is None)
+            )
         ):
             rclpy.spin_once(node, timeout_sec=0.1)
             if include_world_tool_pose:
@@ -1200,7 +1225,25 @@ def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnost
             result_queue.put(
                 {
                     "success": False,
-                    "message": f"TF world -> tool0 is unavailable{detail}",
+                    "message": (
+                        f"TF world -> {node.pose_child_frame} is unavailable{detail}"
+                    ),
+                    "world_tool0_ready": False,
+                }
+            )
+        elif include_world_tool_pose and node.world_base_pose is None:
+            detail = (
+                f": {node.world_base_pose_error}"
+                if node.world_base_pose_error
+                else ""
+            )
+            result_queue.put(
+                {
+                    "success": False,
+                    "message": (
+                        f"TF world -> {node.world_base_child_frame} is unavailable"
+                        f"{detail}"
+                    ),
                     "world_tool0_ready": False,
                 }
             )
@@ -1212,6 +1255,7 @@ def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnost
             }
             if include_world_tool_pose:
                 result["pose"] = dict(node.pose or {})
+                result["world_base_pose"] = dict(node.world_base_pose or {})
                 result["world_tool0_ready"] = True
             result_queue.put(result)
     except Exception as exc:
@@ -1225,6 +1269,166 @@ def _joint_state_snapshot_worker(  # noqa: C901 - joint and optional TF diagnost
                 ),
             }
         )
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy is not None:
+            rclpy.shutdown()
+
+
+def _xarm6_relayed_positions(
+    names: list[str],
+    positions: list[float],
+) -> tuple[list[float] | None, str]:
+    """Validate one root /joint_states message for the physical xArm6 chain."""
+    observed = {
+        str(name): positions[index]
+        for index, name in enumerate(names)
+        if index < len(positions)
+    }
+    missing = [name for name in _XARM6_RELAYED_JOINT_NAMES if name not in observed]
+    if missing:
+        return None, (
+            "/joint_states did not provide all six xArm6 joints; "
+            f"missing={missing}; seen={sorted(observed)}"
+        )
+    resolved: list[float] = []
+    non_finite: list[str] = []
+    for name in _XARM6_RELAYED_JOINT_NAMES:
+        try:
+            value = float(observed[name])
+        except (TypeError, ValueError):
+            non_finite.append(name)
+            continue
+        if not math.isfinite(value):
+            non_finite.append(name)
+            continue
+        resolved.append(value)
+    if non_finite:
+        return None, (
+            "/joint_states provided non-finite xArm6 positions; "
+            f"joints={non_finite}"
+        )
+    return resolved, ""
+
+
+def _xarm6_tf_readiness(  # noqa: C901 - exact relay and three TF diagnostics share one node.
+    domain_id: int,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    """Wait for the exact root relay input and the complete xArm6 TF chain."""
+    rclpy = None
+    node = None
+    timeout = max(1.0, float(timeout_sec))
+    try:
+        rclpy = _init_ros_domain(domain_id)
+        from rclpy.duration import Duration
+        from rclpy.node import Node
+        from rclpy.time import Time
+        from sensor_msgs.msg import JointState
+        from tf2_ros import Buffer, TransformException, TransformListener
+
+        class XArm6TfReadinessNode(Node):
+            def __init__(self) -> None:
+                super().__init__("digital_twin_xarm6_tf_readiness")
+                self.relay_ready = False
+                self.relay_problem = (
+                    "/joint_states has not provided a new message containing "
+                    "joint1..joint6"
+                )
+                self.tf_buffer = Buffer()
+                self.tf_listener = TransformListener(
+                    self.tf_buffer,
+                    self,
+                    spin_thread=False,
+                )
+                self.transform_ready = {
+                    "world -> link_base": False,
+                    "link_base -> link_eef": False,
+                    "world -> link_eef": False,
+                }
+                self.transform_problem = {
+                    name: "transform has not been received"
+                    for name in self.transform_ready
+                }
+                self.create_subscription(
+                    JointState,
+                    "/joint_states",
+                    self._joint_state,
+                    20,
+                )
+
+            def _joint_state(self, message: JointState) -> None:
+                positions, problem = _xarm6_relayed_positions(
+                    list(message.name),
+                    list(message.position),
+                )
+                self.relay_problem = problem
+                if positions is not None:
+                    self.relay_ready = True
+
+            def read_transforms(self) -> None:
+                transforms = (
+                    ("world -> link_base", "world", "link_base"),
+                    ("link_base -> link_eef", "link_base", "link_eef"),
+                    ("world -> link_eef", "world", "link_eef"),
+                )
+                for label, target_frame, source_frame in transforms:
+                    if self.transform_ready[label]:
+                        continue
+                    try:
+                        self.tf_buffer.lookup_transform(
+                            target_frame,
+                            source_frame,
+                            Time(),
+                            timeout=Duration(seconds=0.05),
+                        )
+                    except TransformException as exc:
+                        self.transform_problem[label] = str(exc)
+                        continue
+                    self.transform_ready[label] = True
+                    self.transform_problem[label] = ""
+
+            def ready(self) -> bool:
+                return self.relay_ready and all(self.transform_ready.values())
+
+        node = XArm6TfReadinessNode()
+        deadline = time.monotonic() + timeout
+        while rclpy.ok() and time.monotonic() < deadline and not node.ready():
+            rclpy.spin_once(node, timeout_sec=0.1)
+            node.read_transforms()
+        if node.ready():
+            return {
+                "success": True,
+                "message": (
+                    "xArm6 relayed /joint_states and TF world -> link_eef are ready"
+                ),
+            }
+        if not node.relay_ready:
+            return {
+                "success": False,
+                "message": f"xArm6 relayed /joint_states is not ready: {node.relay_problem}",
+            }
+        for label in (
+            "world -> link_base",
+            "link_base -> link_eef",
+            "world -> link_eef",
+        ):
+            if not node.transform_ready[label]:
+                detail = node.transform_problem[label]
+                return {
+                    "success": False,
+                    "message": f"TF {label} is unavailable: {detail}",
+                }
+        return {
+            "success": False,
+            "message": f"xArm6 TF readiness did not complete within {timeout:.1f}s",
+        }
+    except (ImportError, RuntimeError, TypeError, ValueError) as exc:
+        return {
+            "success": False,
+            "message": f"xArm6 relayed /joint_states and TF readiness failed: {exc}",
+        }
     finally:
         if node is not None:
             node.destroy_node()
@@ -3939,7 +4143,7 @@ def _read_snapshot(
             }
         if proc.is_alive():
             try:
-                result = result_queue.get_nowait()
+                result = result_queue.get(timeout=1.0)
             except queue.Empty:
                 result = None
             proc.terminate()
@@ -3948,7 +4152,7 @@ def _read_snapshot(
                 return result
             return {"success": False, "message": f"{source} /joint_states timed out."}
         try:
-            return result_queue.get_nowait()
+            return result_queue.get(timeout=0.5)
         except queue.Empty:
             if attempt + 1 < attempts:
                 continue
@@ -4348,9 +4552,20 @@ def run_snapshot(args: argparse.Namespace) -> int:
     }
     if args.include_world_tool_pose:
         payload["pose"] = dict(snap.get("pose") or {})
+        payload["world_base_pose"] = dict(snap.get("world_base_pose") or {})
         payload["world_tool0_ready"] = bool(snap.get("world_tool0_ready"))
     print(json.dumps(payload))
     return 0
+
+
+def run_xarm6_tf_readiness(args: argparse.Namespace) -> int:
+    """Report startup readiness for the exact root xArm6 TF input path."""
+    result = _xarm6_tf_readiness(
+        int(args.hardware_domain_id),
+        float(args.tf_readiness_timeout_sec),
+    )
+    print(json.dumps(result))
+    return 0 if result.get("success") else 4
 
 
 def _paired_replay_robot_plan(
@@ -5581,6 +5796,7 @@ def build_parser() -> argparse.ArgumentParser:
             "apply-gazebo-to-hardware",
             "initialize-gazebo-from-hardware",
             "snapshot",
+            "xarm6-tf-readiness",
             "prepare-replay",
             "replay",
         ],
@@ -5597,6 +5813,7 @@ def build_parser() -> argparse.ArgumentParser:
     # snapshot mode
     parser.add_argument("--source", choices=["gazebo", "hardware"], default="gazebo")
     parser.add_argument("--include-world-tool-pose", action="store_true")
+    parser.add_argument("--tf-readiness-timeout-sec", type=float, default=20.0)
     # initialize-gazebo-from-hardware mode
     parser.add_argument("--init-tolerance-rad", type=float, default=INITIALIZE_GAZEBO_TOLERANCE_RAD)
     parser.add_argument("--init-attempts", type=int, default=INITIALIZE_GAZEBO_ATTEMPTS)
@@ -5623,6 +5840,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_initialize_gazebo_from_hardware(args)
     if args.mode == "snapshot":
         return run_snapshot(args)
+    if args.mode == "xarm6-tf-readiness":
+        return run_xarm6_tf_readiness(args)
     if args.mode == "prepare-replay":
         return run_prepare_replay(args)
     if args.mode == "replay":

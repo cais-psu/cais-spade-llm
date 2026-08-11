@@ -158,8 +158,177 @@
       }
     },
     "real": {
-      "static_capabilities": {},
-      "controller": {},
+      "static_capabilities": {
+        "resource_type": "robot",
+        "reachability": [
+          "prusa-mk4-1",
+          "prusa-mk3",
+          "assembly_board-v1"
+        ],
+        "workspace_bounds": {
+          "x_min_m": -0.6,
+          "x_max_m": 0.6,
+          "y_min_m": -1.0,
+          "y_max_m": 0.1,
+          "z_min_m": 0.9,
+          "z_max_m": 1.6
+        },
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": -0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.9,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-1": {
+            "anchor_pose": {
+              "x": 0.4,
+              "y": -0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": -0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          }
+        }
+      },
+      "controller": {
+        "hardware_cartesian_service": "/xarm6/xarm/set_position",
+        "hardware_cartesian_velocity_service": "/xarm6/xarm/vc_set_cartesian_velocity",
+        "hardware_robot_states_topic": "/xarm6/xarm/robot_states",
+        "hardware_set_mode_service": "/xarm6/xarm/set_mode",
+        "hardware_set_state_service": "/xarm6/xarm/set_state",
+        "hardware_joint_duration_scale": 3.0769230769,
+        "hardware_cartesian_speed_mm_s": 50.0,
+        "hardware_cartesian_max_speed_mm_s": 100.0,
+        "hardware_cartesian_acceleration_mm_s2": 42.25,
+        "hardware_cartesian_position_tolerance_m": 0.003,
+        "hardware_cartesian_orientation_tolerance_rad": 0.0523598776,
+        "joint_state_topics": [
+          "/joint_states",
+          "/xarm/joint_states",
+          "/xarm6/joint_states",
+          "/xarm6/xarm/joint_states",
+          "/xarm6/xarm_gripper/joint_states"
+        ],
+        "hardware_trajectory_actions": [
+          "/xarm6/xarm6_traj_controller/follow_joint_trajectory",
+          "/xarm6_traj_controller/follow_joint_trajectory",
+          "/xarm_traj_controller/follow_joint_trajectory",
+          "/xarm6_xarm6_traj_controller/follow_joint_trajectory"
+        ],
+        "move_group": {
+          "group_name": "xarm6",
+          "ee_link": "link_eef",
+          "tcp_link": "link_tcp",
+          "frame_id": "world"
+        },
+        "gripper": {
+          "joint": "xarm6_drive_joint",
+          "topic": "/xarm6/xarm_gripper_traj_controller/joint_trajectory",
+          "hardware_service": "set_gripper_position",
+          "hardware_action": "/xarm6/xarm_gripper/gripper_action",
+          "action_candidates": [
+            "/xarm6/xarm_gripper/gripper_action",
+            "/xarm/xarm_gripper/gripper_action",
+            "/xarm_gripper/gripper_action"
+          ],
+          "hardware_service_candidates": [
+            "/xarm6/set_gripper_position",
+            "/xarm/set_gripper_position",
+            "/set_gripper_position"
+          ],
+          "open": 0.0,
+          "close": 0.85,
+          "open_width_mm": 85.0,
+          "close_width_mm": 0.0,
+          "open_pulse": 850.0,
+          "close_pulse": 0.0,
+          "move_time_sec": 0.4,
+          "settle_sec": 0.08,
+          "feedback_timeout_pad_sec": 1.0,
+          "position_tolerance": 0.02
+        },
+        "services": {
+          "detect_all": "/perception/xarm6/detect_all",
+          "cartesian_path": "/compute_cartesian_path",
+          "execute_trajectory": "/execute_trajectory",
+          "attach": "/ATTACHLINK",
+          "detach": "/DETACHLINK",
+          "set_entity_state": "/set_entity_state",
+          "get_entity_state": "/get_entity_state"
+        },
+        "attach": {
+          "robot_model_name": "dual_robot",
+          "attach_link_candidates": [
+            "link6"
+          ],
+          "release_detach_link_candidates": [
+            "link6",
+            "right_inner_knuckle",
+            "left_inner_knuckle",
+            "right_finger",
+            "left_finger"
+          ],
+          "primary_attach_link": "link6",
+          "detach_timeout_sec": 2.0,
+          "detach_max_link_attempts": 3,
+          "release_detach_timeout_sec": 8.0
+        },
+        "motion": {
+          "approach_height_m": 0.2,
+          "recovery_observed_pick_approach_height_m": 0.06,
+          "recovery_observed_pick_surface_clearance_m": 0.005,
+          "pick_tcp_z_bias_max_m": 0.02,
+          "pick_tcp_z_bias_min_m": 0.003,
+          "min_pick_tcp_z_m": 1.07,
+          "place_surface_gap_m": -0.01,
+          "release_preopen_settle_sec": 0.15,
+          "release_postopen_settle_sec": 0.6,
+          "release_postdetach_settle_sec": 0.35,
+          "release_descend_time_scale": 1.35,
+          "release_detach_retry_count": 3,
+          "release_detach_retry_delay_sec": 0.35,
+          "release_retry_lift_m": 0.005,
+          "xy_axis_step_m": 0.05,
+          "named_pose_duration_sec": 1.0,
+          "move_home_duration_sec": 1.0,
+          "trajectory_time_scale": 0.45
+        },
+        "parts_tuning": {
+          "insertion_depth_m": 0.0025
+        }
+      },
       "named_positions": {
         "home": [
           -0.6739,

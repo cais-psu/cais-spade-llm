@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Callable
 
 from nicegui import context, ui
 from nicegui.client import Client
@@ -28,11 +29,15 @@ _GAZEBO_VARIANTS = {
 _HARDWARE_STACKS = {
     "xarm6": (
         "xArm6 Hardware Stack",
-        "Start xArm6 MoveIt realmove stack (includes embedded driver)",
+        "Start the xArm6 driver with direct trajectory control; no MoveIt, RViz, or Gazebo",
     ),
     "ur5e": (
         "UR5e Hardware Stack",
-        "Auto sequence: start RTDE trajectory server, RG2 gripper bridge, and MoveIt",
+        "Start RTDE and RG2 with direct trajectory control; no MoveIt, RViz, or Gazebo",
+    ),
+    "dual robots": (
+        "Dual Hardware Stack",
+        "Start xArm6, UR5e RTDE, and RG2 with direct control; no MoveIt, RViz, or Gazebo",
     ),
 }
 _HARDWARE_PROC_NAMES = (
@@ -41,11 +46,9 @@ _HARDWARE_PROC_NAMES = (
     "hardware_ur5e_rtde_trajectory_server",
     "hardware_ur5e_rg2_gripper",
     "hardware_ur5e_moveit",
+    "hardware_dual_robots_moveit",
+    "hardware_robot_state_publisher",
 )
-
-_SUPPORT_PROCS = {
-    "perception": ("Perception", "Simulation-only: part detection via Gazebo ground-truth camera"),
-}
 
 
 def _client_alive(element) -> bool:
@@ -65,13 +68,33 @@ def _hardware_status_text(status: dict) -> str:
         if isinstance(robot_status, dict):
             robot_bits.append(f"{robot}: {_hardware_status_text(robot_status)}")
     if robot_bits:
+        state_publisher = status.get("state_publisher")
+        if state_publisher is not None:
+            robot_bits.append(f"State publisher: {str(state_publisher)}")
         return " | ".join(robot_bits)
     driver_state = str(status.get("driver", "stopped"))
-    moveit_state = str(status.get("moveit", "stopped"))
+    control = str(status.get("control", "direct"))
+    state_publisher = status.get("state_publisher")
     gripper_state = status.get("gripper")
+    joint_control = status.get("joint_control")
+    cartesian_control = status.get("cartesian_control")
+    control_text = ""
+    if joint_control is not None or cartesian_control is not None:
+        control_text = (
+            f" | Joint control: {str(joint_control or 'stopped')}"
+            f" | Cartesian control: {str(cartesian_control or 'stopped')}"
+        )
+    state_text = (
+        f" | State publisher: {str(state_publisher)}"
+        if state_publisher is not None
+        else ""
+    )
     if gripper_state is None:
-        return f"Driver: {driver_state} | MoveIt: {moveit_state}"
-    return f"Driver: {driver_state} | Gripper: {str(gripper_state)} | MoveIt: {moveit_state}"
+        return f"Driver: {driver_state} | Control: {control}{control_text}{state_text}"
+    return (
+        f"Driver: {driver_state} | Gripper: {str(gripper_state)} | "
+        f"Control: {control}{control_text}{state_text}"
+    )
 
 
 def _ur5e_status_sources(status: dict) -> list[tuple[str, dict]]:
@@ -94,6 +117,16 @@ def _render_ur5e_rtde_and_rg2_status(status: dict) -> None:
         rtde_message = str(source.get("rtde_trajectory_message") or "").strip()
         if rtde_message:
             ui.label(f"{prefix}RTDE trajectory: {rtde_message}").classes("text-xs text-slate-500")
+        joint_action_ready = source.get("rtde_trajectory_joint_action_ready")
+        cartesian_action_ready = source.get("rtde_trajectory_cartesian_action_ready")
+        if joint_action_ready is not None:
+            ui.label(f"{prefix}RTDE joint control ready: {bool(joint_action_ready)}").classes(
+                "text-xs text-slate-500"
+            )
+        if cartesian_action_ready is not None:
+            ui.label(
+                f"{prefix}RTDE Cartesian control ready: {bool(cartesian_action_ready)}"
+            ).classes("text-xs text-slate-500")
         rtde_blocked = str(source.get("rtde_trajectory_blocked_reason") or "").strip()
         if rtde_blocked:
             ui.label(f"{prefix}RTDE trajectory blocked: {rtde_blocked}").classes(
@@ -157,6 +190,7 @@ if (!window.__caisTeleopScrollBlockerInstalled) {
 
 def render(bridge: SystemBridge) -> None:
     _install_control_key_scroll_blocker()
+    refresh_callbacks: dict[str, Callable[[], None]] = {}
     with ui.column().classes("w-full max-w-7xl mx-auto p-6 gap-6"):
         ui.label("Control").classes("text-2xl font-bold")
 
@@ -167,10 +201,10 @@ def render(bridge: SystemBridge) -> None:
         _digital_twin_launch_section(bridge)
 
         # ── Robot Functions ──────────────────────────────────────────
-        _function_record_panel(bridge)
+        _function_record_panel(bridge, refresh_callbacks)
 
         # ── Interactive Teleop ───────────────────────────────────────
-        _teleop_section(bridge)
+        _teleop_section(bridge, refresh_callbacks)
 
 
 # =====================================================================
@@ -184,13 +218,14 @@ def _launch_section(bridge: SystemBridge) -> None:
             "The environment must be running before starting the agent system from the Dashboard."
         ).classes("text-xs text-slate-500 mb-3")
         ui.label(
-            "Hardware stacks are combined per arm. UR5e starts Driver, RG2 gripper bridge, then MoveIt; xArm6 MoveIt realmove includes its driver."
+            "Hardware stacks run without MoveIt, RViz, or Gazebo. xArm6 uses its trajectory "
+            "controller directly; RTDE is the UR5e arm actuator."
         ).classes("text-xs text-slate-500 mb-2")
 
         hw_refresh_state = {"busy": False}
         ips = bridge.get_hardware_ips()
         with ui.column().classes("w-full gap-2 mb-3"):
-            ui.label("Hardware Connectivity (Ping)").classes("text-sm font-semibold text-slate-600")
+            ui.label("Hardware Connectivity").classes("text-sm font-semibold text-slate-600")
 
             with ui.row().classes("items-center gap-2"):
                 xarm_ping_icon = ui.icon("circle", color="grey").classes("text-xs")
@@ -207,9 +242,11 @@ def _launch_section(bridge: SystemBridge) -> None:
                 ip = str(entry.get("ip", ""))
                 if entry.get("reachable"):
                     latency = entry.get("latency_ms")
+                    probe = str(entry.get("probe") or "").strip()
+                    probe_text = f" via {probe}" if probe else ""
                     if latency is not None:
-                        return f"{name}: {ip} reachable ({latency:.1f} ms)"
-                    return f"{name}: {ip} reachable"
+                        return f"{name}: {ip} reachable{probe_text} ({latency:.1f} ms)"
+                    return f"{name}: {ip} reachable{probe_text}"
                 return f"{name}: {ip} unreachable ({entry.get('message', 'no reply')})"
 
             def _ping_color(entry: dict) -> str:
@@ -293,7 +330,6 @@ def _launch_section(bridge: SystemBridge) -> None:
             return (
                 tuple((name, statuses.get(name, "stopped")) for name in _GAZEBO_VARIANTS),
                 tuple((name, statuses.get(name, "stopped")) for name in _HARDWARE_PROC_NAMES),
-                tuple((name, statuses.get(name, "stopped")) for name in _SUPPORT_PROCS),
             )
 
         def _refresh(*, force: bool = False):
@@ -308,7 +344,7 @@ def _launch_section(bridge: SystemBridge) -> None:
                     asyncio.create_task(_refresh_ping_async())
                     return
                 refresh_state["signature"] = signature
-                statuses = dict(signature[0] + signature[1] + signature[2])
+                statuses = dict(signature[0] + signature[1])
             finally:
                 refresh_state["busy"] = False
 
@@ -334,6 +370,7 @@ def _launch_section(bridge: SystemBridge) -> None:
                         label,
                         desc,
                         statuses.get(name, "stopped"),
+                        _refresh,
                         blocked_reason=blocked_reason,
                     )
 
@@ -345,16 +382,31 @@ def _launch_section(bridge: SystemBridge) -> None:
                     stack_status = bridge.hardware_stack_status(robot)
                     if any_gazebo_running and stack_status.get("overall") != "running":
                         blocked_reason = "Blocked: Gazebo is running. Stop Gazebo first."
+                    else:
+                        other_running = next(
+                            (
+                                other_robot
+                                for other_robot in _HARDWARE_STACKS
+                                if other_robot != robot
+                                and bridge.hardware_stack_status(other_robot).get("overall")
+                                == "running"
+                            ),
+                            "",
+                        )
+                        if other_running:
+                            blocked_reason = (
+                                f"Blocked: {other_running} Hardware Stack is running. "
+                                "Stop it first."
+                            )
                     _hardware_stack_row(
-                        bridge, robot, label, desc, stack_status, blocked_reason=blocked_reason
+                        bridge,
+                        robot,
+                        label,
+                        desc,
+                        stack_status,
+                        _refresh,
+                        blocked_reason=blocked_reason,
                     )
-
-                ui.separator().classes("my-2")
-
-                # Support processes.
-                ui.label("Support Services").classes("text-sm font-semibold text-slate-600")
-                for name, (label, desc) in _SUPPORT_PROCS.items():
-                    _proc_row(bridge, name, label, desc, statuses.get(name, "stopped"))
 
                 ui.separator().classes("my-2")
 
@@ -408,6 +460,7 @@ def _proc_row(
     label: str,
     desc: str,
     status: str,
+    refresh_callback: Callable[..., None],
     blocked_reason: str | None = None,
 ) -> None:
     with ui.row().classes("items-center gap-4 w-full"):
@@ -427,12 +480,12 @@ def _proc_row(
                 ui.notify(err, type="warning")
             else:
                 ui.notify(f"Started {label}", type="positive")
-            _refresh(force=True)
+            refresh_callback(force=True)
 
         async def _stop_async(n=name):
             await asyncio.to_thread(bridge.ros2_stop, n)
             ui.notify(f"Stopped {label}", type="info")
-            _refresh(force=True)
+            refresh_callback(force=True)
 
         def _start(n=name):
             if blocked_reason:
@@ -457,10 +510,22 @@ def _hardware_stack_row(
     label: str,
     desc: str,
     status: dict,
+    refresh_callback: Callable[..., None],
     blocked_reason: str | None = None,
 ) -> None:
     overall = str(status.get("overall", "stopped"))
-    color = "green" if overall == "running" else ("orange" if overall == "partial" else "grey")
+    lifecycle_state = str(status.get("lifecycle_state") or "").strip()
+    if not lifecycle_state:
+        lifecycle_state = "running" if overall == "running" else "stopped"
+    color = (
+        "green"
+        if lifecycle_state == "running" and overall == "running"
+        else "red"
+        if lifecycle_state == "failed"
+        else "orange"
+        if lifecycle_state in {"starting", "stopping"} or overall == "partial"
+        else "grey"
+    )
 
     with ui.row().classes("items-center gap-4 w-full"):
         ui.icon("circle", color=color).classes("text-xs")
@@ -468,40 +533,122 @@ def _hardware_stack_row(
         with ui.column().classes("gap-0 flex-1"):
             ui.label(label).classes("font-semibold text-sm")
             ui.label(desc).classes("text-xs text-slate-400")
+            ui.label(f"Lifecycle: {lifecycle_state}").classes("text-xs text-slate-500")
+            generation = status.get("lifecycle_generation")
+            if generation is not None:
+                ui.label(f"Repair generation: {generation}").classes(
+                    "text-xs text-slate-500"
+                )
             ui.label(_hardware_status_text(status)).classes("text-xs text-slate-500")
-            if robot == "ur5e":
+            validated_process_pids = dict(
+                status.get("validated_process_pids") or {}
+            )
+            if validated_process_pids:
+                ownership = ", ".join(
+                    f"{name} PID {process_id}"
+                    for name, process_id in validated_process_pids.items()
+                )
+                ui.label(f"Validated ownership: {ownership}").classes(
+                    "text-xs text-slate-500"
+                )
+            for robot_name, result in dict(
+                status.get("stationary_results") or {}
+            ).items():
+                stationary_ready = bool(dict(result or {}).get("stationary_ready"))
+                stationary_message = str(dict(result or {}).get("message") or "")
+                ui.label(
+                    f"{robot_name} stationary: "
+                    f"{'ready' if stationary_ready else 'failed'}"
+                    + (f" | {stationary_message}" if stationary_message else "")
+                ).classes(
+                    "text-xs text-slate-500" if stationary_ready else "text-xs text-red-700"
+                )
+            for robot_name, reset_result in dict(
+                status.get("cartesian_jog_reset_results") or {}
+            ).items():
+                ui.label(f"{robot_name} Cartesian jog reset: {reset_result}").classes(
+                    "text-xs text-slate-500"
+                )
+            last_error = str(status.get("last_error") or "").strip()
+            if last_error:
+                ui.label(last_error).classes("text-xs text-red-700")
+            if robot in {"ur5e", "dual robots"}:
                 _render_ur5e_rtde_and_rg2_status(status)
 
-        start_blocked = bool(blocked_reason) or overall == "running"
-        stop_disabled = overall == "stopped"
+        repair_needed = lifecycle_state == "failed"
+        selected_stack = str(status.get("selected_stack") or "")
+        another_stack_selected = bool(selected_stack and selected_stack != robot)
+        start_blocked = bool(blocked_reason) or another_stack_selected or lifecycle_state in {
+            "starting",
+            "running",
+            "stopping",
+        }
+        stop_disabled = another_stack_selected or (
+            lifecycle_state == "stopped" and overall == "stopped"
+        )
+        operation_state = {"busy": False}
 
         async def _start_async() -> None:
-            err = await asyncio.to_thread(bridge.ros2_start_hardware_stack, robot)
-            if err:
-                ui.notify(err, type="warning", timeout=5000)
-                return
-            ui.notify(f"Started {label}", type="positive")
+            try:
+                operation = (
+                    bridge.ros2_repair_hardware_stack
+                    if repair_needed
+                    else bridge.ros2_start_hardware_stack
+                )
+                err = await asyncio.to_thread(operation, robot)
+                if err:
+                    ui.notify(err, type="warning", timeout=5000)
+                else:
+                    verb = "Repaired" if repair_needed else "Started"
+                    ui.notify(f"{verb} {label}", type="positive")
+            finally:
+                operation_state["busy"] = False
+                if _client_alive(start_button):
+                    start_button.props(remove="loading")
+                refresh_callback(force=True)
 
         async def _stop_async() -> None:
-            err = await asyncio.to_thread(bridge.ros2_stop_hardware_stack, robot)
-            if err:
-                ui.notify(err, type="warning", timeout=3000)
-                return
-            ui.notify(f"Stopped {label}", type="info")
+            try:
+                err = await asyncio.to_thread(bridge.ros2_stop_hardware_stack, robot)
+                if err:
+                    ui.notify(err, type="warning", timeout=3000)
+                else:
+                    ui.notify(f"Stopped {label}", type="info")
+            finally:
+                operation_state["busy"] = False
+                if _client_alive(stop_button):
+                    stop_button.props(remove="loading")
+                refresh_callback(force=True)
 
         def _start() -> None:
+            if operation_state["busy"]:
+                return
             if blocked_reason:
                 ui.notify(blocked_reason, type="warning", timeout=3500)
                 return
+            operation_state["busy"] = True
+            start_button.disable()
+            stop_button.disable()
+            start_button.props("loading")
             asyncio.create_task(_start_async())
 
         def _stop() -> None:
+            if operation_state["busy"]:
+                return
+            operation_state["busy"] = True
+            start_button.disable()
+            stop_button.disable()
+            stop_button.props("loading")
             asyncio.create_task(_stop_async())
 
-        ui.button("Start", on_click=_start, icon="play_arrow").props(
+        start_button = ui.button(
+            "Repair Hardware Stack" if repair_needed else "Start",
+            on_click=_start,
+            icon="build" if repair_needed else "play_arrow",
+        ).props(
             "flat dense" + (" disable" if start_blocked else "")
         ).classes("text-green-600")
-        ui.button("Stop", on_click=_stop, icon="stop").props(
+        stop_button = ui.button("Stop", on_click=_stop, icon="stop").props(
             "flat dense" + (" disable" if stop_disabled else "")
         ).classes("text-red-600")
 
@@ -634,6 +781,27 @@ def _digital_twin_active_target(rows: dict[str, dict]) -> str:
     return ""
 
 
+def _hardware_stack_robot_function_target(bridge: SystemBridge) -> str:
+    for stack, target in (
+        ("dual robots", "dual robots"),
+        ("xarm6", "xarm only"),
+        ("ur5e", "ur5e only"),
+    ):
+        status = bridge.hardware_stack_status(stack)
+        selected_stack = str(status.get("selected_stack") or "")
+        lifecycle_state = str(status.get("lifecycle_state") or "")
+        if selected_stack == stack and lifecycle_state in {
+            "starting",
+            "running",
+            "stopping",
+            "failed",
+        }:
+            return target
+        if not selected_stack and str(status.get("overall") or "") == "running":
+            return target
+    return ""
+
+
 def _digital_twin_row(
     bridge: SystemBridge, target: str, row: dict, refresh_callback, *, active_target: str = ""
 ) -> None:
@@ -650,7 +818,6 @@ def _digital_twin_row(
     gazebo_status = str(gazebo.get("status", "stopped"))
     hardware_status = dict(hardware.get("status") or {})
     hardware_overall = str(hardware.get("overall", "unknown"))
-    hardware_robots = [str(robot).strip().lower() for robot in (hardware.get("robots") or [])]
     sync_state = str(sync.get("state", "unknown"))
     sync_process_status = str(sync.get("process_status", "unknown"))
     sync_message = str(sync.get("message", "") or "").strip()
@@ -839,12 +1006,18 @@ def _digital_twin_row(
             # Function execution and position recording live in Robot Functions.
 
 
-def _function_record_panel(bridge: SystemBridge) -> None:
+def _function_record_panel(
+    bridge: SystemBridge,
+    refresh_callbacks: dict[str, Callable[[], None]],
+) -> None:
     rows = bridge.digital_twin_statuses()
     targets = [target for target, row in rows.items() if bool(row.get("supported", False))]
     if not targets:
         return
     active_target = _digital_twin_active_target(rows)
+    hardware_target = _hardware_stack_robot_function_target(bridge)
+    if hardware_target:
+        active_target = hardware_target
     initial_target = (
         active_target
         if active_target in targets
@@ -878,8 +1051,12 @@ def _function_record_panel(bridge: SystemBridge) -> None:
 
         target_select.on_value_change(_refresh_body)
         _refresh_body()
+        refresh_callbacks["robot_functions"] = _refresh_body
 
-        active_target_refresh = {"busy": False}
+        active_target_refresh: dict[str, object] = {
+            "busy": False,
+            "hardware_signature": (),
+        }
 
         async def _sync_active_target() -> None:
             if not _client_alive(body):
@@ -899,6 +1076,29 @@ def _function_record_panel(bridge: SystemBridge) -> None:
                 if not current_targets:
                     return
                 current_active = _digital_twin_active_target(current_rows)
+                current_hardware_target = await asyncio.to_thread(
+                    _hardware_stack_robot_function_target,
+                    bridge,
+                )
+                if current_hardware_target:
+                    current_active = current_hardware_target
+                hardware_signature: tuple[object, ...] = ()
+                if current_hardware_target:
+                    stack = {
+                        "xarm only": "xarm6",
+                        "ur5e only": "ur5e",
+                        "dual robots": "dual robots",
+                    }[current_hardware_target]
+                    stack_status = await asyncio.to_thread(
+                        bridge.hardware_stack_status,
+                        stack,
+                    )
+                    hardware_signature = (
+                        current_hardware_target,
+                        str(stack_status.get("lifecycle_state") or ""),
+                        str(stack_status.get("overall") or ""),
+                        str(stack_status.get("last_error") or ""),
+                    )
                 target_select.options = current_targets
                 desired = (
                     current_active
@@ -916,7 +1116,12 @@ def _function_record_panel(bridge: SystemBridge) -> None:
                 else:
                     target_select.enable()
                 target_select.update()
-                if changed:
+                lifecycle_changed = (
+                    hardware_signature
+                    != active_target_refresh.get("hardware_signature")
+                )
+                active_target_refresh["hardware_signature"] = hardware_signature
+                if changed or lifecycle_changed:
                     _refresh_body()
             finally:
                 active_target_refresh["busy"] = False
@@ -996,6 +1201,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     execution_status = ui.label("Run readiness is checked automatically without motion.").classes(
         "text-xs text-slate-500"
     )
+    execution_blocker = ui.label("").classes("text-xs text-amber-700")
+    execution_blocker.set_visibility(False)
     execution_controls = ui.row().classes("items-center gap-2 w-full flex-wrap")
 
     ui.label("Function Definition").classes("text-sm font-semibold mt-2")
@@ -1098,40 +1305,43 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         )
 
     def _confirmation_description(function_name: str, values: dict[str, str]) -> str:
+        robot = _current_robot()
         part_name = values.get("part_name", "")
         if function_name == "pick_approach":
-            if part_name == "MG":
+            if robot == "ur5e" and part_name == "MG":
                 return (
                     f"The UR5e will stage at {values.get('origin_resource_location', '')}, "
                     "request a fresh MG detection, open the stock RG2, and descend to the "
                     "smooth raised hub target calculated from the actual Gear_Medium.STL. "
+                    "If the empty, open runtime is still at_pick, it will reset to idle "
+                    "without robot motion immediately before staging. "
                     "The gripper remains open for visual confirmation; the Gazebo MG is not "
                     "used for physical geometry."
                 )
             return (
-                f"The UR5e will stage at {values.get('origin_resource_location', '')}, request "
+                f"The {robot} will stage at {values.get('origin_resource_location', '')}, request "
                 f"a fresh {part_name} detection, open the gripper, move above the detected "
                 "gear, and descend to the computed pick target."
             )
         if function_name == "pick_grasp":
-            if part_name == "MG":
+            if robot == "ur5e" and part_name == "MG":
                 return (
                     "The stock RG2 will close at the STL-calculated width around the MG "
                     "smooth raised hub and then lift. It will not descend again."
                 )
-            return f"The UR5e will grasp and lift {part_name}."
+            return f"The {robot} will grasp and lift {part_name}."
         if function_name == "place_approach":
             return (
-                f"The UR5e will move {part_name} to the saved approach and descend positions "
+                f"The {robot} will move {part_name} to the saved approach and descend positions "
                 f"for {values.get('destination_location', '')}."
             )
         if function_name == "place_insert":
             return (
-                f"The UR5e will release {part_name} at "
+                f"The {robot} will release {part_name} at "
                 f"{values.get('destination_location', '')} and lift away. "
                 "Releasing the part is irreversible."
             )
-        return "The UR5e will move to the configured home named position."
+        return f"The {robot} will move to the configured home named position."
 
     with execution_controls:
         with ui.dialog() as run_confirm, ui.card().classes("gap-3 max-w-xl"):
@@ -1162,10 +1372,17 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     _render_execution()
                     _render_steps()
                     if function_name == "pick_approach":
-                        execution_status.set_text(
-                            "Dispatching pick_approach after fresh RTDE, world -> tool0, "
-                            "and perception checks; then staging, settling, and detecting."
-                        )
+                        if robot == "ur5e":
+                            execution_status.set_text(
+                                "Dispatching pick_approach after fresh RTDE, world -> tool0, "
+                                "and perception checks; then staging, settling, and detecting."
+                            )
+                        else:
+                            execution_status.set_text(
+                                "Dispatching pick_approach after fresh xarm6 hardware, "
+                                "world -> link_eef, and perception checks; then staging, "
+                                "settling, and detecting."
+                            )
                     else:
                         execution_status.set_text(
                             f"Dispatching {function_name} after fresh physical readiness checks."
@@ -1304,23 +1521,18 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             .classes("text-red-600")
         )
 
-        with ui.dialog() as mg_close_test_confirm, ui.card().classes("gap-3 max-w-xl"):
-            ui.label("Run MG Close Test on the physical ur5e?").classes("font-semibold")
-            ui.label(
-                "The arm will not move. The RG2 will close once to the retained MG position "
-                "(approximately 0.047), hold for three seconds while you inspect the smooth "
-                "hub contact, and reopen in all cases. The stock fingertips move downward "
-                "approximately 26.16 mm while closing."
-            ).classes("text-sm")
+        with ui.dialog() as gripper_close_test_confirm, ui.card().classes("gap-3 max-w-xl"):
+            gripper_close_test_title = ui.label("").classes("font-semibold")
+            gripper_close_test_text = ui.label("").classes("text-sm")
             ui.label(
                 "Clear the gripper area and keep the UR5e at the completed pick_approach pose."
             ).classes("text-xs text-red-700")
             with ui.row().classes("justify-end gap-2 w-full"):
-                ui.button("Cancel", on_click=mg_close_test_confirm.close).props("flat")
+                ui.button("Cancel", on_click=gripper_close_test_confirm.close).props("flat")
 
-                async def _confirmed_mg_close_test() -> None:
+                async def _confirmed_gripper_close_test() -> None:
                     client = _current_client()
-                    mg_close_test_confirm.close()
+                    gripper_close_test_confirm.close()
                     if execution.get("busy") or execution.get("checking"):
                         _notify(
                             "A robot function check or execution is already active.",
@@ -1328,8 +1540,9 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             client=client,
                         )
                         return
-                    execution.update({"busy": True, "active_function": "MG Close Test"})
-                    mg_close_test_button.props("loading")
+                    part_name = _current_part_name()
+                    execution.update({"busy": True, "active_function": "Gripper Close Test"})
+                    gripper_close_test_button.props("loading")
                     _render_execution()
                     _render_steps()
                     execution_status.set_text(
@@ -1338,13 +1551,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     )
                     execution_status.classes(replace="text-xs text-amber-700")
                     try:
-                        result = await bridge.digital_twin_execute_mg_close_test(
+                        result = await bridge.digital_twin_execute_gripper_close_test(
                             target,
                             _current_robot(),
                             _current_origin_resource_location(),
+                            part_name,
                             confirmed=True,
                         )
-                        message = str(result.get("message") or "MG Close Test completed.")
+                        message = str(
+                            result.get("message") or f"{part_name} Gripper Close Test completed."
+                        )
                         if _client_alive(execution_status):
                             execution_status.set_text(message)
                             execution_status.classes(
@@ -1361,45 +1577,61 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             client=client,
                         )
                     except Exception as exc:
-                        log.exception("MG Close Test UI execution failed")
-                        message = f"MG Close Test failed: {exc}"
+                        log.exception("Gripper Close Test UI execution failed")
+                        message = f"Gripper Close Test failed: {exc}"
                         if _client_alive(execution_status):
                             execution_status.set_text(message)
                             execution_status.classes(replace="text-xs text-red-700")
                         _notify(message, type="negative", timeout=7000, client=client)
                     finally:
                         execution.update({"busy": False, "active_function": ""})
-                        if _client_alive(mg_close_test_button):
-                            mg_close_test_button.props(remove="loading")
+                        if _client_alive(gripper_close_test_button):
+                            gripper_close_test_button.props(remove="loading")
                             _render_execution()
                             _render_steps()
 
                 ui.button(
-                    "Confirm MG Close Test",
-                    on_click=_confirmed_mg_close_test,
+                    "Confirm Gripper Close Test",
+                    on_click=_confirmed_gripper_close_test,
                     icon="compare_arrows",
                 ).props("color=red")
 
-        def _open_mg_close_test_confirm() -> None:
+        def _open_gripper_close_test_confirm() -> None:
             if execution.get("busy") or execution.get("checking"):
                 _notify("A robot function check or execution is already active.", type="warning")
                 return
-            mg_close_test_confirm.open()
+            part_name = _current_part_name()
+            gripper_close_test_title.set_text(
+                f"Run {part_name} Gripper Close Test on the physical ur5e?"
+            )
+            if part_name == "MG":
+                gripper_close_test_text.set_text(
+                    "The arm will not move. The RG2 will close once to the retained MG "
+                    "position (approximately 0.047), hold for three seconds, and reopen in "
+                    "all cases. The stock fingertips move downward approximately 26.16 mm "
+                    "at this MG closing width."
+                )
+            else:
+                gripper_close_test_text.set_text(
+                    f"The arm will not move. The RG2 will close once to the retained "
+                    f"{part_name} gripper_close_position from pick_approach, hold for three "
+                    "seconds, and reopen in all cases."
+                )
+            gripper_close_test_confirm.open()
 
-        mg_close_test_button = (
+        gripper_close_test_button = (
             ui.button(
-                "MG Close Test",
-                on_click=_open_mg_close_test_confirm,
+                "Gripper Close Test",
+                on_click=_open_gripper_close_test_confirm,
                 icon="compare_arrows",
             )
             .props("outline dense")
             .classes("text-amber-700")
         )
-        mg_close_test_help = ui.label(
-            "Start with the configured MG +1 mm. If the closed pads are still low, let the "
-            "test reopen, jog Z+ by 1 mm, and repeat. Persist MG: 0.002 only if that second "
-            "millimeter is required. If more than 2 mm is needed, do not run pick_grasp; "
-            "inspect the mount, table plane, fingertips, and MG orientation."
+        gripper_close_test_help = ui.label(
+            "Gripper Close Test only: uses the selected part's retained "
+            "gripper_close_position. It never moves or lifts the arm and always attempts "
+            "to reopen the RG2."
         ).classes("text-xs text-amber-700")
 
     def _render_execution() -> None:
@@ -1432,23 +1664,75 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             if location_argument == "destination_location"
             else True
         )
+        blocker = ""
+        hardware_target = _hardware_stack_robot_function_target(bridge)
+        if hardware_target:
+            stack = {
+                "xarm only": "xarm6",
+                "ur5e only": "ur5e",
+                "dual robots": "dual robots",
+            }[hardware_target]
+            stack_status = bridge.hardware_stack_status(stack)
+            if hardware_target != target:
+                blocker = (
+                    f"Selected Function Execution target is {target}, but "
+                    f"{hardware_target} owns the Hardware Stack."
+                )
+            elif str(stack_status.get("lifecycle_state") or "") != "running":
+                blocker = str(
+                    stack_status.get("last_error")
+                    or f"{stack} Hardware Stack lifecycle is "
+                    f"{stack_status.get('lifecycle_state') or 'stopped'}."
+                )
+            elif str(stack_status.get("overall") or "") != "running":
+                blocker = f"{stack} Hardware Stack components are not all running."
+            else:
+                robot_status = (
+                    dict(stack_status.get(_current_robot()) or {})
+                    if stack == "dual robots"
+                    else stack_status
+                )
+                if robot_status.get("cartesian_function_ready") is False:
+                    reason = str(
+                        robot_status.get("cartesian_readiness_message")
+                        or "Cartesian frame validation has not completed"
+                    )
+                    blocker = (
+                        reason
+                        if reason.startswith("Cartesian frame validation failed:")
+                        else f"Cartesian frame validation failed: {reason}"
+                    )
+                elif (
+                    _current_robot() == "ur5e"
+                    and str(robot_status.get("gripper_action") or "") != "ready"
+                ):
+                    blocker = "UR5e RG2 gripper action is not ready."
+        teleop_readiness = bridge.teleop_cartesian_readiness(_current_robot())
+        if teleop_readiness.get("smooth_hold_active"):
+            blocker = "Release Cartesian Smooth Hold before Function Execution."
+        execution_blocker.set_text(blocker)
+        execution_blocker.set_visibility(bool(blocker))
         enabled = bool(
-            _current_robot() == "ur5e"
+            _current_robot() in {"xarm6", "ur5e"}
             and function_name
             and has_location
             and (not needs_part or _current_part_name())
             and controls_enabled
         )
         run_button.set_enabled(enabled)
-        show_mg_close_test = bool(
+        show_gripper_close_test = bool(
             _current_robot() == "ur5e"
-            and _current_part_name() == "MG"
+            and bool(_current_part_name())
             and function_name in {"pick_approach", "pick_grasp"}
         )
-        mg_close_test_button.set_visibility(show_mg_close_test)
-        mg_close_test_help.set_visibility(show_mg_close_test)
-        mg_close_test_button.set_enabled(
-            bool(show_mg_close_test and has_location and controls_enabled)
+        gripper_close_test_button.set_visibility(show_gripper_close_test)
+        gripper_close_test_help.set_visibility(show_gripper_close_test)
+        gripper_close_test_button.set_enabled(
+            bool(
+                show_gripper_close_test
+                and has_location
+                and controls_enabled
+            )
         )
 
     async def _capture_position(step_name: str, primitive: str) -> None:
@@ -1463,12 +1747,25 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution.update(
             {
                 "checking": True,
-                "active_function": f"{function_name}.{step_name} Capture Position",
+                "active_function": f"{function_name}.{step_name} Capture Pose",
             }
         )
         _render_execution()
         _render_steps()
         try:
+            preparation = await bridge.digital_twin_prepare_function_capture(
+                target,
+                robot,
+            )
+            if not preparation.get("success"):
+                result = preparation
+                _notify(
+                    str(result.get("message") or ""),
+                    type="warning",
+                    timeout=6000,
+                    client=client,
+                )
+                return
             result = await asyncio.to_thread(
                 bridge.digital_twin_capture_function_step,
                 target,
@@ -1503,7 +1800,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution.update(
             {
                 "checking": True,
-                "active_function": f"{function_name}.{step_name} Save/Replace Position",
+                "active_function": f"{function_name}.{step_name} Save/Replace Pose",
             }
         )
         _render_execution()
@@ -1542,7 +1839,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution.update(
             {
                 "checking": True,
-                "active_function": f"{function_name}.{step_name} Clear Position",
+                "active_function": f"{function_name}.{step_name} Clear Pose",
             }
         )
         _render_execution()
@@ -1594,6 +1891,23 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         _render_execution()
         _render_steps()
         try:
+            execution_status.set_text(
+                f"Preparing the physical {robot} Function Execution runtime; no motion."
+            )
+            execution_status.classes(replace="text-xs text-amber-700")
+            preparation = await bridge.digital_twin_prepare_function_position(
+                target,
+                robot,
+            )
+            if not preparation.get("success"):
+                message = str(
+                    preparation.get("message")
+                    or f"Physical {robot} Function Execution preparation failed."
+                )
+                execution_status.set_text(message)
+                execution_status.classes(replace="text-xs text-red-700")
+                _notify(message, type="warning", timeout=7000, client=client)
+                return
             result = await asyncio.to_thread(
                 bridge.digital_twin_test_function_position,
                 target,
@@ -1604,8 +1918,17 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 confirmed=True,
                 part_name=part_name,
             )
+            message = str(result.get("message") or "")
+            execution_status.set_text(message)
+            execution_status.classes(
+                replace=(
+                    "text-xs text-green-700"
+                    if result.get("success")
+                    else "text-xs text-red-700"
+                )
+            )
             _notify(
-                str(result.get("message") or ""),
+                message,
                 type="positive" if result.get("success") else "warning",
                 timeout=6000,
                 client=client,
@@ -1616,10 +1939,113 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 _render_execution()
                 _render_steps()
 
-    def _render_steps() -> None:
+    async def _preview_position(step_name: str) -> None:
+        client = _current_client()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        robot = _current_robot()
+        function_name = _current_function()
+        recording_name = _current_recording_name()
+        part_name = _current_part_name()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": f"{function_name}.{step_name} Preview Resolved Pose",
+            }
+        )
+        _render_execution()
+        _render_steps()
+        try:
+            execution_status.set_text(
+                f"Preparing the physical {robot} Function Execution runtime; no motion."
+            )
+            execution_status.classes(replace="text-xs text-amber-700")
+            preparation = await bridge.digital_twin_prepare_function_position(
+                target,
+                robot,
+            )
+            if not preparation.get("success"):
+                message = str(
+                    preparation.get("message")
+                    or f"Physical {robot} Function Execution preparation failed."
+                )
+                execution_status.set_text(message)
+                execution_status.classes(replace="text-xs text-red-700")
+                _notify(message, type="warning", timeout=7000, client=client)
+                return
+            result = await asyncio.to_thread(
+                bridge.digital_twin_preview_function_position,
+                target,
+                robot,
+                function_name,
+                recording_name,
+                step_name,
+                part_name=part_name,
+            )
+            message = str(result.get("message") or "")
+            resolved = dict(result.get("resolved_position") or {})
+            computed = dict(result.get("computed_position") or {})
+            if result.get("success") and resolved:
+                message = (
+                    f"{message} Computed world -> "
+                    f"{'tool0' if robot == 'ur5e' else 'link_eef'}: "
+                    f"x={float(computed['x']):.6f}, "
+                    f"y={float(computed['y']):.6f}, "
+                    f"z={float(computed['z']):.6f}; resolved: "
+                    f"x={float(resolved['x']):.6f}, "
+                    f"y={float(resolved['y']):.6f}, "
+                    f"z={float(resolved['z']):.6f}."
+                )
+                relative_position = dict(result.get("relative_position_m") or {})
+                current_computed = dict(
+                    result.get("resolved_computed_position_m") or {}
+                )
+                if relative_position and current_computed:
+                    message += (
+                        f" Saved calibration XYZ offset=({float(relative_position['x']):+.6f}, "
+                        f"{float(relative_position['y']):+.6f}, "
+                        f"{float(relative_position['z']):+.6f}) m from the computed pose "
+                        f"({float(current_computed['x']):.6f}, "
+                        f"{float(current_computed['y']):.6f}, "
+                        f"{float(current_computed['z']):.6f})."
+                    )
+                diagnostics = dict(result.get("diagnostics") or {})
+                if diagnostics.get("finger_tooth_clearance_m") is not None:
+                    message += (
+                        " MG tooth clearance="
+                        f"{float(diagnostics['finger_tooth_clearance_m']) * 1000.0:.2f} mm, "
+                        "hub overlap="
+                        f"{float(diagnostics['finger_hub_overlap_m']) * 1000.0:.2f} mm."
+                    )
+            execution_status.set_text(message)
+            execution_status.classes(
+                replace=(
+                    "text-xs text-green-700"
+                    if result.get("success")
+                    else "text-xs text-red-700"
+                )
+            )
+            _notify(
+                message,
+                type="positive" if result.get("success") else "warning",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(run_button):
+                _render_execution()
+                _render_steps()
+
+    def _render_steps() -> None:  # noqa: C901, PLR0912, PLR0915 - operator states stay local.
         function_name = _current_function()
         name = _current_recording_name()
-        controls_blocked = bool(execution.get("busy") or execution.get("checking"))
+        controls_blocked = bool(
+            execution.get("busy")
+            or execution.get("checking")
+            or execution.get("preparing")
+        )
         template = bridge.digital_twin_function_template(function_name)
         saved_steps = {
             str(step.get("step_name") or ""): dict(step)
@@ -1641,26 +2067,34 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 part_name=_current_part_name(),
             )
         }
-        required = [step for step in template if bool(step.get("recordable"))]
+        recordable_steps = [step for step in template if bool(step.get("recordable"))]
+        required_steps = [step for step in recordable_steps if bool(step.get("required"))]
         saved_required = [
             step
-            for step in required
+            for step in required_steps
             if str(step.get("step_name") or "") in saved_steps
             and saved_steps[str(step.get("step_name") or "")].get("pose")
         ]
-        recording_container.set_visibility(bool(required))
+        recording_container.set_visibility(bool(recordable_steps))
         definition_summary.set_text(
             f"{len(template)} ordered primitive step{'s' if len(template) != 1 else ''}."
             if template
             else "No function definition is available."
         )
-        if required and function_name == "place_approach":
+        if required_steps and function_name == "place_approach":
             recording_summary.set_text(
-                f"{len(saved_required)}/{len(required)} positions saved for "
+                f"{len(saved_required)}/{len(required_steps)} required positions saved for "
                 f"{name} / {_current_part_name()}"
             )
-        elif required:
-            recording_summary.set_text(f"{len(saved_required)}/{len(required)} positions saved")
+        elif recordable_steps:
+            saved_count = sum(
+                1
+                for step in recordable_steps
+                if str(step.get("step_name") or "") in saved_steps
+            )
+            recording_summary.set_text(
+                f"{saved_count}/{len(recordable_steps)} optional Cartesian positions saved"
+            )
         info = bridge.digital_twin_function_info(
             target,
             _current_robot(),
@@ -1669,7 +2103,9 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             _current_part_name(),
         )
         recording_info.set_text(
-            f"Saving as: {info.get('display_path')}" if info.get("success") and required else ""
+            f"Saving as: {info.get('display_path')}"
+            if info.get("success") and recordable_steps
+            else ""
         )
         definition_container.clear()
         with definition_container:
@@ -1677,6 +2113,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 step_name = str(step.get("step_name") or "")
                 primitive = str(step.get("primitive") or "")
                 recordable = bool(step.get("recordable"))
+                position_required = bool(step.get("required"))
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-2 w-full"):
                         ui.label(str(index)).classes("text-xs font-semibold w-5")
@@ -1688,8 +2125,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             ui.label("No recorded position required").classes(
                                 "text-xs text-slate-500"
                             )
+                        elif position_required:
+                            ui.label("Recorded position required").classes(
+                                "text-xs text-blue-700"
+                            )
                         else:
-                            ui.label("Recorded position required").classes("text-xs text-blue-700")
+                            ui.label("Optional Cartesian teaching").classes(
+                                "text-xs text-amber-700"
+                            )
                     ui.label(
                         f"Parameter source: {str(step.get('parameter_source') or '')}"
                     ).classes("text-xs text-slate-500")
@@ -1704,12 +2147,20 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
 
         recording_steps.clear()
         with recording_steps:
-            for step in required:
+            for step in recordable_steps:
                 step_name = str(step.get("step_name") or "")
                 primitive = str(step.get("primitive") or "")
+                position_required = bool(step.get("required"))
                 saved = saved_steps.get(step_name)
                 buffered = buffered_steps.get(step_name)
                 position = buffered or saved
+                position_sources = dict(position.get("position_sources") or {}) if position else {}
+                relative_ready = bool(
+                    position
+                    and set(position_sources.values()) == {"captured_relative"}
+                    and dict(position.get("relative_position_m") or {})
+                    and dict(position.get("relative_reference") or {})
+                )
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-2 w-full"):
                         ui.label(step_name).classes("text-sm font-semibold")
@@ -1717,38 +2168,84 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         ui.label(primitive).classes("text-sm text-blue-700")
                         ui.space()
                         if buffered:
-                            ui.label("Captured; not saved").classes("text-xs text-amber-700")
+                            ui.label("Captured pose; not saved").classes("text-xs text-amber-700")
                         elif saved:
-                            ui.label("Position saved").classes("text-xs text-green-700")
+                            ui.label("Pose saved").classes("text-xs text-green-700")
+                        elif not position_required:
+                            ui.label("Computed live; override optional").classes(
+                                "text-xs text-slate-500"
+                            )
                         else:
                             ui.label("Position required").classes("text-xs text-red-700")
                     pose = dict(position.get("pose") or {}) if position else {}
                     if pose:
                         ui.label(
-                            "world → tool0: "
-                            f"x={float(pose.get('x', 0.0)):.4f}, "
-                            f"y={float(pose.get('y', 0.0)):.4f}, "
-                            f"z={float(pose.get('z', 0.0)):.4f}, "
-                            f"q=({float(pose.get('qx', 0.0)):.4f}, "
-                            f"{float(pose.get('qy', 0.0)):.4f}, "
-                            f"{float(pose.get('qz', 0.0)):.4f}, "
-                            f"{float(pose.get('qw', 1.0)):.4f})"
+                            f"world → {'tool0' if _current_robot() == 'ur5e' else 'link_eef'}: "
+                            f"x={float(pose.get('x', 0.0)):.9f}, "
+                            f"y={float(pose.get('y', 0.0)):.9f}, "
+                            f"z={float(pose.get('z', 0.0)):.9f}, "
+                            f"q=({float(pose.get('qx', 0.0)):.9f}, "
+                            f"{float(pose.get('qy', 0.0)):.9f}, "
+                            f"{float(pose.get('qz', 0.0)):.9f}, "
+                            f"{float(pose.get('qw', 1.0)):.9f})"
                         ).classes("text-xs text-slate-600")
+                        relative_position = dict(
+                            position.get("relative_position_m") or {}
+                        )
+                        relative_reference = dict(
+                            position.get("relative_reference") or {}
+                        )
+                        computed_position = dict(
+                            position.get("computed_position_m") or {}
+                        )
+                        if computed_position:
+                            ui.label(
+                                "Computed pose used for calibration: "
+                                f"x={float(computed_position.get('x', 0.0)):.9f}, "
+                                f"y={float(computed_position.get('y', 0.0)):.9f}, "
+                                f"z={float(computed_position.get('z', 0.0)):.9f} m; "
+                                f"source={position.get('computed_source')}, "
+                                f"timestamp={position.get('computed_at')}"
+                            ).classes("text-xs text-slate-600")
+                        if relative_position and relative_reference:
+                            ui.label(
+                                "Saved calibration XYZ offset: "
+                                f"x={float(relative_position.get('x', 0.0)):.9f}, "
+                                f"y={float(relative_position.get('y', 0.0)):.9f}, "
+                                f"z={float(relative_position.get('z', 0.0)):.9f} m"
+                            ).classes("text-xs text-blue-700")
+                            reference_position = dict(
+                                relative_reference.get("position_m") or {}
+                            )
+                            ui.label(
+                                f"Reference: {relative_reference.get('kind')} "
+                                f"{relative_reference.get('name')} in world at "
+                                f"x={float(reference_position.get('x', 0.0)):.9f}, "
+                                f"y={float(reference_position.get('y', 0.0)):.9f}, "
+                                f"z={float(reference_position.get('z', 0.0)):.9f}; "
+                                f"source={relative_reference.get('source')}"
+                            ).classes("text-xs text-slate-600")
+                            ui.label(
+                                "Replay adds this saved world-axis XYZ calibration to the "
+                                "current computed pose and keeps the captured quaternion unchanged."
+                            ).classes("text-xs text-slate-500")
                     with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
                         capture_button = ui.button(
-                            "Capture Position",
+                            "Capture Pose",
                             on_click=lambda _e, s=step_name, p=primitive: _capture_position(s, p),
                             icon="fiber_manual_record",
                         ).props("flat dense")
                         if (
                             controls_blocked
-                            or _current_robot() != "ur5e"
                             or not name
-                            or (function_name == "place_approach" and not _current_part_name())
+                            or (
+                                function_name in {"pick_approach", "place_approach"}
+                                and not _current_part_name()
+                            )
                         ):
                             capture_button.disable()
                         save_button = ui.button(
-                            "Save/Replace Position",
+                            "Save/Replace Pose",
                             on_click=lambda _e, s=step_name: _save_position(s),
                             icon="save",
                         ).props("flat dense")
@@ -1765,6 +2262,23 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         )
                         if controls_blocked or (not buffered and not saved):
                             clear_button.disable()
+
+                        preview_button = ui.button(
+                            "Preview Resolved Pose",
+                            on_click=lambda _e, s=step_name: asyncio.create_task(
+                                _preview_position(s)
+                            ),
+                            icon="visibility",
+                        ).props("outline dense")
+                        if (
+                            controls_blocked
+                            or not name
+                            or (
+                                function_name in {"pick_approach", "place_approach"}
+                                and not _current_part_name()
+                            )
+                        ):
+                            preview_button.disable()
 
                         test_robot = _current_robot()
                         test_part_name = _current_part_name()
@@ -1814,12 +2328,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             test_button.disable()
 
     def _reset_execution_status() -> None:
-        if _current_robot() == "ur5e":
-            message = "Run readiness is checked automatically without motion."
-            classes = "text-xs text-slate-500"
-        else:
-            message = "Physical robot function execution is implemented for ur5e first."
-            classes = "text-xs text-amber-700"
+        message = "Run readiness is checked automatically without motion."
+        classes = "text-xs text-slate-500"
         execution_status.set_text(message)
         execution_status.classes(replace=classes)
 
@@ -1871,61 +2381,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             execution_status.set_text(message)
             execution_status.classes(replace="text-xs text-amber-700")
 
-    async def _prepare_function_execution_runtime() -> None:
-        """Warm the physical ur5e Function Execution path without motion."""
-        if _current_robot() != "ur5e" or execution.get("preparing"):
-            return
-        selection_signature = _selection_signature()
-        selection_revision = int(execution["selection_revision"])
-        values = _execution_kwargs()
-        function_name = _current_function()
-        execution["preparing"] = True
-        _render_execution()
-        execution_status.set_text(
-            "Preparing and caching the physical ur5e Function Execution runtime; no motion."
-        )
-        execution_status.classes(replace="text-xs text-amber-700")
-        try:
-            result = await bridge.digital_twin_robot_function_execution_readiness(
-                target,
-                "ur5e",
-                function_name,
-                origin_resource_location=values["origin_resource_location"],
-                destination_location=values["destination_location"],
-                part_name=values["part_name"],
-            )
-            if (
-                selection_revision != int(execution["selection_revision"])
-                or selection_signature != _selection_signature()
-                or execution.get("busy")
-                or execution.get("checking")
-            ):
-                return
-            if result.get("success"):
-                execution_status.set_text(
-                    "Physical ur5e Function Execution is prepared; Run performs fresh "
-                    "readiness checks without rebuilding the runtime."
-                )
-                execution_status.classes(replace="text-xs text-green-700")
-            else:
-                execution_status.set_text(str(result.get("message") or "Preparation failed."))
-                execution_status.classes(replace="text-xs text-red-700")
-        except Exception as exc:
-            log.exception("physical ur5e Function Execution background preparation failed")
-            if selection_revision == int(execution["selection_revision"]):
-                execution_status.set_text(f"Function Execution preparation failed: {exc}")
-                execution_status.classes(replace="text-xs text-red-700")
-        finally:
-            execution["preparing"] = False
-            if _client_alive(run_button):
-                _render_execution()
-
-    asyncio.create_task(_prepare_function_execution_runtime())
     ui.timer(0.2, _refresh_function_execution_progress)
     ui.label(
-        "Capture checks read-only readiness automatically and works with the UR5e pendant in "
-        "Local Control. Run and Test Position are separate motion actions requiring Physical "
-        "mode, Remote Control, and explicit confirmation."
+        "Capture checks read-only readiness automatically. Run and Test Position are separate "
+        "physical motion actions requiring the selected robot's remote-control mode and "
+        "explicit confirmation."
     ).classes("text-xs text-amber-700 mt-2")
 
 
@@ -1945,9 +2405,14 @@ _TELEOP_PROFILE_STEPS = {
     "precision": {"cartesian_mm": 2.0, "joint_deg": 0.2},
     "fast": {"cartesian_mm": 10.0, "joint_deg": 2.0},
 }
+_PHYSICAL_CARTESIAN_SPEED_STEP_MM_S = 0.025
+_PHYSICAL_JOINT_SPEED_STEP_DEG_S = 0.1
 
 
-def _teleop_section(bridge: SystemBridge) -> None:
+def _teleop_section(
+    bridge: SystemBridge,
+    refresh_callbacks: dict[str, Callable[[], None]],
+) -> None:
     with ui.card().classes("w-full"):
         ui.label("Interactive Teleop").classes("text-lg font-semibold mb-1")
         ui.label(
@@ -1955,6 +2420,10 @@ def _teleop_section(bridge: SystemBridge) -> None:
             "Works in both Simulation and Physical modes when the environment is running."
         ).classes("text-xs text-slate-500 mb-3")
 
+        rtde_reset_state = {"busy": False}
+        named_position_refresh: dict[str, Callable[[], None] | None] = {
+            "callback": None,
+        }
         with ui.row().classes("items-center gap-4 mb-2 flex-wrap"):
             with ui.row().classes("items-center gap-2"):
                 teleop_backend_icon = ui.icon("circle", color="grey").classes("text-xs")
@@ -1962,7 +2431,13 @@ def _teleop_section(bridge: SystemBridge) -> None:
             with ui.row().classes("items-center gap-2"):
                 teleop_env_icon = ui.icon("circle", color="grey").classes("text-xs")
                 teleop_env_label = ui.label("Teleop environment: checking...").classes("text-xs")
+            rtde_reset_button = ui.button(
+                "Reset UR5e RTDE",
+                icon="restart_alt",
+            ).props("outline dense")
+            rtde_reset_button.disable()
         teleop_warning_label = ui.label("").classes("text-xs text-amber-700")
+        rtde_reset_progress_label = ui.label("").classes("text-xs text-amber-700")
 
         # Robot selector.
         xarm6_initial_target = bridge.teleop_target("xarm6", "state")
@@ -1973,6 +2448,7 @@ def _teleop_section(bridge: SystemBridge) -> None:
             and not bool(xarm6_initial_target.get("ready"))
             else "xarm6"
         )
+        selected_robot_state = {"robot": initial_robot, "changing": False}
         with ui.row().classes("items-center gap-4 mb-4"):
             ui.label("Robot:").classes("font-semibold text-sm")
             robot_select = ui.toggle(["xarm6", "ur5e"], value=initial_robot).classes(
@@ -1980,6 +2456,25 @@ def _teleop_section(bridge: SystemBridge) -> None:
             )
 
         mode_state = {"mode": "cartesian"}  # cartesian | gripper | joint
+        cartesian_jog_mode = {
+            "mode": "step",
+            "preparing": False,
+            "updating_toggle": False,
+        }  # step | smooth
+        cartesian_command_state = {"pending": False}
+        conflicting_motion_buttons = []
+        smooth_hold = {
+            "pressed": False,
+            "active": False,
+            "stopping": False,
+            "robot": "",
+            "axis": "",
+            "speed_mm_s": 0.0,
+            "generation": 0,
+            "task": None,
+        }
+        cartesian_jog_buttons = []
+        cartesian_jog_controls = {"toggle": None, "readiness": None}
         axis_state = {"axis": "y"}  # x | y | z
         joint_state = {"idx": 1}  # 1..6
         profile_state = {"mode": "fast"}  # precision | fast
@@ -1987,15 +2482,118 @@ def _teleop_section(bridge: SystemBridge) -> None:
             "xarm6": {"arm_vel": 1.0, "gripper_vel": 1.0},
             "ur5e": {"arm_vel": 1.0, "gripper_vel": 1.0},
         }
+        motion_settings = {
+            robot: bridge.teleop_motion_settings(robot)
+            for robot in ("xarm6", "ur5e")
+        }
+        motion_speed_state = {
+            robot: {
+                "cartesian_mm_s": float(
+                    motion_settings[robot].get("cartesian_speed_default_mm_s", 5.0)
+                ),
+                "joint_deg_s": float(
+                    motion_settings[robot].get("joint_speed_default_deg_s", 0.1)
+                ),
+            }
+            for robot in ("xarm6", "ur5e")
+        }
+        motion_speed_controls = {
+            "title": None,
+            "physical": None,
+            "simulation": None,
+            "cartesian_slider": None,
+            "cartesian_number": None,
+            "joint_slider": None,
+            "joint_number": None,
+            "range": None,
+            "acceleration": None,
+            "applied": None,
+            "simulation_scale": None,
+        }
+        motion_speed_sync = {"busy": False}
         effective_labels = {}
         profile_note = {"label": None}
         step_inputs = {"cartesian": None, "joint": None}
+        applied_motion_labels = {"cartesian": None, "joint": None}
+        cartesian_status = {"label": None}
         save_env_label = {"label": None}
         state_refresh = {"busy": False}
         state_labels = {"status": None, "xyz": None, "rpy": None, "joints": []}
 
+        def _refresh_rtde_reset_enabled() -> None:
+            robot = str(robot_select.value or "xarm6").strip().lower()
+            target = bridge.teleop_target(robot, "state")
+            source = str(target.get("source") or "")
+            enabled = bool(
+                robot == "ur5e"
+                and str(target.get("environment") or "") == "real"
+                and (source == "hardware" or source.startswith("digital_twin:"))
+                and not bridge.system_running
+                and not bool(getattr(bridge, "_starting", False))
+                and not bool(getattr(bridge, "_stopping", False))
+                and not rtde_reset_state["busy"]
+            )
+            rtde_reset_button.set_enabled(enabled)
+
+        async def _reset_ur5e_rtde() -> None:
+            if rtde_reset_state["busy"]:
+                return
+            rtde_reset_state["busy"] = True
+            rtde_reset_button.disable()
+            rtde_reset_button.props("loading")
+            rtde_reset_progress_label.set_text(
+                "Resetting the UR5e RTDE connection; no motion."
+            )
+            try:
+                ok, message = await asyncio.to_thread(
+                    bridge.teleop_reset_ur5e_rtde_connection
+                )
+                if not _client_alive(rtde_reset_progress_label):
+                    return
+                rtde_reset_progress_label.set_text(message)
+                rtde_reset_progress_label.classes(
+                    replace=(
+                        "text-xs text-green-700" if ok else "text-xs text-red-700"
+                    )
+                )
+                ui.notify(
+                    message,
+                    type="positive" if ok else "negative",
+                    position="bottom-right",
+                    timeout=8000 if ok else 6000,
+                )
+                if ok:
+                    _refresh_teleop_status()
+                    await _refresh_teleop_state_async()
+                    refresh_named_positions = named_position_refresh["callback"]
+                    if refresh_named_positions is not None:
+                        refresh_named_positions()
+                    refresh_robot_functions = refresh_callbacks.get("robot_functions")
+                    if refresh_robot_functions is not None:
+                        refresh_robot_functions()
+                    await asyncio.to_thread(bridge.digital_twin_statuses)
+            except Exception as exc:
+                log.exception("Reset UR5e RTDE failed")
+                message = f"Reset UR5e RTDE failed: {type(exc).__name__}: {exc}"
+                rtde_reset_progress_label.set_text(message)
+                rtde_reset_progress_label.classes(replace="text-xs text-red-700")
+                ui.notify(
+                    message,
+                    type="negative",
+                    position="bottom-right",
+                    timeout=6000,
+                )
+            finally:
+                rtde_reset_state["busy"] = False
+                rtde_reset_button.props(remove="loading")
+                _refresh_rtde_reset_enabled()
+
+        rtde_reset_button.on_click(_reset_ur5e_rtde)
+
         def _refresh_teleop_status() -> None:
             if not _client_alive(teleop_backend_label):
+                return
+            if smooth_hold["pressed"] or smooth_hold["active"] or smooth_hold["stopping"]:
                 return
             status = bridge.teleop_connection_status(str(robot_select.value or "xarm6"))
             connected = bool(status.get("connected", False))
@@ -2023,10 +2621,17 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 teleop_env_label.set_text(f"Teleop environment: {env or 'unknown'}{domain_text}")
 
             teleop_warning_label.set_text(warning)
+            _refresh_rtde_reset_enabled()
 
             target_label = save_env_label["label"]
             if target_label is not None:
                 target_label.set_text(f'Save target: "{env or "gazebo"}" block in resource JSON')
+            if motion_speed_controls["title"] is not None:
+                _motion_settings_for(
+                    str(robot_select.value or "xarm6"),
+                    refresh=True,
+                )
+                _refresh_motion_speed_labels()
 
         def _set_state_unavailable(reason: str) -> None:
             status_label = state_labels["status"]
@@ -2050,6 +2655,8 @@ def _teleop_section(bridge: SystemBridge) -> None:
         async def _refresh_teleop_state_async() -> None:
             status_label = state_labels["status"]
             if status_label is None or not _client_alive(status_label):
+                return
+            if smooth_hold["pressed"] or smooth_hold["active"] or smooth_hold["stopping"]:
                 return
             if state_refresh["busy"]:
                 return
@@ -2126,8 +2733,537 @@ def _teleop_section(bridge: SystemBridge) -> None:
 
         def _effective_velocity(robot: str, key: str, default: float) -> float:
             base = _velocity(robot, key, default)
+            if key != "arm_vel" or _uses_physical_motion_speeds(robot):
+                return base
             multiplier = _TELEOP_PROFILE_MULTIPLIER.get(profile_state["mode"], 1.0)
             return base * multiplier
+
+        def _motion_settings_for(robot: str, *, refresh: bool = False) -> dict:
+            key = str(robot or "xarm6").strip().lower()
+            if refresh:
+                latest = bridge.teleop_motion_settings(key)
+                if not latest.get("error"):
+                    motion_settings[key] = latest
+            return motion_settings[key]
+
+        def _uses_physical_motion_speeds(robot: str) -> bool:
+            return bool(_motion_settings_for(robot).get("physical_units"))
+
+        def _cartesian_speed_mm_s(robot: str) -> float | None:
+            key = str(robot or "xarm6").strip().lower()
+            if not _uses_physical_motion_speeds(key):
+                return None
+            return float(motion_speed_state[key]["cartesian_mm_s"])
+
+        def _joint_speed_deg_s(robot: str) -> float | None:
+            key = str(robot or "xarm6").strip().lower()
+            if not _uses_physical_motion_speeds(key):
+                return None
+            return float(motion_speed_state[key]["joint_deg_s"])
+
+        def _aligned_motion_speed(
+            value: float,
+            minimum: float,
+            maximum: float,
+            step: float,
+        ) -> float:
+            steps = round((float(value) - minimum) / step)
+            aligned = minimum + steps * step
+            return round(min(maximum, max(minimum, aligned)), 6)
+
+        def _set_motion_speed(
+            robot: str,
+            key: str,
+            value: float,
+            *,
+            source: str = "",
+        ) -> None:
+            if motion_speed_sync["busy"]:
+                return
+            robot_key = str(robot or "xarm6").strip().lower()
+            settings = motion_settings[robot_key]
+            value_key = (
+                "cartesian_mm_s" if key == "cartesian" else "joint_deg_s"
+            )
+            minimum_key = (
+                "cartesian_speed_min_mm_s"
+                if key == "cartesian"
+                else "joint_speed_min_deg_s"
+            )
+            maximum_key = (
+                "cartesian_speed_max_mm_s"
+                if key == "cartesian"
+                else "joint_speed_max_deg_s"
+            )
+            current = float(motion_speed_state[robot_key][value_key])
+            try:
+                requested = float(value)
+            except (TypeError, ValueError):
+                requested = math.nan
+            minimum = float(settings[minimum_key])
+            maximum = float(settings[maximum_key])
+            step = (
+                _PHYSICAL_CARTESIAN_SPEED_STEP_MM_S
+                if key == "cartesian"
+                else _PHYSICAL_JOINT_SPEED_STEP_DEG_S
+            )
+            if not math.isfinite(requested) or not minimum <= requested <= maximum:
+                ui.notify(
+                    f"{robot_key} {key} speed must be within "
+                    f"[{minimum:.1f}, {maximum:.1f}]",
+                    type="warning",
+                    position="bottom-right",
+                    timeout=2500,
+                )
+                requested = current
+            else:
+                requested = _aligned_motion_speed(
+                    requested,
+                    minimum,
+                    maximum,
+                    step,
+                )
+            motion_speed_state[robot_key][value_key] = requested
+            if robot_key == str(robot_select.value or "xarm6"):
+                motion_speed_sync["busy"] = True
+                try:
+                    slider = motion_speed_controls[f"{key}_slider"]
+                    number = motion_speed_controls[f"{key}_number"]
+                    if slider is not None and source != "slider":
+                        slider.set_value(requested)
+                        slider.update()
+                    if number is not None and source != "number":
+                        number.set_value(requested)
+                        number.update()
+                finally:
+                    motion_speed_sync["busy"] = False
+            _refresh_motion_speed_labels()
+
+        def _configure_motion_speed_controls(robot: str) -> None:
+            robot_key = str(robot or "xarm6").strip().lower()
+            settings = _motion_settings_for(robot_key, refresh=True)
+            controls = (
+                (
+                    "cartesian",
+                    float(motion_speed_state[robot_key]["cartesian_mm_s"]),
+                    float(settings["cartesian_speed_min_mm_s"]),
+                    float(settings["cartesian_speed_max_mm_s"]),
+                    _PHYSICAL_CARTESIAN_SPEED_STEP_MM_S,
+                ),
+                (
+                    "joint",
+                    float(motion_speed_state[robot_key]["joint_deg_s"]),
+                    float(settings["joint_speed_min_deg_s"]),
+                    float(settings["joint_speed_max_deg_s"]),
+                    _PHYSICAL_JOINT_SPEED_STEP_DEG_S,
+                ),
+            )
+            motion_speed_sync["busy"] = True
+            try:
+                for control_key, value, minimum, maximum, step in controls:
+                    slider = motion_speed_controls[f"{control_key}_slider"]
+                    number = motion_speed_controls[f"{control_key}_number"]
+                    for control in (slider, number):
+                        if control is None:
+                            continue
+                        control.props(
+                            f"min={minimum:.6f} max={maximum:.6f} step={step:.6f}"
+                        )
+                        control.set_value(value)
+                        control.update()
+                simulation_scale = motion_speed_controls["simulation_scale"]
+                if simulation_scale is not None:
+                    simulation_scale.value = _velocity(robot_key, "arm_vel", 1.0)
+            finally:
+                motion_speed_sync["busy"] = False
+
+        def _refresh_motion_speed_labels() -> None:
+            robot = str(robot_select.value or "xarm6").strip().lower()
+            settings = _motion_settings_for(robot)
+            physical = bool(settings.get("physical_units"))
+            title = motion_speed_controls["title"]
+            if title is not None:
+                title.set_text(f"Motion Speed - {robot}")
+            physical_group = motion_speed_controls["physical"]
+            simulation_group = motion_speed_controls["simulation"]
+            if physical_group is not None:
+                physical_group.set_visibility(physical)
+            if simulation_group is not None:
+                simulation_group.set_visibility(not physical)
+            if not physical:
+                applied = motion_speed_controls["applied"]
+                if applied is not None:
+                    applied.set_text(
+                        "Gazebo uses simulation arm velocity scaling; physical mm/s and "
+                        "deg/s are not claimed."
+                    )
+                simulation_scale_value = _effective_velocity(
+                    robot, "arm_vel", 1.0
+                )
+                if applied_motion_labels["cartesian"] is not None:
+                    applied_motion_labels["cartesian"].set_text(
+                        "Applied Cartesian control: simulation scale "
+                        f"{simulation_scale_value:.2f}"
+                    )
+                if applied_motion_labels["joint"] is not None:
+                    applied_motion_labels["joint"].set_text(
+                        "Applied joint jog control: simulation scale "
+                        f"{simulation_scale_value:.2f}"
+                    )
+                return
+
+            cartesian_value = float(motion_speed_state[robot]["cartesian_mm_s"])
+            joint_value = float(motion_speed_state[robot]["joint_deg_s"])
+            range_label = motion_speed_controls["range"]
+            if range_label is not None:
+                range_label.set_text(
+                    "Cartesian range: "
+                    f"{float(settings['cartesian_speed_min_mm_s']):.3f}-"
+                    f"{float(settings['cartesian_speed_max_mm_s']):.3f} mm/s"
+                )
+            acceleration = motion_speed_controls["acceleration"]
+            if acceleration is not None:
+                acceleration.set_text(
+                    "Configured Cartesian acceleration: "
+                    f"{float(settings['cartesian_acceleration_mm_s2']):.1f} mm/s²"
+                )
+            applied = motion_speed_controls["applied"]
+            if applied is not None:
+                applied.set_text(
+                    f"Applied: Cartesian {cartesian_value:.3f} mm/s | "
+                    f"Joint {joint_value:.1f} deg/s"
+                )
+            if applied_motion_labels["cartesian"] is not None:
+                applied_motion_labels["cartesian"].set_text(
+                    f"Applied Cartesian speed: {cartesian_value:.3f} mm/s"
+                )
+            if applied_motion_labels["joint"] is not None:
+                applied_motion_labels["joint"].set_text(
+                    f"Applied joint jog speed: {joint_value:.1f} deg/s"
+                )
+
+        def _smooth_speed_mm_s(direction: int) -> float:
+            robot = str(robot_select.value or "xarm6")
+            configured = _cartesian_speed_mm_s(robot)
+            if configured is None:
+                configured = 10.0 if profile_state["mode"] == "precision" else 30.0
+            return math.copysign(float(configured), direction)
+
+        async def _stop_smooth_hold(*, notify_failure: bool = True) -> None:
+            smooth_hold["pressed"] = False
+            smooth_hold["generation"] = int(smooth_hold["generation"]) + 1
+            if smooth_hold["stopping"]:
+                return
+            robot = str(smooth_hold["robot"] or robot_select.value or "xarm6")
+            axis = str(smooth_hold["axis"] or "x")
+            active = bool(smooth_hold["active"])
+            smooth_hold["stopping"] = True
+            try:
+                if active:
+                    ok, message = await asyncio.to_thread(
+                        bridge.teleop_cartesian_smooth,
+                        robot,
+                        axis,
+                        0.0,
+                        "stop",
+                    )
+                    if not ok and notify_failure and _client_alive(teleop_warning_label):
+                        ui.notify(
+                            f"{robot}: Smooth Hold stop failed ({message})",
+                            type="negative",
+                            position="bottom-right",
+                            timeout=5000,
+                        )
+                    elif ok and _client_alive(teleop_warning_label):
+                        label = cartesian_status["label"]
+                        if label is not None:
+                            label.set_text(
+                                "Motion stopped; Smooth Hold remains prepared."
+                            )
+                            label.classes(replace="text-xs text-green-700 mb-2")
+            finally:
+                smooth_hold["active"] = False
+                smooth_hold["robot"] = ""
+                smooth_hold["axis"] = ""
+                smooth_hold["speed_mm_s"] = 0.0
+                smooth_hold["task"] = None
+                smooth_hold["stopping"] = False
+
+        async def _run_smooth_hold(
+            robot: str,
+            axis: str,
+            direction: int,
+            generation: int,
+        ) -> None:
+            speed_mm_s = _smooth_speed_mm_s(direction)
+            ok, message = await asyncio.to_thread(
+                bridge.teleop_cartesian_smooth,
+                robot,
+                axis,
+                speed_mm_s,
+                "start",
+            )
+            if not ok:
+                smooth_hold["pressed"] = False
+                if _client_alive(teleop_warning_label):
+                    ui.notify(
+                        f"{robot}: Smooth Hold failed ({message})",
+                        type="negative",
+                        position="bottom-right",
+                        timeout=5000,
+                    )
+                return
+            smooth_hold["active"] = True
+            smooth_hold["robot"] = robot
+            smooth_hold["axis"] = axis
+            smooth_hold["speed_mm_s"] = speed_mm_s
+            label = cartesian_status["label"]
+            if label is not None:
+                label.set_text(
+                    f"World {axis.upper()}{'+' if direction > 0 else '-'} moving "
+                    f"at {abs(speed_mm_s):.3f} mm/s"
+                )
+                label.classes(replace="text-xs text-blue-700 mb-2")
+            try:
+                while (
+                    smooth_hold["pressed"]
+                    and int(smooth_hold["generation"]) == generation
+                    and cartesian_jog_mode["mode"] == "smooth"
+                    and str(robot_select.value or "") == robot
+                ):
+                    await asyncio.sleep(0.1)
+                    ok, message = await asyncio.to_thread(
+                        bridge.teleop_cartesian_smooth,
+                        robot,
+                        axis,
+                        speed_mm_s,
+                        "update",
+                    )
+                    if not ok:
+                        smooth_hold["pressed"] = False
+                        if _client_alive(teleop_warning_label):
+                            ui.notify(
+                                f"{robot}: Smooth Hold stopped ({message})",
+                                type="negative",
+                                position="bottom-right",
+                                timeout=5000,
+                            )
+                        break
+            finally:
+                await _stop_smooth_hold(notify_failure=False)
+
+        def _start_smooth_hold(axis: str, direction: int) -> None:
+            if cartesian_jog_mode["mode"] != "smooth":
+                return
+            if smooth_hold["pressed"] or smooth_hold["active"]:
+                return
+            smooth_hold["pressed"] = True
+            smooth_hold["generation"] = int(smooth_hold["generation"]) + 1
+            generation = int(smooth_hold["generation"])
+            robot = str(robot_select.value or "xarm6")
+            smooth_hold["task"] = asyncio.create_task(
+                _run_smooth_hold(robot, axis, direction, generation)
+            )
+
+        def _request_smooth_stop(_event=None) -> None:
+            smooth_hold["pressed"] = False
+            if smooth_hold["active"] and not smooth_hold["stopping"]:
+                asyncio.create_task(_stop_smooth_hold())
+
+        def _set_cartesian_toggle_value(value: str) -> None:
+            toggle = cartesian_jog_controls["toggle"]
+            if toggle is None:
+                return
+            display = "Smooth Hold" if str(value).strip() == "Smooth Hold" else "Step"
+            cartesian_jog_mode["updating_toggle"] = True
+            try:
+                toggle.value = display
+            finally:
+                cartesian_jog_mode["updating_toggle"] = False
+
+        async def _apply_cartesian_mode(value: str) -> bool:
+            if cartesian_jog_mode["preparing"]:
+                return False
+            requested_label = str(value or "Step").strip()
+            requested = requested_label.lower()
+            if requested == "smooth hold":
+                requested = "smooth"
+            if requested not in {"step", "smooth"}:
+                return False
+            robot = str(robot_select.value or "xarm6").strip().lower()
+            if requested == "smooth":
+                readiness = bridge.teleop_cartesian_readiness(robot)
+                if str(readiness.get("environment") or "") != "real":
+                    _set_cartesian_toggle_value("Step")
+                    cartesian_jog_mode["mode"] = "step"
+                    ui.notify(
+                        "Smooth Hold is available only for Hardware Stack.",
+                        type="warning",
+                        position="bottom-right",
+                        timeout=3000,
+                    )
+                    return False
+            previous_mode = str(cartesian_jog_mode["mode"] or "step")
+            cartesian_jog_mode["mode"] = requested
+            _set_cartesian_toggle_value(
+                "Smooth Hold" if requested == "smooth" else "Step"
+            )
+            if previous_mode == "smooth" and requested != "smooth":
+                await _stop_smooth_hold(notify_failure=True)
+            cartesian_jog_mode["preparing"] = True
+            cartesian_command_state["pending"] = True
+            label = cartesian_status["label"] or cartesian_jog_controls["readiness"]
+            if label is not None:
+                if robot == "xarm6":
+                    expected_mode = 0 if requested == "step" else 5
+                    label.set_text(f"Preparing Mode {expected_mode}...")
+                else:
+                    label.set_text(f"Preparing {requested.title()}...")
+                label.classes(replace="text-xs text-blue-700 mb-2")
+            _refresh_cartesian_controls()
+            try:
+                ok, message = await asyncio.to_thread(
+                    bridge.teleop_cartesian_mode,
+                    robot,
+                    requested,
+                )
+                if not _client_alive(cartesian_jog_controls["readiness"]):
+                    return False
+                if ok:
+                    cartesian_jog_mode["mode"] = requested
+                    if label is not None:
+                        label.set_text(message)
+                        label.classes(replace="text-xs text-green-700 mb-2")
+                    return True
+                else:
+                    if label is not None:
+                        label.set_text(f"Cartesian mode failed: {message}")
+                        label.classes(replace="text-xs text-red-700 mb-2")
+                    ui.notify(
+                        f"{robot}: {message}",
+                        type="negative",
+                        position="bottom-right",
+                        timeout=5000,
+                    )
+                    return False
+            finally:
+                cartesian_jog_mode["preparing"] = False
+                cartesian_command_state["pending"] = False
+                _refresh_cartesian_controls()
+
+        def _refresh_cartesian_controls() -> None:
+            label = cartesian_jog_controls["readiness"]
+            toggle = cartesian_jog_controls["toggle"]
+            if label is None or toggle is None or not _client_alive(label):
+                return
+            if smooth_hold["pressed"] or smooth_hold["active"] or smooth_hold["stopping"]:
+                for button in cartesian_jog_buttons:
+                    button.disable()
+                for button in conflicting_motion_buttons:
+                    button.disable()
+                toggle.disable()
+                robot_select.disable()
+                return
+            if cartesian_jog_mode["preparing"] or cartesian_command_state["pending"]:
+                for button in cartesian_jog_buttons:
+                    button.disable()
+                for button in conflicting_motion_buttons:
+                    button.disable()
+                toggle.disable()
+                robot_select.disable()
+                return
+            robot = str(robot_select.value or "xarm6")
+            readiness = bridge.teleop_cartesian_readiness(robot)
+            environment = str(readiness.get("environment") or "")
+            selected_mode = str(cartesian_jog_mode["mode"] or "step")
+            if environment == "real":
+                base_ready = bool(readiness.get("cartesian_jog_ready"))
+                message = str(readiness.get("message") or "")
+                reported_mode = str(readiness.get("cartesian_mode") or "off")
+                if (
+                    robot == "xarm6"
+                    and selected_mode == "smooth"
+                    and reported_mode == "off"
+                    and not cartesian_jog_mode["preparing"]
+                ):
+                    selected_mode = "step"
+                    cartesian_jog_mode["mode"] = "step"
+                    _set_cartesian_toggle_value("Step")
+                mode_ready = bool(
+                    selected_mode in {"step", "smooth"}
+                    and readiness.get("cartesian_mode_ready") is True
+                    and reported_mode == selected_mode
+                )
+                ready = bool(base_ready and mode_ready)
+                state_uncertain = bool(
+                    readiness.get("state_uncertain")
+                    or readiness.get("cartesian_jog_state_uncertain")
+                )
+                idle_remaining = float(
+                    readiness.get("cartesian_mode_idle_remaining_sec") or 0.0
+                )
+                if state_uncertain:
+                    label.set_text(f"Cartesian motion blocked: {message}")
+                    label.classes(replace="text-xs text-red-700 mb-2")
+                elif ready:
+                    mode_text = (
+                        "Mode 0" if selected_mode == "step" else "Mode 5"
+                    ) if robot == "xarm6" else selected_mode.title()
+                    idle_text = (
+                        f"; idle restore in {idle_remaining:.1f}s"
+                        if robot == "xarm6" and idle_remaining > 0.0
+                        else ""
+                    )
+                    label.set_text(f"Cartesian {mode_text} ready{idle_text}")
+                    label.classes(replace="text-xs text-green-700 mb-2")
+                elif base_ready and selected_mode == "step" and robot == "xarm6":
+                    label.set_text(
+                        "Step selected; Mode 1 active. First World move prepares Mode 0."
+                    )
+                    label.classes(replace="text-xs text-amber-700 mb-2")
+                elif base_ready and selected_mode == "step":
+                    label.set_text(
+                        "Step selected. First World move prepares Cartesian motion."
+                    )
+                    label.classes(replace="text-xs text-amber-700 mb-2")
+                else:
+                    label.set_text(f"Cartesian frame validation failed: {message}")
+                    label.classes(replace="text-xs text-red-700 mb-2")
+                smooth_available = bool(base_ready)
+            else:
+                target = bridge.teleop_target(robot, "cartesian")
+                base_ready = bool(target.get("ready"))
+                smooth_available = False
+                ready = bool(base_ready and selected_mode == "step")
+                label.set_text("Simulation uses Step Cartesian jog with velocity scaling.")
+                label.classes(replace="text-xs text-slate-500 mb-2")
+            if not smooth_available and selected_mode == "smooth":
+                cartesian_jog_mode["mode"] = "step"
+                _set_cartesian_toggle_value("Step")
+                _request_smooth_stop()
+                selected_mode = "step"
+                ready = bool(base_ready)
+            controls_enabled = bool(
+                (ready or (base_ready and selected_mode == "step"))
+                and not (
+                    environment == "real"
+                    and bool(
+                        readiness.get("state_uncertain")
+                        or readiness.get("cartesian_jog_state_uncertain")
+                    )
+                )
+                and not cartesian_jog_mode["preparing"]
+                and not cartesian_command_state["pending"]
+            )
+            for button in cartesian_jog_buttons:
+                button.set_enabled(controls_enabled)
+            for button in conflicting_motion_buttons:
+                button.enable()
+            toggle.set_enabled(
+                not cartesian_jog_mode["preparing"]
+                and not cartesian_command_state["pending"]
+            )
+            robot_select.enable()
 
         def _apply_profile_steps(mode: str) -> None:
             settings = _TELEOP_PROFILE_STEPS.get(mode)
@@ -2140,20 +3276,45 @@ def _teleop_section(bridge: SystemBridge) -> None:
             if joint_input is not None:
                 joint_input.value = float(settings["joint_deg"])
 
+        def _apply_profile_speeds(mode: str) -> None:
+            multiplier = _TELEOP_PROFILE_MULTIPLIER.get(mode, 1.0)
+            for robot in ("xarm6", "ur5e"):
+                settings = _motion_settings_for(robot)
+                cartesian_minimum = float(settings["cartesian_speed_min_mm_s"])
+                cartesian_maximum = float(settings["cartesian_speed_max_mm_s"])
+                motion_speed_state[robot]["cartesian_mm_s"] = _aligned_motion_speed(
+                    float(settings["cartesian_speed_default_mm_s"]) * multiplier,
+                    cartesian_minimum,
+                    cartesian_maximum,
+                    _PHYSICAL_CARTESIAN_SPEED_STEP_MM_S,
+                )
+                joint_minimum = float(settings["joint_speed_min_deg_s"])
+                joint_maximum = float(settings["joint_speed_max_deg_s"])
+                motion_speed_state[robot]["joint_deg_s"] = _aligned_motion_speed(
+                    float(settings["joint_speed_default_deg_s"]) * multiplier,
+                    joint_minimum,
+                    joint_maximum,
+                    _PHYSICAL_JOINT_SPEED_STEP_DEG_S,
+                )
+            _configure_motion_speed_controls(
+                str(robot_select.value or "xarm6")
+            )
+            _refresh_motion_speed_labels()
+
         def _refresh_effective_labels() -> None:
-            multiplier = _TELEOP_PROFILE_MULTIPLIER.get(profile_state["mode"], 1.0)
             note_label = profile_note["label"]
             if note_label is not None:
+                robot = str(robot_select.value or "xarm6")
+                cartesian_speed = motion_speed_state[robot]["cartesian_mm_s"]
+                joint_speed = motion_speed_state[robot]["joint_deg_s"]
                 note_label.set_text(
-                    f"{profile_state['mode'].title()} mode applies velocity x{multiplier:.2f} "
-                    "and profile step presets."
+                    f"{profile_state['mode'].title()} preset: Cartesian "
+                    f"{cartesian_speed:.3f} mm/s, Joint {joint_speed:.1f} deg/s; "
+                    "step values are shown below."
                 )
             for robot_name, label in effective_labels.items():
                 arm = _effective_velocity(robot_name, "arm_vel", 1.0)
-                grip = _effective_velocity(robot_name, "gripper_vel", 1.0)
-                label.set_text(
-                    f"Applied velocity: arm {arm:.2f}, gripper {grip:.2f} (x{multiplier:.2f})"
-                )
+                label.set_text(f"Applied simulation arm velocity scale: {arm:.2f}")
 
         with ui.row().classes("items-center gap-3 mb-2"):
             ui.label("Teleop Profile:").classes("font-semibold text-sm")
@@ -2163,8 +3324,11 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 if mode not in _TELEOP_PROFILE_MULTIPLIER:
                     return
                 changed = profile_state["mode"] != mode
+                if changed:
+                    _request_smooth_stop()
                 profile_state["mode"] = mode
                 _apply_profile_steps(mode)
+                _apply_profile_speeds(mode)
                 _refresh_effective_labels()
                 if changed:
                     ui.notify(
@@ -2178,6 +3342,144 @@ def _teleop_section(bridge: SystemBridge) -> None:
             ).props("dense")
             profile_note["label"] = ui.label("").classes("text-xs text-slate-500")
 
+        with ui.card().classes("w-full mb-4 border border-blue-200"):
+            motion_speed_controls["title"] = ui.label(
+                f"Motion Speed - {initial_robot}"
+            ).classes("font-semibold text-sm")
+            ui.label(
+                "Physical speeds are sent as exact values. xArm6 and UR5e retain "
+                "independent page-session settings."
+            ).classes("text-xs text-slate-500")
+            with ui.column().classes("w-full gap-2") as physical_speed_group:
+                with ui.row().classes("w-full items-end gap-3 flex-wrap"):
+                    with ui.column().classes("gap-0 grow min-w-64"):
+                        ui.label("Cartesian speed (mm/s)").classes(
+                            "text-xs font-semibold"
+                        )
+                        cartesian_speed_slider = ui.slider(
+                            min=float(
+                                motion_settings[initial_robot][
+                                    "cartesian_speed_min_mm_s"
+                                ]
+                            ),
+                            max=float(
+                                motion_settings[initial_robot][
+                                    "cartesian_speed_max_mm_s"
+                                ]
+                            ),
+                            step=_PHYSICAL_CARTESIAN_SPEED_STEP_MM_S,
+                            value=motion_speed_state[initial_robot]["cartesian_mm_s"],
+                        ).classes("w-full")
+                        cartesian_speed_slider.on(
+                            "change",
+                            lambda event: _set_motion_speed(
+                                str(robot_select.value or "xarm6"),
+                                "cartesian",
+                                event.args,
+                                source="slider",
+                            ),
+                        )
+                        motion_speed_controls["cartesian_slider"] = (
+                            cartesian_speed_slider
+                        )
+                    motion_speed_controls["cartesian_number"] = ui.number(
+                        "Cartesian speed (mm/s)",
+                        value=motion_speed_state[initial_robot]["cartesian_mm_s"],
+                        min=float(
+                            motion_settings[initial_robot][
+                                "cartesian_speed_min_mm_s"
+                            ]
+                        ),
+                        max=float(
+                            motion_settings[initial_robot][
+                                "cartesian_speed_max_mm_s"
+                            ]
+                        ),
+                        step=_PHYSICAL_CARTESIAN_SPEED_STEP_MM_S,
+                        on_change=lambda event: _set_motion_speed(
+                            str(robot_select.value or "xarm6"),
+                            "cartesian",
+                            event.value,
+                            source="number",
+                        ),
+                    ).classes("w-48")
+                with ui.row().classes("w-full items-end gap-3 flex-wrap"):
+                    with ui.column().classes("gap-0 grow min-w-64"):
+                        ui.label("Joint jog speed (deg/s)").classes(
+                            "text-xs font-semibold"
+                        )
+                        joint_speed_slider = ui.slider(
+                            min=float(
+                                motion_settings[initial_robot][
+                                    "joint_speed_min_deg_s"
+                                ]
+                            ),
+                            max=float(
+                                motion_settings[initial_robot][
+                                    "joint_speed_max_deg_s"
+                                ]
+                            ),
+                            step=_PHYSICAL_JOINT_SPEED_STEP_DEG_S,
+                            value=motion_speed_state[initial_robot]["joint_deg_s"],
+                        ).classes("w-full")
+                        joint_speed_slider.on(
+                            "change",
+                            lambda event: _set_motion_speed(
+                                str(robot_select.value or "xarm6"),
+                                "joint",
+                                event.args,
+                                source="slider",
+                            ),
+                        )
+                        motion_speed_controls["joint_slider"] = joint_speed_slider
+                    motion_speed_controls["joint_number"] = ui.number(
+                        "Joint jog speed (deg/s)",
+                        value=motion_speed_state[initial_robot]["joint_deg_s"],
+                        min=float(
+                            motion_settings[initial_robot]["joint_speed_min_deg_s"]
+                        ),
+                        max=float(
+                            motion_settings[initial_robot]["joint_speed_max_deg_s"]
+                        ),
+                        step=_PHYSICAL_JOINT_SPEED_STEP_DEG_S,
+                        on_change=lambda event: _set_motion_speed(
+                            str(robot_select.value or "xarm6"),
+                            "joint",
+                            event.value,
+                            source="number",
+                        ),
+                    ).classes("w-48")
+                motion_speed_controls["range"] = ui.label("").classes(
+                    "text-xs text-slate-600"
+                )
+                motion_speed_controls["acceleration"] = ui.label("").classes(
+                    "text-xs text-slate-600"
+                )
+            motion_speed_controls["physical"] = physical_speed_group
+            with ui.column().classes("w-full gap-1") as simulation_speed_group:
+                ui.label(
+                    "Simulation-only control: scaling, not physical mm/s or deg/s."
+                ).classes("text-xs text-amber-700")
+                motion_speed_controls["simulation_scale"] = ui.number(
+                    "Simulation arm velocity scale",
+                    value=velocity_state[initial_robot]["arm_vel"],
+                    min=0.1,
+                    max=3.0,
+                    step=0.1,
+                    on_change=lambda event: _set_velocity(
+                        str(robot_select.value or "xarm6"),
+                        "arm_vel",
+                        event.value,
+                    ),
+                ).classes("w-56")
+            motion_speed_controls["simulation"] = simulation_speed_group
+            motion_speed_controls["applied"] = ui.label("").classes(
+                "text-sm font-medium text-blue-800"
+            )
+            _configure_motion_speed_controls(initial_robot)
+            _refresh_motion_speed_labels()
+            _refresh_effective_labels()
+
         with (
             ui.element("div")
             .classes("w-full columns-1 lg:columns-2 xl:columns-3")
@@ -2186,85 +3488,119 @@ def _teleop_section(bridge: SystemBridge) -> None:
             # ── Cartesian Jog Pad ────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
                 ui.label("Cartesian Jog").classes("font-semibold text-sm mb-2")
+                ui.label(
+                    "Commands translation only along the displayed World X, World Y, or "
+                    "World Z axis. Rotation is never requested."
+                ).classes("text-xs text-amber-700 mb-2")
+
+                def _set_cartesian_jog_mode(value: str) -> None:
+                    if cartesian_jog_mode["updating_toggle"]:
+                        return
+                    asyncio.create_task(_apply_cartesian_mode(str(value or "Step")))
+
+                cartesian_jog_controls["toggle"] = ui.toggle(
+                    ["Step", "Smooth Hold"],
+                    value="Step",
+                    on_change=lambda event: _set_cartesian_jog_mode(event.value),
+                ).props("dense")
+                cartesian_jog_controls["readiness"] = ui.label(
+                    "Cartesian frame validation: checking..."
+                ).classes("text-xs text-slate-500 mb-2")
+                cartesian_status["label"] = cartesian_jog_controls["readiness"]
                 step_input = ui.number(
                     "Step (mm)", value=10.0, min=0.1, max=100.0, step=0.1
                 ).classes("w-32 mb-3")
                 step_inputs["cartesian"] = step_input
+                applied_motion_labels["cartesian"] = ui.label("").classes(
+                    "text-xs font-medium text-blue-800 mb-1"
+                )
                 ui.label("Switching Precision/Fast also updates this step value.").classes(
                     "text-xs text-slate-500 mb-2"
                 )
 
-                # X/Y pad (top-down view).
-                ui.label("X / Y Axes").classes("text-xs text-slate-500 mb-1")
-                with ui.column().classes("items-center gap-1"):
-                    _jog_btn(
+                async def _send_cartesian_step(axis: str, direction: int) -> None:
+                    if cartesian_jog_mode["mode"] != "step":
+                        return
+                    robot = str(robot_select.value or "xarm6")
+                    readiness = bridge.teleop_cartesian_readiness(robot)
+                    if not (
+                        str(readiness.get("cartesian_mode") or "off") == "step"
+                        and readiness.get("cartesian_mode_ready") is True
+                    ):
+                        prepared = await _apply_cartesian_mode("Step")
+                        if not prepared:
+                            return
+                    step_mm = math.copysign(float(step_input.value or 10.0), direction)
+                    speed_mm_s = _cartesian_speed_mm_s(robot)
+                    velocity_scale = _effective_velocity(robot, "arm_vel", 1.0)
+                    cartesian_command_state["pending"] = True
+                    if speed_mm_s is not None:
+                        cartesian_status["label"].set_text(
+                            f"World {axis.upper()}{'+' if direction > 0 else '-'} "
+                            f"moving at {speed_mm_s:.3f} mm/s"
+                        )
+                    else:
+                        cartesian_status["label"].set_text(
+                            f"World {axis.upper()}{'+' if direction > 0 else '-'} moving "
+                            f"at simulation scale {velocity_scale:.2f}"
+                        )
+                    cartesian_status["label"].classes(
+                        replace="text-xs text-blue-700 mb-2"
+                    )
+                    _refresh_cartesian_controls()
+                    try:
+                        await _send_jog(
+                            bridge,
+                            robot,
+                            axis,
+                            step_mm,
+                            velocity_scale,
+                            speed_mm_s=speed_mm_s,
+                        )
+                    finally:
+                        cartesian_command_state["pending"] = False
+                        _refresh_cartesian_controls()
+
+                def _cartesian_jog_button(
+                    label: str,
+                    axis: str,
+                    direction: int,
+                    icon: str,
+                ):
+                    button = _jog_btn(
                         bridge,
                         robot_select,
                         step_input,
                         _effective_velocity,
-                        "Y+",
-                        "y",
-                        1,
-                        "arrow_upward",
+                        label,
+                        axis,
+                        direction,
+                        icon,
+                        mode_getter=lambda: cartesian_jog_mode["mode"],
+                        step_sender=_send_cartesian_step,
+                        smooth_start=_start_smooth_hold,
+                        smooth_stop=_request_smooth_stop,
                     )
+                    cartesian_jog_buttons.append(button)
+                    return button
+
+                # X/Y pad (top-down view).
+                ui.label("World X / World Y").classes("text-xs text-slate-500 mb-1")
+                with ui.column().classes("items-center gap-1"):
+                    _cartesian_jog_button("World Y+", "y", 1, "arrow_upward")
                     with ui.row().classes("gap-1"):
-                        _jog_btn(
-                            bridge,
-                            robot_select,
-                            step_input,
-                            _effective_velocity,
-                            "X-",
-                            "x",
-                            -1,
-                            "arrow_back",
-                        )
+                        _cartesian_jog_button("World X-", "x", -1, "arrow_back")
                         ui.button(icon="radio_button_unchecked").props(
                             "flat dense disable"
                         ).classes("w-12 h-12")
-                        _jog_btn(
-                            bridge,
-                            robot_select,
-                            step_input,
-                            _effective_velocity,
-                            "X+",
-                            "x",
-                            1,
-                            "arrow_forward",
-                        )
-                    _jog_btn(
-                        bridge,
-                        robot_select,
-                        step_input,
-                        _effective_velocity,
-                        "Y-",
-                        "y",
-                        -1,
-                        "arrow_downward",
-                    )
+                        _cartesian_jog_button("World X+", "x", 1, "arrow_forward")
+                    _cartesian_jog_button("World Y-", "y", -1, "arrow_downward")
 
                 # Z axis.
-                ui.label("Z Axis").classes("text-xs text-slate-500 mt-3 mb-1")
+                ui.label("World Z").classes("text-xs text-slate-500 mt-3 mb-1")
                 with ui.row().classes("gap-2 justify-center"):
-                    _jog_btn(
-                        bridge,
-                        robot_select,
-                        step_input,
-                        _effective_velocity,
-                        "Z+",
-                        "z",
-                        1,
-                        "expand_less",
-                    )
-                    _jog_btn(
-                        bridge,
-                        robot_select,
-                        step_input,
-                        _effective_velocity,
-                        "Z-",
-                        "z",
-                        -1,
-                        "expand_more",
-                    )
+                    _cartesian_jog_button("World Z+", "z", 1, "expand_less")
+                    _cartesian_jog_button("World Z-", "z", -1, "expand_more")
 
             # ── Joint Jog ────────────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
@@ -2273,6 +3609,10 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     "Step (deg)", value=2.0, min=0.05, max=30.0, step=0.05
                 ).classes("w-32 mb-2")
                 step_inputs["joint"] = joint_step_input
+                applied_motion_labels["joint"] = ui.label("").classes(
+                    "text-xs font-medium text-blue-800 mb-1"
+                )
+                _refresh_motion_speed_labels()
                 _apply_profile_steps(profile_state["mode"])
                 selected_joint_label = ui.label("Selected: J1").classes(
                     "text-xs text-slate-500 mb-2"
@@ -2297,23 +3637,43 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     def _joint_minus():
                         step_deg = joint_step_input.value or 2.0
                         arm_vel = _effective_velocity(robot_select.value, "arm_vel", 1.0)
+                        speed_deg_s = _joint_speed_deg_s(robot_select.value)
                         asyncio.create_task(
                             _send_joint(
-                                bridge, robot_select.value, joint_state["idx"], -step_deg, arm_vel
+                                bridge,
+                                robot_select.value,
+                                joint_state["idx"],
+                                -step_deg,
+                                arm_vel,
+                                speed_deg_s=speed_deg_s,
                             )
                         )
 
                     def _joint_plus():
                         step_deg = joint_step_input.value or 2.0
                         arm_vel = _effective_velocity(robot_select.value, "arm_vel", 1.0)
+                        speed_deg_s = _joint_speed_deg_s(robot_select.value)
                         asyncio.create_task(
                             _send_joint(
-                                bridge, robot_select.value, joint_state["idx"], step_deg, arm_vel
+                                bridge,
+                                robot_select.value,
+                                joint_state["idx"],
+                                step_deg,
+                                arm_vel,
+                                speed_deg_s=speed_deg_s,
                             )
                         )
 
-                    ui.button("-", on_click=_joint_minus, icon="remove").props("outline")
-                    ui.button("+", on_click=_joint_plus, icon="add").props("outline")
+                    conflicting_motion_buttons.append(
+                        ui.button("-", on_click=_joint_minus, icon="remove").props(
+                            "outline"
+                        )
+                    )
+                    conflicting_motion_buttons.append(
+                        ui.button("+", on_click=_joint_plus, icon="add").props(
+                            "outline"
+                        )
+                    )
 
             # ── Gripper Control ──────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
@@ -2349,13 +3709,29 @@ def _teleop_section(bridge: SystemBridge) -> None:
                             _send_gripper(bridge, robot_select.value, "close", None, grip_vel)
                         )
 
-                    ui.button("Full Open", on_click=_full_open, icon="open_with").props("outline")
-                    ui.button("Full Close", on_click=_full_close, icon="close_fullscreen").props(
-                        "outline"
+                    conflicting_motion_buttons.append(
+                        ui.button(
+                            "Full Open", on_click=_full_open, icon="open_with"
+                        ).props("outline")
+                    )
+                    conflicting_motion_buttons.append(
+                        ui.button(
+                            "Full Close",
+                            on_click=_full_close,
+                            icon="close_fullscreen",
+                        ).props("outline")
                     )
                 with ui.row().classes("gap-2 justify-center"):
-                    ui.button("Open", on_click=_step_open, icon="add").props("outline")
-                    ui.button("Close", on_click=_step_close, icon="remove").props("outline")
+                    conflicting_motion_buttons.append(
+                        ui.button("Open", on_click=_step_open, icon="add").props(
+                            "outline"
+                        )
+                    )
+                    conflicting_motion_buttons.append(
+                        ui.button("Close", on_click=_step_close, icon="remove").props(
+                            "outline"
+                        )
+                    )
 
                 # Home button.
                 ui.separator().classes("my-3")
@@ -2363,8 +3739,10 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 def _go_home():
                     asyncio.create_task(_send_home(bridge, robot_select.value))
 
-                ui.button("Move Home", on_click=_go_home, icon="home").props("outline").classes(
-                    "w-full"
+                conflicting_motion_buttons.append(
+                    ui.button("Move Home", on_click=_go_home, icon="home")
+                    .props("outline")
+                    .classes("w-full")
                 )
 
             # ── Keyboard Help ────────────────────────────────────────
@@ -2414,35 +3792,31 @@ def _teleop_section(bridge: SystemBridge) -> None:
                             ui.label(f"J{idx}: --").classes("text-xs font-mono")
                         )
 
-            # ── Speeds ───────────────────────────────────────────────
+            # ── Gripper Settings ─────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
-                ui.label("Velocity Settings (Per Robot)").classes("font-semibold text-sm mb-2")
+                ui.label("Gripper Settings (Per Robot)").classes(
+                    "font-semibold text-sm mb-2"
+                )
+                ui.label(
+                    "Gripper command scale is separate from arm motion speed and is not "
+                    "a physical velocity."
+                ).classes("text-xs text-slate-500 mb-2")
 
                 def _velocity_block(robot: str) -> None:
                     with ui.column().classes("gap-1 mb-3"):
                         ui.label(robot).classes("text-xs font-semibold text-slate-600")
                         ui.number(
-                            "Arm velocity scale",
-                            value=velocity_state[robot]["arm_vel"],
-                            min=0.1,
-                            max=3.0,
-                            step=0.1,
-                            on_change=lambda e, r=robot: _set_velocity(r, "arm_vel", e.value),
-                        ).classes("w-44")
-                        ui.number(
-                            "Gripper velocity scale",
+                            "Gripper command scale",
                             value=velocity_state[robot]["gripper_vel"],
                             min=0.1,
                             max=3.0,
                             step=0.1,
                             on_change=lambda e, r=robot: _set_velocity(r, "gripper_vel", e.value),
                         ).classes("w-44")
-                        effective_labels[robot] = ui.label("").classes("text-xs text-slate-500")
 
                 with ui.row().classes("gap-6 flex-wrap"):
                     _velocity_block("xarm6")
                     _velocity_block("ur5e")
-                _refresh_effective_labels()
 
             # ── Save Position ────────────────────────────────────────
             with ui.card().classes("w-full mb-6 break-inside-avoid"):
@@ -2551,6 +3925,8 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     _update_named_position_go_enabled()
                     asyncio.create_task(_refresh_named_position_readiness())
 
+                named_position_refresh["callback"] = _refresh_named_positions
+
                 async def _go_to_named() -> None:
                     name = named_pos_select.value
                     robot = robot_select.value
@@ -2573,8 +3949,13 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     try:
                         ok, msg = await asyncio.to_thread(bridge.teleop_go_to_position, robot, name)
                         if ok:
+                            recovery_suffix = (
+                                " Robot Function recovery state cleared."
+                                if robot == "ur5e" and name == "home"
+                                else ""
+                            )
                             ui.notify(
-                                f"{robot}: moved to '{name}'",
+                                f"{robot}: moved to '{name}'.{recovery_suffix}",
                                 type="positive",
                                 position="bottom-right",
                                 timeout=1800,
@@ -2613,20 +3994,116 @@ def _teleop_section(bridge: SystemBridge) -> None:
                 robot_select.on_value_change(lambda _: _refresh_named_positions())
                 ui.timer(3.0, _refresh_named_position_readiness)
 
+        async def _close_cartesian_mode_for_robot_change(
+            previous_robot: str,
+            selected_robot: str,
+        ) -> None:
+            selected_robot_state["changing"] = True
+            cartesian_jog_mode["preparing"] = True
+            try:
+                await _stop_smooth_hold(notify_failure=False)
+                await asyncio.to_thread(
+                    bridge.teleop_cartesian_mode,
+                    previous_robot,
+                    "off",
+                )
+            finally:
+                selected_robot_state["robot"] = selected_robot
+                selected_robot_state["changing"] = False
+                cartesian_jog_mode["preparing"] = False
+                cartesian_jog_mode["mode"] = "step"
+                _set_cartesian_toggle_value("Step")
+                _configure_motion_speed_controls(selected_robot)
+                _refresh_motion_speed_labels()
+                _refresh_effective_labels()
+                _refresh_cartesian_controls()
+
+        def _robot_selection_changed(_event=None) -> None:
+            selected_robot = str(robot_select.value or "xarm6")
+            previous_robot = str(selected_robot_state["robot"] or "xarm6")
+            if selected_robot_state["changing"] or selected_robot == previous_robot:
+                _refresh_motion_speed_labels()
+                return
+            asyncio.create_task(
+                _close_cartesian_mode_for_robot_change(
+                    previous_robot,
+                    selected_robot,
+                )
+            )
+
+        robot_select.on_value_change(_robot_selection_changed)
+        ui.on("cais_cartesian_smooth_stop", _request_smooth_stop)
+        ui.run_javascript(
+            """
+            if (!window.__caisCartesianSmoothStopInstalled) {
+              window.__caisCartesianSmoothStopInstalled = true;
+              const stop = () => emitEvent('cais_cartesian_smooth_stop');
+              window.addEventListener('pointerup', stop);
+              window.addEventListener('pointercancel', stop);
+              window.addEventListener('blur', stop);
+              document.addEventListener('visibilitychange', () => {
+                if (document.hidden) stop();
+              });
+            }
+            """
+        )
+
+        async def _client_disconnected() -> None:
+            await _stop_smooth_hold(notify_failure=False)
+            await asyncio.to_thread(
+                bridge.teleop_cartesian_mode,
+                str(robot_select.value or "xarm6"),
+                "off",
+            )
+
+        ui.context.client.on_disconnect(_client_disconnected)
+
         _refresh_teleop_status()
+        _refresh_cartesian_controls()
         ui.timer(1.0, _refresh_teleop_status)
+        ui.timer(0.5, _refresh_cartesian_controls)
         asyncio.create_task(_refresh_teleop_state_async())
         ui.timer(1.0, _refresh_teleop_state_async)
 
         # ── Keyboard handler ─────────────────────────────────────────
+        def _keyboard_cartesian(
+            robot: str,
+            axis: str,
+            direction: int,
+            step_mm: float,
+            arm_vel: float,
+        ) -> None:
+            if cartesian_jog_mode["mode"] == "smooth":
+                _start_smooth_hold(axis, direction)
+            elif cartesian_jog_mode["mode"] == "step":
+                asyncio.create_task(_send_cartesian_step(axis, direction))
+            else:
+                ui.notify(
+                    "Select Step or Smooth Hold first.",
+                    type="warning",
+                    position="bottom-right",
+                    timeout=1800,
+                )
+
         def _on_key(e: KeyEventArguments):
+            key_name = e.key.name if hasattr(e.key, "name") else str(e.key)
+            if e.action.keyup:
+                if key_name in {
+                    "ArrowLeft",
+                    "ArrowRight",
+                    "ArrowUp",
+                    "ArrowDown",
+                    "PageUp",
+                    "PageDown",
+                }:
+                    _request_smooth_stop()
+                return
             if e.action.keydown and not e.action.repeat:
                 robot = robot_select.value
                 step_mm = step_input.value or 10.0
                 step_deg = joint_step_input.value or 2.0
                 arm_vel = _effective_velocity(robot, "arm_vel", 1.0)
                 grip_vel = _effective_velocity(robot, "gripper_vel", 1.0)
-                key_name = e.key.name if hasattr(e.key, "name") else str(e.key)
                 key_lower = key_name.lower()
 
                 if key_lower == "t":
@@ -2689,43 +4166,77 @@ def _teleop_section(bridge: SystemBridge) -> None:
                     asyncio.create_task(_save_position(bridge, robot, name))
                 elif key_name == "PageUp":
                     mode_state["mode"] = "cartesian"
-                    asyncio.create_task(_send_jog(bridge, robot, "z", step_mm, arm_vel))
+                    _keyboard_cartesian(robot, "z", 1, step_mm, arm_vel)
                 elif key_name == "PageDown":
                     mode_state["mode"] = "cartesian"
-                    asyncio.create_task(_send_jog(bridge, robot, "z", -step_mm, arm_vel))
+                    _keyboard_cartesian(robot, "z", -1, step_mm, arm_vel)
                 elif mode_state["mode"] == "gripper":
                     if key_name == "ArrowUp":
                         asyncio.create_task(_send_gripper(bridge, robot, "open", None, grip_vel))
                     elif key_name == "ArrowDown":
                         asyncio.create_task(_send_gripper(bridge, robot, "close", None, grip_vel))
                 elif mode_state["mode"] == "joint":
+                    speed_deg_s = _joint_speed_deg_s(robot)
                     if key_name == "ArrowUp":
                         asyncio.create_task(
-                            _send_joint(bridge, robot, joint_state["idx"], step_deg, arm_vel)
+                            _send_joint(
+                                bridge,
+                                robot,
+                                joint_state["idx"],
+                                step_deg,
+                                arm_vel,
+                                speed_deg_s=speed_deg_s,
+                            )
                         )
                     elif key_name == "ArrowDown":
                         asyncio.create_task(
-                            _send_joint(bridge, robot, joint_state["idx"], -step_deg, arm_vel)
+                            _send_joint(
+                                bridge,
+                                robot,
+                                joint_state["idx"],
+                                -step_deg,
+                                arm_vel,
+                                speed_deg_s=speed_deg_s,
+                            )
                         )
                 elif mode_state["mode"] == "cartesian":
                     # XY uses left/right only, as requested.
                     axis = axis_state["axis"]
                     if axis in {"x", "y"}:
                         if key_name == "ArrowRight":
-                            asyncio.create_task(_send_jog(bridge, robot, axis, step_mm, arm_vel))
+                            _keyboard_cartesian(robot, axis, 1, step_mm, arm_vel)
                         elif key_name == "ArrowLeft":
-                            asyncio.create_task(_send_jog(bridge, robot, axis, -step_mm, arm_vel))
+                            _keyboard_cartesian(robot, axis, -1, step_mm, arm_vel)
                     elif axis == "z":
                         if key_name == "ArrowUp":
-                            asyncio.create_task(_send_jog(bridge, robot, "z", step_mm, arm_vel))
+                            _keyboard_cartesian(robot, "z", 1, step_mm, arm_vel)
                         elif key_name == "ArrowDown":
-                            asyncio.create_task(_send_jog(bridge, robot, "z", -step_mm, arm_vel))
+                            _keyboard_cartesian(robot, "z", -1, step_mm, arm_vel)
 
         ui.keyboard(on_key=_on_key, ignore=["input", "select", "textarea"])
 
 
-def _jog_btn(bridge, robot_select, step_input, velocity_getter, label, axis, direction, icon):
+def _jog_btn(
+    bridge,
+    robot_select,
+    step_input,
+    velocity_getter,
+    label,
+    axis,
+    direction,
+    icon,
+    *,
+    mode_getter=lambda: "step",
+    step_sender=None,
+    smooth_start=None,
+    smooth_stop=None,
+):
     def _on_click(a=axis, d=direction):
+        if str(mode_getter() or "step") != "step":
+            return
+        if step_sender is not None:
+            asyncio.create_task(step_sender(a, d))
+            return
         step = (step_input.value or 10.0) * d
         try:
             arm_vel = float(velocity_getter(robot_select.value, "arm_vel", 1.0))
@@ -2733,7 +4244,34 @@ def _jog_btn(bridge, robot_select, step_input, velocity_getter, label, axis, dir
             arm_vel = 1.0
         asyncio.create_task(_send_jog(bridge, robot_select.value, a, step, arm_vel))
 
-    ui.button(icon=icon, on_click=_on_click).props("flat dense").classes("w-12 h-12").tooltip(label)
+    button = (
+        ui.button(icon=icon, on_click=_on_click)
+        .props("flat dense")
+        .classes("w-12 h-12")
+        .style("touch-action: none; user-select: none;")
+        .tooltip(label)
+    )
+    if smooth_start is not None:
+        button.on(
+            "pointerdown",
+            lambda _event=None, a=axis, d=direction: smooth_start(a, d),
+            js_handler=(
+                "(event) => { event.preventDefault(); "
+                "event.currentTarget.setPointerCapture(event.pointerId); emit(); }"
+            ),
+        )
+    if smooth_stop is not None:
+        for event_name in ("pointerup", "pointercancel"):
+            button.on(
+                event_name,
+                smooth_stop,
+                js_handler=(
+                    "(event) => { event.preventDefault(); "
+                    "if (event.currentTarget.hasPointerCapture(event.pointerId)) "
+                    "event.currentTarget.releasePointerCapture(event.pointerId); emit(); }"
+                ),
+            )
+    return button
 
 
 # =====================================================================
@@ -2745,9 +4283,18 @@ async def _send_jog(
     axis: str,
     step_mm: float,
     velocity_scale: float = 1.0,
-) -> None:
+    *,
+    speed_mm_s: float | None = None,
+) -> tuple[bool, str]:
     """Send one Cartesian jog command through the ROS2 teleop backend."""
-    ok, msg = await asyncio.to_thread(bridge.teleop_jog, robot, axis, step_mm, velocity_scale)
+    ok, msg = await asyncio.to_thread(
+        bridge.teleop_jog,
+        robot,
+        axis,
+        step_mm,
+        velocity_scale,
+        speed_mm_s=speed_mm_s,
+    )
     if ok:
         ui.notify(
             f"{robot}: jog {axis} {step_mm:+.0f}mm",
@@ -2755,10 +4302,11 @@ async def _send_jog(
             position="bottom-right",
             timeout=1200,
         )
-        return
+        return True, msg
     ui.notify(
         f"{robot}: jog failed ({msg})", type="negative", position="bottom-right", timeout=3500
     )
+    return False, msg
 
 
 async def _send_gripper(
@@ -2823,10 +4371,17 @@ async def _send_joint(
     joint_idx: int,
     delta_deg: float,
     velocity_scale: float = 1.0,
-) -> None:
+    *,
+    speed_deg_s: float | None = None,
+) -> tuple[bool, str]:
     """Send one joint jog command through the ROS2 teleop backend."""
     ok, msg = await asyncio.to_thread(
-        bridge.teleop_joint, robot, joint_idx, delta_deg, velocity_scale
+        bridge.teleop_joint,
+        robot,
+        joint_idx,
+        delta_deg,
+        velocity_scale,
+        speed_deg_s=speed_deg_s,
     )
     if ok:
         ui.notify(
@@ -2835,10 +4390,11 @@ async def _send_joint(
             position="bottom-right",
             timeout=1200,
         )
-        return
+        return True, msg
     ui.notify(
         f"{robot}: joint jog failed ({msg})", type="negative", position="bottom-right", timeout=3500
     )
+    return False, msg
 
 
 async def _save_position(bridge: SystemBridge, robot: str, name: str) -> None:

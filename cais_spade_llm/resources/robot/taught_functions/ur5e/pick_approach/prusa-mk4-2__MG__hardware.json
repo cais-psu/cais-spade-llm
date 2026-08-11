@@ -1,0 +1,89 @@
+{
+  "robot": "ur5e",
+  "function_name": "pick_approach",
+  "name": "prusa-mk4-2",
+  "capture_source": "hardware",
+  "replay_targets": [
+    "hardware",
+    "digital_twin"
+  ],
+  "steps": [
+    {
+      "step_name": "descend",
+      "primitive": "move_cartesian",
+      "params": {
+        "x": 0.29427310944834645,
+        "y": 0.4265197315195987,
+        "z": 1.267854010419474,
+        "qx": 0.6727390249297289,
+        "qy": 0.7398160539916842,
+        "qz": -0.006919965278064899,
+        "qw": 0.006820899744287707
+      },
+      "capture_source": "hardware",
+      "captured_at": 1786400802.7019255,
+      "position_sources": {
+        "x": "captured_relative",
+        "y": "captured_relative",
+        "z": "captured_relative"
+      },
+      "relative_position_m": {
+        "x": -0.0003834222081670058,
+        "y": 0.00019522013582612407,
+        "z": 0.01158770164919698
+      },
+      "relative_reference": {
+        "kind": "detected_part",
+        "frame_id": "world",
+        "name": "MG",
+        "source": "live_detection",
+        "captured_at": 1786400757.9368281,
+        "position_m": {
+          "x": 0.29465653165651345,
+          "y": 0.4263245113837726,
+          "z": 1.0216499062031217
+        }
+      },
+      "computed_position_m": {
+        "x": 0.29465653165651345,
+        "y": 0.4263245113837726,
+        "z": 1.256266308770277
+      },
+      "computed_source": "execution",
+      "computed_at": 1786400758.369992,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          0.2169393002986908,
+          -1.1867184799960633,
+          -2.5191569328308105,
+          -1.0099252623370667,
+          1.5516743659973145,
+          -3.019083325062887
+        ],
+        "pose": {
+          "frame_id": "world",
+          "child_frame_id": "tool0",
+          "x": 0.29427310944834645,
+          "y": 0.4265197315195987,
+          "z": 1.267854010419474,
+          "qx": 0.6727390249297289,
+          "qy": 0.7398160539916842,
+          "qz": -0.006919965278064899,
+          "qw": 0.006820899744287707
+        },
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      }
+    }
+  ],
+  "part_name": "MG"
+}

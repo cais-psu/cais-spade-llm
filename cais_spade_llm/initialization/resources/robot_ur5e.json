@@ -160,9 +160,43 @@
       }
     },
     "real": {
-      "static_capabilities": {},
+      "static_capabilities": {
+        "resource_type": "robot",
+        "reachability": [
+          "prusa-mk4-2",
+          "prusa-mk3",
+          "assembly_board-v1"
+        ],
+        "workspace_bounds": {
+          "x_min_m": -0.7,
+          "x_max_m": 0.7,
+          "y_min_m": -0.35,
+          "y_max_m": 1.1,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6
+        },
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": 0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        }
+      },
       "controller": {
         "hardware_trajectory_action": "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
+        "hardware_cartesian_action": "/cais_ur5e_rtde_cartesian_controller/move_cartesian",
+        "hardware_relative_cartesian_action": "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian",
+        "hardware_cartesian_jog_service": "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog",
+        "hardware_action_send_timeout_sec": 10.0,
+        "hardware_cartesian_speed_m_s": 0.05,
+        "hardware_cartesian_max_speed_m_s": 0.1,
+        "hardware_cartesian_acceleration_m_s2": 0.1,
         "move_group": {
           "group_name": "ur_manipulator",
           "ee_link": "tool0",

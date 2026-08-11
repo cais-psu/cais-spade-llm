@@ -499,6 +499,10 @@ class GazeboPickPlaceController:
         self.trajectory_time_scale = need_float(
             motion, "trajectory_time_scale", "controller.motion.trajectory_time_scale"
         )
+        self.tf_lookup_timeout_sec = max(
+            0.0,
+            opt_float(motion, "tf_lookup_timeout_sec", 2.0),
+        )
         self.named_pose_duration_sec = max(
             0.1,
             opt_float(motion, "named_pose_duration_sec", 4.0),
@@ -810,7 +814,7 @@ class GazeboPickPlaceController:
         self._log().info("Waiting for services/actions...")
         deadline = time.monotonic() + timeout_sec
 
-        if not self._wait_service(
+        if self.execution_mode != "physical" and not self._wait_service(
             self._detect_all_client_legacy, self.service_detect_all, deadline
         ):
             return False
@@ -898,7 +902,10 @@ class GazeboPickPlaceController:
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ee = self._get_ee_pose()
         if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
         orientation = ee.orientation
         if normalized_quaternion is not None:
             orientation = self._make_orientation(*normalized_quaternion)
@@ -955,7 +962,10 @@ class GazeboPickPlaceController:
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ee = self._get_ee_pose()
         if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
         target_x = ee.position.x + float(dx)
         target_y = ee.position.y + float(dy)
         target_z = ee.position.z + float(dz)
@@ -1024,7 +1034,10 @@ class GazeboPickPlaceController:
         target_orientation = self._make_orientation(qx, qy, qz, qw)
         ee = self._get_ee_pose()
         if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
         same_xy = math.isclose(float(ee.position.x), float(x), abs_tol=1e-6) and math.isclose(
             float(ee.position.y), float(y), abs_tol=1e-6
         )
@@ -1105,7 +1118,10 @@ class GazeboPickPlaceController:
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ee = self._get_ee_pose()
         if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
         return {
             "success": True,
             "message": "current pose",
@@ -1900,7 +1916,10 @@ class GazeboPickPlaceController:
             }
         ee = self._get_ee_pose()
         if ee is None:
-            return {"success": False, "message": "cannot read current ee pose"}
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
         self._last_start_pose = self._make_pose(
             ee.position.x,
             ee.position.y,
@@ -2233,6 +2252,7 @@ class GazeboPickPlaceController:
         return {
             "success": True,
             "part_name": target_part_name,
+            "destination_location": requested_destination,
             "slot_x": bx,
             "slot_y": by,
             "board_top_z": board_top_z,
@@ -2293,6 +2313,17 @@ class GazeboPickPlaceController:
         if not self.wait_for_services():
             if not self._last_failure_message:
                 self._last_failure_message = self._unavailable_message("services not ready")
+            return []
+        detection_deadline = time.monotonic() + 10.0
+        if not self._wait_service(
+            self._detect_all_client_legacy,
+            self.service_detect_all,
+            detection_deadline,
+        ):
+            self._last_failure_message = (
+                f"Camera & Perception is required for detect_parts: "
+                f"{self.service_detect_all} is unavailable"
+            )
             return []
         future = self._detect_all_client_legacy.call_async(self._Trigger.Request())
         result = self._wait_future(future, timeout_sec=30.0, label="detect_all_legacy")
@@ -2597,19 +2628,48 @@ class GazeboPickPlaceController:
         return False
 
     def _get_ee_pose(self):
-        try:
-            t = self._tf_buffer.lookup_transform(
-                self.frame_id, self.ee_link, self._rclpy.time.Time()
-            )
-            pose = self._Pose()
-            pose.position.x = t.transform.translation.x
-            pose.position.y = t.transform.translation.y
-            pose.position.z = t.transform.translation.z
-            pose.orientation = t.transform.rotation
-            return pose
-        except Exception as e:
-            self._log().error(f"TF lookup failed: {e}")
-            return None
+        timeout_sec = max(
+            0.0,
+            float(getattr(self, "tf_lookup_timeout_sec", 2.0)),
+        )
+        deadline = time.monotonic() + timeout_sec
+        last_error: Exception | None = None
+        while True:
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    self.frame_id,
+                    self.ee_link,
+                    self._rclpy.time.Time(),
+                )
+                pose = self._Pose()
+                pose.position.x = transform.transform.translation.x
+                pose.position.y = transform.transform.translation.y
+                pose.position.z = transform.transform.translation.z
+                pose.orientation = transform.transform.rotation
+                if str(getattr(self, "_last_failure_message", "")).startswith(
+                    "tf lookup failed for "
+                ):
+                    self._last_failure_message = ""
+                return pose
+            except (
+                self._tf2_ros.LookupException,
+                self._tf2_ros.ConnectivityException,
+                self._tf2_ros.ExtrapolationException,
+                RuntimeError,
+            ) as exc:
+                last_error = exc
+            remaining_sec = deadline - time.monotonic()
+            if remaining_sec <= 0.0:
+                break
+            time.sleep(min(0.05, remaining_sec))
+
+        detail = str(last_error or "transform unavailable").strip()
+        self._last_failure_message = (
+            f"tf lookup failed for {self.frame_id} -> {self.ee_link} "
+            f"after {timeout_sec:.1f}s: {detail}"
+        )
+        self._log().error(self._last_failure_message)
+        return None
 
     def _get_ee_tcp_world_z_offset(self) -> float:
         try:
@@ -3445,7 +3505,10 @@ class GazeboPickPlaceController:
         if orientation is None:
             ee = self._get_ee_pose()
             if ee is None:
-                return {"success": False, "message": "cannot read current ee pose"}
+                return {
+                    "success": False,
+                    "message": self._unavailable_message("cannot read current ee pose"),
+                }
             orientation = ee.orientation
         ok = self._move_xy_direct(
             float(x),
@@ -3456,7 +3519,12 @@ class GazeboPickPlaceController:
             time_scale=_as_float(speed, self.trajectory_time_scale),
         )
         if not ok:
-            return {"success": False, "message": f"failed to move above target ({x}, {y}, {z})"}
+            return {
+                "success": False,
+                "message": self._unavailable_message(
+                    f"failed to move above target ({x}, {y}, {z})"
+                ),
+            }
         return {"success": True, "message": f"moved above target ({x:.4f}, {y:.4f}, {z:.4f})"}
 
     def _move_pose_direct(
@@ -3477,7 +3545,10 @@ class GazeboPickPlaceController:
         if orientation is None:
             ee = self._get_ee_pose()
             if ee is None:
-                return {"success": False, "message": "cannot read current ee pose"}
+                return {
+                    "success": False,
+                    "message": self._unavailable_message("cannot read current ee pose"),
+                }
             orientation = ee.orientation
         ok = self._cartesian_move(
             self._make_pose(float(x), float(y), float(z), orientation),
@@ -3509,7 +3580,10 @@ class GazeboPickPlaceController:
         if orientation is None:
             ee = self._get_ee_pose()
             if ee is None:
-                return {"success": False, "message": "cannot read current ee pose"}
+                return {
+                    "success": False,
+                    "message": self._unavailable_message("cannot read current ee pose"),
+                }
             orientation = ee.orientation
 
         released = self.release_part(str(model_name))

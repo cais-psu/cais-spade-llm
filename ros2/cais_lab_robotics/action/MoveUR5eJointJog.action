@@ -1,0 +1,12 @@
+# One guarded Interactive Teleop joint jog. joint is 1 through 6.
+int32 joint
+float64 delta_rad
+float64 speed_rad_s
+float64 acceleration_rad_s2
+---
+int32 error_code
+string error_string
+float64 final_joint_error_rad
+bool state_uncertain
+---
+float64 joint_error_rad

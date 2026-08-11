@@ -45,6 +45,44 @@ def test_cais_lab_robotics_is_an_ament_cmake_package() -> None:
         assert asset_directory in cmake
 
 
+def test_cais_lab_robotics_generates_direct_ur5e_cartesian_action() -> None:
+    action_path = PACKAGE_ROOT / "action" / "MoveUR5eCartesian.action"
+    action = action_path.read_text(encoding="utf-8")
+    cmake = (PACKAGE_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    package = (PACKAGE_ROOT / "package.xml").read_text(encoding="utf-8")
+
+    assert "geometry_msgs/PoseStamped target_tool0_pose" in action
+    assert "float64 final_position_error_m" in action
+    assert "float64 final_orientation_error_rad" in action
+    assert '"action/MoveUR5eCartesian.action"' in cmake
+    assert "rosidl_generate_interfaces" in cmake
+    assert "rosidl_default_generators" in package
+
+
+def test_cais_lab_robotics_generates_translation_only_ur5e_jog_interfaces() -> None:
+    relative_action = (
+        PACKAGE_ROOT / "action" / "MoveUR5eRelativeCartesian.action"
+    ).read_text(encoding="utf-8")
+    jog_service = (
+        PACKAGE_ROOT / "srv" / "SetUR5eCartesianJog.srv"
+    ).read_text(encoding="utf-8")
+    joint_jog_action = (
+        PACKAGE_ROOT / "action" / "MoveUR5eJointJog.action"
+    ).read_text(encoding="utf-8")
+    cmake = (PACKAGE_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    assert "geometry_msgs/Vector3 world_translation_m" in relative_action
+    assert "float64 final_orientation_drift_rad" in relative_action
+    assert "geometry_msgs/Vector3 world_linear_velocity_m_s" in jog_service
+    assert "bool stop" in jog_service
+    assert "int32 joint" in joint_jog_action
+    assert "float64 speed_rad_s" in joint_jog_action
+    assert "bool state_uncertain" in joint_jog_action
+    assert '"action/MoveUR5eRelativeCartesian.action"' in cmake
+    assert '"action/MoveUR5eJointJog.action"' in cmake
+    assert '"srv/SetUR5eCartesianJog.srv"' in cmake
+
+
 def test_project_launch_assets_resolve_from_cais_lab_robotics() -> None:
     launch_text = "\n".join(
         path.read_text(encoding="utf-8")

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3.10
 """
-Keyboard teleop for dual xArm6 + UR5e via MoveIt.
+Keyboard teleop for dual xArm6 + UR5e.
 
-Each keypress immediately plans + executes a move.
-Robot moves visibly in both RViz and Gazebo.
+Hardware Stack commands use the direct xArm6 driver and guarded UR5e RTDE
+actions. Gazebo commands use MoveIt.
 
 Usage:
     source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
@@ -54,7 +54,7 @@ from pathlib import Path
 import rclpy
 import tf2_ros
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
@@ -70,11 +70,37 @@ except Exception:
     GripperCommand = None
 
 try:
-    from xarm_msgs.srv import GripperMove, SetFloat32, SetInt16
+    from xarm_msgs.msg import RobotMsg
+    from xarm_msgs.srv import GripperMove, MoveVelocity, SetFloat32, SetInt16
 except Exception:
+    RobotMsg = None
     GripperMove = None
+    MoveVelocity = None
     SetFloat32 = None
     SetInt16 = None
+
+try:
+    from controller_manager_msgs.srv import ListControllers
+except ImportError:
+    ListControllers = None
+
+try:
+    from xarm_msgs.srv import MoveCartesian
+except ImportError:
+    MoveCartesian = None
+
+try:
+    from cais_lab_robotics.action import (
+        MoveUR5eCartesian,
+        MoveUR5eJointJog,
+        MoveUR5eRelativeCartesian,
+    )
+    from cais_lab_robotics.srv import SetUR5eCartesianJog
+except ImportError:
+    MoveUR5eCartesian = None
+    MoveUR5eJointJog = None
+    MoveUR5eRelativeCartesian = None
+    SetUR5eCartesianJog = None
 
 # ── Robot definitions ────────────────────────────────────────────────────────
 
@@ -99,6 +125,7 @@ ROBOTS = {
         'frame_id_candidates': ['world', 'xarm6_link_base', 'xarm6_base_link', 'link_base', 'base_link'],
         'arm_controller_topic': '/xarm6_xarm6_traj_controller/joint_trajectory',
         'arm_controller_topics': [
+            '/xarm6/xarm6_traj_controller/joint_trajectory',
             '/xarm6_xarm6_traj_controller/joint_trajectory',
             '/xarm6_traj_controller/joint_trajectory',
             '/xarm_traj_controller/joint_trajectory',
@@ -170,6 +197,117 @@ HOME_PRELIFT_DELTA_M = 0.05
 HOME_PRELIFT_MAX_DELTA_M = 0.10
 HOME_PRELIFT_GAZEBO_MIN_Z_M = 1.12
 HOME_PRELIFT_VELOCITY_SCALE = 1.8
+UR5E_HARDWARE_CARTESIAN_ACTION = (
+    '/cais_ur5e_rtde_cartesian_controller/move_cartesian'
+)
+XARM6_HARDWARE_CARTESIAN_SERVICE = '/xarm6/xarm/set_position'
+XARM6_HARDWARE_CARTESIAN_VELOCITY_SERVICE = '/xarm6/xarm/vc_set_cartesian_velocity'
+XARM6_HARDWARE_ROBOT_STATES_TOPIC = '/xarm6/xarm/robot_states'
+XARM6_HARDWARE_SET_MODE_SERVICE = '/xarm6/xarm/set_mode'
+XARM6_HARDWARE_SET_STATE_SERVICE = '/xarm6/xarm/set_state'
+XARM6_HARDWARE_CONTROL_SERVICE_WAIT_SEC = 5.0
+XARM6_HARDWARE_FEEDBACK_DISCOVERY_WAIT_SEC = 8.0
+XARM6_TRAJECTORY_MODE_HARD_SAFETY_TIMEOUT_SEC = 90.0
+XARM6_TRAJECTORY_MODE_NO_PROGRESS_TIMEOUT_SEC = 15.0
+XARM6_TRAJECTORY_MODE_POLL_INTERVAL_SEC = 0.10
+UR5E_HARDWARE_RELATIVE_CARTESIAN_ACTION = (
+    '/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian'
+)
+UR5E_HARDWARE_CARTESIAN_JOG_SERVICE = (
+    '/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog'
+)
+UR5E_HARDWARE_JOINT_JOG_ACTION = (
+    '/cais_ur5e_rtde_trajectory_controller/move_joint_jog'
+)
+XARM6_HARDWARE_MAX_JOINT_SPEED_RAD_S = 1.391
+UR5E_HARDWARE_MAX_JOINT_SPEED_RAD_S = 1.125
+UR5E_HARDWARE_MAX_JOINT_ACCEL_RAD_S2 = 1.263
+
+
+def _normalized_quaternion(quaternion):
+    norm = math.sqrt(sum(float(value) * float(value) for value in quaternion))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError('quaternion norm is zero or non-finite')
+    return tuple(float(value) / norm for value in quaternion)
+
+
+def _quaternion_multiply(left, right):
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _quaternion_rotate(quaternion, vector):
+    qx, qy, qz, qw = _normalized_quaternion(quaternion)
+    rotated = _quaternion_multiply(
+        _quaternion_multiply((qx, qy, qz, qw), (*vector, 0.0)),
+        (-qx, -qy, -qz, qw),
+    )
+    return rotated[:3]
+
+
+def _compose_transforms(left, right):
+    left_translation, left_quaternion = left
+    right_translation, right_quaternion = right
+    rotated = _quaternion_rotate(left_quaternion, right_translation)
+    return (
+        tuple(left_translation[index] + rotated[index] for index in range(3)),
+        _normalized_quaternion(
+            _quaternion_multiply(left_quaternion, right_quaternion)
+        ),
+    )
+
+
+def _inverse_transform(transform):
+    translation, quaternion = transform
+    qx, qy, qz, qw = _normalized_quaternion(quaternion)
+    inverse_quaternion = (-qx, -qy, -qz, qw)
+    inverse_translation = _quaternion_rotate(
+        inverse_quaternion,
+        tuple(-value for value in translation),
+    )
+    return inverse_translation, inverse_quaternion
+
+
+def _quaternion_error_rad(left, right):
+    normalized_left = _normalized_quaternion(left)
+    normalized_right = _normalized_quaternion(right)
+    dot = abs(sum(a * b for a, b in zip(normalized_left, normalized_right)))
+    return 2.0 * math.acos(max(-1.0, min(1.0, dot)))
+
+
+def _quaternion_from_rpy(roll, pitch, yaw):
+    half_roll = float(roll) * 0.5
+    half_pitch = float(pitch) * 0.5
+    half_yaw = float(yaw) * 0.5
+    cr, sr = math.cos(half_roll), math.sin(half_roll)
+    cp, sp = math.cos(half_pitch), math.sin(half_pitch)
+    cy, sy = math.cos(half_yaw), math.sin(half_yaw)
+    return _normalized_quaternion(
+        (
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
+        )
+    )
+
+
+def _xarm_pose_transform(values):
+    if len(values) != 6:
+        raise ValueError('xArm6 Cartesian pose must contain six values')
+    converted = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in converted):
+        raise ValueError('xArm6 Cartesian pose contains non-finite values')
+    return (
+        tuple(value / 1000.0 for value in converted[:3]),
+        _quaternion_from_rpy(*converted[3:6]),
+    )
 
 
 class KeyboardTeleop(Node):
@@ -187,8 +325,10 @@ class KeyboardTeleop(Node):
         super().__init__(str(node_name or 'keyboard_teleop'))
         self.cb_group = ReentrantCallbackGroup()
         self.joint_positions = {}
+        self.joint_velocities = {}
         self.joint_state_map = {}
         self.joint_state_received_monotonic = {}
+        self.joint_velocity_received_monotonic = {}
         self.cartesian_max_step_m = max(0.001, cartesian_max_step_mm / 1000.0)
         self.joint_duration_sec = max(0.05, float(joint_duration_sec))
         self.gripper_duration_sec = max(0.05, float(gripper_duration_sec))
@@ -200,8 +340,140 @@ class KeyboardTeleop(Node):
             10.0,
             float(ur5e_hardware_result_timeout_sec),
         )
+        xarm6_real = self._load_real_robot_config('xarm6')
+        ur5e_real = self._load_real_robot_config('ur5e')
+        xarm6_controller = xarm6_real.get('controller', {})
+        ur5e_controller = ur5e_real.get('controller', {})
+        self.xarm6_hardware_cartesian_service = str(
+            xarm6_controller.get(
+                'hardware_cartesian_service',
+                XARM6_HARDWARE_CARTESIAN_SERVICE,
+            )
+        ).strip()
+        self.xarm6_hardware_cartesian_velocity_service = str(
+            xarm6_controller.get(
+                'hardware_cartesian_velocity_service',
+                XARM6_HARDWARE_CARTESIAN_VELOCITY_SERVICE,
+            )
+        ).strip()
+        self.xarm6_hardware_robot_states_topic = str(
+            xarm6_controller.get(
+                'hardware_robot_states_topic',
+                XARM6_HARDWARE_ROBOT_STATES_TOPIC,
+            )
+        ).strip()
+        self.xarm6_hardware_joint_duration_scale = max(
+            1.0,
+            float(xarm6_controller.get('hardware_joint_duration_scale', 1.0)),
+        )
+        self.xarm6_hardware_cartesian_speed_mm_s = max(
+            1.0,
+            float(xarm6_controller.get('hardware_cartesian_speed_mm_s', 50.0)),
+        )
+        self.xarm6_hardware_cartesian_max_speed_mm_s = max(
+            self.xarm6_hardware_cartesian_speed_mm_s,
+            float(
+                xarm6_controller.get(
+                    'hardware_cartesian_max_speed_mm_s',
+                    50.0,
+                )
+            ),
+        )
+        self.xarm6_hardware_cartesian_acceleration_mm_s2 = max(
+            1.0,
+            float(
+                xarm6_controller.get(
+                    'hardware_cartesian_acceleration_mm_s2',
+                    100.0,
+                )
+            ),
+        )
+        self.xarm6_hardware_cartesian_position_tolerance_m = max(
+            0.0001,
+            float(
+                xarm6_controller.get(
+                    'hardware_cartesian_position_tolerance_m',
+                    0.003,
+                )
+            ),
+        )
+        self.xarm6_hardware_cartesian_orientation_tolerance_rad = max(
+            0.001,
+            float(
+                xarm6_controller.get(
+                    'hardware_cartesian_orientation_tolerance_rad',
+                    math.radians(3.0),
+                )
+            ),
+        )
+        self.xarm6_hardware_workspace_bounds = dict(
+            xarm6_real.get('static_capabilities', {}).get('workspace_bounds', {})
+        )
+        self._xarm6_cartesian_motion_attempted = False
+        self.ur5e_hardware_cartesian_action = str(
+            ur5e_controller.get(
+                'hardware_cartesian_action',
+                UR5E_HARDWARE_CARTESIAN_ACTION,
+            )
+        ).strip()
+        self.ur5e_hardware_relative_cartesian_action = str(
+            ur5e_controller.get(
+                'hardware_relative_cartesian_action',
+                UR5E_HARDWARE_RELATIVE_CARTESIAN_ACTION,
+            )
+        ).strip()
+        self.ur5e_hardware_cartesian_jog_service = str(
+            ur5e_controller.get(
+                'hardware_cartesian_jog_service',
+                UR5E_HARDWARE_CARTESIAN_JOG_SERVICE,
+            )
+        ).strip()
+        self.ur5e_hardware_cartesian_speed_m_s = max(
+            0.001,
+            float(ur5e_controller.get('hardware_cartesian_speed_m_s', 0.05)),
+        )
+        self.ur5e_hardware_cartesian_max_speed_m_s = max(
+            self.ur5e_hardware_cartesian_speed_m_s,
+            float(
+                ur5e_controller.get(
+                    'hardware_cartesian_max_speed_m_s',
+                    0.10,
+                )
+            ),
+        )
+        self.ur5e_hardware_cartesian_acceleration_m_s2 = max(
+            0.001,
+            float(
+                ur5e_controller.get(
+                    'hardware_cartesian_acceleration_m_s2',
+                    0.10,
+                )
+            ),
+        )
+        self.ur5e_hardware_joint_jog_action = UR5E_HARDWARE_JOINT_JOG_ACTION
+        self.ur5e_hardware_max_joint_speed_rad_s = (
+            UR5E_HARDWARE_MAX_JOINT_SPEED_RAD_S
+        )
+        self.ur5e_hardware_max_joint_acceleration_rad_s2 = (
+            UR5E_HARDWARE_MAX_JOINT_ACCEL_RAD_S2
+        )
+        self.xarm6_hardware_max_joint_speed_rad_s = (
+            XARM6_HARDWARE_MAX_JOINT_SPEED_RAD_S
+        )
+        self._last_ur5e_joint_jog_state_uncertain = False
 
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        self._xarm6_robot_state_lock = threading.Lock()
+        self._xarm6_robot_state = None
+        self._xarm6_robot_state_received_monotonic = 0.0
+        self._xarm6_robot_state_subscription = None
+        if RobotMsg is not None:
+            self._xarm6_robot_state_subscription = self.create_subscription(
+                RobotMsg,
+                self.xarm6_hardware_robot_states_topic,
+                self._xarm6_robot_state_cb,
+                10,
+            )
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -217,6 +489,101 @@ class KeyboardTeleop(Node):
             if FollowJointTrajectory is not None
             else None
         )
+        self.ur5e_hardware_cartesian_client = (
+            ActionClient(
+                self,
+                MoveUR5eCartesian,
+                self.ur5e_hardware_cartesian_action,
+                callback_group=self.cb_group,
+            )
+            if MoveUR5eCartesian is not None
+            else None
+        )
+        self.ur5e_hardware_relative_cartesian_client = (
+            ActionClient(
+                self,
+                MoveUR5eRelativeCartesian,
+                self.ur5e_hardware_relative_cartesian_action,
+                callback_group=self.cb_group,
+            )
+            if MoveUR5eRelativeCartesian is not None
+            else None
+        )
+        self.ur5e_hardware_joint_jog_client = (
+            ActionClient(
+                self,
+                MoveUR5eJointJog,
+                self.ur5e_hardware_joint_jog_action,
+                callback_group=self.cb_group,
+            )
+            if MoveUR5eJointJog is not None
+            else None
+        )
+        self.ur5e_hardware_cartesian_jog_client = (
+            self.create_client(
+                SetUR5eCartesianJog,
+                self.ur5e_hardware_cartesian_jog_service,
+                callback_group=self.cb_group,
+            )
+            if SetUR5eCartesianJog is not None
+            else None
+        )
+        self.xarm6_hardware_cartesian_client = (
+            self.create_client(
+                MoveCartesian,
+                self.xarm6_hardware_cartesian_service,
+                callback_group=self.cb_group,
+            )
+            if MoveCartesian is not None
+            else None
+        )
+        self.xarm6_hardware_cartesian_velocity_client = (
+            self.create_client(
+                MoveVelocity,
+                self.xarm6_hardware_cartesian_velocity_service,
+                callback_group=self.cb_group,
+            )
+            if MoveVelocity is not None
+            else None
+        )
+        self.xarm6_set_mode_client = (
+            self.create_client(
+                SetInt16,
+                XARM6_HARDWARE_SET_MODE_SERVICE,
+                callback_group=self.cb_group,
+            )
+            if SetInt16 is not None
+            else None
+        )
+        self.xarm6_set_state_client = (
+            self.create_client(
+                SetInt16,
+                XARM6_HARDWARE_SET_STATE_SERVICE,
+                callback_group=self.cb_group,
+            )
+            if SetInt16 is not None
+            else None
+        )
+        self.xarm6_controller_list_client = (
+            self.create_client(
+                ListControllers,
+                '/xarm6/controller_manager/list_controllers',
+                callback_group=self.cb_group,
+            )
+            if ListControllers is not None
+            else None
+        )
+        self._xarm6_smooth_active = False
+        self._xarm6_last_stop_motion_confirmed = True
+        self._xarm6_smooth_state_lock = threading.Lock()
+        self._xarm6_smooth_service_lock = threading.Lock()
+        self._xarm6_smooth_speeds = [0.0] * 6
+        self._xarm6_smooth_watchdog_sec = 0.50
+        self._xarm6_smooth_heartbeat_monotonic = 0.0
+        self._xarm6_smooth_pending_error = ''
+        self._xarm6_smooth_refresh_stop = threading.Event()
+        self._xarm6_smooth_refresh_thread = None
+        self._xarm6_cartesian_session_mode = 'off'
         self.cartesian_client = self.create_client(
             GetCartesianPath, '/compute_cartesian_path', callback_group=self.cb_group)
         self.arm_publishers = {}
@@ -246,6 +613,20 @@ class KeyboardTeleop(Node):
     def _joint_name_candidates(robot):
         cfg = ROBOTS[robot]
         return cfg.get('joint_name_candidates') or [cfg['joint_names']]
+
+    @staticmethod
+    def _load_real_robot_config(robot):
+        path = DEFAULT_CONFIG_PATHS[robot]
+        try:
+            with path.open(encoding='utf-8') as config_file:
+                payload = json.load(config_file)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        robot_block = payload.get(robot, {})
+        if not isinstance(robot_block, dict):
+            return {}
+        real_block = robot_block.get('real', {})
+        return real_block if isinstance(real_block, dict) else {}
 
     @staticmethod
     def _group_name_candidates(robot):
@@ -373,7 +754,14 @@ class KeyboardTeleop(Node):
         return response, None
 
     def _candidate_action_names(self, suffix):
-        if str(suffix) == 'xarm_gripper/gripper_action':
+        if str(suffix) == 'xarm6_traj_controller/follow_joint_trajectory':
+            names = [
+                '/xarm6/xarm6_traj_controller/follow_joint_trajectory',
+                '/xarm6_traj_controller/follow_joint_trajectory',
+                '/xarm_traj_controller/follow_joint_trajectory',
+                'xarm6_traj_controller/follow_joint_trajectory',
+            ]
+        elif str(suffix) == 'xarm_gripper/gripper_action':
             names = [
                 '/xarm6/xarm_gripper/gripper_action',
                 '/xarm/xarm_gripper/gripper_action',
@@ -575,6 +963,12 @@ class KeyboardTeleop(Node):
         return True, f'{action_name}: goal accepted'
 
     def _joint_state_cb(self, msg):
+        received_at = time.monotonic()
+        message_velocities = {
+            str(name): float(velocity)
+            for name, velocity in zip(msg.name, msg.velocity)
+            if math.isfinite(float(velocity))
+        }
         for jname, pos in zip(msg.name, msg.position):
             self.joint_state_map[jname] = pos
         for robot_name, cfg in ROBOTS.items():
@@ -584,14 +978,118 @@ class KeyboardTeleop(Node):
                     if jname in joint_names:
                         positions[jname] = pos
                 if len(positions) == len(joint_names):
+                    previous_positions = self.joint_positions.get(robot_name)
+                    previous_at = self.joint_state_received_monotonic.get(robot_name)
                     self.joint_positions[robot_name] = [positions[n] for n in joint_names]
                     self.active_joint_names[robot_name] = list(joint_names)
-                    self.joint_state_received_monotonic[robot_name] = time.monotonic()
+                    self.joint_state_received_monotonic[robot_name] = received_at
+                    if all(name in message_velocities for name in joint_names):
+                        velocities = [message_velocities[name] for name in joint_names]
+                    elif previous_positions is not None and previous_at is not None:
+                        elapsed = received_at - float(previous_at)
+                        velocities = (
+                            [
+                                (float(current) - float(previous)) / elapsed
+                                for current, previous in zip(
+                                    self.joint_positions[robot_name],
+                                    previous_positions,
+                                )
+                            ]
+                            if elapsed > 1e-6
+                            else []
+                        )
+                    else:
+                        velocities = []
+                    if len(velocities) == len(joint_names) and all(
+                        math.isfinite(value) for value in velocities
+                    ):
+                        self.joint_velocities[robot_name] = velocities
+                        self.joint_velocity_received_monotonic[robot_name] = received_at
                     break
             for gj in self._gripper_joint_candidates(robot_name):
                 if gj in self.joint_state_map:
                     self.active_gripper_joint[robot_name] = gj
                     break
+
+    def _xarm6_robot_state_cb(self, msg):
+        """Retain authoritative xArm6 controller TCP pose and active offset."""
+        with self._xarm6_robot_state_lock:
+            self._xarm6_robot_state = msg
+            self._xarm6_robot_state_received_monotonic = time.monotonic()
+
+    def _xarm6_robot_state_snapshot(self):
+        with self._xarm6_robot_state_lock:
+            message = self._xarm6_robot_state
+            received_at = self._xarm6_robot_state_received_monotonic
+        if message is None:
+            return None, 'xArm6 robot_states feedback has not been received'
+        age_sec = time.monotonic() - received_at
+        if age_sec > 2.0:
+            return None, f'xArm6 robot_states feedback is stale ({age_sec:.2f}s)'
+        try:
+            pose = [float(value) for value in list(message.pose)]
+            offset = [float(value) for value in list(message.offset)]
+        except (AttributeError, TypeError, ValueError) as exc:
+            return None, f'xArm6 robot_states feedback is invalid: {exc}'
+        if len(pose) != 6 or len(offset) != 6:
+            return None, 'xArm6 robot_states pose and offset must contain six values'
+        if not all(math.isfinite(value) for value in pose + offset):
+            return None, 'xArm6 robot_states pose or offset contains non-finite values'
+        return {
+            'pose': pose,
+            'offset': offset,
+            'state': int(getattr(message, 'state', -1)),
+            'mode': int(getattr(message, 'mode', -1)),
+            'age_sec': age_sec,
+        }, 'OK'
+
+    def _stationary_readiness(
+        self,
+        robot,
+        *,
+        velocity_limit_rad_s=0.01,
+        hold_sec=0.25,
+        timeout_sec=3.0,
+    ):
+        """Require fresh joint feedback below the configured velocity limit."""
+        limit = max(0.0, float(velocity_limit_rad_s))
+        required_hold = max(0.0, float(hold_sec))
+        deadline = time.monotonic() + max(required_hold, float(timeout_sec))
+        stationary_since = None
+        diagnostics = {
+            'velocity_limit_rad_s': limit,
+            'stationary_hold_required_sec': required_hold,
+            'stationary_hold_sec': 0.0,
+            'max_joint_velocity_rad_s': None,
+        }
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            positions_at = self.joint_state_received_monotonic.get(robot)
+            velocities_at = self.joint_velocity_received_monotonic.get(robot)
+            velocities = list(self.joint_velocities.get(robot) or [])
+            feedback_fresh = bool(
+                positions_at is not None
+                and velocities_at is not None
+                and now - float(positions_at) <= 0.5
+                and now - float(velocities_at) <= 0.5
+                and len(velocities) == 6
+            )
+            if feedback_fresh:
+                max_velocity = max(abs(float(value)) for value in velocities)
+                diagnostics['max_joint_velocity_rad_s'] = max_velocity
+                if max_velocity <= limit:
+                    stationary_since = stationary_since or now
+                    diagnostics['stationary_hold_sec'] = now - stationary_since
+                    if diagnostics['stationary_hold_sec'] >= required_hold:
+                        return True, f'{robot} stationary feedback ready', diagnostics
+                else:
+                    stationary_since = None
+                    diagnostics['stationary_hold_sec'] = 0.0
+            else:
+                stationary_since = None
+                diagnostics['stationary_hold_sec'] = 0.0
+            time.sleep(0.02)
+        return False, f'{robot} did not remain stationary within {timeout_sec:.2f}s', diagnostics
 
     @staticmethod
     def _duration_msg(seconds):
@@ -732,18 +1230,1654 @@ class KeyboardTeleop(Node):
             if point.accelerations:
                 point.accelerations = [a / (scale * scale) for a in point.accelerations]
 
-    def move_cartesian(self, robot, dx_mm=0, dy_mm=0, dz_mm=0, velocity_scale=1.0):
+    def _get_world_ee_pose(self, robot):
+        for ee_link in self._ee_link_candidates(robot):
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    'world',
+                    ee_link,
+                    rclpy.time.Time(),
+                )
+            except (
+                tf2_ros.LookupException,
+                tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException,
+            ):
+                continue
+            pose = Pose()
+            pose.position.x = transform.transform.translation.x
+            pose.position.y = transform.transform.translation.y
+            pose.position.z = transform.transform.translation.z
+            pose.orientation = transform.transform.rotation
+            self.active_frame_id[robot] = 'world'
+            self.active_ee_link[robot] = ee_link
+            return pose
+        return None
+
+    def _xarm6_cartesian_readiness(
+        self,
+        *,
+        allow_smooth_mode=False,
+        expected_mode=None,
+    ):
+        """Validate xArm6 controller TCP feedback against world -> link_eef TF."""
+        snapshot, error = self._xarm6_robot_state_snapshot()
+        if snapshot is None:
+            return False, f'Cartesian frame validation failed: {error}', {}
+        try:
+            world_base_message = self.tf_buffer.lookup_transform(
+                'world',
+                'link_base',
+                rclpy.time.Time(),
+            )
+            world_eef_message = self.tf_buffer.lookup_transform(
+                'world',
+                'link_eef',
+                rclpy.time.Time(),
+            )
+            eef_tcp_message = self.tf_buffer.lookup_transform(
+                'link_eef',
+                'link_tcp',
+                rclpy.time.Time(),
+            )
+            world_base = (
+                (
+                    float(world_base_message.transform.translation.x),
+                    float(world_base_message.transform.translation.y),
+                    float(world_base_message.transform.translation.z),
+                ),
+                _normalized_quaternion(
+                    (
+                        float(world_base_message.transform.rotation.x),
+                        float(world_base_message.transform.rotation.y),
+                        float(world_base_message.transform.rotation.z),
+                        float(world_base_message.transform.rotation.w),
+                    )
+                ),
+            )
+            tf_world_eef = (
+                (
+                    float(world_eef_message.transform.translation.x),
+                    float(world_eef_message.transform.translation.y),
+                    float(world_eef_message.transform.translation.z),
+                ),
+                _normalized_quaternion(
+                    (
+                        float(world_eef_message.transform.rotation.x),
+                        float(world_eef_message.transform.rotation.y),
+                        float(world_eef_message.transform.rotation.z),
+                        float(world_eef_message.transform.rotation.w),
+                    )
+                ),
+            )
+            tf_eef_tcp = (
+                (
+                    float(eef_tcp_message.transform.translation.x),
+                    float(eef_tcp_message.transform.translation.y),
+                    float(eef_tcp_message.transform.translation.z),
+                ),
+                _normalized_quaternion(
+                    (
+                        float(eef_tcp_message.transform.rotation.x),
+                        float(eef_tcp_message.transform.rotation.y),
+                        float(eef_tcp_message.transform.rotation.z),
+                        float(eef_tcp_message.transform.rotation.w),
+                    )
+                ),
+            )
+            base_tcp = _xarm_pose_transform(snapshot['pose'])
+            active_eef_tcp = _xarm_pose_transform(snapshot['offset'])
+            base_eef = _compose_transforms(base_tcp, _inverse_transform(active_eef_tcp))
+            reconstructed_world_eef = _compose_transforms(world_base, base_eef)
+            position_error = math.sqrt(
+                sum(
+                    (
+                        reconstructed_world_eef[0][index]
+                        - tf_world_eef[0][index]
+                    )
+                    ** 2
+                    for index in range(3)
+                )
+            )
+            orientation_error = _quaternion_error_rad(
+                reconstructed_world_eef[1],
+                tf_world_eef[1],
+            )
+            offset_position_difference = math.sqrt(
+                sum(
+                    (active_eef_tcp[0][index] - tf_eef_tcp[0][index]) ** 2
+                    for index in range(3)
+                )
+            )
+            offset_orientation_difference = _quaternion_error_rad(
+                active_eef_tcp[1],
+                tf_eef_tcp[1],
+            )
+        except (
+            ValueError,
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            return False, f'Cartesian frame validation failed: {exc}', {}
+        diagnostics = {
+            'controller_tcp_pose': list(snapshot['pose']),
+            'controller_tcp_offset': list(snapshot['offset']),
+            'position_error_m': position_error,
+            'orientation_error_rad': orientation_error,
+            'tf_link_eef_link_tcp_position_difference_m': offset_position_difference,
+            'tf_link_eef_link_tcp_orientation_difference_rad': (
+                offset_orientation_difference
+            ),
+            'controller_mode': snapshot['mode'],
+            'controller_state': snapshot['state'],
+        }
+        required_mode = (
+            int(expected_mode)
+            if expected_mode is not None
+            else (5 if allow_smooth_mode else 1)
+        )
+        if int(snapshot['mode']) != required_mode:
+            return (
+                False,
+                'Cartesian frame validation failed: xArm6 controller mode '
+                f"is {snapshot['mode']}, expected Mode {required_mode}",
+                diagnostics,
+            )
+        controller_state = int(snapshot['state'])
+        if controller_state > 2 or controller_state < 0:
+            return (
+                False,
+                'Cartesian frame validation failed: xArm6 controller state '
+                f"is {snapshot['state']}, expected a driver-ready state from 0 to 2",
+                diagnostics,
+            )
+        if position_error > max(0.005, self.xarm6_hardware_cartesian_position_tolerance_m):
+            return (
+                False,
+                'Cartesian frame validation failed: controller TCP reconstructed '
+                f'world -> link_eef differs from TF by {position_error:.6f} m',
+                diagnostics,
+            )
+        if orientation_error > self.xarm6_hardware_cartesian_orientation_tolerance_rad:
+            return (
+                False,
+                'Cartesian frame validation failed: controller TCP reconstructed '
+                f'world -> link_eef differs from TF by {orientation_error:.6f} rad',
+                diagnostics,
+            )
+        message = 'xArm6 Cartesian frame validation ready'
+        if offset_position_difference > 0.005 or offset_orientation_difference > math.radians(3.0):
+            message += (
+                '; active RobotMsg.offset differs from TF link_eef -> link_tcp '
+                f'(position={offset_position_difference:.6f} m, '
+                f'orientation={offset_orientation_difference:.6f} rad)'
+            )
+        return True, message, diagnostics
+
+    def _prepare_xarm6_trajectory_mode(  # noqa: C901, PLR0912, PLR0915 - explicit UFactory transition gates.
+        self,
+    ):
+        """Observe the UFactory-owned transition into trajectory Mode 1."""
+        started_at = time.monotonic()
+        hard_deadline = (
+            started_at + XARM6_TRAJECTORY_MODE_HARD_SAFETY_TIMEOUT_SEC
+        )
+        last_progress_at = started_at
+        feedback_missing_since = started_at
+        controller_error_since = None
+        last_semantic_state = None
+        last_controller_state = 'missing'
+        last_controller_error = ''
+        snapshot_error = 'xArm6 robot_states feedback has not been received'
+        last_diagnostics = {}
+        mode_requested = False
+        state_requested = False
+        failure_reason = ''
+
+        while time.monotonic() < hard_deadline:
+            now = time.monotonic()
+            snapshot, snapshot_error = self._xarm6_robot_state_snapshot()
+            if snapshot is not None:
+                feedback_missing_since = None
+                try:
+                    controller_mode = int(snapshot['mode'])
+                    controller_state = int(snapshot['state'])
+                except (KeyError, TypeError, ValueError):
+                    snapshot = None
+                    snapshot_error = 'xArm6 robot_states mode or state is invalid'
+                    if feedback_missing_since is None:
+                        feedback_missing_since = now
+                else:
+                    last_diagnostics = {
+                        'controller_mode': controller_mode,
+                        'controller_state': controller_state,
+                    }
+            elif feedback_missing_since is None:
+                feedback_missing_since = now
+
+            remaining_sec = max(0.1, hard_deadline - now)
+            observed_controller_state, controller_error = (
+                self._xarm6_trajectory_controller_state(
+                    timeout_sec=min(1.0, remaining_sec)
+                )
+            )
+            if observed_controller_state is not None:
+                last_controller_state = observed_controller_state
+                last_controller_error = ''
+                controller_error_since = None
+            else:
+                last_controller_error = str(controller_error or '').strip()
+                if controller_error_since is None:
+                    controller_error_since = now
+
+            semantic_state = (
+                last_diagnostics.get('controller_mode'),
+                last_diagnostics.get('controller_state'),
+                last_controller_state,
+            )
+            if semantic_state != last_semantic_state:
+                last_semantic_state = semantic_state
+                last_progress_at = now
+
+            if snapshot is not None:
+                controller_mode = int(snapshot['mode'])
+                controller_state = int(snapshot['state'])
+                if (
+                    controller_mode == 1
+                    and 0 <= controller_state <= 2
+                    and observed_controller_state == 'active'
+                ):
+                    return (
+                        True,
+                        'xArm6 trajectory controller Mode 1 is ready',
+                        last_diagnostics,
+                    )
+
+                mode_change_requested = controller_mode != 1 and not mode_requested
+                if mode_change_requested:
+                    ok, message = self._xarm6_set_int16('set_mode', 1)
+                    if not ok:
+                        return (
+                            False,
+                            'xArm6 trajectory Mode 1 preparation failed: '
+                            f'{message}',
+                            last_diagnostics,
+                        )
+                    mode_requested = True
+                    last_progress_at = time.monotonic()
+                if (
+                    (mode_change_requested or not 0 <= controller_state <= 2)
+                    and not state_requested
+                ):
+                    ok, message = self._xarm6_set_int16('set_state', 0)
+                    if not ok:
+                        return (
+                            False,
+                            'xArm6 trajectory state preparation failed: '
+                            f'{message}',
+                            last_diagnostics,
+                        )
+                    state_requested = True
+                    last_progress_at = time.monotonic()
+
+                if controller_mode != 1 or not 0 <= controller_state <= 2:
+                    # Fresh Mode/State transition feedback means UFactory still owns
+                    # an active handoff, including its temporary State 5 period.
+                    last_progress_at = now
+
+            if (
+                feedback_missing_since is not None
+                and now - feedback_missing_since
+                >= XARM6_HARDWARE_FEEDBACK_DISCOVERY_WAIT_SEC
+            ):
+                failure_reason = snapshot_error
+                break
+            if (
+                controller_error_since is not None
+                and now - controller_error_since
+                >= XARM6_HARDWARE_FEEDBACK_DISCOVERY_WAIT_SEC
+            ):
+                failure_reason = (
+                    last_controller_error
+                    or '/xarm6/controller_manager/list_controllers is unavailable'
+                )
+                break
+            if (
+                snapshot is not None
+                and int(snapshot['mode']) == 1
+                and 0 <= int(snapshot['state']) <= 2
+                and now - last_progress_at
+                >= XARM6_TRAJECTORY_MODE_NO_PROGRESS_TIMEOUT_SEC
+            ):
+                failure_reason = (
+                    'trajectory controller activation stopped progressing; '
+                    f'state={last_controller_state}'
+                )
+                break
+            time.sleep(XARM6_TRAJECTORY_MODE_POLL_INTERVAL_SEC)
+
+        if not failure_reason:
+            failure_reason = (
+                'hard safety timeout while waiting for Mode 1 and '
+                'xarm6_traj_controller=active'
+            )
+        if not last_diagnostics:
+            subscription = getattr(
+                self,
+                '_xarm6_robot_state_subscription',
+                None,
+            )
+            publisher_count = None
+            if subscription is not None:
+                try:
+                    publisher_count = int(subscription.get_publisher_count())
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    publisher_count = None
+            discovery_detail = (
+                ''
+                if publisher_count is None
+                else f'; discovered_publishers={publisher_count}'
+            )
+            return (
+                False,
+                'xArm6 trajectory Mode 1 preparation failed: '
+                f'{failure_reason}{discovery_detail}',
+                {},
+            )
+        return (
+            False,
+            'xArm6 trajectory Mode 1 preparation did not converge: '
+            f'{failure_reason}; mode={last_diagnostics.get("controller_mode")!r} '
+            f'state={last_diagnostics.get("controller_state")!r} '
+            f'trajectory_controller={last_controller_state}',
+            last_diagnostics,
+        )
+
+    def _world_vector_in_robot_base(self, vector):
+        world_base_message = self.tf_buffer.lookup_transform(
+            'world',
+            'link_base',
+            rclpy.time.Time(),
+        )
+        world_base_rotation = _normalized_quaternion(
+            (
+                float(world_base_message.transform.rotation.x),
+                float(world_base_message.transform.rotation.y),
+                float(world_base_message.transform.rotation.z),
+                float(world_base_message.transform.rotation.w),
+            )
+        )
+        return _quaternion_rotate(
+            _inverse_transform(((0.0, 0.0, 0.0), world_base_rotation))[1],
+            tuple(float(value) for value in vector),
+        )
+
+    def _move_ur5e_hardware_cartesian(self, target, velocity_scale):
+        client = getattr(self, 'ur5e_hardware_cartesian_client', None)
+        if client is None or MoveUR5eCartesian is None:
+            return False, 'UR5e RTDE Cartesian action type is unavailable'
+        if not client.wait_for_server(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_cartesian_action} is not available'
+
+        values = (
+            float(target.position.x),
+            float(target.position.y),
+            float(target.position.z),
+            float(target.orientation.x),
+            float(target.orientation.y),
+            float(target.orientation.z),
+            float(target.orientation.w),
+        )
+        if not all(math.isfinite(value) for value in values):
+            return False, 'UR5e Cartesian target contains non-finite values'
+
+        scale = min(1.0, self._normalize_velocity_scale(velocity_scale))
+        goal = MoveUR5eCartesian.Goal()
+        goal.target_tool0_pose = PoseStamped()
+        goal.target_tool0_pose.header.frame_id = 'world'
+        goal.target_tool0_pose.header.stamp = self.get_clock().now().to_msg()
+        goal.target_tool0_pose.pose.position.x = values[0]
+        goal.target_tool0_pose.pose.position.y = values[1]
+        goal.target_tool0_pose.pose.position.z = values[2]
+        goal.target_tool0_pose.pose.orientation.x = values[3]
+        goal.target_tool0_pose.pose.orientation.y = values[4]
+        goal.target_tool0_pose.pose.orientation.z = values[5]
+        goal.target_tool0_pose.pose.orientation.w = values[6]
+        goal.speed_m_s = max(
+            0.005,
+            min(self.ur5e_hardware_cartesian_speed_m_s,
+                self.ur5e_hardware_cartesian_speed_m_s * scale),
+        )
+        goal.acceleration_m_s2 = max(
+            0.01,
+            min(self.ur5e_hardware_cartesian_acceleration_m_s2,
+                self.ur5e_hardware_cartesian_acceleration_m_s2 * scale),
+        )
+
+        try:
+            send_future = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_cartesian_action}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=3.0):
+            return False, f'{self.ur5e_hardware_cartesian_action}: send timeout'
+        try:
+            goal_handle = send_future.result()
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_cartesian_action}: send failed ({exc})'
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{self.ur5e_hardware_cartesian_action}: goal rejected'
+
+        result_future = goal_handle.get_result_async()
+        if not self._wait_future(
+            result_future,
+            timeout=self.ur5e_hardware_result_timeout_sec,
+        ):
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+                self._wait_future(cancel_future, timeout=2.0)
+            except (AttributeError, RuntimeError):
+                pass
+            return False, f'{self.ur5e_hardware_cartesian_action}: result timeout'
+        try:
+            wrapped = result_future.result()
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_cartesian_action}: result failed ({exc})'
+        result = getattr(wrapped, 'result', None)
+        status = int(getattr(wrapped, 'status', -1))
+        error_code = int(getattr(result, 'error_code', -1))
+        error_string = str(getattr(result, 'error_string', '')).strip()
+        if status != 4 or error_code != 0:
+            detail = f'status={status} error_code={error_code}'
+            if error_string:
+                detail += f' {error_string}'
+            return False, f'{self.ur5e_hardware_cartesian_action}: {detail}'
+        position_error = float(getattr(result, 'final_position_error_m', math.nan))
+        orientation_error = float(
+            getattr(result, 'final_orientation_error_rad', math.nan)
+        )
+        return True, (
+            f'{self.ur5e_hardware_cartesian_action}: succeeded '
+            f'(position_error={position_error:.6f} m, '
+            f'orientation_error={orientation_error:.6f} rad)'
+        )
+
+    def _move_ur5e_relative_cartesian(
+        self,
+        world_delta_m,
+        velocity_scale,
+        *,
+        speed_mm_s=None,
+    ):
+        client = getattr(self, 'ur5e_hardware_relative_cartesian_client', None)
+        if client is None or MoveUR5eRelativeCartesian is None:
+            return False, 'UR5e RTDE relative Cartesian action type is unavailable'
+        if not client.wait_for_server(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_relative_cartesian_action} is not available'
+        values = tuple(float(value) for value in world_delta_m)
+        if len(values) != 3 or not all(math.isfinite(value) for value in values):
+            return False, 'UR5e world Cartesian Step contains non-finite values'
+        scale = min(1.0, self._normalize_velocity_scale(velocity_scale))
+        requested_speed_m_s = (
+            self.ur5e_hardware_cartesian_speed_m_s * scale
+            if speed_mm_s is None
+            else float(speed_mm_s) / 1000.0
+        )
+        if not math.isfinite(requested_speed_m_s) or not (
+            0.005
+            <= requested_speed_m_s
+            <= self.ur5e_hardware_cartesian_max_speed_m_s
+        ):
+            return False, (
+                'UR5e Cartesian speed must be finite and within '
+                f'[5.0, {self.ur5e_hardware_cartesian_max_speed_m_s * 1000.0:.1f}] mm/s'
+            )
+        goal = MoveUR5eRelativeCartesian.Goal()
+        goal.world_translation_m.x = values[0]
+        goal.world_translation_m.y = values[1]
+        goal.world_translation_m.z = values[2]
+        goal.speed_m_s = requested_speed_m_s
+        goal.acceleration_m_s2 = self.ur5e_hardware_cartesian_acceleration_m_s2
+        try:
+            send_future = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_relative_cartesian_action}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=3.0):
+            return False, f'{self.ur5e_hardware_relative_cartesian_action}: send timeout'
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{self.ur5e_hardware_relative_cartesian_action}: goal rejected'
+        result_future = goal_handle.get_result_async()
+        if not self._wait_future(result_future, timeout=self.ur5e_hardware_result_timeout_sec):
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+                self._wait_future(cancel_future, timeout=2.0)
+            except (AttributeError, RuntimeError):
+                pass
+            return False, f'{self.ur5e_hardware_relative_cartesian_action}: result timeout'
+        wrapped = result_future.result()
+        result = getattr(wrapped, 'result', None)
+        status = int(getattr(wrapped, 'status', -1))
+        error_code = int(getattr(result, 'error_code', -1))
+        error_string = str(getattr(result, 'error_string', '')).strip()
+        if status != 4 or error_code != 0:
+            detail = f'status={status} error_code={error_code}'
+            if error_string:
+                detail += f' {error_string}'
+            return False, f'{self.ur5e_hardware_relative_cartesian_action}: {detail}'
+        translation_error = float(
+            getattr(result, 'final_translation_error_m', math.nan)
+        )
+        orientation_drift = float(
+            getattr(result, 'final_orientation_drift_rad', math.nan)
+        )
+        return True, (
+            f'{self.ur5e_hardware_relative_cartesian_action}: succeeded '
+            f'(translation_error={translation_error:.6f} m, '
+            f'orientation_drift={orientation_drift:.6f} rad)'
+        )
+
+    def _move_ur5e_joint_jog(self, joint, delta_deg, speed_deg_s):
+        """Execute one exact-speed UR5e Interactive Teleop joint jog."""
+        self._last_ur5e_joint_jog_state_uncertain = False
+        client = getattr(self, 'ur5e_hardware_joint_jog_client', None)
+        if client is None or MoveUR5eJointJog is None:
+            return False, 'UR5e RTDE joint jog action type is unavailable'
+        if not client.wait_for_server(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_joint_jog_action} is not available'
+        speed_rad_s = math.radians(float(speed_deg_s))
+        delta_rad = math.radians(float(delta_deg))
+        if not math.isfinite(delta_rad) or abs(delta_rad) <= 1e-12:
+            return False, 'UR5e joint jog delta must be non-zero and finite'
+        if not math.isfinite(speed_rad_s) or not (
+            math.radians(0.1)
+            <= speed_rad_s
+            <= self.ur5e_hardware_max_joint_speed_rad_s
+        ):
+            return False, (
+                'UR5e joint jog speed must be finite and within '
+                f'[0.1, {math.degrees(self.ur5e_hardware_max_joint_speed_rad_s):.1f}] deg/s'
+            )
+        goal = MoveUR5eJointJog.Goal()
+        goal.joint = int(joint)
+        goal.delta_rad = delta_rad
+        goal.speed_rad_s = speed_rad_s
+        goal.acceleration_rad_s2 = self.ur5e_hardware_max_joint_acceleration_rad_s2
+        try:
+            send_future = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            return False, f'{self.ur5e_hardware_joint_jog_action}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=3.0):
+            return False, f'{self.ur5e_hardware_joint_jog_action}: send timeout'
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{self.ur5e_hardware_joint_jog_action}: goal rejected'
+        result_future = goal_handle.get_result_async()
+        result_timeout_sec = max(
+            self.ur5e_hardware_result_timeout_sec,
+            abs(delta_rad) / speed_rad_s + 10.0,
+        )
+        if not self._wait_future(result_future, timeout=result_timeout_sec):
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+                self._wait_future(cancel_future, timeout=2.0)
+            except (AttributeError, RuntimeError):
+                pass
+            self._last_ur5e_joint_jog_state_uncertain = True
+            return False, f'{self.ur5e_hardware_joint_jog_action}: result timeout'
+        wrapped = result_future.result()
+        result = getattr(wrapped, 'result', None)
+        status = int(getattr(wrapped, 'status', -1))
+        error_code = int(getattr(result, 'error_code', -1))
+        error_string = str(getattr(result, 'error_string', '')).strip()
+        self._last_ur5e_joint_jog_state_uncertain = bool(
+            getattr(result, 'state_uncertain', False)
+        )
+        if status != 4 or error_code != 0:
+            detail = f'status={status} error_code={error_code}'
+            if error_string:
+                detail += f' {error_string}'
+            return False, f'{self.ur5e_hardware_joint_jog_action}: {detail}'
+        final_error = float(getattr(result, 'final_joint_error_rad', math.nan))
+        return True, (
+            f'{self.ur5e_hardware_joint_jog_action}: succeeded '
+            f'(joint_error={final_error:.6f} rad)'
+        )
+
+    def _move_xarm6_relative_cartesian(
+        self,
+        world_delta_m,
+        velocity_scale,
+        *,
+        speed_mm_s=None,
+        restore_trajectory_control=True,
+    ):
+        self._xarm6_cartesian_motion_attempted = False
+        client = getattr(self, 'xarm6_hardware_cartesian_client', None)
+        if client is None or MoveCartesian is None:
+            return False, 'xArm6 MoveCartesian service type is unavailable'
+        if not client.wait_for_service(timeout_sec=2.0):
+            return False, f'{self.xarm6_hardware_cartesian_service} is not available'
+        session_start = None
+        if restore_trajectory_control:
+            ready, message, _diagnostics = self._xarm6_cartesian_readiness()
+        else:
+            if self._xarm6_cartesian_session_mode != 'step':
+                return False, 'xArm6 Cartesian Step session is not prepared'
+            session_start, message = self._xarm6_robot_state_snapshot()
+            ready = bool(
+                session_start is not None
+                and int(session_start['mode']) == 0
+                and 0 <= int(session_start['state']) <= 2
+            )
+            if session_start is not None and not ready:
+                message = (
+                    'xArm6 Cartesian Step session lost Mode 0 readiness; '
+                    f"mode={session_start['mode']} state={session_start['state']}"
+                )
+        if not ready:
+            return False, message
+        current_world_eef = self._get_world_ee_pose('xarm6')
+        if current_world_eef is None:
+            return False, 'Cartesian frame validation failed: world -> link_eef is unavailable'
+        world_target = copy.deepcopy(current_world_eef)
+        world_target.position.x += float(world_delta_m[0])
+        world_target.position.y += float(world_delta_m[1])
+        world_target.position.z += float(world_delta_m[2])
+        target_ready, target_message = self._xarm6_target_within_workspace(world_target)
+        if not target_ready:
+            return False, target_message
+        try:
+            base_delta_m = self._world_vector_in_robot_base(world_delta_m)
+        except (
+            ValueError,
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            return False, f'xArm6 world -> link_base Step conversion failed: {exc}'
+        start, start_error = (
+            (session_start, '')
+            if session_start is not None
+            else self._xarm6_robot_state_snapshot()
+        )
+        if start is None:
+            return False, start_error
+        start_transform = _xarm_pose_transform(start['pose'])
+        target_translation = tuple(
+            start_transform[0][index] + base_delta_m[index]
+            for index in range(3)
+        )
+        scale = min(1.0, self._normalize_velocity_scale(velocity_scale))
+        requested_speed_mm_s = (
+            self.xarm6_hardware_cartesian_speed_mm_s * scale
+            if speed_mm_s is None
+            else float(speed_mm_s)
+        )
+        speed_limit_mm_s = float(
+            getattr(
+                self,
+                'xarm6_hardware_cartesian_max_speed_mm_s',
+                self.xarm6_hardware_cartesian_speed_mm_s,
+            )
+        )
+        if not math.isfinite(requested_speed_mm_s) or not (
+            5.0
+            <= requested_speed_mm_s
+            <= speed_limit_mm_s
+        ):
+            return False, (
+                'xArm6 Cartesian speed must be finite and within '
+                f'[5.0, {speed_limit_mm_s:.3f}] mm/s'
+            )
+        request = MoveCartesian.Request()
+        request.pose = [
+            base_delta_m[0] * 1000.0,
+            base_delta_m[1] * 1000.0,
+            base_delta_m[2] * 1000.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        request.speed = requested_speed_mm_s
+        request.acc = self.xarm6_hardware_cartesian_acceleration_mm_s2
+        request.mvtime = 0.0
+        request.wait = True
+        expected_duration_sec = (
+            math.sqrt(sum(float(value) ** 2 for value in base_delta_m))
+            * 1000.0
+            / requested_speed_mm_s
+        )
+        request.timeout = max(8.0, expected_duration_sec + 5.0)
+        request.radius = -1.0
+        request.is_tool_coord = False
+        request.relative = True
+        request.motion_type = 0
+        if restore_trajectory_control:
+            handoff_ok, handoff_message = self._xarm6_prepare_firmware_cartesian_mode()
+            if not handoff_ok:
+                return False, handoff_message
+        self._xarm6_cartesian_motion_attempted = True
+        response, error = self._call_service(
+            client,
+            request,
+            timeout_sec=request.timeout + 2.0,
+        )
+        restore_ok, restore_message = (
+            self._xarm6_restore_trajectory_control()
+            if restore_trajectory_control
+            else (True, 'xArm6 Cartesian Step session remains in Mode 0')
+        )
+        if error is not None:
+            message = f'{self.xarm6_hardware_cartesian_service}: {error}'
+            if not restore_ok:
+                message += f'; trajectory control restore failed: {restore_message}'
+            return False, message
+        return_code = int(getattr(response, 'ret', -1))
+        if return_code != 0:
+            detail = str(getattr(response, 'message', '')).strip()
+            message = (
+                f'{self.xarm6_hardware_cartesian_service}: ret={return_code} {detail}'
+            ).strip()
+            if not restore_ok:
+                message += f'; trajectory control restore failed: {restore_message}'
+            return False, message
+        if not restore_ok:
+            return False, (
+                f'{self.xarm6_hardware_cartesian_service}: command succeeded but '
+                f'trajectory control restore failed: {restore_message}'
+            )
+        deadline = time.monotonic() + 2.0
+        position_error = math.inf
+        orientation_drift = math.inf
+        while time.monotonic() < deadline:
+            actual, _error = self._xarm6_robot_state_snapshot()
+            if actual is not None:
+                actual_transform = _xarm_pose_transform(actual['pose'])
+                position_error = math.sqrt(
+                    sum(
+                        (actual_transform[0][index] - target_translation[index]) ** 2
+                        for index in range(3)
+                    )
+                )
+                orientation_drift = _quaternion_error_rad(
+                    actual_transform[1],
+                    start_transform[1],
+                )
+                if orientation_drift > math.radians(1.0):
+                    return False, (
+                        'xArm6 translation-only Cartesian Step changed orientation by '
+                        f'{orientation_drift:.6f} rad'
+                    )
+                if position_error <= self.xarm6_hardware_cartesian_position_tolerance_m:
+                    return True, (
+                        f'{self.xarm6_hardware_cartesian_service}: relative Step succeeded '
+                        f'(position_error={position_error:.6f} m, '
+                        f'orientation_drift={orientation_drift:.6f} rad)'
+                    )
+            time.sleep(0.05)
+        return False, (
+            f'{self.xarm6_hardware_cartesian_service}: relative Step did not converge; '
+            f'position_error={position_error:.6f} m '
+            f'orientation_drift={orientation_drift:.6f} rad'
+        )
+
+    def _xarm6_target_within_workspace(self, target):
+        bounds = getattr(self, 'xarm6_hardware_workspace_bounds', {})
+        required = {
+            'x_min_m', 'x_max_m', 'y_min_m',
+            'y_max_m', 'z_min_m', 'z_max_m',
+        }
+        if not isinstance(bounds, dict) or not required.issubset(bounds):
+            return False, 'xArm6 hardware workspace bounds are unavailable'
+        coordinates = {
+            'x': float(target.position.x),
+            'y': float(target.position.y),
+            'z': float(target.position.z),
+        }
+        for axis, value in coordinates.items():
+            lower = float(bounds[f'{axis}_min_m'])
+            upper = float(bounds[f'{axis}_max_m'])
+            if not math.isfinite(value) or value < lower or value > upper:
+                return False, (
+                    f'xArm6 Cartesian target {axis}={value:.6f} m is outside '
+                    f'[{lower:.6f}, {upper:.6f}] m'
+                )
+        return True, 'OK'
+
+    def _move_xarm6_hardware_cartesian(self, target, velocity_scale):
+        client = getattr(self, 'xarm6_hardware_cartesian_client', None)
+        if client is None or MoveCartesian is None:
+            return False, 'xArm6 MoveCartesian service type is unavailable'
+        if not client.wait_for_service(timeout_sec=2.0):
+            return False, f'{self.xarm6_hardware_cartesian_service} is not available'
+        target_ready, target_message = self._xarm6_target_within_workspace(target)
+        if not target_ready:
+            return False, target_message
+
+        try:
+            world_target = (
+                (
+                    float(target.position.x),
+                    float(target.position.y),
+                    float(target.position.z),
+                ),
+                _normalized_quaternion(
+                    (
+                        float(target.orientation.x),
+                        float(target.orientation.y),
+                        float(target.orientation.z),
+                        float(target.orientation.w),
+                    )
+                ),
+            )
+            world_base_message = self.tf_buffer.lookup_transform(
+                'world',
+                'link_base',
+                rclpy.time.Time(),
+            )
+            world_base = (
+                (
+                    float(world_base_message.transform.translation.x),
+                    float(world_base_message.transform.translation.y),
+                    float(world_base_message.transform.translation.z),
+                ),
+                _normalized_quaternion(
+                    (
+                        float(world_base_message.transform.rotation.x),
+                        float(world_base_message.transform.rotation.y),
+                        float(world_base_message.transform.rotation.z),
+                        float(world_base_message.transform.rotation.w),
+                    )
+                ),
+            )
+            base_target = _compose_transforms(_inverse_transform(world_base), world_target)
+            roll, pitch, yaw = self._quat_to_rpy(*base_target[1])
+        except (
+            ValueError,
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            return False, f'xArm6 world -> link_base Cartesian conversion failed: {exc}'
+
+        scale = min(1.0, self._normalize_velocity_scale(velocity_scale))
+        request = MoveCartesian.Request()
+        request.pose = [
+            base_target[0][0] * 1000.0,
+            base_target[0][1] * 1000.0,
+            base_target[0][2] * 1000.0,
+            roll,
+            pitch,
+            yaw,
+        ]
+        request.speed = max(
+            5.0,
+            min(self.xarm6_hardware_cartesian_speed_mm_s,
+                self.xarm6_hardware_cartesian_speed_mm_s * scale),
+        )
+        request.acc = max(
+            10.0,
+            min(self.xarm6_hardware_cartesian_acceleration_mm_s2,
+                self.xarm6_hardware_cartesian_acceleration_mm_s2 * scale),
+        )
+        request.mvtime = 0.0
+        request.wait = True
+        request.timeout = 8.0
+        request.radius = -1.0
+        request.is_tool_coord = False
+        request.relative = False
+        request.motion_type = 0
+        handoff_ok, handoff_message = self._xarm6_prepare_firmware_cartesian_mode()
+        if not handoff_ok:
+            return False, handoff_message
+        response, error = self._call_service(client, request, timeout_sec=10.0)
+        restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+        if error is not None:
+            message = f'{self.xarm6_hardware_cartesian_service}: {error}'
+            if not restore_ok:
+                message += f'; trajectory control restore failed: {restore_message}'
+            return False, message
+        return_code = int(getattr(response, 'ret', -1))
+        if return_code != 0:
+            message = str(getattr(response, 'message', '')).strip()
+            message = (
+                f'{self.xarm6_hardware_cartesian_service}: '
+                f'ret={return_code} {message}'
+            ).strip()
+            if not restore_ok:
+                message += f'; trajectory control restore failed: {restore_message}'
+            return False, message
+        if not restore_ok:
+            return False, (
+                f'{self.xarm6_hardware_cartesian_service}: command succeeded but '
+                f'trajectory control restore failed: {restore_message}'
+            )
+
+        deadline = time.monotonic() + 2.0
+        position_error = math.inf
+        orientation_error = math.inf
+        while time.monotonic() < deadline:
+            actual = self._get_world_ee_pose('xarm6')
+            if actual is not None:
+                position_error = math.sqrt(
+                    (float(actual.position.x) - world_target[0][0]) ** 2
+                    + (float(actual.position.y) - world_target[0][1]) ** 2
+                    + (float(actual.position.z) - world_target[0][2]) ** 2
+                )
+                orientation_error = _quaternion_error_rad(
+                    (
+                        float(actual.orientation.x),
+                        float(actual.orientation.y),
+                        float(actual.orientation.z),
+                        float(actual.orientation.w),
+                    ),
+                    world_target[1],
+                )
+                if (
+                    position_error
+                    <= self.xarm6_hardware_cartesian_position_tolerance_m
+                    and orientation_error
+                    <= self.xarm6_hardware_cartesian_orientation_tolerance_rad
+                ):
+                    return True, (
+                        f'{self.xarm6_hardware_cartesian_service}: succeeded '
+                        f'(position_error={position_error:.6f} m, '
+                        f'orientation_error={orientation_error:.6f} rad)'
+                    )
+            time.sleep(0.05)
+        return False, (
+            f'{self.xarm6_hardware_cartesian_service}: terminal pose did not converge; '
+            f'position_error={position_error:.6f} m '
+            f'orientation_error={orientation_error:.6f} rad'
+        )
+
+    def _xarm6_trajectory_controller_state(self, *, timeout_sec=1.0):
+        """Read one exact xarm6_traj_controller lifecycle state."""
+        client = self.xarm6_controller_list_client
+        if client is None or ListControllers is None:
+            return None, 'xArm6 controller list service type is unavailable'
+        try:
+            service_ready = bool(
+                client.wait_for_service(
+                    timeout_sec=min(0.5, max(0.1, float(timeout_sec)))
+                )
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return None, f'xArm6 controller list readiness failed ({exc})'
+        if not service_ready:
+            return None, '/xarm6/controller_manager/list_controllers is unavailable'
+        response, error = self._call_service(
+            client,
+            ListControllers.Request(),
+            timeout_sec=max(0.1, float(timeout_sec)),
+        )
+        if error is not None:
+            return None, str(error)
+        if response is None:
+            return None, 'xArm6 controller list returned no response'
+        controller = next(
+            (
+                row
+                for row in list(getattr(response, 'controller', []))
+                if str(getattr(row, 'name', '')).strip()
+                == 'xarm6_traj_controller'
+            ),
+            None,
+        )
+        if controller is None:
+            return 'missing', ''
+        return str(getattr(controller, 'state', '')).strip().lower(), ''
+
+    def _xarm6_wait_for_trajectory_controller_state(
+        self,
+        expected_state,
+        *,
+        timeout_sec=5.0,
+    ):
+        expected = str(expected_state).strip().lower()
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        last_state = 'missing'
+        last_error = ''
+        while time.monotonic() < deadline:
+            remaining = max(0.1, deadline - time.monotonic())
+            state, error = self._xarm6_trajectory_controller_state(
+                timeout_sec=min(1.0, remaining)
+            )
+            if error:
+                last_error = str(error)
+            elif state is not None:
+                last_state = state
+                if last_state == expected:
+                    return True, (
+                        f'xArm6 trajectory controller is {expected}'
+                    )
+            time.sleep(0.05)
+        detail = f'state={last_state}'
+        if last_error:
+            detail += f' last_error={last_error}'
+        return False, (
+            f'xArm6 trajectory controller did not become {expected}; {detail}'
+        )
+
+    def _xarm6_set_int16(self, suffix, value):
+        if SetInt16 is None:
+            return False, 'xArm6 SetInt16 service type is unavailable'
+        service_name = {
+            'set_mode': XARM6_HARDWARE_SET_MODE_SERVICE,
+            'set_state': XARM6_HARDWARE_SET_STATE_SERVICE,
+        }.get(str(suffix))
+        client = {
+            'set_mode': getattr(self, 'xarm6_set_mode_client', None),
+            'set_state': getattr(self, 'xarm6_set_state_client', None),
+        }.get(str(suffix))
+        if service_name is not None and client is not None:
+            try:
+                service_ready = client.wait_for_service(
+                    timeout_sec=XARM6_HARDWARE_CONTROL_SERVICE_WAIT_SEC
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                return False, f'{service_name} readiness failed: {exc}'
+            if not service_ready:
+                return False, (
+                    f'{service_name} is unavailable after '
+                    f'{XARM6_HARDWARE_CONTROL_SERVICE_WAIT_SEC:.1f}s'
+                )
+        elif service_name is not None:
+            return False, f'{service_name} client is unavailable'
+        else:
+            service_name, client = self._get_service_client(
+                SetInt16,
+                suffix,
+                wait_timeout_sec=0.3,
+            )
+        if client is None:
+            return False, f'xArm6 {suffix} service is unavailable'
+        request = SetInt16.Request()
+        request.data = int(value)
+        response, error = self._call_service(client, request, timeout_sec=3.0)
+        if error is not None:
+            return False, f'{service_name}: {error}'
+        ret = int(getattr(response, 'ret', -1))
+        if ret != 0:
+            return False, f'{service_name}: ret={ret} {getattr(response, "message", "")}'.strip()
+        return True, 'OK'
+
+    def _xarm6_wait_for_mode(self, expected_mode, *, timeout_sec=3.0):
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        last_mode = None
+        last_state = None
+        while time.monotonic() < deadline:
+            snapshot, snapshot_error = self._xarm6_robot_state_snapshot()
+            if snapshot is None:
+                last_mode = snapshot_error
+                time.sleep(0.05)
+                continue
+            last_mode = int(snapshot['mode'])
+            last_state = int(snapshot['state'])
+            if last_mode == int(expected_mode) and 0 <= last_state <= 2:
+                return True, 'OK'
+            time.sleep(0.05)
+        return False, (
+            f'xArm6 mode handoff did not converge to Mode {expected_mode}; '
+            f'mode={last_mode!r} state={last_state!r}'
+        )
+
+    def _xarm6_confirm_cartesian_mode(self, expected_mode):
+        ok, message = self._xarm6_wait_for_mode(expected_mode)
+        if not ok:
+            return False, message
+        ok, message = self._xarm6_wait_for_trajectory_controller_state('inactive')
+        if not ok:
+            return False, message
+        return True, f'xArm6 firmware Cartesian Mode {expected_mode} ready'
+
+    def _prepare_xarm6_cartesian_session(self, mode):
+        requested = str(mode or '').strip().lower()
+        expected_mode = {'step': 0, 'smooth': 5}.get(requested)
+        if expected_mode is None:
+            return False, f'unknown xArm6 Cartesian mode: {mode}', False
+        if self._xarm6_smooth_active:
+            stop_ok, stop_message = self._stop_xarm6_cartesian_jog(
+                restore_trajectory_control=False,
+            )
+            if not stop_ok:
+                return False, stop_message, bool(
+                    not self._xarm6_last_stop_motion_confirmed
+                )
+        snapshot, _snapshot_error = self._xarm6_robot_state_snapshot()
+        already_ready = bool(
+            snapshot is not None
+            and int(snapshot['mode']) == expected_mode
+            and 0 <= int(snapshot['state']) <= 2
+        )
+        if already_ready:
+            ok, message = self._xarm6_confirm_cartesian_mode(expected_mode)
+        else:
+            ok = True
+            message = 'OK'
+            for suffix, value in (('set_mode', expected_mode), ('set_state', 0)):
+                ok, message = self._xarm6_set_int16(suffix, value)
+                if not ok:
+                    break
+            if ok:
+                ok, message = self._xarm6_confirm_cartesian_mode(expected_mode)
+        if not ok:
+            restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+            self._xarm6_cartesian_session_mode = 'off'
+            detail = f'xArm6 Cartesian {requested} preparation failed: {message}'
+            if not restore_ok:
+                detail += f'; trajectory control restore failed: {restore_message}'
+            return False, detail, False
+        if requested == 'smooth':
+            ok, message = self._xarm6_set_tcp_maxacc()
+            if not ok:
+                restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+                self._xarm6_cartesian_session_mode = 'off'
+                detail = f'xArm6 Cartesian smooth preparation failed: {message}'
+                if not restore_ok:
+                    detail += f'; trajectory control restore failed: {restore_message}'
+                return False, detail, False
+        ready, message, _diagnostics = self._xarm6_cartesian_readiness(
+            expected_mode=expected_mode,
+        )
+        if not ready:
+            self._xarm6_restore_trajectory_control()
+            self._xarm6_cartesian_session_mode = 'off'
+            return False, message, False
+        self._xarm6_cartesian_session_mode = requested
+        return True, f'xArm6 Cartesian {requested} Mode {expected_mode} ready', False
+
+    def _close_xarm6_cartesian_session(self):
+        stop_ok = True
+        stop_message = 'xArm6 Cartesian motion already stopped'
+        if self._xarm6_smooth_active:
+            stop_ok, stop_message = self._stop_xarm6_cartesian_jog(
+                restore_trajectory_control=False,
+            )
+        stop_confirmed = bool(self._xarm6_last_stop_motion_confirmed)
+        restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+        self._xarm6_cartesian_session_mode = 'off'
+        if not stop_ok:
+            return False, stop_message, not stop_confirmed
+        if not restore_ok:
+            return False, (
+                'xArm6 Cartesian motion stopped; trajectory Mode 1 is not ready: '
+                f'{restore_message}'
+            ), False
+        return True, 'xArm6 Cartesian session closed; Mode 1 restored', False
+
+    def xarm6_cartesian_session(self, mode):
+        """Prepare, inspect, or close the explicit xArm6 Cartesian session."""
+        requested = str(mode or '').strip().lower()
+        if requested in {'step', 'smooth'}:
+            return self._prepare_xarm6_cartesian_session(requested)
+        if requested == 'off':
+            return self._close_xarm6_cartesian_session()
+        if requested == 'status':
+            current = str(self._xarm6_cartesian_session_mode or 'off')
+            expected_mode = {'step': 0, 'smooth': 5}.get(current)
+            if expected_mode is None:
+                return True, 'xArm6 Cartesian session is Off', False
+            ok, message = self._xarm6_confirm_cartesian_mode(expected_mode)
+            return ok, message, False
+        return False, f'unknown xArm6 Cartesian session mode: {mode}', False
+
+    def _xarm6_restore_trajectory_control(self):
+        errors = []
+        for suffix, value in (('set_mode', 1), ('set_state', 0)):
+            ok, message = self._xarm6_set_int16(suffix, value)
+            if not ok:
+                errors.append(message)
+        if errors:
+            return False, '; '.join(errors)
+        ok, message = self._xarm6_wait_for_mode(1)
+        if not ok:
+            return False, message
+        ok, message = self._xarm6_wait_for_trajectory_controller_state('active')
+        if not ok:
+            return False, message
+        return True, 'xArm6 trajectory controller Mode 1 restored'
+
+    def _xarm6_prepare_firmware_cartesian_mode(self):
+        for suffix, value in (('set_mode', 0), ('set_state', 0)):
+            ok, message = self._xarm6_set_int16(suffix, value)
+            if not ok:
+                restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+                if not restore_ok:
+                    self._xarm6_cartesian_motion_attempted = True
+                detail = f'xArm6 Cartesian handoff failed: {message}'
+                if not restore_ok:
+                    detail += f'; trajectory control restore failed: {restore_message}'
+                return False, detail
+        ok, message = self._xarm6_wait_for_mode(0)
+        if not ok:
+            restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+            if not restore_ok:
+                self._xarm6_cartesian_motion_attempted = True
+            detail = f'xArm6 Cartesian handoff failed: {message}'
+            if not restore_ok:
+                detail += f'; trajectory control restore failed: {restore_message}'
+            return False, detail
+        ok, message = self._xarm6_wait_for_trajectory_controller_state('inactive')
+        if not ok:
+            restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+            detail = f'xArm6 Cartesian handoff failed: {message}'
+            if not restore_ok:
+                detail += f'; trajectory control restore failed: {restore_message}'
+            return False, detail
+        return True, 'xArm6 firmware Cartesian Mode 0 ready'
+
+    def _xarm6_set_tcp_maxacc(self):
+        if SetFloat32 is None:
+            return False, 'xArm6 SetFloat32 service type is unavailable'
+        service_name, client = self._get_service_client(
+            SetFloat32,
+            'set_tcp_maxacc',
+            wait_timeout_sec=0.3,
+        )
+        if client is None:
+            return False, 'xArm6 set_tcp_maxacc service is unavailable'
+        request = SetFloat32.Request()
+        request.data = float(self.xarm6_hardware_cartesian_acceleration_mm_s2)
+        response, error = self._call_service(client, request, timeout_sec=3.0)
+        if error is not None:
+            return False, f'{service_name}: {error}'
+        ret = int(getattr(response, 'ret', -1))
+        if ret != 0:
+            return False, f'{service_name}: ret={ret} {getattr(response, "message", "")}'.strip()
+        return True, 'OK'
+
+    def _send_xarm6_cartesian_velocity(self, speeds, *, duration, timeout_sec):
+        request = MoveVelocity.Request()
+        request.speeds = [float(value) for value in speeds]
+        request.is_tool_coord = False
+        request.duration = float(duration)
+        with self._xarm6_smooth_service_lock:
+            response, error = self._call_service(
+                self.xarm6_hardware_cartesian_velocity_client,
+                request,
+                timeout_sec=timeout_sec,
+            )
+        if error is not None or int(getattr(response, 'ret', -1)) != 0:
+            detail = error or f'ret={getattr(response, "ret", -1)}'
+            return False, (
+                f'{self.xarm6_hardware_cartesian_velocity_service}: {detail}'
+            )
+        return True, 'OK'
+
+    def _xarm6_refresh_cartesian_jog_once(self):
+        with self._xarm6_smooth_state_lock:
+            if not self._xarm6_smooth_active:
+                return False
+            speeds = list(self._xarm6_smooth_speeds)
+            watchdog_sec = float(self._xarm6_smooth_watchdog_sec)
+            heartbeat_age_sec = (
+                time.monotonic() - self._xarm6_smooth_heartbeat_monotonic
+            )
+        if heartbeat_age_sec > watchdog_sec:
+            failure = (
+                'xArm6 Cartesian Smooth Hold UI heartbeat expired after '
+                f'{heartbeat_age_sec:.3f}s'
+            )
+        else:
+            ok, failure = self._send_xarm6_cartesian_velocity(
+                speeds,
+                duration=0.30,
+                timeout_sec=0.40,
+            )
+            if ok:
+                return True
+            failure = f'xArm6 Cartesian Smooth Hold refresh failed: {failure}'
+        with self._xarm6_smooth_state_lock:
+            if not self._xarm6_smooth_active:
+                return False
+            self._xarm6_smooth_pending_error = failure
+        if hasattr(self, '_xarm6_cartesian_session_mode'):
+            self._stop_xarm6_cartesian_jog(
+                clear_pending_error=False,
+                restore_trajectory_control=(
+                    self._xarm6_cartesian_session_mode == 'off'
+                ),
+            )
+        else:
+            self._stop_xarm6_cartesian_jog(clear_pending_error=False)
+        return False
+
+    def _xarm6_cartesian_jog_refresh_loop(self):
+        while not self._xarm6_smooth_refresh_stop.wait(0.10):
+            if not self._xarm6_refresh_cartesian_jog_once():
+                return
+
+    def _start_xarm6_cartesian_jog_refresh(self):
+        previous = self._xarm6_smooth_refresh_thread
+        if previous is not None and previous.is_alive():
+            self._xarm6_smooth_refresh_stop.set()
+            previous.join(timeout=0.60)
+            if previous.is_alive():
+                return False, 'xArm6 Cartesian Smooth Hold refresh thread did not stop'
+        self._xarm6_smooth_refresh_stop.clear()
+        refresh_thread = threading.Thread(
+            target=self._xarm6_cartesian_jog_refresh_loop,
+            name='xarm6_cartesian_smooth_refresh',
+            daemon=True,
+        )
+        self._xarm6_smooth_refresh_thread = refresh_thread
+        refresh_thread.start()
+        return True, 'OK'
+
+    def _stop_xarm6_cartesian_jog(
+        self,
+        *,
+        clear_pending_error=True,
+        restore_trajectory_control=True,
+    ):
+        errors = []
+        with self._xarm6_smooth_state_lock:
+            motion_was_active = bool(self._xarm6_smooth_active)
+            pending_error = str(self._xarm6_smooth_pending_error or '')
+            self._xarm6_smooth_active = False
+            self._xarm6_smooth_refresh_stop.set()
+            if clear_pending_error:
+                self._xarm6_smooth_pending_error = ''
+        if pending_error:
+            errors.append(pending_error)
+        previous_stop_confirmed = bool(
+            getattr(self, '_xarm6_last_stop_motion_confirmed', True)
+        )
+        self._xarm6_last_stop_motion_confirmed = bool(
+            not motion_was_active and previous_stop_confirmed
+        )
+        client = self.xarm6_hardware_cartesian_velocity_client
+        if client is not None and MoveVelocity is not None:
+            ok, velocity_detail = self._send_xarm6_cartesian_velocity(
+                [0.0] * 6,
+                duration=0.30,
+                timeout_sec=2.0,
+            )
+            if not ok:
+                errors.append(velocity_detail)
+            else:
+                self._xarm6_last_stop_motion_confirmed = True
+        elif motion_was_active:
+            errors.append(
+                f'{self.xarm6_hardware_cartesian_velocity_service}: '
+                'stop service is unavailable'
+            )
+        if restore_trajectory_control:
+            ok, message = self._xarm6_restore_trajectory_control()
+            if not ok:
+                errors.append(f'trajectory control restore failed: {message}')
+        if errors:
+            return False, '; '.join(errors)
+        return True, (
+            'xArm6 Cartesian Smooth Hold stopped'
+            if restore_trajectory_control
+            else 'xArm6 Cartesian Smooth Hold motion stopped; Mode 5 remains ready'
+        )
+
+    def _set_xarm6_cartesian_jog(  # noqa: C901, PLR0912 - guarded Smooth Hold lifecycle.
+        self,
+        world_velocity_m_s,
+        watchdog_sec,
+    ):
+        client = self.xarm6_hardware_cartesian_velocity_client
+        if client is None or MoveVelocity is None:
+            return False, 'xArm6 Cartesian velocity service type is unavailable'
+        if not client.wait_for_service(timeout_sec=2.0):
+            return False, f'{self.xarm6_hardware_cartesian_velocity_service} is unavailable'
+        with self._xarm6_smooth_state_lock:
+            pending_error = str(self._xarm6_smooth_pending_error or '')
+            if pending_error:
+                self._xarm6_smooth_pending_error = ''
+            smooth_active = bool(self._xarm6_smooth_active)
+        if pending_error:
+            return False, pending_error
+        session_prepared = (
+            getattr(self, '_xarm6_cartesian_session_mode', 'off') == 'smooth'
+        )
+        if smooth_active:
+            snapshot, snapshot_error = self._xarm6_robot_state_snapshot()
+            if snapshot is None:
+                return False, f'Cartesian frame validation failed: {snapshot_error}'
+            if int(snapshot['mode']) != 5:
+                return False, (
+                    'Cartesian frame validation failed: xArm6 controller mode '
+                    f"is {snapshot['mode']}, expected Mode 5"
+                )
+            controller_state = int(snapshot['state'])
+            if controller_state > 2 or controller_state < 0:
+                return False, (
+                    'Cartesian frame validation failed: xArm6 controller state '
+                    f"is {snapshot['state']}, expected a driver-ready state from 0 to 2"
+                )
+        elif session_prepared:
+            snapshot, snapshot_error = self._xarm6_robot_state_snapshot()
+            if snapshot is None:
+                return False, f'Cartesian frame validation failed: {snapshot_error}'
+            if int(snapshot['mode']) != 5 or not 0 <= int(snapshot['state']) <= 2:
+                return False, (
+                    'xArm6 Cartesian Smooth Hold session lost Mode 5 readiness; '
+                    f"mode={snapshot['mode']} state={snapshot['state']}"
+                )
+        else:
+            ready, message, _diagnostics = self._xarm6_cartesian_readiness(
+                expected_mode=1,
+            )
+            if not ready:
+                return False, message
+        try:
+            base_velocity_m_s = self._world_vector_in_robot_base(world_velocity_m_s)
+        except (
+            ValueError,
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            return False, f'xArm6 world -> link_base velocity conversion failed: {exc}'
+        if not smooth_active and not session_prepared:
+            ok, error = self._xarm6_set_int16('set_mode', 5)
+            if not ok:
+                restore_ok, restore_message = self._xarm6_restore_trajectory_control()
+                if not restore_ok:
+                    error += f'; trajectory control restore failed: {restore_message}'
+                return False, error
+            ok, error = self._xarm6_set_int16('set_state', 0)
+            if not ok:
+                self._stop_xarm6_cartesian_jog()
+                return False, error
+            ok, error = self._xarm6_wait_for_mode(5)
+            if not ok:
+                self._stop_xarm6_cartesian_jog()
+                return False, error
+            ok, error = self._xarm6_wait_for_trajectory_controller_state('inactive')
+            if not ok:
+                self._stop_xarm6_cartesian_jog()
+                return False, error
+            ok, error = self._xarm6_set_tcp_maxacc()
+            if not ok:
+                self._stop_xarm6_cartesian_jog()
+                return False, error
+        speeds = [
+            base_velocity_m_s[0] * 1000.0,
+            base_velocity_m_s[1] * 1000.0,
+            base_velocity_m_s[2] * 1000.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        watchdog_sec = min(0.50, max(0.10, float(watchdog_sec)))
+        if smooth_active:
+            with self._xarm6_smooth_state_lock:
+                if not self._xarm6_smooth_active:
+                    return False, 'xArm6 Cartesian Smooth Hold is no longer active'
+                self._xarm6_smooth_speeds = speeds
+                self._xarm6_smooth_watchdog_sec = watchdog_sec
+                self._xarm6_smooth_heartbeat_monotonic = time.monotonic()
+            return True, 'xArm6 Cartesian Smooth Hold active'
+        ok, detail = self._send_xarm6_cartesian_velocity(
+            speeds,
+            duration=0.30,
+            timeout_sec=2.0,
+        )
+        if not ok:
+            stop_ok, stop_message = self._stop_xarm6_cartesian_jog(
+                restore_trajectory_control=not session_prepared,
+            )
+            if not stop_ok:
+                detail += f'; restore failed: {stop_message}'
+            return False, detail
+        with self._xarm6_smooth_state_lock:
+            self._xarm6_smooth_speeds = speeds
+            self._xarm6_smooth_watchdog_sec = watchdog_sec
+            self._xarm6_smooth_heartbeat_monotonic = time.monotonic()
+            self._xarm6_smooth_pending_error = ''
+            self._xarm6_smooth_active = True
+        refresh_ok, refresh_error = self._start_xarm6_cartesian_jog_refresh()
+        if not refresh_ok:
+            with self._xarm6_smooth_state_lock:
+                self._xarm6_smooth_pending_error = refresh_error
+            self._stop_xarm6_cartesian_jog(
+                restore_trajectory_control=not session_prepared,
+            )
+            return False, refresh_error
+        return True, 'xArm6 Cartesian Smooth Hold active'
+
+    def set_cartesian_jog(
+        self,
+        robot,
+        axis,
+        speed_mm_s,
+        *,
+        stop=False,
+        watchdog_sec=0.50,
+    ):
+        """Start, refresh, or stop translation-only hardware Cartesian velocity jog."""
+        if robot not in {'xarm6', 'ur5e'}:
+            return False, f'unknown robot: {robot}'
+        if stop:
+            if robot == 'xarm6':
+                return self._stop_xarm6_cartesian_jog(
+                    restore_trajectory_control=(
+                        self._xarm6_cartesian_session_mode != 'smooth'
+                    ),
+                )
+            client = self.ur5e_hardware_cartesian_jog_client
+            if client is None or SetUR5eCartesianJog is None:
+                return False, 'UR5e Cartesian jog service type is unavailable'
+            request = SetUR5eCartesianJog.Request()
+            request.stop = True
+            response, error = self._call_service(client, request, timeout_sec=3.0)
+            if error is not None:
+                return False, f'{self.ur5e_hardware_cartesian_jog_service}: {error}'
+            return bool(response.accepted), str(response.message)
+        if axis not in {'x', 'y', 'z'}:
+            return False, f'unknown axis: {axis}'
+        speed_m_s = float(speed_mm_s) / 1000.0
+        if not math.isfinite(speed_m_s) or abs(speed_m_s) <= 1e-9:
+            return False, 'Cartesian Smooth Hold speed must be non-zero and finite'
+        if robot == 'xarm6':
+            xarm6_speed_limit_mm_s = float(
+                getattr(
+                    self,
+                    'xarm6_hardware_cartesian_max_speed_mm_s',
+                    self.xarm6_hardware_cartesian_speed_mm_s,
+                )
+            )
+            requested_speed_mm_s = abs(speed_m_s) * 1000.0
+            if not 5.0 <= requested_speed_mm_s <= xarm6_speed_limit_mm_s:
+                return False, (
+                    'xArm6 Cartesian Smooth Hold speed must be finite and within '
+                    f'[5.0, {xarm6_speed_limit_mm_s:.3f}] mm/s'
+                )
+        world_velocity_m_s = [0.0, 0.0, 0.0]
+        world_velocity_m_s[{'x': 0, 'y': 1, 'z': 2}[axis]] = speed_m_s
+        if robot == 'xarm6':
+            return self._set_xarm6_cartesian_jog(
+                world_velocity_m_s,
+                watchdog_sec,
+            )
+        client = self.ur5e_hardware_cartesian_jog_client
+        if client is None or SetUR5eCartesianJog is None:
+            return False, 'UR5e Cartesian jog service type is unavailable'
+        if not client.wait_for_service(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_cartesian_jog_service} is unavailable'
+        request = SetUR5eCartesianJog.Request()
+        request.world_linear_velocity_m_s.x = world_velocity_m_s[0]
+        request.world_linear_velocity_m_s.y = world_velocity_m_s[1]
+        request.world_linear_velocity_m_s.z = world_velocity_m_s[2]
+        request.acceleration_m_s2 = self.ur5e_hardware_cartesian_acceleration_m_s2
+        request.watchdog_sec = min(0.50, max(0.10, float(watchdog_sec)))
+        request.stop = False
+        response, error = self._call_service(client, request, timeout_sec=3.0)
+        if error is not None:
+            return False, f'{self.ur5e_hardware_cartesian_jog_service}: {error}'
+        return bool(response.accepted), str(response.message)
+
+    def move_cartesian(
+        self,
+        robot,
+        dx_mm=0,
+        dy_mm=0,
+        dz_mm=0,
+        velocity_scale=1.0,
+        *,
+        speed_mm_s=None,
+        xarm6_cartesian_session=False,
+    ):
         """Move end-effector by a delta in mm. Returns (ok, message)."""
-        ee = self.get_ee_pose(robot)
+        environment = self.infer_robot_environment(robot)
+        world_delta_m = (
+            float(dx_mm) / 1000.0,
+            float(dy_mm) / 1000.0,
+            float(dz_mm) / 1000.0,
+        )
+        if environment == 'real':
+            if robot == 'ur5e':
+                if speed_mm_s is None:
+                    return self._move_ur5e_relative_cartesian(
+                        world_delta_m,
+                        velocity_scale,
+                    )
+                return self._move_ur5e_relative_cartesian(
+                    world_delta_m,
+                    velocity_scale,
+                    speed_mm_s=speed_mm_s,
+                )
+            if robot == 'xarm6':
+                if speed_mm_s is None and not xarm6_cartesian_session:
+                    return self._move_xarm6_relative_cartesian(
+                        world_delta_m,
+                        velocity_scale,
+                    )
+                return self._move_xarm6_relative_cartesian(
+                    world_delta_m,
+                    velocity_scale,
+                    speed_mm_s=speed_mm_s,
+                    restore_trajectory_control=not xarm6_cartesian_session,
+                )
+            return False, f'No direct Cartesian implementation for {robot}'
+        ee = (
+            self._get_world_ee_pose(robot)
+            if environment == 'real'
+            else self.get_ee_pose(robot)
+        )
         if ee is None:
-            return False, 'No TF data'
+            return False, (
+                f'No world -> {self._current_ee_link(robot)} TF data'
+                if environment == 'real'
+                else 'No TF data'
+            )
 
         target = copy.deepcopy(ee)
         target.position.x += dx_mm / 1000.0
         target.position.y += dy_mm / 1000.0
         target.position.z += dz_mm / 1000.0
 
-        cfg = ROBOTS[robot]
+        return self._move_gazebo_cartesian(robot, target, velocity_scale)
+
+    def _move_gazebo_cartesian(self, robot, target, velocity_scale):
+        """Plan and execute one Gazebo Cartesian target through MoveIt."""
         response = None
         group_candidates = [self._current_group_name(robot)] + [
             g for g in self._group_name_candidates(robot) if g != self._current_group_name(robot)
@@ -811,7 +2945,15 @@ class KeyboardTeleop(Node):
             return True, 'OK'
         return False, f'Error code {code}'
 
-    def move_joint(self, robot, joint_idx, delta_deg, velocity_scale=1.0):
+    def move_joint(
+        self,
+        robot,
+        joint_idx,
+        delta_deg,
+        velocity_scale=1.0,
+        *,
+        speed_deg_s=None,
+    ):
         """Jog a single arm joint through trajectory controller."""
         if robot not in self.joint_positions:
             return False, 'No joint state'
@@ -821,6 +2963,36 @@ class KeyboardTeleop(Node):
             return False, 'Invalid joint index'
         target = list(self.joint_positions[robot])
         target[joint_idx] += math.radians(delta_deg)
+
+        environment = self.infer_robot_environment(robot)
+        if speed_deg_s is not None:
+            requested_speed_deg_s = float(speed_deg_s)
+            speed_limit_rad_s = (
+                self.xarm6_hardware_max_joint_speed_rad_s
+                if robot == 'xarm6'
+                else self.ur5e_hardware_max_joint_speed_rad_s
+            )
+            if not math.isfinite(requested_speed_deg_s) or not (
+                0.1 <= requested_speed_deg_s <= math.degrees(speed_limit_rad_s)
+            ):
+                return False, (
+                    f'{robot} joint jog speed must be finite and within '
+                    f'[0.1, {math.degrees(speed_limit_rad_s):.1f}] deg/s'
+                )
+            if environment == 'real' and robot == 'ur5e':
+                return self._move_ur5e_joint_jog(
+                    joint_idx + 1,
+                    delta_deg,
+                    requested_speed_deg_s,
+                )
+            duration = max(0.05, abs(float(delta_deg)) / requested_speed_deg_s)
+            if environment == 'real' and robot == 'xarm6':
+                return self._move_xarm6_arm_action(
+                    joint_names,
+                    target,
+                    duration_sec=duration,
+                )
+            return self.move_arm_to_joints(robot, target, duration_sec=duration)
 
         velocity_scale = self._normalize_velocity_scale(velocity_scale)
         duration = max(0.05, self.joint_duration_sec / velocity_scale)
@@ -833,12 +3005,21 @@ class KeyboardTeleop(Node):
             return False, f'Expected {len(joint_names)} joints, got {len(target_joints)}'
         move_duration = self.joint_duration_sec if duration_sec is None else max(0.05, float(duration_sec))
 
-        if robot == 'ur5e' and self.infer_robot_environment(robot) == 'real':
-            return self._move_ur5e_arm_action(
-                joint_names,
-                target_joints,
-                duration_sec=move_duration,
-            )
+        if self.infer_robot_environment(robot) == 'real':
+            if robot == 'xarm6':
+                return self._move_xarm6_arm_action(
+                    joint_names,
+                    target_joints,
+                    duration_sec=(
+                        move_duration * self.xarm6_hardware_joint_duration_scale
+                    ),
+                )
+            if robot == 'ur5e':
+                return self._move_ur5e_arm_action(
+                    joint_names,
+                    target_joints,
+                    duration_sec=move_duration,
+                )
 
         arm_pub, _topic = self._pick_publisher(self.arm_publishers[robot])
         ok, msg = self._publish_joint_trajectory(
@@ -855,6 +3036,70 @@ class KeyboardTeleop(Node):
         for name, pos in zip(joint_names, target_joints):
             self.joint_state_map[name] = pos
         return True, 'OK'
+
+    def _move_xarm6_arm_action(self, joint_names, target_joints, duration_sec):
+        """Send a real xArm6 joint target through its trajectory action."""
+        if FollowJointTrajectory is None:
+            return False, 'xArm6 FollowJointTrajectory action type is unavailable'
+        action_name, client = self._get_action_client(
+            FollowJointTrajectory,
+            'xarm6_traj_controller/follow_joint_trajectory',
+            wait_timeout_sec=2.0,
+        )
+        if client is None:
+            return False, (
+                'xArm6 trajectory action is unavailable; tried '
+                f'{self._candidate_action_names("xarm6_traj_controller/follow_joint_trajectory")}'
+            )
+
+        current_positions = self.joint_positions.get('xarm6')
+        if current_positions is None or len(current_positions) != len(joint_names):
+            return False, 'xArm6 current joint state is unavailable'
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = list(joint_names)
+        start_point = JointTrajectoryPoint()
+        start_point.positions = [float(position) for position in current_positions]
+        start_point.time_from_start = self._duration_msg(0.0)
+        target_point = JointTrajectoryPoint()
+        target_point.positions = [float(position) for position in target_joints]
+        target_point.time_from_start = self._duration_msg(duration_sec)
+        goal.trajectory.points = [start_point, target_point]
+        try:
+            send_future = client.send_goal_async(goal)
+        except RuntimeError as exc:
+            return False, f'{action_name}: send failed ({exc})'
+        if not self._wait_future(send_future, timeout=3.0):
+            return False, f'{action_name}: send timeout'
+        try:
+            goal_handle = send_future.result()
+        except RuntimeError as exc:
+            return False, f'{action_name}: send failed ({exc})'
+        if goal_handle is None or not goal_handle.accepted:
+            return False, f'{action_name}: goal rejected'
+
+        result_future = goal_handle.get_result_async()
+        result_timeout = max(10.0, float(duration_sec) + 20.0)
+        if not self._wait_future(result_future, timeout=result_timeout):
+            return False, f'{action_name}: result timeout'
+        try:
+            wrapped = result_future.result()
+        except RuntimeError as exc:
+            return False, f'{action_name}: result failed ({exc})'
+        result = getattr(wrapped, 'result', None)
+        status = int(getattr(wrapped, 'status', -1))
+        error_code = int(getattr(result, 'error_code', -1))
+        error_string = str(getattr(result, 'error_string', '')).strip()
+        if status != 4 or error_code != 0:
+            detail = f'status={status} error_code={error_code}'
+            if error_string:
+                detail += f' {error_string}'
+            return False, f'{action_name}: {detail}'
+
+        self.joint_positions['xarm6'] = [float(position) for position in target_joints]
+        for name, position in zip(joint_names, target_joints, strict=True):
+            self.joint_state_map[name] = float(position)
+        return True, f'{action_name}: succeeded'
 
     def _move_ur5e_arm_action(self, joint_names, target_joints, duration_sec):
         """Send a real UR5e joint target through the guarded RTDE action."""
@@ -1332,9 +3577,13 @@ def run_server(args):
 
     planning_ready = False
     gripper_ready = {'xarm6': False, 'ur5e': False}
+    active_request_id = None
 
     def emit(payload):
-        sys.stdout.write(json.dumps(payload) + '\n')
+        body = dict(payload)
+        if active_request_id:
+            body['request_id'] = active_request_id
+        sys.stdout.write(json.dumps(body) + '\n')
         sys.stdout.flush()
 
     def ensure_planning(robot):
@@ -1379,6 +3628,7 @@ def run_server(args):
 
     try:
         for raw in sys.stdin:
+            active_request_id = None
             line = raw.strip()
             if not line:
                 continue
@@ -1389,6 +3639,8 @@ def run_server(args):
                 emit({'ok': False, 'msg': f'invalid json: {exc}'})
                 continue
 
+            active_request_id = str(cmd.get('request_id') or '').strip() or None
+
             op = str(cmd.get('op', '')).strip().lower()
             robot = str(cmd.get('robot', args.robot)).strip().lower()
             if robot not in ROBOTS:
@@ -1396,8 +3648,167 @@ def run_server(args):
                 continue
 
             if op == 'shutdown':
+                if node._xarm6_cartesian_session_mode != 'off':
+                    node._close_xarm6_cartesian_session()
+                elif node._xarm6_smooth_active:
+                    node._stop_xarm6_cartesian_jog()
                 emit({'ok': True, 'msg': 'bye'})
                 break
+
+            if op == 'stationary_readiness':
+                if not wait_for_joint_positions(
+                    node,
+                    [robot],
+                    timeout_sec=service_timeout_sec,
+                ):
+                    emit({'ok': False, 'msg': f'no joint state for {robot}'})
+                    continue
+                if node.infer_robot_environment(robot) != 'real':
+                    emit({
+                        'ok': False,
+                        'msg': 'Stationary hardware readiness requires hardware',
+                    })
+                    continue
+                ok, msg, diagnostics = node._stationary_readiness(
+                    robot,
+                    velocity_limit_rad_s=float(
+                        cmd.get('velocity_limit_rad_s', 0.01)
+                    ),
+                    hold_sec=float(cmd.get('hold_sec', 0.25)),
+                    timeout_sec=float(cmd.get('timeout_sec', 3.0)),
+                )
+                emit({
+                    'ok': bool(ok),
+                    'msg': msg,
+                    'stationary_ready': bool(ok),
+                    'diagnostics': diagnostics,
+                })
+                continue
+
+            if op == 'cartesian_readiness':
+                if not wait_for_joint_positions(
+                    node,
+                    [robot],
+                    timeout_sec=service_timeout_sec,
+                ):
+                    emit({'ok': False, 'msg': f'no joint state for {robot}'})
+                    continue
+                if node.infer_robot_environment(robot) != 'real':
+                    emit({'ok': False, 'msg': 'Cartesian hardware readiness requires hardware'})
+                    continue
+                if robot == 'xarm6':
+                    session_mode = str(node._xarm6_cartesian_session_mode or 'off')
+                    expected_mode = {'step': 0, 'smooth': 5}.get(session_mode, 1)
+                    ok, msg, diagnostics = node._xarm6_cartesian_readiness(
+                        expected_mode=expected_mode,
+                    )
+                    emit({
+                        'ok': bool(ok),
+                        'msg': msg,
+                        'cartesian_jog_ready': bool(ok),
+                        'cartesian_function_ready': bool(ok),
+                        'cartesian_mode': session_mode,
+                        'cartesian_mode_ready': bool(ok and session_mode != 'off'),
+                        'diagnostics': diagnostics,
+                    })
+                    continue
+                action_ready = bool(
+                    node.ur5e_hardware_relative_cartesian_client is not None
+                    and node.ur5e_hardware_relative_cartesian_client.wait_for_server(
+                        timeout_sec=2.0
+                    )
+                )
+                service_ready = bool(
+                    node.ur5e_hardware_cartesian_jog_client is not None
+                    and node.ur5e_hardware_cartesian_jog_client.wait_for_service(
+                        timeout_sec=2.0
+                    )
+                )
+                ok = action_ready and service_ready
+                emit({
+                    'ok': ok,
+                    'msg': (
+                        'UR5e Cartesian direct interfaces ready'
+                        if ok
+                        else 'UR5e relative Cartesian action or jog service is unavailable'
+                    ),
+                    'cartesian_jog_ready': ok,
+                    'cartesian_function_ready': ok,
+                })
+                continue
+
+            if op == 'cartesian_mode':
+                mode = str(cmd.get('mode', '')).strip().lower()
+                if robot != 'xarm6':
+                    accepted = mode in {'off', 'step', 'smooth', 'status'}
+                    emit({
+                        'ok': accepted,
+                        'msg': (
+                            f'{robot} Cartesian {mode or "mode"} ready'
+                            if accepted
+                            else f'unknown Cartesian mode: {mode}'
+                        ),
+                        'cartesian_mode': mode if mode in {'off', 'step', 'smooth'} else 'off',
+                        'cartesian_mode_ready': bool(accepted and mode in {'step', 'smooth'}),
+                        'state_uncertain': False,
+                    })
+                    continue
+                ok, msg, state_uncertain = node.xarm6_cartesian_session(mode)
+                current_mode = str(node._xarm6_cartesian_session_mode or 'off')
+                emit({
+                    'ok': bool(ok),
+                    'msg': msg,
+                    'cartesian_mode': current_mode,
+                    'cartesian_mode_ready': bool(ok and current_mode != 'off'),
+                    'state_uncertain': bool(state_uncertain),
+                })
+                continue
+
+            if op == 'prepare_xarm6_trajectory_mode':
+                if robot != 'xarm6':
+                    emit({
+                        'ok': False,
+                        'msg': 'prepare_xarm6_trajectory_mode requires xarm6',
+                    })
+                    continue
+                ok, msg, diagnostics = node._prepare_xarm6_trajectory_mode()
+                emit({
+                    'ok': bool(ok),
+                    'msg': msg,
+                    'diagnostics': diagnostics,
+                })
+                continue
+
+            if op == 'cartesian_smooth':
+                command = str(cmd.get('command', '')).strip().lower()
+                stop = command == 'stop'
+                if command not in {'start', 'update', 'stop'}:
+                    emit({'ok': False, 'msg': f'unknown Cartesian Smooth Hold command: {command}'})
+                    continue
+                if node.infer_robot_environment(robot) != 'real':
+                    emit({'ok': False, 'msg': 'Cartesian Smooth Hold is hardware-only'})
+                    continue
+                axis = str(cmd.get('axis', '')).strip().lower()
+                try:
+                    speed_mm_s = float(cmd.get('speed_mm_s', 0.0))
+                    watchdog_sec = float(cmd.get('watchdog_sec', 0.50))
+                except (TypeError, ValueError):
+                    emit({'ok': False, 'msg': 'invalid Cartesian Smooth Hold speed or watchdog'})
+                    continue
+                ok, msg = node.set_cartesian_jog(
+                    robot,
+                    axis,
+                    speed_mm_s,
+                    stop=stop,
+                    watchdog_sec=watchdog_sec,
+                )
+                response = {'ok': bool(ok), 'msg': msg}
+                if robot == 'xarm6' and stop:
+                    response['state_uncertain'] = bool(
+                        not node._xarm6_last_stop_motion_confirmed
+                    )
+                emit(response)
+                continue
 
             if op == 'cartesian':
                 axis = str(cmd.get('axis', '')).strip().lower()
@@ -1406,20 +3817,47 @@ def run_server(args):
                     continue
                 try:
                     step_mm = float(cmd.get('step_mm'))
+                    speed_mm_s = (
+                        None
+                        if cmd.get('speed_mm_s') is None
+                        else float(cmd.get('speed_mm_s'))
+                    )
                 except Exception:
-                    emit({'ok': False, 'msg': 'missing or invalid step_mm'})
+                    emit({'ok': False, 'msg': 'missing or invalid Step or Cartesian speed'})
                     continue
                 velocity_scale = node._normalize_velocity_scale(cmd.get('velocity_scale', 1.0))
 
-                ok, msg = ensure_planning(robot)
+                if node.infer_robot_environment(robot) == 'real':
+                    ok = wait_for_joint_positions(
+                        node,
+                        [robot],
+                        timeout_sec=service_timeout_sec,
+                    )
+                    msg = 'OK' if ok else f'no joint state for {robot}'
+                else:
+                    ok, msg = ensure_planning(robot)
                 if not ok:
                     emit({'ok': False, 'msg': msg})
                     continue
 
                 kwargs = {'dx_mm': 0.0, 'dy_mm': 0.0, 'dz_mm': 0.0}
                 kwargs[f'd{axis}_mm'] = step_mm
-                ok, msg = node.move_cartesian(robot, velocity_scale=velocity_scale, **kwargs)
-                emit({'ok': bool(ok), 'msg': msg})
+                ok, msg = node.move_cartesian(
+                    robot,
+                    velocity_scale=velocity_scale,
+                    speed_mm_s=speed_mm_s,
+                    xarm6_cartesian_session=bool(
+                        robot == 'xarm6'
+                        and node._xarm6_cartesian_session_mode == 'step'
+                    ),
+                    **kwargs,
+                )
+                response = {'ok': bool(ok), 'msg': msg}
+                if robot == 'xarm6':
+                    response['state_uncertain'] = bool(
+                        not ok and node._xarm6_cartesian_motion_attempted
+                    )
+                emit(response)
                 continue
 
             if op == 'gripper':
@@ -1485,8 +3923,13 @@ def run_server(args):
                     continue
                 try:
                     delta_deg = float(cmd.get('delta_deg'))
+                    speed_deg_s = (
+                        None
+                        if cmd.get('speed_deg_s') is None
+                        else float(cmd.get('speed_deg_s'))
+                    )
                 except Exception:
-                    emit({'ok': False, 'msg': 'missing or invalid delta_deg'})
+                    emit({'ok': False, 'msg': 'missing or invalid joint delta or speed'})
                     continue
                 velocity_scale = node._normalize_velocity_scale(cmd.get('velocity_scale', 1.0))
 
@@ -1499,8 +3942,14 @@ def run_server(args):
                     joint_idx=joint - 1,
                     delta_deg=delta_deg,
                     velocity_scale=velocity_scale,
+                    speed_deg_s=speed_deg_s,
                 )
-                emit({'ok': bool(ok), 'msg': msg})
+                response = {'ok': bool(ok), 'msg': msg}
+                if robot == 'ur5e' and speed_deg_s is not None:
+                    response['state_uncertain'] = bool(
+                        node._last_ur5e_joint_jog_state_uncertain
+                    )
+                emit(response)
                 continue
 
             if op == 'state':
@@ -1543,6 +3992,10 @@ def run_server(args):
 
             emit({'ok': False, 'msg': f'unknown op: {op}'})
     finally:
+        if node._xarm6_cartesian_session_mode != 'off':
+            node._close_xarm6_cartesian_session()
+        elif node._xarm6_smooth_active:
+            node._stop_xarm6_cartesian_jog()
         node.destroy_node()
         rclpy.try_shutdown()
     return 0

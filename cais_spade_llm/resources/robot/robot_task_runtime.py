@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 from math import isfinite
 from pathlib import Path
@@ -19,6 +20,19 @@ from .robot_task_registry import robot_task_registry
 
 _TAUGHT_FUNCTIONS_ROOT = Path(__file__).resolve().parent / "taught_functions"
 _CARTESIAN_POSE_FIELDS = ("x", "y", "z", "qx", "qy", "qz", "qw")
+_CARTESIAN_POSITION_FIELDS = ("x", "y", "z")
+_POSITION_SOURCES = frozenset({"computed", "captured", "manual", "captured_relative"})
+_HARDWARE_JOINT_NAMES = {
+    "ur5e": (
+        "shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "elbow_joint",
+        "wrist_1_joint",
+        "wrist_2_joint",
+        "wrist_3_joint",
+    ),
+    "xarm6": ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6"),
+}
 
 
 def _normalize_pick_targets(raw: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +159,10 @@ def _required_physical_position_steps(task: RobotTaskDefinition) -> tuple[RobotT
     return tuple(step for step in task.program.steps if step.physical_position_required)
 
 
+def _cartesian_position_steps(task: RobotTaskDefinition) -> tuple[RobotTaskStep, ...]:
+    return tuple(step for step in task.program.steps if step.op == "move_cartesian")
+
+
 def _recording_location(task: RobotTaskDefinition, args: dict[str, Any]) -> tuple[str, str]:
     location_param = str(
         dict(task.program.context_mapping or {}).get("location_param") or ""
@@ -166,6 +184,7 @@ def _recording_part_name(args: dict[str, Any]) -> tuple[str, str]:
 
 def _recorded_joints_error(
     *,
+    robot: str,
     task: RobotTaskDefinition,
     step: RobotTaskStep,
     waypoint: dict[str, Any],
@@ -187,11 +206,19 @@ def _recorded_joints_error(
         return f"physical position joints are invalid for {task.name}.{step.id}"
     if not all(isfinite(value) for value in finite_joint_positions):
         return f"physical position joints are not finite for {task.name}.{step.id}"
+    expected_joint_names = _HARDWARE_JOINT_NAMES.get(robot)
+    recorded_joint_names = tuple(str(name).strip() for name in joint_names)
+    if expected_joint_names is None or set(recorded_joint_names) != set(expected_joint_names):
+        return (
+            f"physical position joints do not match the exact {robot} six-joint hardware "
+            f"set for {task.name}.{step.id}"
+        )
     return ""
 
 
 def _recorded_cartesian_pose(
     *,
+    robot: str,
     task: RobotTaskDefinition,
     step: RobotTaskStep,
     recorded_step: dict[str, Any],
@@ -210,7 +237,12 @@ def _recorded_cartesian_pose(
         return {}, f"physical position capture_source must be hardware for {task.name}.{step.id}"
     if str(waypoint.get("source") or "").strip().lower() != "hardware":
         return {}, f"physical position source must be hardware for {task.name}.{step.id}"
-    joint_error = _recorded_joints_error(task=task, step=step, waypoint=waypoint)
+    joint_error = _recorded_joints_error(
+        robot=robot,
+        task=task,
+        step=step,
+        waypoint=waypoint,
+    )
     if joint_error:
         return {}, joint_error
     pose = waypoint.get("pose")
@@ -218,8 +250,12 @@ def _recorded_cartesian_pose(
         return {}, f"physical position pose is missing for {task.name}.{step.id}"
     if str(pose.get("frame_id") or "").strip() != "world":
         return {}, f"physical position frame must be world for {task.name}.{step.id}"
-    if str(pose.get("child_frame_id") or "").strip() != "tool0":
-        return {}, f"physical position child frame must be tool0 for {task.name}.{step.id}"
+    expected_child_frame = "link_eef" if robot == "xarm6" else "tool0"
+    if str(pose.get("child_frame_id") or "").strip() != expected_child_frame:
+        return {}, (
+            f"physical position child frame must be {expected_child_frame} for "
+            f"{task.name}.{step.id}"
+        )
 
     recorded_params = recorded_step.get("params")
     if not isinstance(recorded_params, dict):
@@ -249,22 +285,236 @@ def _recorded_cartesian_pose(
     return result, ""
 
 
-def _load_physical_cartesian_overrides(  # noqa: C901
+def _recorded_relative_position(  # noqa: C901 - explicit persisted-field validation.
+    *,
+    task: RobotTaskDefinition,
+    step: RobotTaskStep,
+    recorded_step: dict[str, Any],
+    location: str,
+    part_name: str,
+) -> tuple[dict[str, float], dict[str, Any], str]:
+    raw_relative = recorded_step.get("relative_position_m")
+    if not isinstance(raw_relative, dict):
+        return {}, {}, f"relative_position_m is missing for {task.name}.{step.id}"
+    relative_position_m: dict[str, float] = {}
+    for field in _CARTESIAN_POSITION_FIELDS:
+        try:
+            value = float(raw_relative[field])
+        except (KeyError, TypeError, ValueError):
+            return {}, {}, (
+                f"relative_position_m.{field} is missing or invalid for "
+                f"{task.name}.{step.id}"
+            )
+        if not isfinite(value):
+            return {}, {}, (
+                f"relative_position_m.{field} is not finite for {task.name}.{step.id}"
+            )
+        relative_position_m[field] = value
+
+    raw_reference = recorded_step.get("relative_reference")
+    if not isinstance(raw_reference, dict):
+        return {}, {}, f"relative_reference is missing for {task.name}.{step.id}"
+    expected_kind = "detected_part" if task.name == "pick_approach" else "destination_target"
+    expected_name = part_name if expected_kind == "detected_part" else location
+    kind = str(raw_reference.get("kind") or "").strip()
+    frame_id = str(raw_reference.get("frame_id") or "").strip()
+    name = str(raw_reference.get("name") or "").strip()
+    source = str(raw_reference.get("source") or "").strip()
+    if kind != expected_kind:
+        return {}, {}, (
+            f"relative_reference.kind must be {expected_kind} for {task.name}.{step.id}"
+        )
+    if frame_id != "world":
+        return {}, {}, (
+            f"relative_reference.frame_id must be world for {task.name}.{step.id}"
+        )
+    if name != expected_name:
+        return {}, {}, (
+            f"relative_reference.name mismatch for {task.name}.{step.id}: "
+            f"expected {expected_name!r}, found {name or '<empty>'!r}"
+        )
+    if not source:
+        return {}, {}, f"relative_reference.source is missing for {task.name}.{step.id}"
+    raw_reference_position = raw_reference.get("position_m")
+    if not isinstance(raw_reference_position, dict):
+        return {}, {}, (
+            f"relative_reference.position_m is missing for {task.name}.{step.id}"
+        )
+    reference_position_m: dict[str, float] = {}
+    for field in _CARTESIAN_POSITION_FIELDS:
+        try:
+            value = float(raw_reference_position[field])
+        except (KeyError, TypeError, ValueError):
+            return {}, {}, (
+                f"relative_reference.position_m.{field} is missing or invalid for "
+                f"{task.name}.{step.id}"
+            )
+        if not isfinite(value):
+            return {}, {}, (
+                f"relative_reference.position_m.{field} is not finite for "
+                f"{task.name}.{step.id}"
+            )
+        reference_position_m[field] = value
+    try:
+        captured_at = float(raw_reference["captured_at"])
+    except (KeyError, TypeError, ValueError):
+        return {}, {}, (
+            f"relative_reference.captured_at is missing or invalid for {task.name}.{step.id}"
+        )
+    if not isfinite(captured_at) or captured_at <= 0.0:
+        return {}, {}, (
+            f"relative_reference.captured_at is invalid for {task.name}.{step.id}"
+        )
+    return relative_position_m, {
+        "kind": kind,
+        "frame_id": frame_id,
+        "name": name,
+        "position_m": reference_position_m,
+        "source": source,
+        "captured_at": captured_at,
+    }, ""
+
+
+def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-source gates.
+    *,
+    robot: str,
+    task: RobotTaskDefinition,
+    step: RobotTaskStep,
+    recorded_step: dict[str, Any],
+    location: str,
+    part_name: str,
+) -> tuple[dict[str, Any], str]:
+    pose, error = _recorded_cartesian_pose(
+        robot=robot,
+        task=task,
+        step=step,
+        recorded_step=recorded_step,
+    )
+    if error:
+        return {}, error
+
+    raw_sources = recorded_step.get("position_sources")
+    if raw_sources is None:
+        position_sources = {field: "captured" for field in _CARTESIAN_POSITION_FIELDS}
+    elif not isinstance(raw_sources, dict):
+        return {}, f"physical position_sources is invalid for {task.name}.{step.id}"
+    else:
+        position_sources = {
+            field: str(raw_sources.get(field) or "").strip()
+            for field in _CARTESIAN_POSITION_FIELDS
+        }
+    for field, source in position_sources.items():
+        if source not in _POSITION_SOURCES:
+            return {}, (
+                f"physical position source for {task.name}.{step.id}.{field} must be "
+                "computed, captured, manual, or captured_relative"
+            )
+
+    relative_fields = {
+        field for field, source in position_sources.items() if source == "captured_relative"
+    }
+    if relative_fields and relative_fields != set(_CARTESIAN_POSITION_FIELDS):
+        return {}, (
+            f"captured_relative must be selected for x, y, and z together for "
+            f"{task.name}.{step.id}"
+        )
+    relative_position_m: dict[str, float] = {}
+    relative_reference: dict[str, Any] = {}
+    computed_position_m: dict[str, float] = {}
+    computed_source = ""
+    computed_at: float | None = None
+    if relative_fields:
+        relative_position_m, relative_reference, relative_error = (
+            _recorded_relative_position(
+                task=task,
+                step=step,
+                recorded_step=recorded_step,
+                location=location,
+                part_name=part_name,
+            )
+        )
+        if relative_error:
+            return {}, relative_error
+        raw_computed_position = recorded_step.get("computed_position_m")
+        if raw_computed_position is not None:
+            if not isinstance(raw_computed_position, dict):
+                return {}, f"computed_position_m is invalid for {task.name}.{step.id}"
+            for field in _CARTESIAN_POSITION_FIELDS:
+                try:
+                    value = float(raw_computed_position[field])
+                except (KeyError, TypeError, ValueError):
+                    return {}, (
+                        f"computed_position_m.{field} is missing or invalid for "
+                        f"{task.name}.{step.id}"
+                    )
+                if not isfinite(value):
+                    return {}, (
+                        f"computed_position_m.{field} is not finite for {task.name}.{step.id}"
+                    )
+                computed_position_m[field] = value
+            computed_source = str(recorded_step.get("computed_source") or "").strip()
+            try:
+                computed_at = float(recorded_step["computed_at"])
+            except (KeyError, TypeError, ValueError):
+                return {}, f"computed_at is missing or invalid for {task.name}.{step.id}"
+            if not computed_source:
+                return {}, f"computed_source is missing for {task.name}.{step.id}"
+            if not isfinite(computed_at) or computed_at <= 0.0:
+                return {}, f"computed_at is invalid for {task.name}.{step.id}"
+
+    raw_manual = recorded_step.get("manual_position_m", {})
+    if not isinstance(raw_manual, dict):
+        return {}, f"manual_position_m is invalid for {task.name}.{step.id}"
+    manual_position_m: dict[str, float] = {}
+    resolved_values: dict[str, float] = {
+        field: float(pose[field]) for field in ("qx", "qy", "qz", "qw")
+    }
+    for field, source in position_sources.items():
+        if source in {"computed", "captured_relative"}:
+            continue
+        if source == "captured":
+            resolved_values[field] = float(pose[field])
+            continue
+        try:
+            value = float(raw_manual[field])
+        except (KeyError, TypeError, ValueError):
+            return {}, f"manual position is missing for {task.name}.{step.id}.{field}"
+        if not isfinite(value):
+            return {}, f"manual position is not finite for {task.name}.{step.id}.{field}"
+        manual_position_m[field] = value
+        resolved_values[field] = value
+
+    return {
+        "values": resolved_values,
+        "position_sources": position_sources,
+        "manual_position_m": manual_position_m,
+        "relative_position_m": relative_position_m,
+        "relative_reference": relative_reference,
+        "computed_position_m": computed_position_m,
+        "computed_source": computed_source,
+        "computed_at": computed_at,
+        "captured_pose": pose,
+    }, ""
+
+
+def _load_physical_cartesian_overrides(  # noqa: C901, PLR0912
     *,
     agent: Any,
     task: RobotTaskDefinition,
     args: dict[str, Any],
-) -> tuple[dict[str, dict[str, float]], Path | None, str]:
+    allow_missing: bool = False,
+) -> tuple[dict[str, dict[str, Any]], Path | None, str]:
     required_steps = _required_physical_position_steps(task)
-    if not required_steps:
+    cartesian_steps = _cartesian_position_steps(task)
+    if not cartesian_steps:
         return {}, None, ""
 
     robot = _robot_name(agent)
-    if robot != "ur5e":
+    if robot not in {"ur5e", "xarm6"}:
         return (
             {},
             None,
-            f"physical position recording is currently supported only for ur5e, not {robot or '<unknown>'}",
+            f"physical position recording is not supported for {robot or '<unknown>'}",
         )
     location, error = _recording_location(task, args)
     if error:
@@ -283,7 +533,9 @@ def _load_physical_cartesian_overrides(  # noqa: C901
         with path.open("r", encoding="utf-8") as recording_file:
             payload = json.load(recording_file)
     except FileNotFoundError:
-        return {}, path, f"physical position file not found: {path}"
+        if required_steps and not allow_missing:
+            return {}, path, f"physical position file not found: {path}"
+        return {}, path, ""
     except (OSError, json.JSONDecodeError) as exc:
         return {}, path, f"could not load physical position file {path}: {exc}"
     if not isinstance(payload, dict):
@@ -314,43 +566,403 @@ def _load_physical_cartesian_overrides(  # noqa: C901
             return {}, path, f"duplicate physical position step_name {step_id} in {path}"
         recorded_by_id[step_id] = raw_step
 
-    overrides: dict[str, dict[str, float]] = {}
-    for step in required_steps:
+    overrides: dict[str, dict[str, Any]] = {}
+    required_step_ids = {step.id for step in required_steps}
+    for step in cartesian_steps:
         recorded_step = recorded_by_id.get(step.id)
         if recorded_step is None:
-            return {}, path, f"physical position step not found: {task.name}.{step.id} in {path}"
-        pose, error = _recorded_cartesian_pose(
+            if step.id in required_step_ids and not allow_missing:
+                return (
+                    {},
+                    path,
+                    f"physical position step not found: {task.name}.{step.id} in {path}",
+                )
+            continue
+        override, error = _recorded_cartesian_override(
+            robot=robot,
             task=task,
             step=step,
             recorded_step=recorded_step,
+            location=location,
+            part_name=part_name,
         )
         if error:
             return {}, path, error
-        overrides[step.id] = pose
+        overrides[step.id] = override
     return overrides, path, ""
 
 
-def _apply_physical_recording_state(
+def _apply_resolved_cartesian_state(
     *,
     task: RobotTaskDefinition,
-    physical_overrides: dict[str, dict[str, float]],
+    physical_overrides: dict[str, dict[str, Any]],
+    computed_positions: dict[str, dict[str, float]],
+    computed_reference: dict[str, Any],
+    computed_at: float,
+    resolved_positions: dict[str, dict[str, float]],
     runtime_state: dict[str, Any],
 ) -> None:
-    required_steps = _required_physical_position_steps(task)
-    if not required_steps or not physical_overrides:
+    cartesian_steps = _cartesian_position_steps(task)
+    if not cartesian_steps:
         return
-    above_pose = physical_overrides.get(required_steps[0].id)
-    target_pose = physical_overrides.get(required_steps[-1].id)
+    above_pose = resolved_positions.get(cartesian_steps[0].id)
+    target_pose = resolved_positions.get(cartesian_steps[-1].id)
+    task_context = dict(runtime_state.get("_task_ctx") or {})
     if above_pose is not None:
-        task_context = dict(runtime_state.get("_task_ctx") or {})
         task_context["travel_z"] = float(above_pose["z"])
-        runtime_state["_task_ctx"] = task_context
     if target_pose is not None:
         runtime_state["_position"] = {
             "x": float(target_pose["x"]),
             "y": float(target_pose["y"]),
             "z": float(target_pose["z"]),
         }
+        if task.name == "pick_approach":
+            task_context["pick_z"] = float(target_pose["z"])
+    if physical_overrides:
+        task_context["cartesian_position_sources"] = {
+            step_id: dict(override.get("position_sources") or {})
+            for step_id, override in physical_overrides.items()
+        }
+    if computed_positions:
+        task_context["computed_cartesian_positions"] = deepcopy(computed_positions)
+        task_context["computed_cartesian_reference"] = deepcopy(computed_reference)
+        task_context["computed_cartesian_at"] = float(computed_at)
+    if resolved_positions:
+        task_context["resolved_cartesian_positions"] = deepcopy(resolved_positions)
+    runtime_state["_task_ctx"] = task_context
+
+
+def _computed_cartesian_state(
+    *,
+    task: RobotTaskDefinition,
+    step_outputs: dict[str, Any],
+) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
+    """Return raw computed Cartesian poses and their exact world reference."""
+    output_name = "pick_targets" if task.name == "pick_approach" else "place_targets"
+    targets = step_outputs.get(output_name)
+    cartesian_steps = _cartesian_position_steps(task)
+    if not isinstance(targets, dict) or not cartesian_steps:
+        return {}, {}
+    positions: dict[str, dict[str, float]] = {}
+    for step, pose_key in zip(
+        cartesian_steps[:2],
+        ("approach_pose", "target_pose"),
+        strict=False,
+    ):
+        raw_pose = targets.get(pose_key)
+        if not isinstance(raw_pose, dict):
+            continue
+        try:
+            pose = {
+                field: float(raw_pose[field]) for field in _CARTESIAN_POSITION_FIELDS
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(isfinite(value) for value in pose.values()):
+            continue
+        for field in ("qx", "qy", "qz", "qw"):
+            try:
+                value = float(raw_pose[field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if isfinite(value):
+                pose[field] = value
+        positions[step.id] = pose
+
+    if task.name == "pick_approach":
+        raw_reference = dict(targets.get("origin_pose") or {})
+        reference = {
+            "kind": "detected_part",
+            "frame_id": str(targets.get("frame_id") or "world").strip(),
+            "name": str(targets.get("part_name") or "").strip(),
+            "source": str(targets.get("target_pose_source") or "live_detection").strip(),
+            "captured_at": targets.get("captured_at"),
+        }
+    else:
+        raw_reference = dict(targets.get("target_pose") or {})
+        reference = {
+            "kind": "destination_target",
+            "frame_id": "world",
+            "name": str(targets.get("destination_location") or "").strip(),
+            "source": "computed_destination",
+            "captured_at": time.time(),
+        }
+    try:
+        reference["position_m"] = {
+            field: float(raw_reference[field]) for field in _CARTESIAN_POSITION_FIELDS
+        }
+        reference["captured_at"] = float(reference["captured_at"])
+    except (KeyError, TypeError, ValueError):
+        return positions, {}
+    if (
+        reference["frame_id"] != "world"
+        or not reference["name"]
+        or not reference["source"]
+        or not all(isfinite(value) for value in reference["position_m"].values())
+        or not isfinite(reference["captured_at"])
+    ):
+        return positions, {}
+    return positions, reference
+
+
+def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit reference and safety gates.
+    *,
+    task: RobotTaskDefinition,
+    physical_overrides: dict[str, dict[str, Any]],
+    step_outputs: dict[str, Any],
+    agent: Any | None = None,
+) -> str:
+    if not physical_overrides:
+        return ""
+    output_name = "pick_targets" if task.name == "pick_approach" else "place_targets"
+    targets = step_outputs.get(output_name)
+    if not isinstance(targets, dict):
+        return ""
+    cartesian_steps = _cartesian_position_steps(task)
+    if not cartesian_steps:
+        return ""
+    pose_keys = ("approach_pose", "target_pose")
+    if task.name == "pick_approach":
+        current_reference = dict(targets.get("origin_pose") or {})
+        expected_reference_kind = "detected_part"
+        expected_reference_name = str(targets.get("part_name") or "").strip()
+        if str(targets.get("frame_id") or "").strip() != "world":
+            return "pick_approach current detected part reference frame must be world"
+        try:
+            reference_captured_at = float(targets["captured_at"])
+        except (KeyError, TypeError, ValueError):
+            return "pick_approach current detected part reference has no capture timestamp"
+        reference_age_sec = time.time() - reference_captured_at
+        if (
+            not isfinite(reference_captured_at)
+            or reference_age_sec < -1.0
+            or reference_age_sec > 8.0
+        ):
+            return (
+                "pick_approach current detected part reference is stale "
+                f"(age={reference_age_sec:.2f}s)"
+            )
+    else:
+        current_reference = dict(targets.get("target_pose") or {})
+        expected_reference_kind = "destination_target"
+        expected_reference_name = str(targets.get("destination_location") or "").strip()
+    if not expected_reference_name:
+        return f"{task.name} current relative reference name is unavailable"
+    try:
+        current_reference = {
+            field: float(current_reference[field]) for field in _CARTESIAN_POSITION_FIELDS
+        }
+    except (KeyError, TypeError, ValueError):
+        return f"{task.name} current relative reference position is incomplete"
+    if not all(isfinite(value) for value in current_reference.values()):
+        return f"{task.name} current relative reference position is not finite"
+
+    for index, step in enumerate(cartesian_steps[:2]):
+        override = physical_overrides.get(step.id)
+        if not override:
+            continue
+        pose_key = pose_keys[index]
+        pose = dict(targets.get(pose_key) or {})
+        relative_position_m = dict(override.get("relative_position_m") or {})
+        relative_reference = dict(override.get("relative_reference") or {})
+        if relative_position_m:
+            if str(relative_reference.get("kind") or "") != expected_reference_kind:
+                return f"{task.name}.{step.id} relative reference kind changed"
+            if str(relative_reference.get("name") or "") != expected_reference_name:
+                return (
+                    f"{task.name}.{step.id} relative reference name changed: expected "
+                    f"{expected_reference_name!r}"
+                )
+            try:
+                relative_base = (
+                    {
+                        field: float(pose[field])
+                        for field in _CARTESIAN_POSITION_FIELDS
+                    }
+                    if dict(override.get("computed_position_m") or {})
+                    else current_reference
+                )
+                pose.update(
+                    {
+                        field: relative_base[field] + float(relative_position_m[field])
+                        for field in _CARTESIAN_POSITION_FIELDS
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                return f"{task.name}.{step.id} relative XYZ is incomplete"
+            override["resolved_reference_position_m"] = deepcopy(current_reference)
+            override["resolved_computed_position_m"] = deepcopy(relative_base)
+            override["resolved_position_m"] = {
+                field: float(pose[field]) for field in _CARTESIAN_POSITION_FIELDS
+            }
+        pose.update(
+            {
+                field: float(value)
+                for field, value in dict(override.get("values") or {}).items()
+                if field in (*_CARTESIAN_POSITION_FIELDS, "qx", "qy", "qz", "qw")
+            }
+        )
+        pose_error = _resolved_cartesian_pose_error(
+            agent=agent,
+            task=task,
+            step=step,
+            pose=pose,
+        )
+        if pose_error:
+            return pose_error
+        targets[pose_key] = pose
+    approach_pose = dict(targets.get("approach_pose") or {})
+    target_pose = dict(targets.get("target_pose") or {})
+    try:
+        approach_z = float(approach_pose["z"])
+        target_z = float(target_pose["z"])
+    except (KeyError, TypeError, ValueError):
+        return f"{task.name} taught Cartesian positions are incomplete"
+    if not isfinite(approach_z) or not isfinite(target_z):
+        return f"{task.name} taught Cartesian Z contains a non-finite value"
+    if approach_z <= target_z + 1e-6:
+        return (
+            f"{task.name} taught move-above Z must remain above the descend Z "
+            "so the later lift is positive"
+        )
+    if task.name == "pick_approach":
+        targets["travel_z"] = approach_z
+        targets["pick_z"] = target_z
+        return _validate_resolved_mg_pick_target(targets)
+    return ""
+
+
+def _resolved_cartesian_pose_error(
+    *,
+    agent: Any | None,
+    task: RobotTaskDefinition,
+    step: RobotTaskStep,
+    pose: dict[str, Any],
+) -> str:
+    try:
+        position = {field: float(pose[field]) for field in _CARTESIAN_POSITION_FIELDS}
+    except (KeyError, TypeError, ValueError):
+        return f"{task.name}.{step.id} resolved Cartesian position is incomplete"
+    if not all(isfinite(value) for value in position.values()):
+        return f"{task.name}.{step.id} resolved Cartesian position is not finite"
+    if agent is None:
+        return ""
+
+    workspace_check = getattr(agent, "_is_pose_in_workspace", None)
+    if not callable(workspace_check):
+        return f"{task.name}.{step.id} workspace validation is unavailable"
+    try:
+        workspace_ready, workspace_reason = workspace_check(position)
+    except (AttributeError, TypeError, ValueError) as exc:
+        return f"{task.name}.{step.id} workspace validation failed: {exc}"
+    if not workspace_ready:
+        return f"{task.name}.{step.id} {workspace_reason}"
+
+    capabilities = dict(getattr(agent, "static_capabilities", {}) or {})
+    gripper_reach = capabilities.get("gripper_reach")
+    if not isinstance(gripper_reach, dict) or not gripper_reach:
+        return f"{task.name}.{step.id} gripper_reach capability data is unavailable"
+    if str(gripper_reach.get("frame") or "world").strip() != "world":
+        return f"{task.name}.{step.id} gripper_reach frame must be world"
+    origin_pose = dict(gripper_reach.get("origin_pose") or {})
+    try:
+        origin_x = float(origin_pose["x"])
+        origin_y = float(origin_pose["y"])
+        max_xy_radius_m = float(gripper_reach["max_xy_radius_m"])
+        tolerance_m = float(gripper_reach.get("tolerance_m") or 0.0)
+        z_min_m = float(gripper_reach["z_min_m"])
+        z_max_m = float(gripper_reach["z_max_m"])
+    except (KeyError, TypeError, ValueError):
+        return f"{task.name}.{step.id} gripper_reach capability data is incomplete"
+    reach_values = (
+        origin_x,
+        origin_y,
+        max_xy_radius_m,
+        tolerance_m,
+        z_min_m,
+        z_max_m,
+    )
+    if not all(isfinite(value) for value in reach_values):
+        return f"{task.name}.{step.id} gripper_reach capability data is not finite"
+    xy_radius_m = (
+        (position["x"] - origin_x) ** 2 + (position["y"] - origin_y) ** 2
+    ) ** 0.5
+    if xy_radius_m > max_xy_radius_m + tolerance_m:
+        return (
+            f"{task.name}.{step.id} resolved pose is outside gripper_reach: "
+            f"xy_radius={xy_radius_m:.4f} m, max={max_xy_radius_m:.4f} m"
+        )
+    if position["z"] < z_min_m - tolerance_m or position["z"] > z_max_m + tolerance_m:
+        return (
+            f"{task.name}.{step.id} resolved pose is outside gripper_reach: "
+            f"z={position['z']:.4f} m, range=[{z_min_m:.4f}, {z_max_m:.4f}] m"
+        )
+    return ""
+
+
+def _validate_resolved_mg_pick_target(targets: dict[str, Any]) -> str:
+    if str(targets.get("part_name") or "").strip() != "MG":
+        return ""
+    required_fields = (
+        "table_surface_z_m",
+        "tcp_offset_z",
+        "pick_tool0_z_adjustment_m",
+        "tooth_height_m",
+        "part_height",
+        "tooth_clearance_m",
+        "minimum_hub_overlap_m",
+        "open_inner_pad_lower_z_from_tcp_m",
+        "closed_inner_pad_lower_z_from_tcp_m",
+        "closed_inner_pad_upper_z_from_tcp_m",
+    )
+    try:
+        values = {field: float(targets[field]) for field in required_fields}
+        resolved_tool0_z = float(dict(targets["target_pose"])["z"])
+    except (KeyError, TypeError, ValueError):
+        return "physical MG taught target is missing STL safety diagnostics"
+    if not all(isfinite(value) for value in (*values.values(), resolved_tool0_z)):
+        return "physical MG taught target contains non-finite STL safety diagnostics"
+
+    resolved_pick_tcp_z = (
+        resolved_tool0_z
+        - values["pick_tool0_z_adjustment_m"]
+        + values["tcp_offset_z"]
+    )
+    tcp_offset_from_table_m = resolved_pick_tcp_z - values["table_surface_z_m"]
+    lowest_endpoint = min(
+        values["open_inner_pad_lower_z_from_tcp_m"],
+        values["closed_inner_pad_lower_z_from_tcp_m"],
+    )
+    finger_tooth_clearance_m = (
+        tcp_offset_from_table_m + lowest_endpoint - values["tooth_height_m"]
+    )
+    closed_pad_lower_m = (
+        tcp_offset_from_table_m + values["closed_inner_pad_lower_z_from_tcp_m"]
+    )
+    closed_pad_upper_m = (
+        tcp_offset_from_table_m + values["closed_inner_pad_upper_z_from_tcp_m"]
+    )
+    finger_hub_overlap_m = max(
+        0.0,
+        min(closed_pad_upper_m, values["part_height"])
+        - max(closed_pad_lower_m, values["tooth_height_m"]),
+    )
+    targets.update(
+        {
+            "pick_tcp_z": resolved_pick_tcp_z,
+            "pick_tcp_z_offset_from_table_m": tcp_offset_from_table_m,
+            "finger_tooth_clearance_m": finger_tooth_clearance_m,
+            "finger_hub_overlap_m": finger_hub_overlap_m,
+            "resolved_taught_tool0_z_m": resolved_tool0_z,
+        }
+    )
+    if finger_tooth_clearance_m + 1e-9 < values["tooth_clearance_m"]:
+        return (
+            "physical MG taught Z would contact the teeth: "
+            f"clearance={finger_tooth_clearance_m * 1000.0:.2f} mm, "
+            f"required={values['tooth_clearance_m'] * 1000.0:.2f} mm"
+        )
+    return ""
 
 
 async def _execute_task_step(
@@ -361,7 +973,7 @@ async def _execute_task_step(
     args: dict[str, Any],
     runtime_state: dict[str, Any],
     step_outputs: dict[str, Any],
-    physical_overrides: dict[str, dict[str, float]],
+    physical_overrides: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     for guard in step.when:
         if not _evaluate_guard(
@@ -378,8 +990,10 @@ async def _execute_task_step(
     )
     if not isinstance(params, dict):
         params = {}
-    if step.physical_position_required and step.id in physical_overrides:
-        params.update(physical_overrides[step.id])
+    if (
+        step.physical_position_required or step.op == "move_cartesian"
+    ) and step.id in physical_overrides:
+        params.update(dict(physical_overrides[step.id].get("values") or {}))
 
     if str(step.executor or "primitive").strip() != "primitive":
         return {
@@ -452,7 +1066,7 @@ def _apply_effect(
     runtime_state[f"_{effect.target}"] = deepcopy(value)
 
 
-async def execute_robot_task(  # noqa: C901, PLR0912
+async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     agent: Any,
     task_name: str,
     **kwargs: Any,
@@ -494,10 +1108,10 @@ async def execute_robot_task(  # noqa: C901, PLR0912
         agent.logger.warning("[Robot] %s", detail)
         return {"status": "blocked", "content": detail}
 
-    physical_overrides: dict[str, dict[str, float]] = {}
+    physical_overrides: dict[str, dict[str, Any]] = {}
     physical_recording_path: Path | None = None
     execution_mode = str(getattr(agent, "execution_mode", "") or "").strip().lower()
-    if execution_mode == "physical" and _required_physical_position_steps(task):
+    if execution_mode == "physical" and _cartesian_position_steps(task):
         physical_overrides, physical_recording_path, preflight_error = (
             _load_physical_cartesian_overrides(
                 agent=agent,
@@ -546,6 +1160,10 @@ async def execute_robot_task(  # noqa: C901, PLR0912
         )
 
     completed_step_ids: set[str] = set()
+    computed_cartesian_positions: dict[str, dict[str, float]] = {}
+    computed_cartesian_reference: dict[str, Any] = {}
+    computed_cartesian_at = 0.0
+    resolved_cartesian_positions: dict[str, dict[str, float]] = {}
     for step in task.program.steps:
         progress_callback = getattr(agent, "_robot_task_progress_callback", None)
         if callable(progress_callback):
@@ -593,8 +1211,44 @@ async def execute_robot_task(  # noqa: C901, PLR0912
                 )
                 continue
             raw = dict(result.get("raw") or {})
+            failure_message = str(raw.get("message") or f"{step.op} failed")
+            if task.name == "pick_approach" and step.id == "move_above_part":
+                completed_motions = [
+                    completed_step.id
+                    for completed_step in task.program.steps
+                    if completed_step.id in completed_step_ids
+                    and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                ]
+                completed_detail = ", ".join(completed_motions) or "none"
+                failure_message = (
+                    f"{failure_message} Completed motion steps: {completed_detail}. "
+                    "move_above_part was requested but did not complete; descend was "
+                    "not commanded."
+                )
+            elif task.name == "pick_approach" and step.id == "descend":
+                completed_motions = [
+                    completed_step.id
+                    for completed_step in task.program.steps
+                    if completed_step.id in completed_step_ids
+                    and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                ]
+                completed_detail = ", ".join(completed_motions) or "none"
+                failure_message = (
+                    f"{failure_message} Completed motion steps: {completed_detail}. "
+                    "descend was requested but did not complete."
+                )
+            if (
+                task.name == "pick_approach"
+                and step.id in {"detect_parts", "compute_pick_targets", "open_gripper"}
+                and "move_to_origin_resource_location" in completed_step_ids
+            ):
+                failure_message = (
+                    f"{failure_message} Completed motion steps: "
+                    "move_to_origin_resource_location. move_above_part and descend were "
+                    "not commanded."
+                )
             return agent._task_failure(
-                str(raw.get("message") or f"{step.op} failed"),
+                failure_message,
                 step=f"{task.name}.{step.id}",
                 observations=_resolve_value(
                     step.failure_observations,
@@ -607,8 +1261,72 @@ async def execute_robot_task(  # noqa: C901, PLR0912
         completed_step_ids.add(str(step.id))
         if step.store_as:
             step_outputs[step.store_as] = deepcopy(payload if payload is not None else {})
+            raw_positions, raw_reference = _computed_cartesian_state(
+                task=task,
+                step_outputs=step_outputs,
+            )
+            if raw_positions:
+                computed_cartesian_positions = raw_positions
+                computed_cartesian_reference = raw_reference
+                computed_cartesian_at = time.time()
+                computed_pose_callback = getattr(
+                    agent,
+                    "_robot_task_computed_pose_callback",
+                    None,
+                )
+                if callable(computed_pose_callback):
+                    try:
+                        computed_pose_callback(
+                            task.name,
+                            deepcopy(computed_cartesian_positions),
+                            deepcopy(computed_cartesian_reference),
+                            computed_cartesian_at,
+                        )
+                    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                        agent.logger.warning(
+                            "[Robot] %s computed pose update failed: %s",
+                            task.name,
+                            exc,
+                        )
+            override_error = _apply_cartesian_overrides_to_targets(
+                task=task,
+                physical_overrides=physical_overrides,
+                step_outputs=step_outputs,
+                agent=agent,
+            )
+            if override_error:
+                if (
+                    task.name == "pick_approach"
+                    and "move_to_origin_resource_location" in completed_step_ids
+                ):
+                    completed_motions = [
+                        completed_step.id
+                        for completed_step in task.program.steps
+                        if completed_step.id in completed_step_ids
+                        and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                    ]
+                    override_error = (
+                        f"{override_error} Completed motion steps: "
+                        f"{', '.join(completed_motions)}. move_above_part and descend were "
+                        "not commanded."
+                    )
+                return agent._task_failure(
+                    override_error,
+                    step=f"{task.name}.physical_position_preflight",
+                    observations={
+                        "function_name": task.name,
+                        "physical_position_file": (
+                            str(physical_recording_path)
+                            if physical_recording_path is not None
+                            else ""
+                        ),
+                    },
+                )
         if isinstance(payload, dict) and "absolute_position" in payload:
-            runtime_state["_position"] = deepcopy(payload["absolute_position"])
+            absolute_position = deepcopy(payload["absolute_position"])
+            runtime_state["_position"] = absolute_position
+            if step.op == "move_cartesian":
+                resolved_cartesian_positions[step.id] = absolute_position
 
     injected = await agent._maybe_inject_failure(
         function_name=task.name,
@@ -634,9 +1352,13 @@ async def execute_robot_task(  # noqa: C901, PLR0912
         if should_apply:
             _apply_effect(effect, args=args, runtime_state=runtime_state, step_outputs=step_outputs)
 
-    _apply_physical_recording_state(
+    _apply_resolved_cartesian_state(
         task=task,
         physical_overrides=physical_overrides,
+        computed_positions=computed_cartesian_positions,
+        computed_reference=computed_cartesian_reference,
+        computed_at=computed_cartesian_at,
+        resolved_positions=resolved_cartesian_positions,
         runtime_state=runtime_state,
     )
     _commit_runtime_state(agent, runtime_state)

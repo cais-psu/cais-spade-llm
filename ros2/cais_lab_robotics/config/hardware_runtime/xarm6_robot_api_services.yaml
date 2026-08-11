@@ -1,0 +1,7 @@
+ufactory_driver:
+  ros__parameters:
+    services:
+      set_mode: true
+      set_state: true
+      set_tcp_maxacc: true
+      vc_set_cartesian_velocity: true

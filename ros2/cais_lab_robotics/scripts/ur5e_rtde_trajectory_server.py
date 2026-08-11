@@ -1,5 +1,5 @@
 #!/usr/bin/env python3.10
-"""UR5e RTDE-backed FollowJointTrajectory action server."""
+"""UR5e RTDE-backed joint and Cartesian action server."""
 
 from __future__ import annotations
 
@@ -18,12 +18,28 @@ from typing import Any
 import rclpy
 import yaml
 from control_msgs.action import FollowJointTrajectory
+from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionServer, CancelResponse
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Empty
+from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectoryPoint
+
+try:
+    from cais_lab_robotics.action import (
+        MoveUR5eCartesian,
+        MoveUR5eJointJog,
+        MoveUR5eRelativeCartesian,
+    )
+    from cais_lab_robotics.srv import SetUR5eCartesianJog
+except ImportError:  # Installed ROS interfaces may not be rebuilt yet.
+    MoveUR5eCartesian = None
+    MoveUR5eJointJog = None
+    MoveUR5eRelativeCartesian = None
+    SetUR5eCartesianJog = None
 
 ARM_JOINTS = [
     "shoulder_pan_joint",
@@ -34,6 +50,14 @@ ARM_JOINTS = [
     "wrist_3_joint",
 ]
 ACTION_NAME = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
+CARTESIAN_ACTION_NAME = "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
+RELATIVE_CARTESIAN_ACTION_NAME = (
+    "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
+)
+CARTESIAN_JOG_SERVICE_NAME = (
+    "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
+)
+JOINT_JOG_ACTION_NAME = "/cais_ur5e_rtde_trajectory_controller/move_joint_jog"
 DEFAULT_STATUS_FILE = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
 DEFAULT_CONFIG_FILE = (
     Path(__file__).resolve().parents[1]
@@ -74,6 +98,9 @@ def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
 def _apply_hardware_arms_config(config_path: Path) -> None:
     """Load UR5e RTDE runtime limits from xarm6_ur5e_hardware_runtime.yaml."""
     global ACTION_NAME
+    global CARTESIAN_ACTION_NAME
+    global RELATIVE_CARTESIAN_ACTION_NAME
+    global CARTESIAN_JOG_SERVICE_NAME
     global UR5E_RTDE_MAX_JOINT_VEL_RAD_S
     global UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2
     global UR5E_RTDE_MAX_JOINT_JERK_RAD_S3
@@ -86,9 +113,18 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
     global UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
     global UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC
     global UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
+    global UR5E_RTDE_FREQUENCY_HZ
     global UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
     global UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
     global UR5E_RTDE_RESULT_MARGIN_SEC
+    global UR5E_RTDE_CARTESIAN_SPEED_M_S
+    global UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S
+    global UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+    global UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+    global UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+    global UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
+    global UR5E_RTDE_CARTESIAN_REACH_ORIGIN
+    global UR5E_RTDE_CARTESIAN_REACH_RADIUS_M
     global HARDWARE_ARMS_CONFIG_FILE
 
     HARDWARE_ARMS_CONFIG_FILE = str(Path(config_path).expanduser())
@@ -97,6 +133,21 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
         config,
         ("ur5e", "hardware_trajectory_action"),
         ACTION_NAME,
+    )
+    CARTESIAN_ACTION_NAME = _str(
+        config,
+        ("ur5e", "hardware_cartesian_action"),
+        CARTESIAN_ACTION_NAME,
+    )
+    RELATIVE_CARTESIAN_ACTION_NAME = _str(
+        config,
+        ("ur5e", "hardware_relative_cartesian_action"),
+        RELATIVE_CARTESIAN_ACTION_NAME,
+    )
+    CARTESIAN_JOG_SERVICE_NAME = _str(
+        config,
+        ("ur5e", "hardware_cartesian_jog_service"),
+        CARTESIAN_JOG_SERVICE_NAME,
     )
     UR5E_RTDE_MAX_JOINT_VEL_RAD_S = _float(
         config,
@@ -176,6 +227,17 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
             UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC,
         ),
     )
+    UR5E_RTDE_FREQUENCY_HZ = max(
+        1.0,
+        min(
+            500.0,
+            _float(
+                config,
+                ("ur5e", "rtde", "frequency_hz"),
+                UR5E_RTDE_FREQUENCY_HZ,
+            ),
+        ),
+    )
     UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = max(
         UR5E_RTDE_STATIONARY_HOLD_SEC,
         _float(
@@ -200,6 +262,71 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
             UR5E_RTDE_RESULT_MARGIN_SEC,
         ),
     )
+    UR5E_RTDE_CARTESIAN_SPEED_M_S = max(
+        0.001,
+        _float(
+            config,
+            ("ur5e", "rtde", "cartesian_speed_m_s"),
+            UR5E_RTDE_CARTESIAN_SPEED_M_S,
+        ),
+    )
+    UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S = max(
+        UR5E_RTDE_CARTESIAN_SPEED_M_S,
+        _float(
+            config,
+            ("ur5e", "rtde", "cartesian_max_speed_m_s"),
+            UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S,
+        ),
+    )
+    UR5E_RTDE_CARTESIAN_ACCEL_M_S2 = max(
+        0.001,
+        _float(
+            config,
+            ("ur5e", "rtde", "cartesian_accel_m_s2"),
+            UR5E_RTDE_CARTESIAN_ACCEL_M_S2,
+        ),
+    )
+    UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M = max(
+        0.0001,
+        _float(
+            config,
+            ("ur5e", "rtde", "cartesian_position_tolerance_m"),
+            UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M,
+        ),
+    )
+    UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD = max(
+        0.001,
+        _float(
+            config,
+            ("ur5e", "rtde", "cartesian_orientation_tolerance_rad"),
+            UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD,
+        ),
+    )
+    bounds = _nested(config, ("ur5e", "rtde", "cartesian_workspace_bounds"), {})
+    if isinstance(bounds, dict):
+        UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
+            key: _float(
+                bounds,
+                (key,),
+                UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS[key],
+            )
+            for key in UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
+        }
+    reach = _nested(config, ("ur5e", "rtde", "cartesian_reach"), {})
+    if isinstance(reach, dict):
+        UR5E_RTDE_CARTESIAN_REACH_ORIGIN = (
+            _float(reach, ("origin_x_m",), UR5E_RTDE_CARTESIAN_REACH_ORIGIN[0]),
+            _float(reach, ("origin_y_m",), UR5E_RTDE_CARTESIAN_REACH_ORIGIN[1]),
+            _float(reach, ("origin_z_m",), UR5E_RTDE_CARTESIAN_REACH_ORIGIN[2]),
+        )
+        UR5E_RTDE_CARTESIAN_REACH_RADIUS_M = max(
+            0.01,
+            _float(
+                reach,
+                ("max_xy_radius_m",),
+                UR5E_RTDE_CARTESIAN_REACH_RADIUS_M,
+            ),
+        )
 
 UR5E_RTDE_CURRENT_HOLD_SEC = 0.25
 UR5E_RTDE_MIN_POINT_SPACING_SEC = 0.10
@@ -211,6 +338,8 @@ UR5E_RTDE_START_TOLERANCE_RAD = 0.15
 UR5E_RTDE_GOAL_TOLERANCE_RAD = 0.025
 UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S = 0.01
 UR5E_RTDE_STATIONARY_HOLD_SEC = 0.25
+UR5E_RTDE_JOINT_JOG_TOLERANCE_RAD = math.radians(0.20)
+UR5E_RTDE_JOINT_JOG_MAX_DELTA_RAD = math.radians(30.0)
 UR5E_RTDE_MOVEJ_SPEED_RAD_S = 0.486
 UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 = 0.81
 UR5E_RTDE_CONTROL_PROGRAM_START_TIMEOUT_SEC = 2.0
@@ -219,14 +348,217 @@ UR5E_RTDE_MOTION_START_DELTA_RAD = 0.001
 UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC = 0.5
 UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC = 2.0
 UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC = 1.0
+UR5E_RTDE_FREQUENCY_HZ = 125.0
+UR5E_RTDE_RECEIVE_VARIABLES = (
+    "timestamp",
+    "actual_q",
+    "actual_qd",
+    "actual_TCP_pose",
+)
 UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = 0.5
 UR5E_RTDE_INTERMEDIATE_BLEND_RAD = 0.005
 UR5E_RTDE_STOP_ACCEL_RAD_S2 = 0.50
 UR5E_RTDE_FEEDBACK_STALE_SEC = 2.0
 UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
 UR5E_RTDE_RESULT_MARGIN_SEC = 20.0
+UR5E_RTDE_CARTESIAN_SPEED_M_S = 0.05
+UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S = 0.10
+UR5E_RTDE_CARTESIAN_ACCEL_M_S2 = 0.10
+UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M = 0.002
+UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD = math.radians(2.0)
+UR5E_RTDE_CARTESIAN_FRAME_POSITION_TOLERANCE_M = 0.005
+UR5E_RTDE_CARTESIAN_FRAME_ORIENTATION_TOLERANCE_RAD = math.radians(3.0)
+UR5E_RTDE_CARTESIAN_JOG_ORIENTATION_DRIFT_RAD = math.radians(1.0)
+UR5E_RTDE_CARTESIAN_JOG_MAX_STEP_M = 0.10
+UR5E_RTDE_CARTESIAN_JOG_MIN_WATCHDOG_SEC = 0.10
+UR5E_RTDE_CARTESIAN_JOG_MAX_WATCHDOG_SEC = 0.50
+UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
+    "x_min_m": -0.7,
+    "x_max_m": 0.7,
+    "y_min_m": -0.35,
+    "y_max_m": 1.1,
+    "z_min_m": 0.85,
+    "z_max_m": 1.6,
+}
+UR5E_RTDE_CARTESIAN_REACH_ORIGIN = (0.0, 0.5, 1.021)
+UR5E_RTDE_CARTESIAN_REACH_RADIUS_M = 0.7
 
 _apply_hardware_arms_config(DEFAULT_CONFIG_FILE)
+
+Vector3 = tuple[float, float, float]
+Quaternion = tuple[float, float, float, float]
+RigidTransform = tuple[Vector3, Quaternion]
+
+
+def _normalize_quaternion(value: Quaternion) -> Quaternion:
+    norm = math.sqrt(sum(component * component for component in value))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("quaternion norm is zero or non-finite")
+    return tuple(component / norm for component in value)  # type: ignore[return-value]
+
+
+def _quaternion_multiply(left: Quaternion, right: Quaternion) -> Quaternion:
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return _normalize_quaternion(
+        (
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+            lw * rw - lx * rx - ly * ry - lz * rz,
+        )
+    )
+
+
+def _quaternion_conjugate(value: Quaternion) -> Quaternion:
+    x, y, z, w = _normalize_quaternion(value)
+    return (-x, -y, -z, w)
+
+
+def _rotate_vector(value: Quaternion, vector: Vector3) -> Vector3:
+    x, y, z, w = _normalize_quaternion(value)
+    vx, vy, vz = vector
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def _compose_transform(left: RigidTransform, right: RigidTransform) -> RigidTransform:
+    left_translation, left_rotation = left
+    right_translation, right_rotation = right
+    rotated = _rotate_vector(left_rotation, right_translation)
+    return (
+        tuple(
+            left_translation[index] + rotated[index]
+            for index in range(3)
+        ),  # type: ignore[arg-type]
+        _quaternion_multiply(left_rotation, right_rotation),
+    )
+
+
+def _inverse_transform(value: RigidTransform) -> RigidTransform:
+    translation, rotation = value
+    inverse_rotation = _quaternion_conjugate(rotation)
+    inverse_translation = _rotate_vector(
+        inverse_rotation,
+        (-translation[0], -translation[1], -translation[2]),
+    )
+    return inverse_translation, inverse_rotation
+
+
+def _transform_from_message(message: Any) -> RigidTransform:
+    transform = getattr(message, "transform", message)
+    translation = transform.translation
+    rotation = transform.rotation
+    return (
+        (float(translation.x), float(translation.y), float(translation.z)),
+        _normalize_quaternion(
+            (float(rotation.x), float(rotation.y), float(rotation.z), float(rotation.w))
+        ),
+    )
+
+
+def _transform_from_pose_stamped(message: PoseStamped) -> RigidTransform:
+    position = message.pose.position
+    orientation = message.pose.orientation
+    return (
+        (float(position.x), float(position.y), float(position.z)),
+        _normalize_quaternion(
+            (
+                float(orientation.x),
+                float(orientation.y),
+                float(orientation.z),
+                float(orientation.w),
+            )
+        ),
+    )
+
+
+def _quaternion_from_rotvec(rotation_vector: Vector3) -> Quaternion:
+    angle = math.sqrt(sum(component * component for component in rotation_vector))
+    if angle <= 1e-12:
+        return 0.0, 0.0, 0.0, 1.0
+    half = angle / 2.0
+    scale = math.sin(half) / angle
+    return _normalize_quaternion(
+        (
+            rotation_vector[0] * scale,
+            rotation_vector[1] * scale,
+            rotation_vector[2] * scale,
+            math.cos(half),
+        )
+    )
+
+
+def _rotvec_from_quaternion(value: Quaternion) -> Vector3:
+    x, y, z, w = _normalize_quaternion(value)
+    if w < 0.0:
+        x, y, z, w = -x, -y, -z, -w
+    vector_norm = math.sqrt(x * x + y * y + z * z)
+    if vector_norm <= 1e-12:
+        return 0.0, 0.0, 0.0
+    angle = 2.0 * math.atan2(vector_norm, max(-1.0, min(1.0, w)))
+    scale = angle / vector_norm
+    return x * scale, y * scale, z * scale
+
+
+def _transform_from_rtde_pose(values: list[float]) -> RigidTransform:
+    if len(values) < 6 or not all(math.isfinite(float(value)) for value in values[:6]):
+        raise ValueError("RTDE pose must contain six finite values")
+    return (
+        (float(values[0]), float(values[1]), float(values[2])),
+        _quaternion_from_rotvec(
+            (float(values[3]), float(values[4]), float(values[5]))
+        ),
+    )
+
+
+def _rtde_pose_from_transform(value: RigidTransform) -> list[float]:
+    translation, rotation = value
+    rotation_vector = _rotvec_from_quaternion(rotation)
+    return [*translation, *rotation_vector]
+
+
+def _pose_errors(actual: RigidTransform, target: RigidTransform) -> tuple[float, float]:
+    actual_translation, actual_rotation = actual
+    target_translation, target_rotation = target
+    position_error = math.sqrt(
+        sum(
+            (actual_translation[index] - target_translation[index]) ** 2
+            for index in range(3)
+        )
+    )
+    dot = abs(sum(a * b for a, b in zip(actual_rotation, target_rotation, strict=True)))
+    orientation_error = 2.0 * math.acos(max(-1.0, min(1.0, dot)))
+    return position_error, orientation_error
+
+
+def _workspace_error(target_world_tool0: RigidTransform) -> str | None:
+    translation, _rotation = target_world_tool0
+    x, y, z = translation
+    bounds = UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
+    for axis, value in (("x", x), ("y", y), ("z", z)):
+        minimum = float(bounds[f"{axis}_min_m"])
+        maximum = float(bounds[f"{axis}_max_m"])
+        if not minimum <= value <= maximum:
+            return (
+                f"world -> tool0 {axis}={value:.6f} m is outside "
+                f"[{minimum:.6f}, {maximum:.6f}] m"
+            )
+    origin_x, origin_y, _origin_z = UR5E_RTDE_CARTESIAN_REACH_ORIGIN
+    xy_radius = math.hypot(x - origin_x, y - origin_y)
+    if xy_radius > UR5E_RTDE_CARTESIAN_REACH_RADIUS_M:
+        return (
+            f"world -> tool0 XY radius {xy_radius:.6f} m from "
+            f"configured origin ({origin_x:.6f}, {origin_y:.6f}) exceeds "
+            f"{UR5E_RTDE_CARTESIAN_REACH_RADIUS_M:.6f} m"
+        )
+    return None
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -238,7 +570,9 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _duration_seconds(duration: Any) -> float:
-    return float(getattr(duration, "sec", 0) or 0) + float(getattr(duration, "nanosec", 0) or 0) / 1e9
+    return float(getattr(duration, "sec", 0) or 0) + (
+        float(getattr(duration, "nanosec", 0) or 0) / 1e9
+    )
 
 
 def _set_duration(duration: Any, seconds: float) -> None:
@@ -311,7 +645,11 @@ def _max_segment_velocity(
     previous_time = 0.0
     previous_positions: dict[str, float] | None = None
     if current_positions:
-        previous_positions = {name: float(current_positions[name]) for name in joint_names if name in current_positions}
+        previous_positions = {
+            name: float(current_positions[name])
+            for name in joint_names
+            if name in current_positions
+        }
 
     max_velocity = 0.0
     max_joint = ""
@@ -344,7 +682,11 @@ def _segment_velocities(
     previous_time = 0.0
     previous_positions: dict[str, float] | None = None
     if current_positions:
-        previous_positions = {name: float(current_positions[name]) for name in joint_names if name in current_positions}
+        previous_positions = {
+            name: float(current_positions[name])
+            for name in joint_names
+            if name in current_positions
+        }
 
     segments: list[tuple[float, float, dict[str, float]]] = []
     for point in points:
@@ -359,7 +701,9 @@ def _segment_velocities(
                 if dt <= 0.0:
                     velocities[joint] = math.inf
                 else:
-                    velocities[joint] = (float(positions[joint]) - float(previous_positions[joint])) / dt
+                    velocities[joint] = (
+                        float(positions[joint]) - float(previous_positions[joint])
+                    ) / dt
             segments.append((current_time, dt, velocities))
         previous_positions = positions
         previous_time = current_time
@@ -384,10 +728,17 @@ def _max_segment_acceleration(
             for joint in joint_names:
                 if joint not in previous_velocities or joint not in velocities:
                     continue
-                if dt <= 0.0 or math.isinf(previous_velocities[joint]) or math.isinf(velocities[joint]):
+                invalid_segment = (
+                    dt <= 0.0
+                    or math.isinf(previous_velocities[joint])
+                    or math.isinf(velocities[joint])
+                )
+                if invalid_segment:
                     acceleration = math.inf
                 else:
-                    acceleration = abs(float(velocities[joint]) - float(previous_velocities[joint])) / dt
+                    acceleration = abs(
+                        float(velocities[joint]) - float(previous_velocities[joint])
+                    ) / dt
                 if acceleration > max_acceleration:
                     max_acceleration = acceleration
                     max_joint = str(joint)
@@ -415,18 +766,33 @@ def _max_segment_jerk(
             for joint in joint_names:
                 if joint not in previous_velocities or joint not in velocities:
                     continue
-                if dt <= 0.0 or math.isinf(previous_velocities[joint]) or math.isinf(velocities[joint]):
+                invalid_segment = (
+                    dt <= 0.0
+                    or math.isinf(previous_velocities[joint])
+                    or math.isinf(velocities[joint])
+                )
+                if invalid_segment:
                     accelerations[joint] = math.inf
                 else:
-                    accelerations[joint] = (float(velocities[joint]) - float(previous_velocities[joint])) / dt
+                    accelerations[joint] = (
+                        float(velocities[joint]) - float(previous_velocities[joint])
+                    ) / dt
             if previous_accelerations is not None:
                 for joint in joint_names:
                     if joint not in previous_accelerations or joint not in accelerations:
                         continue
-                    if dt <= 0.0 or math.isinf(previous_accelerations[joint]) or math.isinf(accelerations[joint]):
+                    invalid_segment = (
+                        dt <= 0.0
+                        or math.isinf(previous_accelerations[joint])
+                        or math.isinf(accelerations[joint])
+                    )
+                    if invalid_segment:
                         jerk = math.inf
                     else:
-                        jerk = abs(float(accelerations[joint]) - float(previous_accelerations[joint])) / dt
+                        jerk = abs(
+                            float(accelerations[joint])
+                            - float(previous_accelerations[joint])
+                        ) / dt
                     if jerk > max_jerk:
                         max_jerk = jerk
                         max_joint = str(joint)
@@ -554,7 +920,11 @@ def prepare_guarded_trajectory(
         return False, None, status
 
     first_point_time = _point_seconds(points[0])
-    start_delta, start_joint = _max_named_delta(joint_names, list(points[0].positions), current_positions)
+    start_delta, start_joint = _max_named_delta(
+        joint_names,
+        list(points[0].positions),
+        current_positions,
+    )
     status["first_point_time"] = first_point_time
     status["start_delta_rad"] = start_delta
     status["start_delta_joint"] = start_joint
@@ -593,7 +963,11 @@ def prepare_guarded_trajectory(
     elif max_velocity > float(max_joint_velocity_rad_s) > 0.0:
         velocity_time_scale = max_velocity / float(max_joint_velocity_rad_s)
     if velocity_time_scale > 1.0:
-        _retime_points(points, scale=velocity_time_scale, min_spacing_sec=float(min_point_spacing_sec))
+        _retime_points(
+            points,
+            scale=velocity_time_scale,
+            min_spacing_sec=float(min_point_spacing_sec),
+        )
 
     max_acceleration, max_acceleration_joint = _max_segment_acceleration(
         joint_names,
@@ -606,7 +980,11 @@ def prepare_guarded_trajectory(
     elif max_acceleration > float(max_joint_acceleration_rad_s2) > 0.0:
         acceleration_time_scale = math.sqrt(max_acceleration / float(max_joint_acceleration_rad_s2))
     if acceleration_time_scale > 1.0:
-        _retime_points(points, scale=acceleration_time_scale, min_spacing_sec=float(min_point_spacing_sec))
+        _retime_points(
+            points,
+            scale=acceleration_time_scale,
+            min_spacing_sec=float(min_point_spacing_sec),
+        )
 
     max_jerk, max_jerk_joint = _max_segment_jerk(
         joint_names,
@@ -681,12 +1059,28 @@ def _status_base() -> dict[str, Any]:
         "updated_at": time.time(),
         "action": ACTION_NAME,
         "action_name": ACTION_NAME,
+        "cartesian_action": CARTESIAN_ACTION_NAME,
+        "cartesian_action_name": CARTESIAN_ACTION_NAME,
+        "relative_cartesian_action_name": RELATIVE_CARTESIAN_ACTION_NAME,
+        "cartesian_jog_service_name": CARTESIAN_JOG_SERVICE_NAME,
+        "joint_jog_action_name": JOINT_JOG_ACTION_NAME,
+        "joint_action_ready": True,
+        "joint_jog_action_ready": MoveUR5eJointJog is not None,
+        "cartesian_action_ready": MoveUR5eCartesian is not None,
+        "relative_cartesian_action_ready": MoveUR5eRelativeCartesian is not None,
+        "cartesian_jog_service_ready": SetUR5eCartesianJog is not None,
+        "cartesian_jog_ready": False,
+        "cartesian_function_ready": False,
+        "cartesian_frame_validation_message": "Cartesian frame validation has not completed",
+        "cartesian_frame_position_error_m": None,
+        "cartesian_frame_orientation_error_rad": None,
         "state": "checking",
         "message": "",
         "blocked_reason": "",
         "rtde_connected": False,
         "rtde_receive_connected": False,
         "rtde_control_connected": False,
+        "rtde_reset_required": False,
         "joint_states_fresh": False,
         "start_delta_rad": None,
         "start_delta_joint": "",
@@ -723,6 +1117,13 @@ def _status_base() -> dict[str, Any]:
         "rtde_feedback_recovery_timeout_sec": UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC,
         "rtde_feedback_reconnect_count": 0,
         "rtde_feedback_reconnect_error": "",
+        "rtde_frequency_hz": UR5E_RTDE_FREQUENCY_HZ,
+        "rtde_receive_variables": list(UR5E_RTDE_RECEIVE_VARIABLES),
+        "rtde_failure_kind": "",
+        "rtde_failure_feedback_gap_sec": None,
+        "rtde_last_receive_timestamp": None,
+        "rtde_receive_reported_connected_before_reset": None,
+        "rtde_control_reported_connected_before_reset": None,
         "rtde_result": "",
         "rtde_command_mode": "",
         "rtde_async_dispatch_elapsed_sec": None,
@@ -732,6 +1133,13 @@ def _status_base() -> dict[str, Any]:
         "movej_speed_rad_s": UR5E_RTDE_MOVEJ_SPEED_RAD_S,
         "movej_acceleration_rad_s2": UR5E_RTDE_MOVEJ_ACCEL_RAD_S2,
         "shoulder_pan_extra_scale": UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE,
+        "cartesian_speed_default_m_s": UR5E_RTDE_CARTESIAN_SPEED_M_S,
+        "cartesian_speed_limit_m_s": UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S,
+        "cartesian_acceleration_limit_m_s2": UR5E_RTDE_CARTESIAN_ACCEL_M_S2,
+        "cartesian_position_tolerance_m": UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M,
+        "cartesian_orientation_tolerance_rad": (
+            UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+        ),
         "hardware_runtime_config": HARDWARE_ARMS_CONFIG_FILE,
         "hardware_arms_config": HARDWARE_ARMS_CONFIG_FILE,
     }
@@ -778,9 +1186,14 @@ def prepare_rtde_trajectory(
         if key in guard_status:
             status[key] = guard_status.get(key)
     if not ok or guarded is None:
+        failure_message = (
+            guard_status.get("message")
+            or guard_status.get("blocked_reason")
+            or "trajectory rejected"
+        )
         status.update(
             state="blocked",
-            message=str(guard_status.get("message") or guard_status.get("blocked_reason") or "trajectory rejected"),
+            message=str(failure_message),
         )
         return False, None, status
     status.update(state="ready", message="RTDE trajectory ready", blocked_reason="")
@@ -850,11 +1263,16 @@ class UR5eRTDETrajectoryServer(Node):
         self.current_positions_monotonic: float | None = None
         self._last_receive_timestamp: float | None = None
         self._receive_watch_started_monotonic = time.monotonic()
-        self._last_receive_reconnect_monotonic = 0.0
         self._idle_receive_reconnect_count = 0
         self._receive_lock = threading.Lock()
-        self._next_receive_connect_monotonic = 0.0
         self._receive_error = ""
+        self._receive_transport_failed = False
+        self._rtde_reset_required = False
+        self._rtde_reset_reason = ""
+        self._rtde_failure_kind = ""
+        self._rtde_failure_feedback_gap_sec: float | None = None
+        self._rtde_receive_reported_connected_before_reset: bool | None = None
+        self._rtde_control_reported_connected_before_reset: bool | None = None
         self._control_error = ""
         self._joint_status_announced = False
         self._status_lock = threading.Lock()
@@ -862,18 +1280,35 @@ class UR5eRTDETrajectoryServer(Node):
         self._active_lock = threading.Lock()
         self._active_goal = None
         self._active_goal_status: dict[str, Any] | None = None
+        self._active_motion_kind = ""
         self._latched_terminal_status: dict[str, Any] | None = None
+        self._shutdown_requested = False
+        self._interfaces_disconnected = False
+        self._interface_disconnect_lock = threading.Lock()
+        self._cartesian_frame_ready = False
+        self._cartesian_jog_ready = False
+        self._cartesian_function_ready = False
+        self._cartesian_frame_message = "Cartesian frame validation has not completed"
+        self._cartesian_frame_position_error_m = math.inf
+        self._cartesian_frame_orientation_error_rad = math.inf
+        self._jog_session_token = object()
+        self._jog_watchdog_deadline = 0.0
+        self._jog_stop_in_progress = False
         self.terminal_status_file = self.status_file.with_name(
             f"{self.status_file.stem}_last_terminal{self.status_file.suffix}"
         )
         self._joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
-        self._rviz_goal_state_pub = self.create_publisher(
-            Empty,
-            "/rviz/moveit/update_goal_state",
-            1,
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
+        self._timer = self.create_timer(
+            1.0 / max(1.0, float(publish_rate_hz)),
+            self._publish_joint_state,
         )
-        self._timer = self.create_timer(1.0 / max(1.0, float(publish_rate_hz)), self._publish_joint_state)
         self._action_server = None
+        self._cartesian_action_server = None
+        self._relative_cartesian_action_server = None
+        self._joint_jog_action_server = None
+        self._cartesian_jog_service = None
         if not self.monitor_only:
             self._action_server = ActionServer(
                 self,
@@ -882,9 +1317,61 @@ class UR5eRTDETrajectoryServer(Node):
                 execute_callback=self._execute,
                 cancel_callback=self._cancel,
             )
+            if MoveUR5eCartesian is not None:
+                self._cartesian_action_server = ActionServer(
+                    self,
+                    MoveUR5eCartesian,
+                    CARTESIAN_ACTION_NAME,
+                    execute_callback=self._execute_cartesian,
+                    cancel_callback=self._cancel,
+                )
+            if MoveUR5eRelativeCartesian is not None:
+                self._relative_cartesian_action_server = ActionServer(
+                    self,
+                    MoveUR5eRelativeCartesian,
+                    RELATIVE_CARTESIAN_ACTION_NAME,
+                    execute_callback=self._execute_relative_cartesian,
+                    cancel_callback=self._cancel,
+                )
+            if MoveUR5eJointJog is not None:
+                self._joint_jog_action_server = ActionServer(
+                    self,
+                    MoveUR5eJointJog,
+                    JOINT_JOG_ACTION_NAME,
+                    execute_callback=self._execute_joint_jog,
+                    cancel_callback=self._cancel,
+                )
+            if SetUR5eCartesianJog is not None:
+                self._cartesian_jog_service = self.create_service(
+                    SetUR5eCartesianJog,
+                    CARTESIAN_JOG_SERVICE_NAME,
+                    self._set_cartesian_jog,
+                )
         status = _status_base()
         if not self.robot_ip:
-            status.update(state="blocked", blocked_reason="--robot-ip is required", message="blocked: --robot-ip is required")
+            status.update(
+                state="blocked",
+                blocked_reason="--robot-ip is required",
+                message="blocked: --robot-ip is required",
+            )
+            self._write_status(status)
+            return
+        missing_interfaces = [
+            name
+            for name, value in (
+                ("MoveUR5eCartesian", MoveUR5eCartesian),
+                ("MoveUR5eJointJog", MoveUR5eJointJog),
+                ("MoveUR5eRelativeCartesian", MoveUR5eRelativeCartesian),
+                ("SetUR5eCartesianJog", SetUR5eCartesianJog),
+            )
+            if value is None
+        ]
+        if not self.monitor_only and missing_interfaces:
+            reason = (
+                f"{', '.join(missing_interfaces)} interface is unavailable. Rebuild and source "
+                "cais_lab_robotics before starting Hardware Stack."
+            )
+            status.update(state="blocked", blocked_reason=reason, message=f"blocked: {reason}")
             self._write_status(status)
             return
         self._connect_rtde()
@@ -895,8 +1382,46 @@ class UR5eRTDETrajectoryServer(Node):
         if self.monitor_only:
             body["action"] = ""
             body["action_name"] = ""
+            body["cartesian_action"] = ""
+            body["cartesian_action_name"] = ""
+            body["relative_cartesian_action_name"] = ""
+            body["cartesian_jog_service_name"] = ""
+            body["joint_jog_action_name"] = ""
+            body["joint_action_ready"] = False
+            body["joint_jog_action_ready"] = False
+            body["cartesian_action_ready"] = False
+            body["relative_cartesian_action_ready"] = False
+            body["cartesian_jog_service_ready"] = False
+            body["cartesian_jog_ready"] = False
+            body["cartesian_function_ready"] = False
         body["ros_domain_id"] = self.ros_domain_id
         body["process_id"] = os.getpid()
+        body["rtde_reset_required"] = bool(
+            getattr(self, "_rtde_reset_required", False)
+        )
+        body["rtde_failure_kind"] = str(
+            getattr(self, "_rtde_failure_kind", "") or ""
+        )
+        body["rtde_failure_feedback_gap_sec"] = getattr(
+            self,
+            "_rtde_failure_feedback_gap_sec",
+            None,
+        )
+        body["rtde_last_receive_timestamp"] = getattr(
+            self,
+            "_last_receive_timestamp",
+            None,
+        )
+        body["rtde_receive_reported_connected_before_reset"] = getattr(
+            self,
+            "_rtde_receive_reported_connected_before_reset",
+            None,
+        )
+        body["rtde_control_reported_connected_before_reset"] = getattr(
+            self,
+            "_rtde_control_reported_connected_before_reset",
+            None,
+        )
         body["updated_at"] = time.time()
         body["terminal_status_file"] = str(self.terminal_status_file)
         with self._status_lock:
@@ -908,6 +1433,22 @@ class UR5eRTDETrajectoryServer(Node):
         body["monitor_only"] = self.monitor_only
         body["ros_domain_id"] = self.ros_domain_id
         body["process_id"] = os.getpid()
+        body["rtde_reset_required"] = bool(
+            getattr(self, "_rtde_reset_required", False)
+        )
+        body["rtde_failure_kind"] = str(
+            getattr(self, "_rtde_failure_kind", "") or ""
+        )
+        body["rtde_failure_feedback_gap_sec"] = getattr(
+            self,
+            "_rtde_failure_feedback_gap_sec",
+            None,
+        )
+        body["rtde_last_receive_timestamp"] = getattr(
+            self,
+            "_last_receive_timestamp",
+            None,
+        )
         body["updated_at"] = time.time()
         body["terminal_status_file"] = str(self.terminal_status_file)
         with self._status_lock:
@@ -921,14 +1462,23 @@ class UR5eRTDETrajectoryServer(Node):
             if self.receive_factory is None:
                 import rtde_receive
 
-                self.receive_factory = rtde_receive.RTDEReceiveInterface
-            self.receive = self.receive_factory(self.robot_ip)
+                self.receive = rtde_receive.RTDEReceiveInterface(
+                    self.robot_ip,
+                    UR5E_RTDE_FREQUENCY_HZ,
+                    list(UR5E_RTDE_RECEIVE_VARIABLES),
+                )
+            else:
+                self.receive = self.receive_factory(self.robot_ip)
             receive_connected = True
             self._receive_error = ""
         except (ImportError, OSError, RuntimeError) as exc:
             self.receive = None
             self._receive_error = f"{type(exc).__name__}: {exc}"
-            self._next_receive_connect_monotonic = time.monotonic() + 1.0
+            self._receive_transport_failed = True
+            self._rtde_reset_required = True
+            self._rtde_reset_reason = (
+                f"RTDE receive unavailable: {self._receive_error}"
+            )
 
         if self.monitor_only:
             self.control = None
@@ -938,8 +1488,12 @@ class UR5eRTDETrajectoryServer(Node):
                 if self.control_factory is None:
                     import rtde_control
 
-                    self.control_factory = rtde_control.RTDEControlInterface
-                self.control = self.control_factory(self.robot_ip)
+                    self.control = rtde_control.RTDEControlInterface(
+                        self.robot_ip,
+                        UR5E_RTDE_FREQUENCY_HZ,
+                    )
+                else:
+                    self.control = self.control_factory(self.robot_ip)
                 control_connected = True
                 self._control_error = ""
             except (ImportError, OSError, RuntimeError) as exc:
@@ -979,88 +1533,136 @@ class UR5eRTDETrajectoryServer(Node):
             status.update(state="blocked", blocked_reason=reason, message=f"blocked: {reason}")
         self._write_status(status)
 
-    def _reconnect_receive_locked(self) -> bool:
-        if self.receive_factory is None:
-            try:
-                import rtde_receive
-            except ImportError as exc:
-                self._receive_error = f"{type(exc).__name__}: {exc}"
-                self._next_receive_connect_monotonic = time.monotonic() + 1.0
-                return False
-            self.receive_factory = rtde_receive.RTDEReceiveInterface
-        try:
-            self.receive = self.receive_factory(self.robot_ip)
-        except (OSError, RuntimeError) as exc:
-            self.receive = None
-            self._receive_error = f"{type(exc).__name__}: {exc}"
-            self._next_receive_connect_monotonic = time.monotonic() + 1.0
-            return False
-        self._receive_error = ""
-        self._next_receive_connect_monotonic = 0.0
-        self._last_receive_timestamp = None
-        return True
-
-    def _reconnect_receive(self) -> str:
-        """Replace only the read-only RTDE connection without redispatching motion."""
-        self._last_receive_reconnect_monotonic = time.monotonic()
-        with self._receive_lock:
-            receive = self.receive
-            disconnect = getattr(receive, "disconnect", None)
-            if callable(disconnect):
-                with suppress(OSError, RuntimeError):
-                    disconnect()
-            self.receive = None
-            self._last_receive_timestamp = None
-            self._next_receive_connect_monotonic = 0.0
-            if not self._reconnect_receive_locked():
-                return self._receive_error or "RTDE receive reconnect failed"
+    def _mark_rtde_reset_required(
+        self,
+        reason: str,
+        *,
+        write_status: bool,
+        failure_kind: str = "",
+        feedback_gap_sec: float | None = None,
+    ) -> None:
+        """Latch transport recovery until this process is replaced."""
+        reset_was_required = bool(getattr(self, "_rtde_reset_required", False))
+        self._rtde_reset_required = True
+        if not reset_was_required or not str(getattr(self, "_rtde_reset_reason", "")):
+            self._rtde_reset_reason = str(reason or "UR5e RTDE reset required")
+        if failure_kind and not str(getattr(self, "_rtde_failure_kind", "")):
+            self._rtde_failure_kind = str(failure_kind)
+        if (
+            getattr(self, "_rtde_failure_feedback_gap_sec", None) is None
+            and feedback_gap_sec is not None
+            and math.isfinite(feedback_gap_sec)
+        ):
+            self._rtde_failure_feedback_gap_sec = float(feedback_gap_sec)
+        if (
+            getattr(self, "_rtde_receive_reported_connected_before_reset", None)
+            is None
+        ):
+            self._rtde_receive_reported_connected_before_reset = (
+                self._interface_reported_connected(getattr(self, "receive", None))
+            )
+        if (
+            getattr(self, "_rtde_control_reported_connected_before_reset", None)
+            is None
+        ):
+            self._rtde_control_reported_connected_before_reset = (
+                self._interface_reported_connected(getattr(self, "control", None))
+            )
+        self._cartesian_frame_ready = False
+        self._cartesian_jog_ready = False
+        self._cartesian_function_ready = False
+        self._cartesian_frame_message = self._rtde_reset_reason
         self._joint_status_announced = False
-        return ""
+        self._disconnect_rtde_interfaces()
+        if not write_status:
+            return
+        status = _status_base()
+        status.update(
+            state="failed",
+            blocked_reason=self._rtde_reset_reason,
+            message=self._rtde_reset_reason,
+            rtde_connected=False,
+            rtde_receive_connected=False,
+            rtde_control_connected=self.control is not None,
+            rtde_reset_required=True,
+            joint_states_fresh=False,
+        )
+        self._write_status(status)
+
+    @staticmethod
+    def _interface_reported_connected(interface: Any) -> bool | None:
+        """Read a native RTDE connection flag without changing interface state."""
+        is_connected = getattr(interface, "isConnected", None)
+        if not callable(is_connected):
+            return None
+        try:
+            return bool(is_connected())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+
+    def _disconnect_rtde_interfaces(self) -> None:
+        """Disconnect each native RTDE interface once after failure or shutdown."""
+        disconnect_lock = getattr(self, "_interface_disconnect_lock", None)
+        if disconnect_lock is None:
+            disconnect_lock = threading.Lock()
+            self._interface_disconnect_lock = disconnect_lock
+        with disconnect_lock:
+            if bool(getattr(self, "_interfaces_disconnected", False)):
+                return
+            self._interfaces_disconnected = True
+            control = self.control
+            receive = self.receive
+            self.control = None
+            self.receive = None
+        for interface in (control, receive):
+            disconnect = getattr(interface, "disconnect", None)
+            if not callable(disconnect):
+                continue
+            with suppress(OSError, RuntimeError, TypeError, ValueError):
+                disconnect()
 
     def _connect_control_for_goal(self) -> str | None:
-        if self.control is not None:
-            is_connected = getattr(self.control, "isConnected", None)
-            if is_connected is None:
-                return None
-            try:
-                if bool(is_connected()):
-                    return None
-            except RuntimeError:
-                pass
-            disconnect = getattr(self.control, "disconnect", None)
-            if disconnect is not None:
-                with suppress(RuntimeError):
-                    disconnect()
-            self.control = None
-        try:
-            if self.control_factory is None:
-                import rtde_control
-
-                self.control_factory = rtde_control.RTDEControlInterface
-            self.control = self.control_factory(self.robot_ip)
-        except (ImportError, OSError, RuntimeError) as exc:
-            self.control = None
-            self._control_error = f"{type(exc).__name__}: {exc}"
+        if bool(getattr(self, "_shutdown_requested", False)):
+            return "UR5e RTDE server is stopping"
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return str(getattr(self, "_rtde_reset_reason", "")) or "UR5e RTDE reset required"
+        control = self.control
+        if control is None:
             return (
                 "UR5e RTDE control unavailable. Set the teach pendant to Remote Control "
-                f"before commanding motion: {self._control_error}"
+                "and use Repair Hardware Stack before commanding motion."
             )
-        self._control_error = ""
-        return None
+        is_connected = getattr(control, "isConnected", None)
+        if not callable(is_connected):
+            return None
+        try:
+            if bool(is_connected()):
+                return None
+            detail = "RTDEControlInterface reports disconnected"
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        reason = (
+            f"UR5e RTDE control transport failed: {detail}. "
+            "Use Repair Hardware Stack to create one fresh RTDE owner."
+        )
+        self._control_error = detail
+        self._mark_rtde_reset_required(
+            reason,
+            write_status=True,
+            failure_kind="control_disconnected",
+        )
+        return reason
 
     def _read_actual_q(self) -> list[float] | None:
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
         error = ""
-        recovered = False
         sample_fresh = True
+        values: list[float] = []
         with self._receive_lock:
             if self.receive is None:
-                if time.monotonic() < self._next_receive_connect_monotonic:
-                    return None
-                if not self._reconnect_receive_locked():
-                    error = self._receive_error
-                else:
-                    recovered = True
-            if self.receive is not None:
+                error = self._receive_error or "RTDE receive connection is unavailable"
+            else:
                 try:
                     values = [float(value) for value in list(self.receive.getActualQ())]
                     get_timestamp = getattr(self.receive, "getTimestamp", None)
@@ -1080,32 +1682,25 @@ class UR5eRTDETrajectoryServer(Node):
                                 self._last_receive_timestamp = receive_timestamp
                 except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     error = f"{type(exc).__name__}: {exc}"
-                    disconnect = getattr(self.receive, "disconnect", None)
-                    if disconnect is not None:
-                        with suppress(RuntimeError):
-                            disconnect()
-                    self.receive = None
                     self._receive_error = error
-                    self._next_receive_connect_monotonic = time.monotonic() + 1.0
+                    self._receive_transport_failed = True
         if error:
-            self._joint_status_announced = False
-            status = _status_base()
-            status.update(
-                state="blocked",
-                blocked_reason=f"RTDE getActualQ failed: {error}",
-                message=f"blocked: RTDE getActualQ failed: {error}",
-                rtde_connected=False,
-                rtde_receive_connected=False,
-                rtde_control_connected=self.control is not None,
+            reason = (
+                f"UR5e RTDE feedback transport failed: {error}. "
+                "Use Reset UR5e RTDE in Interactive Teleop."
             )
-            self._write_status(status)
+            self._mark_rtde_reset_required(
+                reason,
+                write_status=True,
+                failure_kind="receive_exception",
+            )
             return None
         if len(values) < len(ARM_JOINTS):
             return None
         self.current_positions = values[: len(ARM_JOINTS)]
         if sample_fresh:
             self.current_positions_monotonic = time.monotonic()
-        if recovered or not self._joint_status_announced:
+        if not self._joint_status_announced:
             control_connected = self.control is not None
             status = _status_base()
             status.update(
@@ -1138,6 +1733,8 @@ class UR5eRTDETrajectoryServer(Node):
 
     def _read_actual_qd(self) -> list[float] | None:
         """Return current joint velocities without changing receive readiness."""
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
         with self._receive_lock:
             receive = self.receive
             get_actual_qd = getattr(receive, "getActualQd", None)
@@ -1155,6 +1752,8 @@ class UR5eRTDETrajectoryServer(Node):
 
     def _read_feedback_timestamp(self) -> float | None:
         """Return the controller timestamp used to prove RTDE feedback is advancing."""
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
         with self._receive_lock:
             receive = self.receive
             get_timestamp = getattr(receive, "getTimestamp", None)
@@ -1177,7 +1776,79 @@ class UR5eRTDETrajectoryServer(Node):
             return False
         return time.monotonic() - self.current_positions_monotonic <= UR5E_RTDE_FEEDBACK_STALE_SEC
 
+    def _stop_cartesian_jog(self, reason: str) -> tuple[bool, str]:
+        """Stop one active RTDE jog and release its shared motion ownership."""
+        wait_for_existing_stop = False
+        with self._active_lock:
+            active = self._active_goal is self._jog_session_token
+            if self._jog_stop_in_progress:
+                wait_for_existing_stop = True
+            elif not active:
+                self._jog_watchdog_deadline = 0.0
+                if bool(getattr(self, "_rtde_reset_required", False)):
+                    return False, str(
+                        getattr(self, "_rtde_reset_reason", "")
+                        or "UR5e RTDE reset required after Cartesian jog"
+                    )
+                return True, "UR5e Cartesian jog already stopped"
+            else:
+                self._jog_stop_in_progress = True
+        if wait_for_existing_stop:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with self._active_lock:
+                    if not self._jog_stop_in_progress:
+                        break
+                time.sleep(0.01)
+            else:
+                return False, "UR5e Cartesian jog stop outcome was not confirmed"
+            return self._stop_cartesian_jog(reason)
+        try:
+            jog_stop = getattr(self.control, "jogStop", None)
+            if not callable(jog_stop):
+                raise RuntimeError("RTDE control object has no jogStop method")
+            stop_result = jog_stop()
+            if stop_result is False:
+                raise RuntimeError("UR5e RTDE jogStop returned False")
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            detail = f"UR5e Cartesian jog stop failed: {type(exc).__name__}: {exc}"
+            self._mark_rtde_reset_required(detail, write_status=False)
+            return False, detail
+        finally:
+            with self._active_lock:
+                if self._active_goal is self._jog_session_token:
+                    self._active_goal = None
+                    self._active_goal_status = None
+                    self._active_motion_kind = ""
+                self._jog_watchdog_deadline = 0.0
+                self._jog_stop_in_progress = False
+        status = _status_base()
+        status.update(
+            state="ready",
+            message=str(reason or "UR5e Cartesian jog stopped"),
+            rtde_connected=True,
+            rtde_receive_connected=True,
+            rtde_control_connected=True,
+            joint_states_fresh=self._joint_states_fresh(),
+        )
+        self._write_status(status)
+        return True, status["message"]
+
+    def _check_jog_watchdog(self) -> None:
+        jog_session_token = getattr(self, "_jog_session_token", None)
+        watchdog_deadline = float(getattr(self, "_jog_watchdog_deadline", 0.0))
+        with self._active_lock:
+            expired = bool(
+                jog_session_token is not None
+                and self._active_goal is jog_session_token
+                and watchdog_deadline > 0.0
+                and time.monotonic() >= watchdog_deadline
+            )
+        if expired:
+            self._stop_cartesian_jog("UR5e Cartesian jog watchdog stopped motion")
+
     def _publish_joint_state(self) -> None:
+        self._check_jog_watchdog()
         previous_sample_at = self.current_positions_monotonic
         actual = self._read_actual_q()
         if actual is None or self.current_positions_monotonic == previous_sample_at:
@@ -1190,35 +1861,35 @@ class UR5eRTDETrajectoryServer(Node):
                 if last_fresh_at is not None
                 else self._receive_watch_started_monotonic
             )
-            reconnect_due = (
-                not active_goal
-                and feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
-                and now - self._last_receive_reconnect_monotonic
-                >= UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC
-            )
-            if reconnect_due:
-                reconnect_error = self._reconnect_receive()
-                self._idle_receive_reconnect_count += 1
+            if active_goal:
+                return
+            if bool(getattr(self, "_rtde_reset_required", False)):
+                return
+            if feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:
+                reason = str(getattr(self, "_rtde_reset_reason", "")) or (
+                    "UR5e RTDE feedback stopped advancing for "
+                    f"{feedback_gap_sec:.2f} s. Use Reset UR5e RTDE in "
+                    "Interactive Teleop."
+                )
+                self._mark_rtde_reset_required(
+                    reason,
+                    write_status=True,
+                    failure_kind="feedback_timestamp_stalled",
+                    feedback_gap_sec=feedback_gap_sec,
+                )
+            elif feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC:
                 status = _status_base()
                 status.update(
                     state="recovering",
-                    message=(
-                        "recovering idle UR5e RTDE feedback"
-                        if not reconnect_error
-                        else f"recovering idle UR5e RTDE feedback: {reconnect_error}"
-                    ),
-                    blocked_reason=reconnect_error,
-                    rtde_connected=(
-                        not bool(reconnect_error) and self.control is not None
-                    ),
-                    rtde_receive_connected=not bool(reconnect_error),
+                    message="waiting for transient UR5e RTDE feedback recovery",
+                    blocked_reason="",
+                    rtde_connected=self.control is not None and self.receive is not None,
+                    rtde_receive_connected=self.receive is not None,
                     rtde_control_connected=self.control is not None,
                     joint_states_fresh=False,
                     rtde_feedback_gap_sec=feedback_gap_sec,
-                    rtde_feedback_reconnect_count=(
-                        self._idle_receive_reconnect_count
-                    ),
-                    rtde_feedback_reconnect_error=reconnect_error,
+                    rtde_feedback_reconnect_count=0,
+                    rtde_feedback_reconnect_error="",
                 )
                 self._write_status(status)
             return
@@ -1232,13 +1903,63 @@ class UR5eRTDETrajectoryServer(Node):
             return
         self._next_status_heartbeat_monotonic = now + 1.0
         with self._active_lock:
+            validate_frames = self._active_goal is None
+        if validate_frames and not self.monitor_only and self.control is not None:
+            (
+                self._cartesian_frame_ready,
+                self._cartesian_frame_message,
+                self._cartesian_frame_position_error_m,
+                self._cartesian_frame_orientation_error_rad,
+            ) = self._cartesian_frame_validation()
+            function_methods = ("moveL", "isPoseWithinSafetyLimits", "getTCPOffset")
+            missing_function_methods = [
+                name for name in function_methods if not callable(getattr(self.control, name, None))
+            ]
+            missing_jog_methods = [
+                name for name in ("jogStart", "jogStop")
+                if not callable(getattr(self.control, name, None))
+            ]
+            self._cartesian_function_ready = bool(
+                self._cartesian_frame_ready and not missing_function_methods
+            )
+            self._cartesian_jog_ready = bool(
+                self._cartesian_function_ready and not missing_jog_methods
+            )
+            if missing_function_methods:
+                self._cartesian_frame_message = (
+                    "Cartesian direct interface validation failed: missing RTDE methods "
+                    f"{missing_function_methods}"
+                )
+            elif missing_jog_methods:
+                self._cartesian_frame_message = (
+                    "Cartesian Smooth Hold validation failed: missing RTDE methods "
+                    f"{missing_jog_methods}"
+                )
+        with self._active_lock:
             control_connected = self.control is not None
             receive_connected = self.receive is not None
-            if self._active_goal is not None:
+            motion_idle = self._active_goal is None
+            if bool(getattr(self, "_rtde_reset_required", False)):
+                status = _status_base()
+                status.update(
+                    state="failed",
+                    message=str(getattr(self, "_rtde_reset_reason", "")),
+                    blocked_reason=str(getattr(self, "_rtde_reset_reason", "")),
+                )
+                control_connected = False
+                receive_connected = False
+            elif self._active_goal is not None:
                 status = dict(self._active_goal_status or _status_base())
                 status.update(
                     state="executing",
-                    message="executing UR5e RTDE moveJ path",
+                    message=str(
+                        status.get("message")
+                        or (
+                            "executing UR5e RTDE Cartesian moveL"
+                            if self._active_motion_kind == "cartesian"
+                            else "executing UR5e RTDE moveJ path"
+                        )
+                    ),
                     blocked_reason="",
                 )
             elif self._latched_terminal_status is not None:
@@ -1266,6 +1987,31 @@ class UR5eRTDETrajectoryServer(Node):
                 rtde_receive_connected=receive_connected,
                 rtde_control_connected=control_connected,
                 joint_states_fresh=self._joint_states_fresh(),
+                cartesian_jog_ready=bool(
+                    self._cartesian_jog_ready
+                    and control_connected
+                    and receive_connected
+                    and motion_idle
+                    and not self._rtde_reset_required
+                ),
+                cartesian_function_ready=bool(
+                    self._cartesian_function_ready
+                    and control_connected
+                    and receive_connected
+                    and motion_idle
+                    and not self._rtde_reset_required
+                ),
+                cartesian_frame_validation_message=self._cartesian_frame_message,
+                cartesian_frame_position_error_m=(
+                    self._cartesian_frame_position_error_m
+                    if math.isfinite(self._cartesian_frame_position_error_m)
+                    else None
+                ),
+                cartesian_frame_orientation_error_rad=(
+                    self._cartesian_frame_orientation_error_rad
+                    if math.isfinite(self._cartesian_frame_orientation_error_rad)
+                    else None
+                ),
             )
             self._write_status(status)
 
@@ -1291,6 +2037,7 @@ class UR5eRTDETrajectoryServer(Node):
             if self._active_goal is goal_handle:
                 self._active_goal = None
                 self._active_goal_status = None
+                self._active_motion_kind = ""
             if latch_status:
                 self._latched_terminal_status = dict(payload)
             self._write_status(payload)
@@ -1309,12 +2056,27 @@ class UR5eRTDETrajectoryServer(Node):
     def _stop_motion(self) -> None:
         if self.control is None:
             return
-        for method_name in ("stopJ", "stopScript", "servoStop"):
+        with self._active_lock:
+            motion_kind = self._active_motion_kind
+        if motion_kind == "cartesian_jog":
+            jog_stop = getattr(self.control, "jogStop", None)
+            if callable(jog_stop):
+                try:
+                    jog_stop()
+                    return
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    pass
+        method_names = (
+            ("stopL", "stopJ", "servoStop", "stopScript")
+            if motion_kind in {"cartesian", "relative_cartesian"}
+            else ("stopJ", "stopL", "servoStop", "stopScript")
+        )
+        for method_name in method_names:
             method = getattr(self.control, method_name, None)
             if method is None:
                 continue
             try:
-                if method_name == "stopJ":
+                if method_name in {"stopJ", "stopL"}:
                     method(UR5E_RTDE_STOP_ACCEL_RAD_S2)
                 else:
                     method()
@@ -1407,20 +2169,12 @@ class UR5eRTDETrajectoryServer(Node):
             )
         return status
 
-    def _publish_rviz_goal_state_update(self, outcome: str) -> None:
-        """Ask MoveIt RViz to reset its orange goal state from current feedback."""
-        try:
-            self._rviz_goal_state_pub.publish(Empty())
-        except RuntimeError as exc:
-            self.get_logger().warning(
-                f"UR5e RTDE trajectory {outcome} but RViz goal-state update failed: {exc}"
-            )
-
     def _clear_active_goal(self, goal_handle: Any) -> None:
         with self._active_lock:
             if self._active_goal is goal_handle:
                 self._active_goal = None
                 self._active_goal_status = None
+                self._active_motion_kind = ""
 
     def _execute_movej_path(self, path: list[list[float]]) -> tuple[str, str]:
         if self.control is None:
@@ -1443,11 +2197,1222 @@ class UR5eRTDETrajectoryServer(Node):
         suffix = "; ".join(type_errors)
         return f"{repr(result)}; blocking_fallback=True; {suffix}", "blocking_fallback"
 
+    def _execute_movej_target(
+        self,
+        target: list[float],
+        *,
+        speed_rad_s: float,
+        acceleration_rad_s2: float,
+    ) -> bool:
+        """Dispatch one asynchronous RTDE moveJ target with explicit limits."""
+        control = self.control
+        movej = getattr(control, "moveJ", None)
+        if not callable(movej):
+            raise RuntimeError("RTDE control object has no moveJ method")
+        try:
+            return bool(movej(target, speed_rad_s, acceleration_rad_s2, True))
+        except TypeError:
+            return bool(
+                movej(
+                    target,
+                    speed=speed_rad_s,
+                    acceleration=acceleration_rad_s2,
+                    asynchronous=True,
+                )
+            )
+
+    @staticmethod
+    def _joint_jog_result(
+        error_code: int,
+        error_string: str,
+        *,
+        final_joint_error_rad: float = math.inf,
+        state_uncertain: bool = False,
+    ) -> Any:
+        if MoveUR5eJointJog is None:
+            return None
+        result = MoveUR5eJointJog.Result()
+        result.error_code = int(error_code)
+        result.error_string = str(error_string or "")
+        result.final_joint_error_rad = float(final_joint_error_rad)
+        result.state_uncertain = bool(state_uncertain)
+        return result
+
+    @staticmethod
+    def _publish_joint_jog_feedback(goal_handle: Any, joint_error_rad: float) -> None:
+        if MoveUR5eJointJog is None:
+            return
+        feedback = MoveUR5eJointJog.Feedback()
+        feedback.joint_error_rad = float(joint_error_rad)
+        goal_handle.publish_feedback(feedback)
+
+    def _execute_joint_jog(self, goal_handle: Any) -> Any:  # noqa: C901, PLR0912
+        """Execute one guarded Interactive Teleop UR5e joint jog."""
+        with self._active_lock:
+            if self._shutdown_requested:
+                goal_handle.abort()
+                return self._joint_jog_result(-1, "UR5e RTDE server is stopping")
+            if self._rtde_reset_required:
+                goal_handle.abort()
+                return self._joint_jog_result(
+                    -1,
+                    self._rtde_reset_reason or "UR5e RTDE reset required",
+                    state_uncertain=True,
+                )
+            if self._latched_terminal_status is not None:
+                reason = str(
+                    self._latched_terminal_status.get("blocked_reason")
+                    or self._latched_terminal_status.get("message")
+                    or "UR5e RTDE trajectory server requires repair"
+                )
+                goal_handle.abort()
+                return self._joint_jog_result(-1, reason, state_uncertain=True)
+            if self._active_goal is not None:
+                goal_handle.abort()
+                return self._joint_jog_result(-1, "UR5e RTDE motion already executing")
+            self._active_goal = goal_handle
+            self._active_goal_status = None
+            self._active_motion_kind = "joint_jog"
+
+        status = _status_base()
+        status.update(
+            state="checking",
+            message="checking guarded UR5e RTDE joint jog",
+            motion_kind="joint_jog",
+        )
+        motion_attempted = False
+        final_error = math.inf
+        try:
+            request = goal_handle.request
+            joint = int(request.joint)
+            delta_rad = float(request.delta_rad)
+            speed_rad_s = float(request.speed_rad_s)
+            acceleration_rad_s2 = float(request.acceleration_rad_s2)
+            if joint < 1 or joint > len(ARM_JOINTS):
+                raise ValueError(f"joint must be within 1..{len(ARM_JOINTS)}")
+            if not math.isfinite(delta_rad) or not (
+                0.0 < abs(delta_rad) <= UR5E_RTDE_JOINT_JOG_MAX_DELTA_RAD
+            ):
+                raise ValueError(
+                    "joint delta must be finite and within "
+                    f"(0, {math.degrees(UR5E_RTDE_JOINT_JOG_MAX_DELTA_RAD):.1f}] deg"
+                )
+            if not math.isfinite(speed_rad_s) or not (
+                0.0 < speed_rad_s <= UR5E_RTDE_MAX_JOINT_VEL_RAD_S
+            ):
+                raise ValueError("joint speed is outside the configured limit")
+            if not math.isfinite(acceleration_rad_s2) or not (
+                0.0 < acceleration_rad_s2 <= UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2
+            ):
+                raise ValueError("joint acceleration is outside the configured limit")
+
+            control_error = self._connect_control_for_goal()
+            if control_error:
+                raise RuntimeError(control_error)
+            actual = self._read_actual_q()
+            if actual is None or not self._joint_states_fresh():
+                raise RuntimeError("UR5e RTDE feedback stale or missing")
+            program_error = self._ensure_control_program_for_goal()
+            if program_error:
+                raise RuntimeError(program_error)
+
+            target = [float(value) for value in actual]
+            target[joint - 1] += delta_rad
+            within_limits = getattr(self.control, "isJointsWithinSafetyLimits", None)
+            if not callable(within_limits):
+                raise RuntimeError(
+                    "RTDE control object has no isJointsWithinSafetyLimits method"
+                )
+            if not bool(within_limits(target)):
+                raise ValueError(
+                    f"UR controller rejected J{joint} target as outside safety limits"
+                )
+
+            initial = [float(value) for value in actual]
+            initial_target_error = abs(target[joint - 1] - initial[joint - 1])
+            timeout_sec = max(
+                4.0,
+                initial_target_error / speed_rad_s + UR5E_RTDE_RESULT_MARGIN_SEC,
+            )
+            execution_started = time.monotonic()
+            status.update(
+                state="executing",
+                message=f"executing guarded UR5e RTDE J{joint} jog",
+                blocked_reason="",
+                rtde_connected=True,
+                rtde_receive_connected=True,
+                rtde_control_connected=True,
+                joint_states_fresh=True,
+                joint_jog_joint=joint,
+                joint_jog_delta_rad=delta_rad,
+                joint_jog_speed_rad_s=speed_rad_s,
+                joint_jog_acceleration_rad_s2=acceleration_rad_s2,
+                initial_positions_rad=initial,
+                final_target_positions_rad=target,
+                trajectory_result_timeout_sec=timeout_sec,
+            )
+            self._write_active_goal_status(goal_handle, status)
+            motion_attempted = True
+            if not self._execute_movej_target(
+                target,
+                speed_rad_s=speed_rad_s,
+                acceleration_rad_s2=acceleration_rad_s2,
+            ):
+                raise RuntimeError("UR5e RTDE moveJ returned False")
+
+            stationary_since: float | None = None
+            previous_actual = list(initial)
+            previous_actual_at = execution_started
+            deadline = execution_started + timeout_sec
+            while rclpy.ok() and time.monotonic() < deadline:
+                if goal_handle.is_cancel_requested:
+                    self._stop_motion()
+                    stop_deadline = time.monotonic() + 2.0
+                    stop_stationary_since: float | None = None
+                    stop_confirmed = False
+                    while time.monotonic() < stop_deadline:
+                        actual_qd = self._read_actual_qd()
+                        if actual_qd is None:
+                            stop_stationary_since = None
+                        elif max(abs(float(value)) for value in actual_qd) <= (
+                            UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                        ):
+                            stop_stationary_since = (
+                                stop_stationary_since or time.monotonic()
+                            )
+                            if (
+                                time.monotonic() - stop_stationary_since
+                                >= UR5E_RTDE_STATIONARY_HOLD_SEC
+                            ):
+                                stop_confirmed = True
+                                break
+                        else:
+                            stop_stationary_since = None
+                        time.sleep(0.02)
+                    if not stop_confirmed:
+                        self._mark_rtde_reset_required(
+                            "UR5e joint jog cancellation did not confirm stationary motion",
+                            write_status=False,
+                        )
+                    goal_handle.canceled()
+                    status.update(
+                        state="canceled",
+                        message=(
+                            "UR5e joint jog canceled"
+                            if stop_confirmed
+                            else "UR5e joint jog canceled without stationary confirmation"
+                        ),
+                        blocked_reason=(
+                            ""
+                            if stop_confirmed
+                            else "UR5e joint jog cancellation did not confirm stationary motion"
+                        ),
+                        rtde_reset_required=not stop_confirmed,
+                    )
+                    self._finish_active_goal_status(
+                        goal_handle,
+                        status,
+                        latch_status=not stop_confirmed,
+                    )
+                    return self._joint_jog_result(
+                        -1,
+                        "canceled",
+                        final_joint_error_rad=final_error,
+                        state_uncertain=not stop_confirmed,
+                    )
+                actual = self._read_actual_q()
+                actual_at = time.monotonic()
+                if actual is None:
+                    raise RuntimeError("UR5e RTDE joint jog feedback is unavailable")
+                final_error = abs(target[joint - 1] - actual[joint - 1])
+                self._publish_joint_jog_feedback(goal_handle, final_error)
+                actual_qd = self._read_actual_qd()
+                if actual_qd is not None:
+                    max_velocity = max(abs(float(value)) for value in actual_qd)
+                else:
+                    elapsed = actual_at - previous_actual_at
+                    max_velocity = (
+                        max(
+                            abs(current - previous) / elapsed
+                            for current, previous in zip(
+                                actual,
+                                previous_actual,
+                                strict=True,
+                            )
+                        )
+                        if elapsed > 1e-6
+                        else math.inf
+                    )
+                target_reached = final_error <= UR5E_RTDE_JOINT_JOG_TOLERANCE_RAD
+                stationary = max_velocity <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                if target_reached and stationary:
+                    stationary_since = stationary_since or actual_at
+                else:
+                    stationary_since = None
+                status.update(
+                    actual_positions_rad=[float(value) for value in actual],
+                    final_joint_error_rad=final_error,
+                    max_actual_joint_velocity_rad_s=max_velocity,
+                    stationary_hold_sec=(
+                        actual_at - stationary_since if stationary_since is not None else 0.0
+                    ),
+                    trajectory_elapsed_sec=actual_at - execution_started,
+                )
+                with self._active_lock:
+                    if self._active_goal is goal_handle:
+                        self._active_goal_status = dict(status)
+                if (
+                    stationary_since is not None
+                    and actual_at - stationary_since >= UR5E_RTDE_STATIONARY_HOLD_SEC
+                ):
+                    status.update(
+                        state="succeeded",
+                        message=f"UR5e J{joint} jog reached its target",
+                    )
+                    goal_handle.succeed()
+                    self._finish_active_goal_status(goal_handle, status)
+                    return self._joint_jog_result(
+                        0,
+                        "",
+                        final_joint_error_rad=final_error,
+                    )
+                previous_actual = list(actual)
+                previous_actual_at = actual_at
+                time.sleep(0.02)
+
+            self._stop_motion()
+            reason = "UR5e RTDE joint jog result timeout"
+            status.update(state="failed", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
+            return self._joint_jog_result(
+                -1,
+                reason,
+                final_joint_error_rad=final_error,
+                state_uncertain=True,
+            )
+        except ValueError as exc:
+            reason = f"UR5e RTDE joint jog rejected: {exc}"
+            status.update(state="blocked", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status)
+            return self._joint_jog_result(
+                -1,
+                reason,
+                final_joint_error_rad=final_error,
+            )
+        except Exception as exc:
+            reason = f"UR5e RTDE joint jog failed: {type(exc).__name__}: {exc}"
+            if motion_attempted:
+                self._stop_motion()
+                self._mark_rtde_reset_required(reason, write_status=False)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=motion_attempted,
+            )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=motion_attempted,
+            )
+            return self._joint_jog_result(
+                -4,
+                reason,
+                final_joint_error_rad=final_error,
+                state_uncertain=motion_attempted,
+            )
+        finally:
+            self._clear_active_goal(goal_handle)
+
+    @staticmethod
+    def _cartesian_result(
+        error_code: int,
+        error_string: str,
+        *,
+        position_error_m: float = math.inf,
+        orientation_error_rad: float = math.inf,
+    ) -> Any:
+        if MoveUR5eCartesian is None:
+            return None
+        result = MoveUR5eCartesian.Result()
+        result.error_code = int(error_code)
+        result.error_string = str(error_string or "")
+        result.final_position_error_m = float(position_error_m)
+        result.final_orientation_error_rad = float(orientation_error_rad)
+        return result
+
+    @staticmethod
+    def _relative_cartesian_result(
+        error_code: int,
+        error_string: str,
+        *,
+        translation_error_m: float = math.inf,
+        orientation_drift_rad: float = math.inf,
+    ) -> Any:
+        if MoveUR5eRelativeCartesian is None:
+            return None
+        result = MoveUR5eRelativeCartesian.Result()
+        result.error_code = int(error_code)
+        result.error_string = str(error_string or "")
+        result.final_translation_error_m = float(translation_error_m)
+        result.final_orientation_drift_rad = float(orientation_drift_rad)
+        return result
+
+    def _lookup_rigid_transform(self, target_frame: str, source_frame: str) -> RigidTransform:
+        message = self._tf_buffer.lookup_transform(
+            target_frame,
+            source_frame,
+            Time(),
+            timeout=Duration(seconds=0.5),
+        )
+        return _transform_from_message(message)
+
+    def _active_tcp_offset(self) -> RigidTransform:
+        control = self.control
+        get_tcp_offset = getattr(control, "getTCPOffset", None)
+        if not callable(get_tcp_offset):
+            raise RuntimeError("RTDE control object has no getTCPOffset method")
+        return _transform_from_rtde_pose([float(value) for value in get_tcp_offset()])
+
+    def _resolve_cartesian_target(
+        self,
+        target_message: PoseStamped,
+    ) -> tuple[RigidTransform, RigidTransform, RigidTransform, RigidTransform]:
+        frame_id = str(target_message.header.frame_id or "").strip()
+        if frame_id != "world":
+            raise ValueError(
+                f"MoveUR5eCartesian requires frame_id=world, received {frame_id or '(empty)'}"
+            )
+        target_world_tool0 = _transform_from_pose_stamped(target_message)
+        workspace_error = _workspace_error(target_world_tool0)
+        if workspace_error:
+            raise ValueError(workspace_error)
+        world_base = self._lookup_rigid_transform("world", "base")
+        tool0_tcp = self._active_tcp_offset()
+        base_tool0 = _compose_transform(_inverse_transform(world_base), target_world_tool0)
+        target_base_tcp = _compose_transform(base_tool0, tool0_tcp)
+        return target_world_tool0, target_base_tcp, world_base, tool0_tcp
+
+    def _read_actual_tcp_pose(self) -> list[float] | None:
+        """Return the controller base -> active TCP pose without rewriting its rotvec."""
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
+        with self._receive_lock:
+            get_actual_tcp_pose = getattr(self.receive, "getActualTCPPose", None)
+            if not callable(get_actual_tcp_pose):
+                return None
+            try:
+                values = [float(value) for value in list(get_actual_tcp_pose())]
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                reason = (
+                    "UR5e RTDE Cartesian feedback transport failed: "
+                    f"{type(exc).__name__}: {exc}. Use Repair Hardware Stack."
+                )
+                self._receive_error = f"{type(exc).__name__}: {exc}"
+                self._receive_transport_failed = True
+                self._mark_rtde_reset_required(
+                    reason,
+                    write_status=True,
+                    failure_kind="cartesian_receive_exception",
+                )
+                return None
+        if len(values) != 6 or not all(math.isfinite(value) for value in values):
+            return None
+        return values
+
+    def _read_actual_tcp_transform(self) -> RigidTransform | None:
+        values = self._read_actual_tcp_pose()
+        if values is None:
+            return None
+        try:
+            return _transform_from_rtde_pose(values)
+        except ValueError:
+            return None
+
+    def _world_tool0_from_actual_tcp(
+        self,
+        actual_base_tcp: RigidTransform,
+        *,
+        world_base: RigidTransform,
+        tool0_tcp: RigidTransform,
+    ) -> RigidTransform:
+        base_tool0 = _compose_transform(actual_base_tcp, _inverse_transform(tool0_tcp))
+        return _compose_transform(world_base, base_tool0)
+
+    def _cartesian_frame_validation(
+        self,
+    ) -> tuple[bool, str, float, float]:
+        """Validate TF against live RTDE TCP and the active TCP offset without motion."""
+        try:
+            world_base = self._lookup_rigid_transform("world", "base")
+            tf_world_tool0 = self._lookup_rigid_transform("world", "tool0")
+            tool0_tcp = self._active_tcp_offset()
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable")
+            reconstructed = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            position_error, orientation_error = _pose_errors(
+                reconstructed,
+                tf_world_tool0,
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"Cartesian frame validation failed: {type(exc).__name__}: {exc}",
+                math.inf,
+                math.inf,
+            )
+        if position_error > UR5E_RTDE_CARTESIAN_FRAME_POSITION_TOLERANCE_M:
+            return (
+                False,
+                "Cartesian frame validation failed: reconstructed world -> tool0 "
+                f"position differs from TF by {position_error:.6f} m",
+                position_error,
+                orientation_error,
+            )
+        if orientation_error > UR5E_RTDE_CARTESIAN_FRAME_ORIENTATION_TOLERANCE_RAD:
+            return (
+                False,
+                "Cartesian frame validation failed: reconstructed world -> tool0 "
+                f"orientation differs from TF by {orientation_error:.6f} rad",
+                position_error,
+                orientation_error,
+            )
+        return (
+            True,
+            "UR5e Cartesian frame validation ready",
+            position_error,
+            orientation_error,
+        )
+
+    def _pose_stamped_from_transform(self, value: RigidTransform) -> PoseStamped:
+        translation, rotation = value
+        message = PoseStamped()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "world"
+        message.pose.position.x = float(translation[0])
+        message.pose.position.y = float(translation[1])
+        message.pose.position.z = float(translation[2])
+        message.pose.orientation.x = float(rotation[0])
+        message.pose.orientation.y = float(rotation[1])
+        message.pose.orientation.z = float(rotation[2])
+        message.pose.orientation.w = float(rotation[3])
+        return message
+
+    def _publish_cartesian_feedback(
+        self,
+        goal_handle: Any,
+        actual_world_tool0: RigidTransform,
+        *,
+        position_error_m: float,
+        orientation_error_rad: float,
+    ) -> None:
+        if MoveUR5eCartesian is None:
+            return
+        feedback = MoveUR5eCartesian.Feedback()
+        feedback.actual_tool0_pose = self._pose_stamped_from_transform(actual_world_tool0)
+        feedback.position_error_m = float(position_error_m)
+        feedback.orientation_error_rad = float(orientation_error_rad)
+        goal_handle.publish_feedback(feedback)
+
+    def _execute_movel(
+        self,
+        target_base_tcp: RigidTransform,
+        *,
+        speed_m_s: float,
+        acceleration_m_s2: float,
+    ) -> bool:
+        return self._execute_movel_pose(
+            _rtde_pose_from_transform(target_base_tcp),
+            speed_m_s=speed_m_s,
+            acceleration_m_s2=acceleration_m_s2,
+        )
+
+    def _execute_movel_pose(
+        self,
+        target_base_tcp_pose: list[float],
+        *,
+        speed_m_s: float,
+        acceleration_m_s2: float,
+    ) -> bool:
+        """Execute one exact RTDE pose, preserving a supplied rotation vector."""
+        move_l = getattr(self.control, "moveL", None)
+        if not callable(move_l):
+            raise RuntimeError("RTDE control object has no moveL method")
+        pose = [float(value) for value in target_base_tcp_pose]
+        try:
+            return bool(move_l(pose, speed_m_s, acceleration_m_s2, True))
+        except TypeError:
+            return bool(
+                move_l(
+                    pose,
+                    speed=speed_m_s,
+                    acceleration=acceleration_m_s2,
+                    asynchronous=True,
+                )
+            )
+
+    def _relative_cartesian_feedback(
+        self,
+        goal_handle: Any,
+        translation_error_m: float,
+        orientation_drift_rad: float,
+    ) -> None:
+        if MoveUR5eRelativeCartesian is None:
+            return
+        feedback = MoveUR5eRelativeCartesian.Feedback()
+        feedback.translation_error_m = float(translation_error_m)
+        feedback.orientation_drift_rad = float(orientation_drift_rad)
+        goal_handle.publish_feedback(feedback)
+
+    def _execute_relative_cartesian(self, goal_handle: Any) -> Any:
+        """Execute one translation-only world-frame Step jog through RTDE moveL."""
+        with self._active_lock:
+            if self._shutdown_requested:
+                goal_handle.abort()
+                return self._relative_cartesian_result(-1, "UR5e RTDE server is stopping")
+            if self._rtde_reset_required:
+                goal_handle.abort()
+                return self._relative_cartesian_result(
+                    -1,
+                    self._rtde_reset_reason or "UR5e RTDE reset required",
+                )
+            if self._active_goal is not None:
+                goal_handle.abort()
+                return self._relative_cartesian_result(
+                    -1,
+                    "UR5e RTDE motion already executing",
+                )
+            self._active_goal = goal_handle
+            self._active_goal_status = None
+            self._active_motion_kind = "relative_cartesian"
+
+        status = _status_base()
+        status.update(
+            state="checking",
+            message="checking translation-only UR5e RTDE Cartesian Step",
+            motion_kind="relative_cartesian",
+        )
+        translation_error = math.inf
+        orientation_drift = math.inf
+        try:
+            control_error = self._connect_control_for_goal()
+            if control_error:
+                raise RuntimeError(control_error)
+            if not self._joint_states_fresh() or self._read_actual_q() is None:
+                raise RuntimeError("UR5e RTDE feedback stale or missing")
+            program_error = self._ensure_control_program_for_goal()
+            if program_error:
+                raise RuntimeError(program_error)
+            frame_ready, frame_message, frame_position_error, frame_orientation_error = (
+                self._cartesian_frame_validation()
+            )
+            if not frame_ready:
+                raise ValueError(frame_message)
+
+            request = goal_handle.request
+            world_delta = (
+                float(request.world_translation_m.x),
+                float(request.world_translation_m.y),
+                float(request.world_translation_m.z),
+            )
+            if not all(math.isfinite(value) for value in world_delta):
+                raise ValueError("world translation contains non-finite values")
+            distance = math.sqrt(sum(value * value for value in world_delta))
+            if not 0.0 < distance <= UR5E_RTDE_CARTESIAN_JOG_MAX_STEP_M:
+                raise ValueError(
+                    f"world translation magnitude {distance:.6f} m must be within "
+                    f"(0, {UR5E_RTDE_CARTESIAN_JOG_MAX_STEP_M:.6f}] m"
+                )
+            speed = float(request.speed_m_s or UR5E_RTDE_CARTESIAN_SPEED_M_S)
+            acceleration = float(
+                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            )
+            if not math.isfinite(speed) or not 0.0 < speed <= UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
+                raise ValueError("relative Cartesian speed is outside the configured limit")
+            if (
+                not math.isfinite(acceleration)
+                or not 0.0 < acceleration <= UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            ):
+                raise ValueError("relative Cartesian acceleration is outside the configured limit")
+
+            world_base = self._lookup_rigid_transform("world", "base")
+            base_delta = _rotate_vector(
+                _quaternion_conjugate(world_base[1]),
+                world_delta,
+            )
+            start_pose = self._read_actual_tcp_pose()
+            if start_pose is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable")
+            target_pose = [
+                start_pose[0] + base_delta[0],
+                start_pose[1] + base_delta[1],
+                start_pose[2] + base_delta[2],
+                *start_pose[3:6],
+            ]
+            tool0_tcp = self._active_tcp_offset()
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                _transform_from_rtde_pose(start_pose),
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            target_world_tool0 = (
+                tuple(
+                    actual_world_tool0[0][index] + world_delta[index]
+                    for index in range(3)
+                ),
+                actual_world_tool0[1],
+            )
+            workspace_error = _workspace_error(target_world_tool0)
+            if workspace_error:
+                raise ValueError(workspace_error)
+            within_safety_limits = getattr(self.control, "isPoseWithinSafetyLimits", None)
+            if not callable(within_safety_limits):
+                raise RuntimeError("RTDE control object has no isPoseWithinSafetyLimits method")
+            if not bool(within_safety_limits(target_pose)):
+                raise ValueError(
+                    "UR controller rejected the relative Cartesian target as outside safety limits"
+                )
+
+            start_transform = _transform_from_rtde_pose(start_pose)
+            target_transform = _transform_from_rtde_pose(target_pose)
+            translation_error = distance
+            orientation_drift = 0.0
+            timeout_sec = max(4.0, distance / speed + UR5E_RTDE_RESULT_MARGIN_SEC)
+            status.update(
+                state="executing",
+                message="executing translation-only UR5e RTDE Cartesian Step",
+                blocked_reason="",
+                rtde_connected=True,
+                rtde_receive_connected=True,
+                rtde_control_connected=True,
+                joint_states_fresh=True,
+                target_world_translation_m=list(world_delta),
+                target_base_translation_m=list(base_delta),
+                start_base_tcp=start_pose,
+                target_base_tcp=target_pose,
+                cartesian_frame_validation_message=frame_message,
+                cartesian_frame_position_error_m=frame_position_error,
+                cartesian_frame_orientation_error_rad=frame_orientation_error,
+            )
+            self._write_active_goal_status(goal_handle, status)
+            if not self._execute_movel_pose(
+                target_pose,
+                speed_m_s=speed,
+                acceleration_m_s2=acceleration,
+            ):
+                raise RuntimeError("UR5e RTDE moveL returned False")
+
+            deadline = time.monotonic() + timeout_sec
+            stationary_since: float | None = None
+            while rclpy.ok() and time.monotonic() < deadline:
+                if goal_handle.is_cancel_requested:
+                    self._stop_motion()
+                    goal_handle.canceled()
+                    status.update(state="canceled", message="UR5e Cartesian Step canceled")
+                    self._finish_active_goal_status(goal_handle, status)
+                    return self._relative_cartesian_result(-3, "canceled")
+                actual_pose = self._read_actual_tcp_pose()
+                if actual_pose is None:
+                    time.sleep(0.02)
+                    continue
+                actual_transform = _transform_from_rtde_pose(actual_pose)
+                translation_error, _target_orientation_error = _pose_errors(
+                    actual_transform,
+                    target_transform,
+                )
+                _unused_position_error, orientation_drift = _pose_errors(
+                    actual_transform,
+                    start_transform,
+                )
+                self._relative_cartesian_feedback(
+                    goal_handle,
+                    translation_error,
+                    orientation_drift,
+                )
+                if orientation_drift > UR5E_RTDE_CARTESIAN_JOG_ORIENTATION_DRIFT_RAD:
+                    self._stop_motion()
+                    raise ValueError(
+                        "translation-only UR5e Cartesian Step changed orientation by "
+                        f"{orientation_drift:.6f} rad"
+                    )
+                velocities = self._read_actual_qd()
+                stationary = bool(
+                    velocities is not None
+                    and max(abs(value) for value in velocities)
+                    <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                )
+                reached = translation_error <= UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+                now = time.monotonic()
+                stationary_since = stationary_since or now if reached and stationary else None
+                status.update(
+                    cartesian_translation_error_m=translation_error,
+                    cartesian_orientation_drift_rad=orientation_drift,
+                )
+                self._write_active_goal_status(goal_handle, status)
+                if (
+                    stationary_since is not None
+                    and now - stationary_since >= UR5E_RTDE_STATIONARY_HOLD_SEC
+                ):
+                    status.update(
+                        state="succeeded",
+                        message="translation-only UR5e Cartesian Step completed",
+                    )
+                    goal_handle.succeed()
+                    self._finish_active_goal_status(goal_handle, status)
+                    return self._relative_cartesian_result(
+                        0,
+                        "",
+                        translation_error_m=translation_error,
+                        orientation_drift_rad=orientation_drift,
+                    )
+                time.sleep(0.02)
+            self._stop_motion()
+            raise RuntimeError("translation-only UR5e Cartesian Step timed out")
+        except ValueError as exc:
+            reason = f"UR5e RTDE relative Cartesian target rejected: {exc}"
+            status.update(state="blocked", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
+            return self._relative_cartesian_result(
+                -2,
+                reason,
+                translation_error_m=translation_error,
+                orientation_drift_rad=orientation_drift,
+            )
+        except Exception as exc:
+            reason = f"UR5e RTDE relative Cartesian failed: {type(exc).__name__}: {exc}"
+            self._stop_motion()
+            transport_text = str(exc).lower()
+            if isinstance(exc, OSError) or (
+                isinstance(exc, RuntimeError)
+                and any(
+                    marker in transport_text
+                    for marker in (
+                        "broken pipe",
+                        "connection",
+                        "disconnected",
+                        "receive transport",
+                        "send failed",
+                        "socket",
+                    )
+                )
+            ):
+                self._mark_rtde_reset_required(reason, write_status=False)
+            status.update(state="failed", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
+            return self._relative_cartesian_result(
+                -4,
+                reason,
+                translation_error_m=translation_error,
+                orientation_drift_rad=orientation_drift,
+            )
+        finally:
+            self._clear_active_goal(goal_handle)
+
+    def _set_cartesian_jog(self, request: Any, response: Any) -> Any:
+        """Start, refresh, or stop one watchdog-guarded translation-only RTDE jog."""
+        if bool(request.stop):
+            response.accepted, response.message = self._stop_cartesian_jog(
+                "UR5e Cartesian jog stopped"
+            )
+            return response
+        try:
+            if self._shutdown_requested:
+                raise RuntimeError("UR5e RTDE server is stopping")
+            control_error = self._connect_control_for_goal()
+            if control_error:
+                raise RuntimeError(control_error)
+            if not self._joint_states_fresh():
+                raise RuntimeError("UR5e RTDE feedback stale or missing")
+            frame_ready, frame_message, _position_error, _orientation_error = (
+                self._cartesian_frame_validation()
+            )
+            if not frame_ready:
+                raise ValueError(frame_message)
+            world_velocity_m_s = (
+                float(request.world_linear_velocity_m_s.x),
+                float(request.world_linear_velocity_m_s.y),
+                float(request.world_linear_velocity_m_s.z),
+            )
+            if not all(math.isfinite(value) for value in world_velocity_m_s):
+                raise ValueError("world Cartesian jog velocity contains non-finite values")
+            nonzero_axes = sum(abs(value) > 1e-9 for value in world_velocity_m_s)
+            if nonzero_axes != 1:
+                raise ValueError("UR5e Cartesian jog requires exactly one world axis")
+            speed_m_s = max(abs(value) for value in world_velocity_m_s)
+            if speed_m_s > UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
+                raise ValueError("UR5e Cartesian jog velocity exceeds the configured limit")
+            acceleration = float(
+                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            )
+            if (
+                not math.isfinite(acceleration)
+                or not 0.0 < acceleration <= UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            ):
+                raise ValueError("UR5e Cartesian jog acceleration is outside the configured limit")
+            watchdog_sec = min(
+                UR5E_RTDE_CARTESIAN_JOG_MAX_WATCHDOG_SEC,
+                max(UR5E_RTDE_CARTESIAN_JOG_MIN_WATCHDOG_SEC, float(request.watchdog_sec)),
+            )
+            world_base = self._lookup_rigid_transform("world", "base")
+            base_velocity_m_s = _rotate_vector(
+                _quaternion_conjugate(world_base[1]),
+                world_velocity_m_s,
+            )
+            actual_pose = self._read_actual_tcp_pose()
+            if actual_pose is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable")
+            lookahead_pose = [
+                actual_pose[index] + base_velocity_m_s[index] * watchdog_sec
+                for index in range(3)
+            ] + actual_pose[3:6]
+            within_safety_limits = getattr(self.control, "isPoseWithinSafetyLimits", None)
+            if not callable(within_safety_limits) or not bool(
+                within_safety_limits(lookahead_pose)
+            ):
+                raise ValueError("UR controller rejected the Cartesian jog lookahead pose")
+            with self._active_lock:
+                if self._active_goal not in (None, self._jog_session_token):
+                    raise RuntimeError("UR5e RTDE motion already executing")
+                self._active_goal = self._jog_session_token
+                self._active_motion_kind = "cartesian_jog"
+                self._jog_watchdog_deadline = time.monotonic() + watchdog_sec
+            jog_start = getattr(self.control, "jogStart", None)
+            if not callable(jog_start):
+                raise RuntimeError("RTDE control object has no jogStart method")
+            feature_base = int(
+                getattr(
+                    self.control,
+                    "FEATURE_BASE",
+                    getattr(type(self.control), "FEATURE_BASE", 0),
+                )
+            )
+            speeds = [
+                base_velocity_m_s[0] * 1000.0,
+                base_velocity_m_s[1] * 1000.0,
+                base_velocity_m_s[2] * 1000.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+            if not bool(jog_start(speeds, feature_base, acceleration)):
+                raise RuntimeError("UR5e RTDE jogStart returned False")
+            status = _status_base()
+            status.update(
+                state="executing",
+                message="executing translation-only UR5e Cartesian Smooth Hold",
+                motion_kind="cartesian_jog",
+                world_linear_velocity_m_s=list(world_velocity_m_s),
+                base_linear_velocity_mm_s=speeds[:3],
+                cartesian_frame_validation_message=frame_message,
+                rtde_connected=True,
+                rtde_receive_connected=True,
+                rtde_control_connected=True,
+                joint_states_fresh=True,
+            )
+            with self._active_lock:
+                self._active_goal_status = dict(status)
+            self._write_status(status)
+            response.accepted = True
+            response.message = "UR5e Cartesian Smooth Hold active"
+            return response
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            reason = f"UR5e Cartesian Smooth Hold rejected: {type(exc).__name__}: {exc}"
+            with self._active_lock:
+                active = self._active_goal is self._jog_session_token
+            if active:
+                self._stop_cartesian_jog(reason)
+            response.accepted = False
+            response.message = reason
+            return response
+
+    def _execute_cartesian(  # noqa: C901, PLR0912, PLR0915 - guarded hardware lifecycle.
+        self,
+        goal_handle: Any,
+    ) -> Any:
+        with self._active_lock:
+            if bool(getattr(self, "_shutdown_requested", False)):
+                reason = "UR5e RTDE server is stopping"
+                goal_handle.abort()
+                return self._cartesian_result(-1, reason)
+            if bool(getattr(self, "_rtde_reset_required", False)):
+                reason = str(getattr(self, "_rtde_reset_reason", "")) or "UR5e RTDE reset required"
+                goal_handle.abort()
+                return self._cartesian_result(-1, reason)
+            if self._latched_terminal_status is not None:
+                reason = str(
+                    self._latched_terminal_status.get("blocked_reason")
+                    or self._latched_terminal_status.get("message")
+                    or "UR5e RTDE server requires repair"
+                )
+                goal_handle.abort()
+                return self._cartesian_result(-1, reason)
+            if self._active_goal is not None:
+                reason = "UR5e RTDE motion already executing"
+                goal_handle.abort()
+                return self._cartesian_result(-1, reason)
+            self._active_goal = goal_handle
+            self._active_goal_status = None
+            self._active_motion_kind = "cartesian"
+
+        status = _status_base()
+        status.update(
+            state="checking",
+            message="checking guarded UR5e RTDE Cartesian target",
+            motion_kind="cartesian",
+        )
+        position_error = math.inf
+        orientation_error = math.inf
+        try:
+            control_error = self._connect_control_for_goal()
+            if control_error:
+                raise RuntimeError(control_error)
+            if not self._joint_states_fresh() or self._read_actual_q() is None:
+                raise RuntimeError("UR5e RTDE feedback stale or missing")
+            program_error = self._ensure_control_program_for_goal()
+            if program_error:
+                raise RuntimeError(program_error)
+
+            request = goal_handle.request
+            speed = float(request.speed_m_s or UR5E_RTDE_CARTESIAN_SPEED_M_S)
+            acceleration = float(
+                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            )
+            if not math.isfinite(speed) or not 0.0 < speed <= UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
+                raise ValueError(
+                    f"Cartesian speed {speed!r} must be within "
+                    f"(0, {UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:.6f}] m/s"
+                )
+            if (
+                not math.isfinite(acceleration)
+                or not 0.0 < acceleration <= UR5E_RTDE_CARTESIAN_ACCEL_M_S2
+            ):
+                raise ValueError(
+                    f"Cartesian acceleration {acceleration!r} must be within "
+                    f"(0, {UR5E_RTDE_CARTESIAN_ACCEL_M_S2:.6f}] m/s^2"
+                )
+
+            (
+                target_world_tool0,
+                target_base_tcp,
+                world_base,
+                tool0_tcp,
+            ) = self._resolve_cartesian_target(request.target_tool0_pose)
+            frame_ready, frame_message, frame_position_error, frame_orientation_error = (
+                self._cartesian_frame_validation()
+            )
+            if not frame_ready:
+                raise ValueError(frame_message)
+            target_rtde_pose = _rtde_pose_from_transform(target_base_tcp)
+            within_safety_limits = getattr(self.control, "isPoseWithinSafetyLimits", None)
+            if not callable(within_safety_limits):
+                raise RuntimeError("RTDE control object has no isPoseWithinSafetyLimits method")
+            if not bool(within_safety_limits(target_rtde_pose)):
+                raise ValueError(
+                    "UR controller rejected the Cartesian target as outside safety limits"
+                )
+
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable")
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            position_error, orientation_error = _pose_errors(
+                actual_world_tool0,
+                target_world_tool0,
+            )
+            distance = position_error
+            timeout_sec = max(8.0, distance / speed + UR5E_RTDE_RESULT_MARGIN_SEC)
+            status.update(
+                state="executing",
+                message="executing UR5e RTDE Cartesian moveL",
+                blocked_reason="",
+                rtde_connected=True,
+                rtde_receive_connected=True,
+                rtde_control_connected=True,
+                joint_states_fresh=True,
+                cartesian_speed_m_s=speed,
+                cartesian_acceleration_m_s2=acceleration,
+                cartesian_result_timeout_sec=timeout_sec,
+                cartesian_position_error_m=position_error,
+                cartesian_orientation_error_rad=orientation_error,
+                target_world_tool0=list(target_world_tool0[0]),
+                target_base_tcp=target_rtde_pose,
+                cartesian_frame_validation_message=frame_message,
+                cartesian_frame_position_error_m=frame_position_error,
+                cartesian_frame_orientation_error_rad=frame_orientation_error,
+            )
+            self._write_active_goal_status(goal_handle, status)
+
+            if (
+                position_error > UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+                or orientation_error > UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+            ) and not self._execute_movel(
+                target_base_tcp,
+                speed_m_s=speed,
+                acceleration_m_s2=acceleration,
+            ):
+                raise RuntimeError("UR5e RTDE moveL returned False")
+
+            deadline = time.monotonic() + timeout_sec
+            stationary_since: float | None = None
+            while rclpy.ok() and time.monotonic() < deadline:
+                if goal_handle.is_cancel_requested:
+                    self._stop_motion()
+                    status.update(state="canceled", message="UR5e RTDE Cartesian move canceled")
+                    goal_handle.canceled()
+                    self._finish_active_goal_status(goal_handle, status)
+                    return self._cartesian_result(
+                        -3,
+                        "canceled",
+                        position_error_m=position_error,
+                        orientation_error_rad=orientation_error,
+                    )
+                if bool(getattr(self, "_rtde_reset_required", False)):
+                    raise RuntimeError(
+                        str(getattr(self, "_rtde_reset_reason", ""))
+                        or "UR5e RTDE reset required"
+                    )
+                actual_base_tcp = self._read_actual_tcp_transform()
+                if actual_base_tcp is None:
+                    time.sleep(0.02)
+                    continue
+                actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                    actual_base_tcp,
+                    world_base=world_base,
+                    tool0_tcp=tool0_tcp,
+                )
+                position_error, orientation_error = _pose_errors(
+                    actual_world_tool0,
+                    target_world_tool0,
+                )
+                self._publish_cartesian_feedback(
+                    goal_handle,
+                    actual_world_tool0,
+                    position_error_m=position_error,
+                    orientation_error_rad=orientation_error,
+                )
+                velocities = self._read_actual_qd()
+                stationary = bool(
+                    velocities is not None
+                    and max(abs(value) for value in velocities)
+                    <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                )
+                reached = bool(
+                    position_error <= UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+                    and orientation_error
+                    <= UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+                )
+                now = time.monotonic()
+                stationary_since = (
+                    stationary_since or now if reached and stationary else None
+                )
+                status.update(
+                    cartesian_position_error_m=position_error,
+                    cartesian_orientation_error_rad=orientation_error,
+                    stationary_hold_sec=(now - stationary_since if stationary_since else 0.0),
+                )
+                self._write_active_goal_status(goal_handle, status)
+                if (
+                    stationary_since is not None
+                    and now - stationary_since >= UR5E_RTDE_STATIONARY_HOLD_SEC
+                ):
+                    status.update(
+                        state="succeeded",
+                        message=(
+                            "UR5e RTDE Cartesian target reached and completed "
+                            "stationary hold"
+                        ),
+                    )
+                    goal_handle.succeed()
+                    self._finish_active_goal_status(goal_handle, status)
+                    return self._cartesian_result(
+                        0,
+                        "",
+                        position_error_m=position_error,
+                        orientation_error_rad=orientation_error,
+                    )
+                time.sleep(0.02)
+
+            self._stop_motion()
+            reason = "UR5e RTDE Cartesian result timeout"
+            status.update(state="failed", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
+            return self._cartesian_result(
+                -3,
+                reason,
+                position_error_m=position_error,
+                orientation_error_rad=orientation_error,
+            )
+        except ValueError as exc:
+            reason = f"UR5e RTDE Cartesian target rejected: {exc}"
+            status.update(state="blocked", message=reason, blocked_reason=reason)
+            goal_handle.abort()
+            self._finish_active_goal_status(goal_handle, status)
+            return self._cartesian_result(
+                -2,
+                reason,
+                position_error_m=position_error,
+                orientation_error_rad=orientation_error,
+            )
+        except Exception as exc:
+            reason = f"UR5e RTDE Cartesian failed: {type(exc).__name__}: {exc}"
+            self._stop_motion()
+            if isinstance(exc, (OSError, RuntimeError)):
+                self._mark_rtde_reset_required(reason, write_status=False)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=bool(getattr(self, "_rtde_reset_required", False)),
+            )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=bool(getattr(self, "_rtde_reset_required", False)),
+            )
+            return self._cartesian_result(
+                -4,
+                reason,
+                position_error_m=position_error,
+                orientation_error_rad=orientation_error,
+            )
+        finally:
+            self._clear_active_goal(goal_handle)
+
     def _execute(  # noqa: C901, PLR0912, PLR0915 - one guarded hardware status lifecycle.
         self,
         goal_handle: Any,
     ) -> FollowJointTrajectory.Result:
         with self._active_lock:
+            if bool(getattr(self, "_rtde_reset_required", False)):
+                reason = (
+                    str(getattr(self, "_rtde_reset_reason", ""))
+                    or "UR5e RTDE reset required"
+                )
+                status = _status_base()
+                status.update(
+                    state="failed",
+                    blocked_reason=reason,
+                    message=reason,
+                )
+                self._write_status(status)
+                goal_handle.abort()
+                return self._result(-1, reason)
             if self._latched_terminal_status is not None:
                 reason = str(
                     self._latched_terminal_status.get("blocked_reason")
@@ -1474,6 +3439,7 @@ class UR5eRTDETrajectoryServer(Node):
                 return self._result(-1, reason)
             self._active_goal = goal_handle
             self._active_goal_status = None
+            self._active_motion_kind = "joint"
         status = _status_base()
         control_error = self._connect_control_for_goal()
         if control_error:
@@ -1582,9 +3548,6 @@ class UR5eRTDETrajectoryServer(Node):
         status["rtde_feedback_timestamp_advanced"] = False
         last_feedback_timestamp = initial_feedback_timestamp
         last_feedback_advance_at = execution_started
-        last_feedback_reconnect_at: float | None = None
-        feedback_reconnect_count = 0
-
         try:
             dispatch_started = time.monotonic()
             rtde_result, rtde_command_mode = self._execute_movej_path(path)
@@ -1607,6 +3570,30 @@ class UR5eRTDETrajectoryServer(Node):
                     return self._result(-1, "canceled")
                 actual = self._read_actual_q()
                 actual_at = time.monotonic()
+                if bool(getattr(self, "_rtde_reset_required", False)):
+                    reason = (
+                        str(getattr(self, "_rtde_reset_reason", ""))
+                        or "UR5e RTDE feedback transport failed. Physical state is "
+                        "uncertain; use Reset UR5e RTDE in Interactive Teleop."
+                    )
+                    self._stop_motion()
+                    status.update(
+                        state="failed",
+                        message=reason,
+                        blocked_reason=reason,
+                        rtde_connected=False,
+                        rtde_receive_connected=False,
+                        rtde_reset_required=True,
+                        joint_states_fresh=False,
+                        trajectory_elapsed_sec=actual_at - execution_started,
+                    )
+                    goal_handle.abort()
+                    self._finish_active_goal_status(
+                        goal_handle,
+                        status,
+                        latch_status=True,
+                    )
+                    return self._result(-1, reason)
                 feedback_timestamp = self._read_feedback_timestamp()
                 status["rtde_feedback_timestamp_sec"] = feedback_timestamp
                 feedback_advanced = (
@@ -1625,14 +3612,6 @@ class UR5eRTDETrajectoryServer(Node):
                 else:
                     feedback_gap_sec = actual_at - last_feedback_advance_at
                     status["rtde_feedback_gap_sec"] = feedback_gap_sec
-                    reconnect_due = (
-                        feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
-                        and (
-                            last_feedback_reconnect_at is None
-                            or actual_at - last_feedback_reconnect_at
-                            >= UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC
-                        )
-                    )
                     if (
                         feedback_gap_sec
                         >= UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
@@ -1640,13 +3619,19 @@ class UR5eRTDETrajectoryServer(Node):
                         reason = (
                             "UR5e RTDE trajectory feedback stopped advancing and did not "
                             "recover within "
-                            f"{UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:.2f} s"
+                            f"{UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:.2f} s. "
+                            "Physical state is uncertain; use Reset UR5e RTDE in "
+                            "Interactive Teleop."
                         )
                         self._stop_motion()
+                        self._mark_rtde_reset_required(reason, write_status=False)
                         status.update(
                             state="failed",
                             message=reason,
                             blocked_reason=reason,
+                            rtde_connected=False,
+                            rtde_receive_connected=False,
+                            rtde_reset_required=True,
                             joint_states_fresh=False,
                             trajectory_elapsed_sec=actual_at - execution_started,
                         )
@@ -1657,21 +3642,6 @@ class UR5eRTDETrajectoryServer(Node):
                             latch_status=True,
                         )
                         return self._result(-1, reason)
-                    if reconnect_due:
-                        last_feedback_reconnect_at = actual_at
-                        feedback_reconnect_count += 1
-                        reconnect_error = self._reconnect_receive()
-                        status["rtde_feedback_reconnect_count"] = (
-                            feedback_reconnect_count
-                        )
-                        status["rtde_feedback_reconnect_error"] = reconnect_error
-                        status["rtde_receive_connected"] = not bool(reconnect_error)
-                        status["rtde_connected"] = (
-                            not bool(reconnect_error) and self.control is not None
-                        )
-                        with self._active_lock:
-                            if self._active_goal is goal_handle:
-                                self._active_goal_status = dict(status)
                     time.sleep(0.02)
                     continue
 
@@ -1776,7 +3746,6 @@ class UR5eRTDETrajectoryServer(Node):
                         )
                         goal_handle.succeed()
                         self._finish_active_goal_status(goal_handle, status)
-                        self._publish_rviz_goal_state_update("succeeded")
                         return self._result(0, "")
 
                     if (
@@ -1848,32 +3817,29 @@ class UR5eRTDETrajectoryServer(Node):
         except Exception as exc:
             reason = f"UR5e RTDE trajectory failed: {type(exc).__name__}: {exc}"
             self._stop_motion()
-            disconnect = getattr(self.control, "disconnect", None)
-            if disconnect is not None:
-                with suppress(RuntimeError):
-                    disconnect()
-            self.control = None
+            self._mark_rtde_reset_required(reason, write_status=False)
             status["rtde_connected"] = False
             status["rtde_control_connected"] = False
             status["rtde_receive_connected"] = self.receive is not None
-            status.update(state="failed", message=reason, blocked_reason=reason)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=True,
+            )
             goal_handle.abort()
-            self._finish_active_goal_status(goal_handle, status)
+            self._finish_active_goal_status(goal_handle, status, latch_status=True)
             return self._result(-4, reason)
         finally:
             self._clear_active_goal(goal_handle)
 
     def destroy_node(self) -> bool:
-        try:
-            if self.receive is not None and hasattr(self.receive, "disconnect"):
-                self.receive.disconnect()
-        except Exception:
-            pass
-        try:
-            if self.control is not None and hasattr(self.control, "disconnect"):
-                self.control.disconnect()
-        except Exception:
-            pass
+        self._shutdown_requested = True
+        with self._active_lock:
+            active_goal = self._active_goal
+        if active_goal is not None:
+            self._stop_motion()
+        self._disconnect_rtde_interfaces()
         return super().destroy_node()
 
 
@@ -1927,7 +3893,22 @@ def main(argv: list[str] | None = None) -> int:
         node._write_status(status)
         raise
     finally:
-        if not failed:
+        if not failed and bool(getattr(node, "_rtde_reset_required", False)):
+            reason = str(getattr(node, "_rtde_reset_reason", "")) or (
+                "UR5e RTDE reset required"
+            )
+            status = _status_base()
+            status.update(
+                state="failed",
+                blocked_reason=reason,
+                message=reason,
+                rtde_connected=False,
+                rtde_receive_connected=False,
+                rtde_control_connected=False,
+                joint_states_fresh=False,
+            )
+            node._write_status(status)
+        elif not failed:
             status = _status_base()
             status.update(
                 state="stopped",

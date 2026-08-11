@@ -106,7 +106,12 @@ def _arm_controller_double(client: _ActionClient) -> UR5eHardwareController:
         "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
     )
     controller._ur5e_hardware_trajectory_client = client
+    controller._ur5e_hardware_cartesian_action = (
+        "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
+    )
+    controller._ur5e_hardware_cartesian_client = _ActionClient()
     controller._FollowJointTrajectory = SimpleNamespace(Goal=_Goal)
+    controller._MoveUR5eCartesian = SimpleNamespace(Goal=object)
     controller._JointTrajectoryPoint = _Point
     controller._Duration = lambda *, sec, nanosec: SimpleNamespace(
         sec=sec,
@@ -159,6 +164,51 @@ def test_physical_ur5e_named_pose_uses_guarded_two_point_rtde_action() -> None:
     assert goal.trajectory.points[0].time_from_start.sec == 0
     assert goal.trajectory.points[0].time_from_start.nanosec == 0
     assert goal.trajectory.points[1].positions == controller.named_positions["prusa-mk4-2"]
+
+
+def test_physical_ur5e_named_pose_allows_action_acknowledgement_latency() -> None:
+    client = _ActionClient()
+    controller = _arm_controller_double(client)
+    waits: dict[str, float] = {}
+
+    def _wait(
+        future: _ImmediateFuture,
+        *,
+        timeout_sec: float,
+        label: str,
+    ) -> Any:
+        waits[label] = timeout_sec
+        return future.result()
+
+    controller._wait_future = _wait
+
+    result = controller.move_to_named_pose("prusa-mk4-2")
+
+    assert result["success"] is True
+    assert waits["send:move_to_named_pose:prusa-mk4-2"] == 10.0
+
+
+def test_physical_ur5e_named_pose_send_timeout_reports_unknown_motion_state() -> None:
+    client = _ActionClient()
+    controller = _arm_controller_double(client)
+
+    def _wait(
+        future: _ImmediateFuture,
+        *,
+        timeout_sec: float,
+        label: str,
+    ) -> Any:
+        assert timeout_sec == 10.0
+        assert label == "send:move_to_named_pose:prusa-mk4-2"
+        return None
+
+    controller._wait_future = _wait
+
+    result = controller.move_to_named_pose("prusa-mk4-2")
+
+    assert result["success"] is False
+    assert "send acknowledgement timeout after 10.0s" in result["message"]
+    assert "physical motion may still be executing" in result["message"]
 
 
 def test_physical_ur5e_named_pose_reports_exact_rtde_action_failure() -> None:
@@ -260,6 +310,87 @@ def test_physical_ur5e_move_home_does_not_trust_cached_home_when_action_is_missi
     assert result["success"] is False
     assert controller._ur5e_hardware_trajectory_action in result["message"]
     assert client.goals == []
+
+
+def test_reset_ur5e_hardware_trajectory_client_replaces_joint_and_cartesian_clients() -> None:
+    previous_arm_client = _ActionClient()
+    previous_cartesian_client = _ActionClient()
+    gripper_client = _ActionClient()
+    replacement_arm_client = _ActionClient()
+    replacement_cartesian_client = _ActionClient()
+    wait_timeouts: list[float] = []
+    for replacement_client in (replacement_arm_client, replacement_cartesian_client):
+        replacement_client.wait_for_server = (
+            lambda timeout_sec: wait_timeouts.append(timeout_sec) or True
+        )
+    controller = _arm_controller_double(previous_arm_client)
+    controller._ur5e_hardware_cartesian_client = previous_cartesian_client
+    controller._node = object()
+    controller._cb_group = object()
+    controller._rg2_action_client = gripper_client
+    created: list[tuple[Any, Any, str, Any]] = []
+
+    def _create_client(
+        node: Any,
+        action_type: Any,
+        action_name: str,
+        *,
+        callback_group: Any,
+    ) -> _ActionClient:
+        created.append((node, action_type, action_name, callback_group))
+        return (
+            replacement_arm_client
+            if action_name == controller._ur5e_hardware_trajectory_action
+            else replacement_cartesian_client
+        )
+
+    controller._ActionClient = _create_client
+
+    ok, message = controller.reset_ur5e_hardware_trajectory_client(timeout_sec=8.0)
+
+    assert ok is True
+    assert "recreated" in message
+    assert previous_arm_client.destroyed is True
+    assert previous_cartesian_client.destroyed is True
+    assert gripper_client.destroyed is False
+    assert controller._rg2_action_client is gripper_client
+    assert controller._ur5e_hardware_trajectory_client is replacement_arm_client
+    assert controller._ur5e_hardware_cartesian_client is replacement_cartesian_client
+    assert len(wait_timeouts) == 2
+    assert 0.0 <= wait_timeouts[1] <= wait_timeouts[0] <= 8.0
+    assert created == [
+        (
+            controller._node,
+            controller._FollowJointTrajectory,
+            controller._ur5e_hardware_trajectory_action,
+            controller._cb_group,
+        ),
+        (
+            controller._node,
+            controller._MoveUR5eCartesian,
+            controller._ur5e_hardware_cartesian_action,
+            controller._cb_group,
+        ),
+    ]
+
+
+def test_reset_ur5e_hardware_trajectory_client_reports_discovery_timeout() -> None:
+    previous_arm_client = _ActionClient()
+    replacement_client = _ActionClient()
+    replacement_client.wait_for_server = lambda timeout_sec: False
+    controller = _arm_controller_double(previous_arm_client)
+    previous_cartesian_client = controller._ur5e_hardware_cartesian_client
+    controller._node = object()
+    controller._cb_group = object()
+    controller._ActionClient = lambda *_args, **_kwargs: replacement_client
+
+    ok, message = controller.reset_ur5e_hardware_trajectory_client(timeout_sec=1.0)
+
+    assert ok is False
+    assert "was not discovered" in message
+    assert previous_arm_client.destroyed is True
+    assert previous_cartesian_client.destroyed is True
+    assert controller._ur5e_hardware_trajectory_client is replacement_client
 
 
 def test_physical_ur5e_gripper_uses_exact_action_without_direct_rtde() -> None:
@@ -376,5 +507,14 @@ def test_real_manifest_configures_the_preflighted_rg2_action() -> None:
         controller._ur5e_hardware_trajectory_action
         == "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
     )
+    assert controller._ur5e_action_send_timeout_sec == 10.0
     assert controller._ur5e_hardware_trajectory_client is None
     assert controller._rg2_action_client is None
+
+
+def test_physical_controller_reserves_an_executor_worker_for_action_responses() -> None:
+    source = (
+        ROOT / "cais_spade_llm/resources/robot/hardware_pick_place_controller.py"
+    ).read_text(encoding="utf-8")
+
+    assert "MultiThreadedExecutor(num_threads=2)" in source
