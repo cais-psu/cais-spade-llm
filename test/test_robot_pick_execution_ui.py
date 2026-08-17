@@ -85,7 +85,9 @@ def test_run_checks_no_motion_readiness_before_confirmation_and_rechecks_on_exec
     )
     assert "execution_blocker.set_visibility(bool(blocker))" in source
     assert "and not blocker" not in source
-    assert "reset to idle" in source
+    assert "not require the assembly sequence resource_state" in source
+    assert "Held-part, gripper, task-context, readiness, and confirmation checks" in source
+    assert "reset to idle" not in source
 
 
 def test_cartesian_jog_exposes_world_step_and_watchdog_smooth_hold_controls() -> None:
@@ -198,7 +200,8 @@ def test_position_recording_is_conditional_and_capture_checks_readiness_automati
     assert '"Capture Pose"' in source
     assert '"Save/Replace Pose"' in source
     assert '"Clear Position"' in source
-    assert '"Preview Resolved Pose"' in source
+    assert '"Preview Resolved Pose"' not in source
+    assert "digital_twin_preview_function_position" not in source
     assert '"Apply Axis Sources"' not in source
     assert "Saved calibration XYZ offset" in source
     assert '"Z+ 1 mm"' not in source
@@ -209,6 +212,164 @@ def test_position_recording_is_conditional_and_capture_checks_readiness_automati
     assert "digital_twin_function_capture_readiness" not in source
     assert "Check Capture Readiness" not in source
     assert "Preview Target" not in source
+
+
+def test_assembly_board_v1_readiness_panel_is_read_only_for_selected_robot() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+    refresh_source = source.split(
+        "async def _refresh_assembly_board_v1_readiness(",
+        maxsplit=1,
+    )[1].split("def _default_location", maxsplit=1)[0]
+
+    assert 'ui.label("assembly_board-v1 Board Readiness")' in source
+    assert 'ui.icon("warning", color="red")' in source
+    assert 'function_name in {"place_approach", "place_insert"}' in source
+    assert '_current_destination_location() == "assembly_board-v1"' in source
+    assert "bridge.perception_assembly_board_v1_aruco_status" in source
+    assert "bridge.list_named_positions" in source
+    assert 'ui.button(\n            "Locate & Accept Board"' not in source
+    assert 'ui.button(\n            "Re-accept Board"' not in source
+    assert "bridge.perception_locate_and_accept_assembly_board_v1" not in source
+    assert "Confirmed Run place_approach first moves" in source
+    assert "Using the assembly_board-v1 pose frozen by place_approach." in source
+    assert 'function_name == "place_insert"' in source
+    assert "ui.timer(2.0, _refresh_assembly_board_v1_readiness, immediate=True)" in source
+    assert "digital_twin_execute_robot_function" not in refresh_source
+    assert "digital_twin_test_function_position" not in refresh_source
+
+
+def test_assembly_board_v1_acceptance_is_only_part_of_confirmed_place_approach() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+
+    assert "_assembly_board_v1_automatic_accept_observation" not in source
+    assert "async def _automatically_accept_assembly_board_v1" not in source
+    assert "async def _reaccept_assembly_board_v1" not in source
+    assert "bridge.perception_locate_and_accept_assembly_board_v1" not in source
+    assert "automatically accept or reaccept the current board" in source
+    assert "run_confirm.open()" in source
+    assert "confirmed=True" in source
+
+
+def test_assembly_board_v1_readiness_has_green_amber_and_red_states() -> None:
+    green = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": True,
+            "accepted": True,
+            "visible": True,
+            "valid": True,
+            "frame_age_sec": 0.1,
+        }
+    )
+    amber = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": True,
+            "accepted": True,
+            "visible": False,
+            "movement_blocked": True,
+        }
+    )
+    red = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": "camera calibration changed",
+            "accepted": True,
+        }
+    )
+
+    assert green == {
+        "usable": True,
+        "level": "green",
+        "message": "Accepted board baseline is usable and ArUco ID 70 is visible.",
+    }
+    assert amber["usable"] is True
+    assert amber["level"] == "amber"
+    assert "currently occluded" in str(amber["message"])
+    assert red == {
+        "usable": False,
+        "level": "red",
+        "message": "camera calibration changed",
+    }
+
+
+def test_assembly_board_v1_readiness_directs_acceptance_to_confirmed_run() -> None:
+    automatic = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": False,
+            "accepted": False,
+            "post_staging_acceptance_allowed": True,
+        }
+    )
+    blocked = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": (
+                "camera calibration changed; use Locate & Accept Board again."
+            ),
+            "accepted": True,
+            "post_staging_acceptance_allowed": False,
+        }
+    )
+
+    assert "Confirmed Run place_approach" in str(automatic["message"])
+    assert "accept the board automatically" in str(automatic["message"])
+    assert "Locate & Accept Board" not in str(blocked["message"])
+    assert "confirmed Run place_approach" in str(blocked["message"])
+
+
+def test_assembly_board_v1_readiness_treats_a_stale_visible_snapshot_as_amber() -> None:
+    readiness = control._assembly_board_v1_readiness(
+        {
+            "accepted_baseline_ready": True,
+            "accepted": True,
+            "visible": True,
+            "valid": True,
+            "frame_age_sec": 2.01,
+        }
+    )
+
+    assert readiness["usable"] is True
+    assert readiness["level"] == "amber"
+    assert "not fresh" in str(readiness["message"])
+
+
+def test_assembly_board_v1_recording_guidance_describes_full_se3_replay() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+
+    assert 'relative_reference.get("source")' in source
+    assert '== "assembly_board-v1_aruco"' in source
+    assert "Replay composes the current ArUco ID 70 world pose" in source
+    assert "applying board " in source
+    assert '"translation and rotation."' in source
+
+
+def test_assembly_board_v1_readiness_fallback_does_not_treat_occlusion_as_movement() -> None:
+    readiness = control._assembly_board_v1_readiness(
+        {
+            "accepted": True,
+            "visible": False,
+            "valid": False,
+            "movement_blocked": True,
+            "calibration_changed": False,
+        }
+    )
+
+    assert readiness["usable"] is True
+    assert readiness["level"] == "amber"
+
+
+def test_assembly_board_v1_capture_stays_gated_while_run_can_stage_and_accept() -> None:
+    source = inspect.getsource(control._predefined_function_record_body)
+
+    assert 'function_name == "place_approach"' in source
+    assert 'and name == "assembly_board-v1"' in source
+    assert "and not _assembly_board_v1_accepted_usable()" in source
+    assert "or board_capture_blocked" in source
+    assert 'board_status.get("post_staging_acceptance_allowed")' in source
+    assert "and not post_staging_acceptance_allowed" in source
+    assert "and not board_run_blocked" in source
+    assert "No manual camera staging is required." in source
+    assert "collect ten fresh post-motion observations" in source
+    assert "automatically accept or reaccept the current board" in source
 
 
 def test_pick_staging_step_explains_that_no_recording_is_required() -> None:

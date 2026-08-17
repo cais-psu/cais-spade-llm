@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Any
 
 from nicegui import ui
@@ -22,6 +24,15 @@ def _safe_age(value: Any) -> str:
         return "n/a"
 
 
+def _safe_timestamp(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+    except (OSError, TypeError, ValueError):
+        return "n/a"
+
+
 class _PerceptionPage:
     """Keep UI element state separate from camera/process implementation."""
 
@@ -36,10 +47,12 @@ class _PerceptionPage:
         self.assigned_serials: dict[str, str] = {}
         self.control_buttons: dict[str, Any] = {}
         self.board_inputs: dict[str, Any] = {}
+        self.assembly_board_v1_labels: dict[str, dict[str, Any]] = {}
         self.wsl_rows_by_busid: dict[str, dict[str, str]] = {}
         self.stream_images: list[tuple[Any, str]] = []
         self.image_refresh_sequence = 0
         self.board_initialized = False
+        self.assembly_board_v1_initialized = False
         self.refreshing = False
 
     @staticmethod
@@ -61,6 +74,7 @@ class _PerceptionPage:
         self._render_assignments()
         self._render_camera_cards()
         self._render_live_view()
+        self._render_assembly_board_v1_aruco()
         self._render_calibration()
         self._render_detection()
         self._render_digital_twin()
@@ -164,8 +178,8 @@ class _PerceptionPage:
     def _render_camera_card(self, role: str) -> None:
         authority = (
             "executable pose authority"
-            if role == "ur5e"
-            else "diagnostic" if role == "xarm6" else "observes and verifies"
+            if role in {"ur5e", "xarm6"}
+            else "observes and verifies"
         )
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center"):
@@ -287,6 +301,59 @@ class _PerceptionPage:
                     on_click=lambda camera_role=role: self._viewer(camera_role),
                     icon="open_in_new",
                 ).props("dense flat")
+
+    def _render_assembly_board_v1_aruco(self) -> None:
+        with ui.card().classes("w-full mt-3"):
+            ui.label("assembly_board-v1 ArUco Localization").classes(
+                "text-lg font-semibold"
+            )
+            ui.label(
+                "The tag localizes a moveable assembly_board-v1 in world. Locate & Accept Board "
+                "reads the latest stable camera snapshot, replaces that role's accepted baseline, "
+                "and increments its generation. It does not request robot motion. Downstream place "
+                "execution blocks if the board later moves more than 10 mm or 2 deg."
+            ).classes("text-xs text-slate-500")
+            with ui.row().classes("items-end gap-2 flex-wrap"):
+                self.assembly_board_v1_marker_length_mm = ui.number(
+                    label="ArUco marker side length (mm)",
+                    value=76.0,
+                    min=1.0,
+                    format="%.3f",
+                ).props("readonly").classes("w-64")
+                ui.button(
+                    "Save 76 mm Marker Length",
+                    on_click=self._save_assembly_board_v1_marker_length,
+                    icon="save",
+                ).props("outline")
+            ui.label(
+                "Marker length is the measured outer black-square side. Reconnect camera previews "
+                "after changing it so the pose estimator uses the saved value."
+            ).classes("text-xs text-slate-500")
+            ui.label(
+                "For each arm, use Control -> Save Position to save a safe, tag-visible joint "
+                "position named exactly assembly_board-v1. Physical place_approach moves there "
+                "before collecting its new 10-frame ArUco window."
+            ).classes("text-xs text-blue-700")
+            with ui.grid(columns=2).classes("w-full gap-4"):
+                for role in ("ur5e", "xarm6"):
+                    with ui.card().classes("w-full"):
+                        ui.label(f"{_ROLE_LABELS[role]} board pose").classes("font-semibold")
+                        self.assembly_board_v1_labels[role] = {
+                            "source": ui.label("Waiting for camera snapshot.").classes(
+                                "text-xs text-slate-600"
+                            ),
+                            "quality": ui.label("").classes("text-xs text-slate-600"),
+                            "movement": ui.label("").classes("text-xs text-slate-600"),
+                            "pose": ui.label("").classes("text-xs font-mono text-slate-600"),
+                            "error": ui.label("").classes("text-xs text-red-700"),
+                        }
+                        ui.button(
+                            "Locate & Accept Board",
+                            on_click=lambda camera_role=role: (
+                                self._locate_and_accept_assembly_board_v1(camera_role)
+                            ),
+                            icon="location_on",
+                        ).props("dense color=primary")
 
     def _render_calibration(self) -> None:
         with ui.card().classes("w-full mt-3"):
@@ -706,6 +773,32 @@ class _PerceptionPage:
         )
         ui.notify("Stationary surveyed board pose saved", type="positive")
 
+    async def _save_assembly_board_v1_marker_length(self) -> None:
+        try:
+            await asyncio.to_thread(
+                self.bridge.perception_save_assembly_board_v1_marker_length,
+                0.076,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            ui.notify(str(exc), type="warning", timeout=6000)
+            return
+        ui.notify(
+            "assembly_board-v1 ArUco marker length saved; reconnect camera previews to apply it",
+            type="positive",
+            timeout=6000,
+        )
+
+    async def _locate_and_accept_assembly_board_v1(self, role: str) -> None:
+        try:
+            result = await asyncio.to_thread(
+                self.bridge.perception_locate_and_accept_assembly_board_v1,
+                role,
+            )
+        except (RuntimeError, ValueError) as exc:
+            ui.notify(str(exc), type="warning", timeout=7000)
+            return
+        ui.notify(str(result.get("message") or ""), type="positive", timeout=6000)
+
     async def _test_detection(self, role: str) -> None:
         result = await asyncio.to_thread(self.bridge.perception_test_detection, role)
         rows = (
@@ -755,6 +848,9 @@ class _PerceptionPage:
                 for field, element in self.board_inputs.items():
                     element.value = float(board.get(field, 0.0) or 0.0)
                 self.board_initialized = True
+            if not self.assembly_board_v1_initialized:
+                self.assembly_board_v1_marker_length_mm.value = 76.0
+                self.assembly_board_v1_initialized = True
         finally:
             self.refreshing = False
 
@@ -896,6 +992,91 @@ class _PerceptionPage:
                 and not camera.get("world_pose_ready")
             )
         self._refresh_calibration(role, camera)
+
+        if role in {"ur5e", "xarm6"}:
+            self._refresh_assembly_board_v1_aruco(
+                role,
+                dict(camera.get("assembly_board-v1_aruco") or {}),
+            )
+
+    def _refresh_assembly_board_v1_aruco(
+        self,
+        role: str,
+        board: dict[str, Any],
+    ) -> None:
+        labels = self.assembly_board_v1_labels[role]
+        labels["source"].text = (
+            f"camera role={board.get('camera_role') or role} | "
+            f"calibration={board.get('active_calibration_id') or 'unavailable'} | "
+            f"frame timestamp={_safe_timestamp(board.get('frame_captured_at'))} | "
+            f"age={_safe_age(board.get('frame_age_sec'))}"
+        )
+        reprojection = board.get("reprojection_error_px")
+        reprojection_text = "n/a"
+        with suppress(TypeError, ValueError):
+            reprojection_text = f"{float(reprojection):.3f} px"
+        translation_spread_text = "n/a"
+        with suppress(TypeError, ValueError):
+            translation_spread_text = (
+                f"{float(board.get('translation_spread_m')) * 1000.0:.3f} mm"
+            )
+        rotation_spread_text = "n/a"
+        with suppress(TypeError, ValueError):
+            rotation_spread_text = f"{float(board.get('rotation_spread_deg')):.3f} deg"
+        labels["quality"].text = (
+            f"visibility={'visible' if board.get('visible') else 'NOT VISIBLE'} | "
+            f"stability={'stable' if board.get('stable') else 'NOT STABLE'} | "
+            f"samples={int(board.get('sample_count', 0) or 0)}/10 | "
+            f"world pose={'ready' if board.get('world_pose_ready') else 'unavailable'} | "
+            f"reprojection={reprojection_text} | "
+            f"translation spread={translation_spread_text} | "
+            f"rotation spread={rotation_spread_text}"
+        )
+        translation_delta_m = board.get("translation_delta_m")
+        rotation_delta_deg = board.get("rotation_delta_deg")
+        translation_text = "n/a"
+        rotation_text = "n/a"
+        with suppress(TypeError, ValueError):
+            translation_text = f"{float(translation_delta_m) * 1000.0:.1f} mm"
+        with suppress(TypeError, ValueError):
+            rotation_text = f"{float(rotation_delta_deg):.2f} deg"
+        movement_evidence_valid = bool(board.get("movement_evidence_valid"))
+        accepted_baseline_ready = bool(board.get("accepted_baseline_ready"))
+        accepted_baseline_error = str(board.get("accepted_baseline_error") or "").strip()
+        movement_text = (
+            f"{translation_text}, {rotation_text}"
+            if movement_evidence_valid
+            else "not evaluated (no fresh stable world pose)"
+        )
+        labels["movement"].text = (
+            f"movement from accepted pose={movement_text} | "
+            f"generation={int(board.get('accepted_generation', 0) or 0)} | "
+            f"accepted baseline={'USABLE' if accepted_baseline_ready else 'BLOCKED'}"
+            + (f" — {accepted_baseline_error}" if accepted_baseline_error else "")
+        )
+        labels["movement"].classes(
+            replace=(
+                "text-xs text-red-700"
+                if not accepted_baseline_ready
+                else (
+                    "text-xs text-amber-700"
+                    if not movement_evidence_valid
+                    else "text-xs text-slate-600"
+                )
+            )
+        )
+        pose = dict(board.get("pose") or {})
+        if pose:
+            labels["pose"].text = (
+                "pose world: "
+                + ", ".join(
+                    f"{field}={float(pose[field]):+.6f}"
+                    for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                )
+            )
+        else:
+            labels["pose"].text = "pose world: unavailable"
+        labels["error"].text = f"error={board.get('error') or 'none'}"
 
     def _refresh_calibration(self, role: str, camera: dict[str, Any]) -> None:
         calibration = camera.get("calibration", {})

@@ -500,6 +500,8 @@ make run-physical-ur5e
 make headless
 make bootstrap-gazebo
 make check
+make cleanup-report
+make cleanup
 ```
 
 Equivalent direct commands:
@@ -515,6 +517,23 @@ poetry check
 poetry run python -m compileall -q cais_spade_llm ros2
 poetry run python -m cais_spade_llm.ui_main --help
 ```
+
+### Runtime housekeeping
+
+The UI prunes CAIS-owned runtime logs during startup after it stops stale ROS2
+processes. Hardware Stack launch logs retain the newest 10 runs per component,
+agent action logs rotate at 10 MB with five backups, and ROS2 processes launched
+by CAIS write under `cais_spade_llm/log/ros/`, where entries older than seven
+days are eligible for cleanup.
+
+Use `make cleanup-report` for a dry run covering CAIS logs, generated test
+caches, and global ROS logs. Use `make cleanup` to apply only CAIS-owned log
+retention and remove `.pytest_cache`, `.ruff_cache`, and Python `__pycache__`
+directories.
+
+Global `~/.ros/log` is never changed by UI startup or `make cleanup`. Review the
+dry-run report first, then explicitly run `make cleanup-global-ros` to remove
+only global ROS log entries older than seven days.
 
 ## Case 3 Recovery Dry-Run Prerequisites
 

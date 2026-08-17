@@ -93,6 +93,48 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         ),
         steps=(
             RobotTaskStep(
+                id="move_to_destination_location",
+                op="move_to_named_pose",
+                executor="primitive",
+                exposed=False,
+                params={
+                    "pose_name": _arg("destination_location"),
+                    "speed": _arg("speed"),
+                },
+                when=(
+                    RobotTaskGuard(
+                        predicate="execution_mode",
+                        args={"mode": "physical"},
+                    ),
+                ),
+                note=(
+                    "Automatic physical staging from destination_location; "
+                    "no recording required."
+                ),
+            ),
+            RobotTaskStep(
+                id="localize_assembly_board_v1",
+                op="localize_assembly_board_v1",
+                executor="primitive",
+                exposed=False,
+                store_as="assembly_board_v1_aruco",
+                params={
+                    "destination_location": _arg("destination_location"),
+                    "part_name": _arg("part_name"),
+                },
+                when=(
+                    RobotTaskGuard(
+                        predicate="execution_mode",
+                        args={"mode": "physical"},
+                    ),
+                ),
+                failure_observations={
+                    "destination_location": _arg("destination_location"),
+                    "part_name": _state("_held_part"),
+                },
+                note="Freeze one fresh role-specific assembly_board-v1 ArUco pose.",
+            ),
+            RobotTaskStep(
                 id="compute_place_targets",
                 op="compute_place_targets",
                 executor="primitive",
@@ -104,6 +146,9 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "part_name": _arg("part_name"),
                     "z_adjustment_m": 0.0,
                     "destination_location": _arg("destination_location"),
+                    "assembly_board_v1_aruco": _step_output(
+                        "assembly_board_v1_aruco"
+                    ),
                 },
                 public_params={
                     "part_name": _arg("part_name"),
@@ -202,7 +247,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         dry_run_duration=5.0,
         failure_part=_first(_arg("part_name"), _state("_held_part")),
         notes=(
-            "RobotAgent.place_approach computes destination geometry, moves above the destination, then descends to the place pose.",
+            "Physical RobotAgent.place_approach stages at destination_location, freezes assembly_board-v1 localization, computes destination geometry, moves above the destination, then descends to the place pose.",
             "Direct controller pose helpers are hidden from synthesis; use compute_place_targets plus move_cartesian approach/target poses.",
         ),
     ),

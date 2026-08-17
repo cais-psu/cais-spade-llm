@@ -404,6 +404,43 @@ def test_ur5e_hardware_start_uses_rtde_rg2_and_state_publisher_only() -> None:
     assert all("moveit" not in process_name for process_name in started)
 
 
+@pytest.mark.parametrize("stack_name", ["ur5e", "dual robots"])
+def test_ur5e_hardware_start_retries_a_transient_disconnected_tf_tree(
+    stack_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, _started, stopped = _dual_start_bridge()
+    snapshot_errors = iter(
+        (
+            (
+                "Could not find a connection between 'world' and 'tool0' because "
+                "they are not part of the same tree"
+            ),
+            "",
+        )
+    )
+    snapshots: list[str] = []
+
+    def _snapshot(robot: str, **_kwargs: Any) -> dict[str, Any]:
+        if robot == "xarm6":
+            return {
+                "joint_names": [f"joint{index}" for index in range(1, 7)],
+                "positions": [0.0] * 6,
+            }
+        error = next(snapshot_errors)
+        snapshots.append(error)
+        return {"error": error} if error else {"pose": {}}
+
+    bridge._snapshot_robot_waypoint = _snapshot
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    error = bridge.ros2_start_hardware_stack(stack_name)
+
+    assert error is None
+    assert len(snapshots) == 2
+    assert stopped == []
+
+
 def test_xarm6_hardware_partial_start_rolls_back_direct_processes() -> None:
     bridge, started, stopped = _dual_start_bridge()
     bridge._wait_for_xarm6_relayed_tf_ready = lambda **_kwargs: (
@@ -522,11 +559,21 @@ def test_xarm6_trajectory_mode_failure_rolls_back_before_motion(
     ]
 
 
-def test_ur5e_hardware_partial_start_rolls_back_direct_processes() -> None:
+def test_ur5e_hardware_partial_start_rolls_back_direct_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bridge, started, stopped = _dual_start_bridge()
-    bridge._snapshot_robot_waypoint = lambda *_args, **_kwargs: {
-        "error": "world -> tool0 unavailable"
-    }
+    snapshot_attempts: list[bool] = []
+    bridge._snapshot_robot_waypoint = lambda *_args, **_kwargs: (
+        snapshot_attempts.append(True) or {"error": "world -> tool0 unavailable"}
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
 
     error = bridge.ros2_start_hardware_stack("ur5e")
 
@@ -540,6 +587,82 @@ def test_ur5e_hardware_partial_start_rolls_back_direct_processes() -> None:
         ("hardware_robot_state_publisher", "ur5e_hardware_start_rollback"),
         ("hardware_ur5e_rg2_gripper", "ur5e_hardware_start_rollback"),
         ("hardware_ur5e_rtde_trajectory_server", "ur5e_hardware_start_rollback"),
+    ]
+    assert len(snapshot_attempts) > 1
+
+
+def test_ur5e_hardware_snapshot_wait_retains_the_last_exact_tf_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge.ros2_proc_status = lambda _name: "running"
+    exact_error = (
+        "Could not find a connection between 'world' and 'tool0' because they are "
+        "not part of the same tree"
+    )
+    bridge._snapshot_robot_waypoint = lambda *_args, **_kwargs: {
+        "error": exact_error
+    }
+    clock = {"now": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    error = bridge._wait_for_ur5e_hardware_snapshot_ready(
+        driver_process_name="hardware_ur5e_rtde_trajectory_server",
+        state_publisher_process_name="hardware_robot_state_publisher",
+        ros_domain_id=42,
+        timeout_sec=1.0,
+    )
+
+    assert error == exact_error
+
+
+@pytest.mark.parametrize("stack_name", ["ur5e", "dual robots"])
+def test_ur5e_hardware_start_rolls_back_if_tf_process_exits_during_retry(
+    stack_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, started, stopped = _dual_start_bridge()
+    original_process_status = bridge.ros2_proc_status
+    snapshot_attempted = {"value": False}
+
+    def _snapshot(robot: str, **_kwargs: Any) -> dict[str, Any]:
+        if robot == "xarm6":
+            return {
+                "joint_names": [f"joint{index}" for index in range(1, 7)],
+                "positions": [0.0] * 6,
+            }
+        snapshot_attempted["value"] = True
+        return {"error": "world and tool0 are not part of the same tree"}
+
+    def _process_status(process_name: str) -> str:
+        if (
+            process_name == "hardware_robot_state_publisher"
+            and snapshot_attempted["value"]
+        ):
+            return "stopped"
+        return original_process_status(process_name)
+
+    bridge._snapshot_robot_waypoint = _snapshot
+    bridge.ros2_proc_status = _process_status
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    error = bridge.ros2_start_hardware_stack(stack_name)
+
+    assert "hardware_robot_state_publisher exited" in str(error)
+    assert snapshot_attempted["value"] is True
+    rollback_reason = (
+        "ur5e_hardware_start_rollback"
+        if stack_name == "ur5e"
+        else "dual_hardware_start_rollback"
+    )
+    assert stopped == [
+        (process_name, rollback_reason)
+        for process_name in reversed(started)
     ]
 
 
@@ -935,6 +1058,38 @@ def test_post_green_rtde_transport_loss_marks_failed_and_preserves_processes(
     assert status["process_return_code"] is None
     assert status["process_log_path"] == str(tmp_path / "rtde-run.log")
     assert len(bridge._ros2_procs) == 4
+
+
+def test_rtde_status_staleness_requires_six_seconds_before_latching_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, _started, _stopped = _dual_start_bridge()
+    assert bridge.ros2_start_hardware_stack("ur5e") is None
+    rtde_process = bridge._ros2_procs["hardware_ur5e_rtde_trajectory_server"]
+    now = 100.0
+    rtde_status = {
+        "state": "ready",
+        "process_id": rtde_process.pid,
+        "updated_at": now - 3.1,
+        "rtde_reset_required": False,
+        "joint_states_fresh": True,
+    }
+    bridge._ur5e_rtde_trajectory_status = lambda: dict(rtde_status)
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    transient = bridge.hardware_stack_status("ur5e")
+
+    assert transient["lifecycle_state"] == "running"
+    assert transient["last_error"] == ""
+
+    rtde_status["updated_at"] = now - 6.1
+    sustained = bridge.hardware_stack_status("ur5e")
+
+    assert sustained["lifecycle_state"] == "failed"
+    assert sustained["failed_process"] == "hardware_ur5e_rtde_trajectory_server"
+    assert sustained["last_error"] == (
+        "UR5e RTDE status stopped advancing. Repair Hardware Stack."
+    )
 
 
 def test_failed_dual_hardware_stack_supports_one_serialized_repair() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from copy import deepcopy
-from math import isfinite
+from math import isfinite, sqrt
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,8 @@ _TAUGHT_FUNCTIONS_ROOT = Path(__file__).resolve().parent / "taught_functions"
 _CARTESIAN_POSE_FIELDS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 _CARTESIAN_POSITION_FIELDS = ("x", "y", "z")
 _POSITION_SOURCES = frozenset({"computed", "captured", "manual", "captured_relative"})
+_ASSEMBLY_BOARD_V1_ARUCO_MAX_AGE_SEC = 8.0
+_MANUAL_FUNCTION_EXECUTION_AUTHORITY = object()
 _HARDWARE_JOINT_NAMES = {
     "ur5e": (
         "shoulder_pan_joint",
@@ -59,6 +61,127 @@ def _normalize_place_targets(
     payload.setdefault("approach_pose", {"x": slot_x, "y": slot_y, "z": travel_z})
     payload.setdefault("target_pose", {"x": slot_x, "y": slot_y, "z": place_z})
     return payload
+
+
+def _normalized_se3_pose(
+    raw_pose: Any,
+    *,
+    label: str,
+) -> tuple[dict[str, float], str]:
+    if not isinstance(raw_pose, dict):
+        return {}, f"{label} is missing"
+    pose: dict[str, float] = {}
+    for field in _CARTESIAN_POSE_FIELDS:
+        try:
+            value = float(raw_pose[field])
+        except (KeyError, TypeError, ValueError):
+            return {}, f"{label}.{field} is missing or invalid"
+        if not isfinite(value):
+            return {}, f"{label}.{field} is not finite"
+        pose[field] = value
+    quaternion_norm = sqrt(sum(pose[field] ** 2 for field in ("qx", "qy", "qz", "qw")))
+    if quaternion_norm <= 1e-12:
+        return {}, f"{label} quaternion is zero"
+    for field in ("qx", "qy", "qz", "qw"):
+        pose[field] /= quaternion_norm
+    return pose, ""
+
+
+def _quaternion_multiply(
+    left: dict[str, float],
+    right: dict[str, float],
+) -> dict[str, float]:
+    lx, ly, lz, lw = (left[field] for field in ("qx", "qy", "qz", "qw"))
+    rx, ry, rz, rw = (right[field] for field in ("qx", "qy", "qz", "qw"))
+    result = {
+        "qx": lw * rx + lx * rw + ly * rz - lz * ry,
+        "qy": lw * ry - lx * rz + ly * rw + lz * rx,
+        "qz": lw * rz + lx * ry - ly * rx + lz * rw,
+        "qw": lw * rw - lx * rx - ly * ry - lz * rz,
+    }
+    norm = sqrt(sum(value**2 for value in result.values()))
+    return {field: value / norm for field, value in result.items()}
+
+
+def _rotate_translation(
+    quaternion: dict[str, float],
+    translation: dict[str, float],
+) -> dict[str, float]:
+    qx, qy, qz, qw = (quaternion[field] for field in ("qx", "qy", "qz", "qw"))
+    vx, vy, vz = (translation[field] for field in _CARTESIAN_POSITION_FIELDS)
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return {
+        "x": vx + qw * tx + qy * tz - qz * ty,
+        "y": vy + qw * ty + qz * tx - qx * tz,
+        "z": vz + qw * tz + qx * ty - qy * tx,
+    }
+
+
+def _compose_se3(
+    parent_pose: dict[str, float],
+    relative_pose: dict[str, float],
+) -> dict[str, float]:
+    rotated_translation = _rotate_translation(parent_pose, relative_pose)
+    orientation = _quaternion_multiply(parent_pose, relative_pose)
+    return {
+        field: parent_pose[field] + rotated_translation[field]
+        for field in _CARTESIAN_POSITION_FIELDS
+    } | orientation
+
+
+def _assembly_board_v1_aruco_payload(
+    raw_payload: Any,
+    *,
+    robot: str,
+    destination_location: str,
+    require_fresh: bool,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(raw_payload, dict):
+        return {}, "assembly_board-v1 ArUco localization payload is missing"
+    payload = dict(raw_payload)
+    if str(payload.get("destination_location") or "").strip() != destination_location:
+        return {}, "assembly_board-v1 ArUco destination_location does not match the task"
+    camera_role = str(payload.get("camera_role") or payload.get("robot") or "").strip().lower()
+    if not robot or camera_role != robot:
+        return {}, (
+            "assembly_board-v1 ArUco camera_role does not match the executing robot: "
+            f"expected {robot or '<unknown>'!r}, found {camera_role or '<empty>'!r}"
+        )
+    if str(payload.get("frame_id") or "").strip() != "world":
+        return {}, "assembly_board-v1 ArUco frame_id must be world"
+    generation = payload.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        return {}, "assembly_board-v1 ArUco generation must be a positive integer"
+    calibration_id = str(payload.get("calibration_id") or "").strip()
+    if not calibration_id:
+        return {}, "assembly_board-v1 ArUco calibration_id is missing"
+    try:
+        captured_at = float(payload["captured_at"])
+    except (KeyError, TypeError, ValueError):
+        return {}, "assembly_board-v1 ArUco captured_at is missing or invalid"
+    if not isfinite(captured_at) or captured_at <= 0.0:
+        return {}, "assembly_board-v1 ArUco captured_at is invalid"
+    if require_fresh:
+        age_sec = time.time() - captured_at
+        if age_sec < -1.0 or age_sec > _ASSEMBLY_BOARD_V1_ARUCO_MAX_AGE_SEC:
+            return {}, f"assembly_board-v1 ArUco pose is stale (age={age_sec:.2f}s)"
+    pose, pose_error = _normalized_se3_pose(
+        payload.get("pose"),
+        label="assembly_board-v1 ArUco pose",
+    )
+    if pose_error:
+        return {}, pose_error
+    return {
+        "destination_location": destination_location,
+        "camera_role": camera_role,
+        "generation": deepcopy(generation),
+        "calibration_id": calibration_id,
+        "captured_at": captured_at,
+        "frame_id": "world",
+        "pose": pose,
+    }, ""
 
 
 def _build_runtime_state(agent: Any) -> dict[str, Any]:
@@ -109,6 +232,17 @@ def _primitive_payload_from_result(
             },
             runtime_state=runtime_state,
         )
+    elif step.store_as == "assembly_board_v1_aruco":
+        raw_data = primitive_result.get("data")
+        payload = deepcopy(
+            raw_data
+            if isinstance(raw_data, dict)
+            else {
+                key: value
+                for key, value in dict(primitive_result or {}).items()
+                if key not in {"success", "message"}
+            }
+        )
     elif isinstance(primitive_result.get("data"), (dict, list)):
         payload = deepcopy(primitive_result.get("data"))
     elif isinstance(primitive_result.get("observation"), dict):
@@ -116,11 +250,23 @@ def _primitive_payload_from_result(
 
     if step.op == "move_cartesian":
         payload = dict(payload or {})
-        payload["absolute_position"] = {
+        absolute_position = {
             "x": float(params.get("x", 0.0) or 0.0),
             "y": float(params.get("y", 0.0) or 0.0),
             "z": float(params.get("z", 0.0) or 0.0),
         }
+        orientation_fields = ("qx", "qy", "qz", "qw")
+        if all(params.get(field) is not None for field in orientation_fields):
+            full_pose, full_pose_error = _normalized_se3_pose(
+                {
+                    **absolute_position,
+                    **{field: params[field] for field in orientation_fields},
+                },
+                label=f"resolved pose for {step.id}",
+            )
+            if not full_pose_error:
+                absolute_position = full_pose
+        payload["absolute_position"] = absolute_position
     elif step.op == "move_relative":
         position = dict(runtime_state.get("_position") or {})
         payload = dict(payload or {})
@@ -285,8 +431,9 @@ def _recorded_cartesian_pose(
     return result, ""
 
 
-def _recorded_relative_position(  # noqa: C901 - explicit persisted-field validation.
+def _recorded_relative_position(  # noqa: C901, PLR0912 - explicit persisted-field validation.
     *,
+    robot: str,
     task: RobotTaskDefinition,
     step: RobotTaskStep,
     recorded_step: dict[str, Any],
@@ -335,6 +482,14 @@ def _recorded_relative_position(  # noqa: C901 - explicit persisted-field valida
         )
     if not source:
         return {}, {}, f"relative_reference.source is missing for {task.name}.{step.id}"
+    is_assembly_board_v1 = (
+        task.name == "place_approach" and location == "assembly_board-v1"
+    )
+    if is_assembly_board_v1 and source != "assembly_board-v1_aruco":
+        return {}, {}, (
+            "relative_reference.source must be assembly_board-v1_aruco for "
+            f"{task.name}.{step.id}"
+        )
     raw_reference_position = raw_reference.get("position_m")
     if not isinstance(raw_reference_position, dict):
         return {}, {}, (
@@ -365,17 +520,99 @@ def _recorded_relative_position(  # noqa: C901 - explicit persisted-field valida
         return {}, {}, (
             f"relative_reference.captured_at is invalid for {task.name}.{step.id}"
         )
-    return relative_position_m, {
+    reference = {
         "kind": kind,
         "frame_id": frame_id,
         "name": name,
         "position_m": reference_position_m,
         "source": source,
         "captured_at": captured_at,
-    }, ""
+    }
+    if is_assembly_board_v1:
+        camera_role = str(raw_reference.get("camera_role") or "").strip().lower()
+        if camera_role != robot:
+            return {}, {}, (
+                "relative_reference.camera_role does not match the executing robot for "
+                f"{task.name}.{step.id}"
+            )
+        generation = raw_reference.get("generation")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            return {}, {}, (
+                "relative_reference.generation must be a positive integer for "
+                f"{task.name}.{step.id}"
+            )
+        reference_pose, reference_pose_error = _normalized_se3_pose(
+            raw_reference.get("pose"),
+            label=f"relative_reference.pose for {task.name}.{step.id}",
+        )
+        if reference_pose_error:
+            return {}, {}, reference_pose_error
+        if any(
+            abs(reference_pose[field] - reference_position_m[field]) > 1e-6
+            for field in _CARTESIAN_POSITION_FIELDS
+        ):
+            return {}, {}, (
+                "relative_reference.pose translation differs from position_m for "
+                f"{task.name}.{step.id}"
+            )
+        reference.update(
+            {
+                "camera_role": camera_role,
+                "generation": deepcopy(generation),
+                "pose": reference_pose,
+            }
+        )
+    return relative_position_m, reference, ""
 
 
-def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-source gates.
+def _recorded_relative_pose(
+    *,
+    task: RobotTaskDefinition,
+    step: RobotTaskStep,
+    recorded_step: dict[str, Any],
+    reference_pose: dict[str, float],
+    captured_pose: dict[str, float],
+) -> tuple[dict[str, float], str]:
+    relative_pose, error = _normalized_se3_pose(
+        recorded_step.get("relative_pose"),
+        label=f"relative_pose for {task.name}.{step.id}",
+    )
+    if error:
+        return {}, error
+    reconstructed_pose = _compose_se3(reference_pose, relative_pose)
+    normalized_captured_pose, captured_pose_error = _normalized_se3_pose(
+        captured_pose,
+        label=f"captured pose for {task.name}.{step.id}",
+    )
+    if captured_pose_error:
+        return {}, captured_pose_error
+    if any(
+        abs(reconstructed_pose[field] - normalized_captured_pose[field]) > 1e-6
+        for field in _CARTESIAN_POSITION_FIELDS
+    ):
+        return {}, (
+            f"relative_pose translation does not reconstruct the captured pose for "
+            f"{task.name}.{step.id}"
+        )
+    quaternion_alignment = abs(
+        sum(
+            reconstructed_pose[field] * normalized_captured_pose[field]
+            for field in ("qx", "qy", "qz", "qw")
+        )
+    )
+    if 1.0 - quaternion_alignment > 1e-6:
+        return {}, (
+            f"relative_pose orientation does not reconstruct the captured pose for "
+            f"{task.name}.{step.id}"
+        )
+    return relative_pose, ""
+
+
+def _recorded_cartesian_override(  # noqa: C901, PLR0912 - explicit legacy and relative-source gates.
     *,
     robot: str,
     task: RobotTaskDefinition,
@@ -413,12 +650,21 @@ def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-s
     relative_fields = {
         field for field, source in position_sources.items() if source == "captured_relative"
     }
+    is_assembly_board_v1 = (
+        task.name == "place_approach" and location == "assembly_board-v1"
+    )
+    if is_assembly_board_v1 and relative_fields != set(_CARTESIAN_POSITION_FIELDS):
+        return {}, (
+            "physical place recording must use captured_relative for x, y, and z and "
+            f"include full relative_pose for {task.name}.{step.id}"
+        )
     if relative_fields and relative_fields != set(_CARTESIAN_POSITION_FIELDS):
         return {}, (
             f"captured_relative must be selected for x, y, and z together for "
             f"{task.name}.{step.id}"
         )
     relative_position_m: dict[str, float] = {}
+    relative_pose: dict[str, float] = {}
     relative_reference: dict[str, Any] = {}
     computed_position_m: dict[str, float] = {}
     computed_source = ""
@@ -426,6 +672,7 @@ def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-s
     if relative_fields:
         relative_position_m, relative_reference, relative_error = (
             _recorded_relative_position(
+                robot=robot,
                 task=task,
                 step=step,
                 recorded_step=recorded_step,
@@ -435,6 +682,16 @@ def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-s
         )
         if relative_error:
             return {}, relative_error
+        if is_assembly_board_v1:
+            relative_pose, relative_pose_error = _recorded_relative_pose(
+                task=task,
+                step=step,
+                recorded_step=recorded_step,
+                reference_pose=dict(relative_reference["pose"]),
+                captured_pose=pose,
+            )
+            if relative_pose_error:
+                return {}, relative_pose_error
         raw_computed_position = recorded_step.get("computed_position_m")
         if raw_computed_position is not None:
             if not isinstance(raw_computed_position, dict):
@@ -489,6 +746,7 @@ def _recorded_cartesian_override(  # noqa: C901 - explicit legacy and relative-s
         "position_sources": position_sources,
         "manual_position_m": manual_position_m,
         "relative_position_m": relative_position_m,
+        "relative_pose": relative_pose,
         "relative_reference": relative_reference,
         "computed_position_m": computed_position_m,
         "computed_source": computed_source,
@@ -601,6 +859,7 @@ def _apply_resolved_cartesian_state(
     computed_at: float,
     resolved_positions: dict[str, dict[str, float]],
     runtime_state: dict[str, Any],
+    step_outputs: dict[str, Any],
 ) -> None:
     cartesian_steps = _cartesian_position_steps(task)
     if not cartesian_steps:
@@ -629,6 +888,13 @@ def _apply_resolved_cartesian_state(
         task_context["computed_cartesian_at"] = float(computed_at)
     if resolved_positions:
         task_context["resolved_cartesian_positions"] = deepcopy(resolved_positions)
+    if task.name == "place_approach":
+        localization = step_outputs.get("assembly_board_v1_aruco")
+        if isinstance(localization, dict) and localization:
+            task_context["assembly_board_v1_aruco"] = deepcopy(localization)
+            task_context["assembly_board_v1_aruco_generation"] = deepcopy(
+                localization.get("generation")
+            )
     runtime_state["_task_ctx"] = task_context
 
 
@@ -679,14 +945,28 @@ def _computed_cartesian_state(
             "captured_at": targets.get("captured_at"),
         }
     else:
-        raw_reference = dict(targets.get("target_pose") or {})
-        reference = {
-            "kind": "destination_target",
-            "frame_id": "world",
-            "name": str(targets.get("destination_location") or "").strip(),
-            "source": "computed_destination",
-            "captured_at": time.time(),
-        }
+        localization = dict(step_outputs.get("assembly_board_v1_aruco") or {})
+        if localization:
+            raw_reference = dict(localization.get("pose") or {})
+            reference = {
+                "kind": "destination_target",
+                "frame_id": str(localization.get("frame_id") or "").strip(),
+                "name": str(localization.get("destination_location") or "").strip(),
+                "source": "assembly_board-v1_aruco",
+                "captured_at": localization.get("captured_at"),
+                "camera_role": str(localization.get("camera_role") or "").strip(),
+                "generation": deepcopy(localization.get("generation")),
+                "pose": deepcopy(raw_reference),
+            }
+        else:
+            raw_reference = dict(targets.get("target_pose") or {})
+            reference = {
+                "kind": "destination_target",
+                "frame_id": "world",
+                "name": str(targets.get("destination_location") or "").strip(),
+                "source": "computed_destination",
+                "captured_at": time.time(),
+            }
     try:
         reference["position_m"] = {
             field: float(raw_reference[field]) for field in _CARTESIAN_POSITION_FIELDS
@@ -722,6 +1002,7 @@ def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit ref
     if not cartesian_steps:
         return ""
     pose_keys = ("approach_pose", "target_pose")
+    current_reference_pose: dict[str, float] = {}
     if task.name == "pick_approach":
         current_reference = dict(targets.get("origin_pose") or {})
         expected_reference_kind = "detected_part"
@@ -743,9 +1024,25 @@ def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit ref
                 f"(age={reference_age_sec:.2f}s)"
             )
     else:
-        current_reference = dict(targets.get("target_pose") or {})
+        expected_destination = str(targets.get("destination_location") or "").strip()
+        if expected_destination == "assembly_board-v1":
+            localization, localization_error = _assembly_board_v1_aruco_payload(
+                step_outputs.get("assembly_board_v1_aruco"),
+                robot=_robot_name(agent) if agent is not None else "",
+                destination_location=expected_destination,
+                require_fresh=True,
+            )
+            if localization_error:
+                return localization_error
+            current_reference_pose = dict(localization["pose"])
+            current_reference = {
+                field: current_reference_pose[field]
+                for field in _CARTESIAN_POSITION_FIELDS
+            }
+        else:
+            current_reference = dict(targets.get("target_pose") or {})
         expected_reference_kind = "destination_target"
-        expected_reference_name = str(targets.get("destination_location") or "").strip()
+        expected_reference_name = expected_destination
     if not expected_reference_name:
         return f"{task.name} current relative reference name is unavailable"
     try:
@@ -764,6 +1061,7 @@ def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit ref
         pose_key = pose_keys[index]
         pose = dict(targets.get(pose_key) or {})
         relative_position_m = dict(override.get("relative_position_m") or {})
+        relative_pose = dict(override.get("relative_pose") or {})
         relative_reference = dict(override.get("relative_reference") or {})
         if relative_position_m:
             if str(relative_reference.get("kind") or "") != expected_reference_kind:
@@ -773,35 +1071,60 @@ def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit ref
                     f"{task.name}.{step.id} relative reference name changed: expected "
                     f"{expected_reference_name!r}"
                 )
-            try:
-                relative_base = (
-                    {
-                        field: float(pose[field])
-                        for field in _CARTESIAN_POSITION_FIELDS
-                    }
-                    if dict(override.get("computed_position_m") or {})
-                    else current_reference
-                )
-                pose.update(
-                    {
-                        field: relative_base[field] + float(relative_position_m[field])
-                        for field in _CARTESIAN_POSITION_FIELDS
-                    }
-                )
-            except (KeyError, TypeError, ValueError):
-                return f"{task.name}.{step.id} relative XYZ is incomplete"
+            is_assembly_board_v1 = (
+                task.name == "place_approach"
+                and expected_reference_name == "assembly_board-v1"
+            )
+            if is_assembly_board_v1:
+                if str(relative_reference.get("source") or "") != "assembly_board-v1_aruco":
+                    return (
+                        f"{task.name}.{step.id} relative reference source changed"
+                    )
+                if str(relative_reference.get("camera_role") or "").strip().lower() != (
+                    _robot_name(agent) if agent is not None else ""
+                ):
+                    return (
+                        f"{task.name}.{step.id} relative reference camera_role changed"
+                    )
+                if not relative_pose:
+                    return f"relative_pose is missing for {task.name}.{step.id}"
+                pose = _compose_se3(current_reference_pose, relative_pose)
+                override["values"] = {
+                    **dict(override.get("values") or {}),
+                    **{field: pose[field] for field in ("qx", "qy", "qz", "qw")},
+                }
+                relative_base = current_reference
+            else:
+                try:
+                    relative_base = (
+                        {
+                            field: float(pose[field])
+                            for field in _CARTESIAN_POSITION_FIELDS
+                        }
+                        if dict(override.get("computed_position_m") or {})
+                        else current_reference
+                    )
+                    pose.update(
+                        {
+                            field: relative_base[field] + float(relative_position_m[field])
+                            for field in _CARTESIAN_POSITION_FIELDS
+                        }
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return f"{task.name}.{step.id} relative XYZ is incomplete"
             override["resolved_reference_position_m"] = deepcopy(current_reference)
             override["resolved_computed_position_m"] = deepcopy(relative_base)
             override["resolved_position_m"] = {
                 field: float(pose[field]) for field in _CARTESIAN_POSITION_FIELDS
             }
-        pose.update(
-            {
-                field: float(value)
-                for field, value in dict(override.get("values") or {}).items()
-                if field in (*_CARTESIAN_POSITION_FIELDS, "qx", "qy", "qz", "qw")
-            }
-        )
+        if task.name != "place_approach" or expected_reference_name != "assembly_board-v1":
+            pose.update(
+                {
+                    field: float(value)
+                    for field, value in dict(override.get("values") or {}).items()
+                    if field in (*_CARTESIAN_POSITION_FIELDS, "qx", "qy", "qz", "qw")
+                }
+            )
         pose_error = _resolved_cartesian_pose_error(
             agent=agent,
             task=task,
@@ -984,6 +1307,13 @@ async def _execute_task_step(
             step_outputs=step_outputs,
         ):
             return {"success": True, "skipped": True}
+    if (
+        task.name == "place_approach"
+        and step.id == "localize_assembly_board_v1"
+        and str(args.get("destination_location") or "").strip()
+        != "assembly_board-v1"
+    ):
+        return {"success": True, "skipped": True}
 
     params = _resolve_value(
         step.params, args=args, runtime_state=runtime_state, step_outputs=step_outputs
@@ -1031,6 +1361,19 @@ async def _execute_task_step(
             primitive_result=result,
             runtime_state=runtime_state,
         )
+        if step.store_as == "assembly_board_v1_aruco":
+            payload, localization_error = _assembly_board_v1_aruco_payload(
+                payload,
+                robot=_robot_name(agent),
+                destination_location=str(params.get("destination_location") or "").strip(),
+                require_fresh=True,
+            )
+            if localization_error:
+                return {
+                    "success": False,
+                    "raw": {"message": localization_error},
+                    "payload": None,
+                }
     return {"success": bool(result.get("success")), "raw": result, "payload": payload}
 
 
@@ -1066,9 +1409,59 @@ def _apply_effect(
     runtime_state[f"_{effect.target}"] = deepcopy(value)
 
 
+def _physical_place_insert_board_lock_error(
+    *,
+    agent: Any,
+    args: dict[str, Any],
+    runtime_state: dict[str, Any],
+) -> str:
+    task_context = dict(runtime_state.get("_task_ctx") or {})
+    localization, localization_error = _assembly_board_v1_aruco_payload(
+        task_context.get("assembly_board_v1_aruco"),
+        robot=_robot_name(agent),
+        destination_location=str(args.get("destination_location") or "").strip(),
+        require_fresh=False,
+    )
+    if localization_error:
+        return (
+            "place_insert requires the frozen assembly_board-v1 ArUco generation from "
+            f"place_approach: {localization_error}"
+        )
+    if task_context.get("assembly_board_v1_aruco_generation") != localization.get(
+        "generation"
+    ):
+        return "place_insert assembly_board-v1 ArUco generation lock changed"
+
+    controller = getattr(agent, "_controller", None)
+    acceptance_reader = getattr(controller, "_assembly_board_v1_aruco_acceptance", None)
+    if not callable(acceptance_reader):
+        return "place_insert cannot verify the current assembly_board-v1 acceptance"
+    current_acceptance, acceptance_error = acceptance_reader()
+    if acceptance_error:
+        return (
+            "place_insert cannot verify the current assembly_board-v1 acceptance: "
+            f"{acceptance_error}"
+        )
+    if current_acceptance.get("accepted_generation") != localization.get("generation"):
+        return (
+            "place_insert assembly_board-v1 accepted generation changed after "
+            "place_approach"
+        )
+    if str(current_acceptance.get("calibration_id") or "").strip() != localization.get(
+        "calibration_id"
+    ):
+        return (
+            "place_insert assembly_board-v1 calibration identity changed after "
+            "place_approach"
+        )
+    return ""
+
+
 async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     agent: Any,
     task_name: str,
+    manual_function_execution_authority: object | None = None,
+    /,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute one exact registry-backed task against the selected robot mode.
@@ -1076,6 +1469,8 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     Args:
         agent: RobotAgent-compatible runtime owner.
         task_name: Exact registered robot function name.
+        manual_function_execution_authority: Internal identity capability for the
+            Control-page manual Function Execution path.
         **kwargs: Arguments declared by the selected task definition.
 
     Returns:
@@ -1085,11 +1480,25 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     if task is None:
         return {"status": "failed", "content": f"unknown robot task '{task_name}'"}
 
+    manual_function_execution = (
+        manual_function_execution_authority is _MANUAL_FUNCTION_EXECUTION_AUTHORITY
+    )
     args = deepcopy(dict(kwargs or {}))
     runtime_state = _build_runtime_state(agent)
     step_outputs: dict[str, Any] = {}
 
     for guard in task.program.entry_guards:
+        # Manual Control commissioning bypasses only the assembly sequence token;
+        # physical, held-part, gripper, and task-context guards stay authoritative.
+        condition = dict(guard.condition or {})
+        if (
+            manual_function_execution
+            and str(condition.get("field") or "").strip() == "resource_state"
+            and str(condition.get("operator") or "").strip() == "equals"
+            and str(condition.get("value") or "").strip()
+            == str(task.program.entry_state or "").strip()
+        ):
+            continue
         if _evaluate_guard(
             guard,
             agent=agent,
@@ -1111,6 +1520,26 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     physical_overrides: dict[str, dict[str, Any]] = {}
     physical_recording_path: Path | None = None
     execution_mode = str(getattr(agent, "execution_mode", "") or "").strip().lower()
+    if (
+        execution_mode == "physical"
+        and task.name == "place_insert"
+        and str(args.get("destination_location") or "").strip()
+        == "assembly_board-v1"
+    ):
+        board_lock_error = _physical_place_insert_board_lock_error(
+            agent=agent,
+            args=args,
+            runtime_state=runtime_state,
+        )
+        if board_lock_error:
+            return agent._task_failure(
+                board_lock_error,
+                step="place_insert.assembly_board_v1_aruco_generation_lock",
+                observations={
+                    "destination_location": str(args.get("destination_location") or ""),
+                    "part_name": str(args.get("part_name") or ""),
+                },
+            )
     if execution_mode == "physical" and _cartesian_position_steps(task):
         physical_overrides, physical_recording_path, preflight_error = (
             _load_physical_cartesian_overrides(
@@ -1176,6 +1605,29 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                     step.id,
                     exc,
                 )
+        if (
+            execution_mode == "physical"
+            and task.name == "place_insert"
+            and step.id == "release_part"
+            and str(args.get("destination_location") or "").strip()
+            == "assembly_board-v1"
+        ):
+            board_lock_error = _physical_place_insert_board_lock_error(
+                agent=agent,
+                args=args,
+                runtime_state=runtime_state,
+            )
+            if board_lock_error:
+                return agent._task_failure(
+                    board_lock_error,
+                    step="place_insert.assembly_board_v1_aruco_generation_lock",
+                    observations={
+                        "destination_location": str(
+                            args.get("destination_location") or ""
+                        ),
+                        "part_name": str(args.get("part_name") or ""),
+                    },
+                )
         result = await _execute_task_step(
             agent=agent,
             task=task,
@@ -1237,6 +1689,31 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                     f"{failure_message} Completed motion steps: {completed_detail}. "
                     "descend was requested but did not complete."
                 )
+            elif task.name == "place_approach" and step.id == "move_above_destination":
+                completed_motions = [
+                    completed_step.id
+                    for completed_step in task.program.steps
+                    if completed_step.id in completed_step_ids
+                    and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                ]
+                completed_detail = ", ".join(completed_motions) or "none"
+                failure_message = (
+                    f"{failure_message} Completed motion steps: {completed_detail}. "
+                    "move_above_destination was requested but did not complete; descend "
+                    "was not commanded."
+                )
+            elif task.name == "place_approach" and step.id == "descend":
+                completed_motions = [
+                    completed_step.id
+                    for completed_step in task.program.steps
+                    if completed_step.id in completed_step_ids
+                    and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                ]
+                completed_detail = ", ".join(completed_motions) or "none"
+                failure_message = (
+                    f"{failure_message} Completed motion steps: {completed_detail}. "
+                    "descend was requested but did not complete."
+                )
             if (
                 task.name == "pick_approach"
                 and step.id in {"detect_parts", "compute_pick_targets", "open_gripper"}
@@ -1246,6 +1723,17 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                     f"{failure_message} Completed motion steps: "
                     "move_to_origin_resource_location. move_above_part and descend were "
                     "not commanded."
+                )
+            if (
+                task.name == "place_approach"
+                and step.id
+                in {"localize_assembly_board_v1", "compute_place_targets"}
+                and "move_to_destination_location" in completed_step_ids
+            ):
+                failure_message = (
+                    f"{failure_message} Completed motion steps: "
+                    "move_to_destination_location. move_above_destination and descend "
+                    "were not commanded."
                 )
             return agent._task_failure(
                 failure_message,
@@ -1310,6 +1798,21 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                         f"{', '.join(completed_motions)}. move_above_part and descend were "
                         "not commanded."
                     )
+                elif (
+                    task.name == "place_approach"
+                    and "move_to_destination_location" in completed_step_ids
+                ):
+                    completed_motions = [
+                        completed_step.id
+                        for completed_step in task.program.steps
+                        if completed_step.id in completed_step_ids
+                        and completed_step.op in {"move_to_named_pose", "move_cartesian"}
+                    ]
+                    override_error = (
+                        f"{override_error} Completed motion steps: "
+                        f"{', '.join(completed_motions)}. move_above_destination and "
+                        "descend were not commanded."
+                    )
                 return agent._task_failure(
                     override_error,
                     step=f"{task.name}.physical_position_preflight",
@@ -1360,6 +1863,7 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
         computed_at=computed_cartesian_at,
         resolved_positions=resolved_cartesian_positions,
         runtime_state=runtime_state,
+        step_outputs=step_outputs,
     )
     _commit_runtime_state(agent, runtime_state)
     response = _resolve_value(

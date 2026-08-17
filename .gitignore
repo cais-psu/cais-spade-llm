@@ -10,6 +10,8 @@ __pycache__/
 
 # Runtime / monitor artifacts
 cais_spade_llm/log/*.log
+cais_spade_llm/log/*.log.*
+cais_spade_llm/log/ros/
 cais_spade_llm/monitor/debug/
 cais_spade_llm/monitor/history/*.jsonl
 cais_spade_llm/monitor/plan/*_plan.json

@@ -57,8 +57,24 @@ class _Agent:
         self._gripper_state = "open"
         self._recovery_pose_ref: str | None = None
         self._task_ctx: dict[str, Any] = {}
+        self._controller = self
         self.primitive_calls: list[tuple[str, dict[str, Any]]] = []
         self.failures: list[dict[str, Any]] = []
+        self.assembly_board_v1_aruco_pose = {
+            "x": 0.5,
+            "y": 0.6,
+            "z": 0.3,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        }
+        self.assembly_board_v1_aruco_generation = 7
+        self.accepted_assembly_board_v1_aruco_generation = 7
+        self.assembly_board_v1_aruco_calibration_id = f"{robot}-calibration"
+        self.accepted_assembly_board_v1_aruco_calibration_id = (
+            self.assembly_board_v1_aruco_calibration_id
+        )
         self.static_capabilities = {
             "workspace_bounds": {
                 "x_min_m": -10.0,
@@ -155,7 +171,24 @@ class _Agent:
                 "part_height": 0.08,
                 "destination_location": str(params.get("destination_location") or ""),
             }
+        if primitive == "localize_assembly_board_v1":
+            return {
+                "success": True,
+                "destination_location": str(params.get("destination_location") or ""),
+                "camera_role": self.agent_name,
+                "generation": self.assembly_board_v1_aruco_generation,
+                "calibration_id": self.assembly_board_v1_aruco_calibration_id,
+                "captured_at": time.time(),
+                "frame_id": "world",
+                "pose": deepcopy(self.assembly_board_v1_aruco_pose),
+            }
         return {"success": True, "message": primitive}
+
+    def _assembly_board_v1_aruco_acceptance(self) -> tuple[dict[str, Any], str]:
+        return {
+            "accepted_generation": self.accepted_assembly_board_v1_aruco_generation,
+            "calibration_id": self.accepted_assembly_board_v1_aruco_calibration_id,
+        }, ""
 
     async def _maybe_inject_failure(self, **_kwargs: Any) -> None:
         return None
@@ -228,6 +261,7 @@ def _relative_recorded_step(
     reference_name: str,
     reference_position_m: dict[str, float],
     child_frame_id: str = "tool0",
+    relative_pose: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     step = _recorded_step(step_name, pose, child_frame_id=child_frame_id)
     step["position_sources"] = {
@@ -236,16 +270,46 @@ def _relative_recorded_step(
         "z": "captured_relative",
     }
     step["relative_position_m"] = deepcopy(relative_position_m)
+    is_place_recording = reference_kind == "destination_target"
     step["relative_reference"] = {
         "kind": reference_kind,
         "frame_id": "world",
         "name": reference_name,
         "position_m": deepcopy(reference_position_m),
         "source": (
-            "live_detection" if reference_kind == "detected_part" else "computed_destination"
+            "live_detection"
+            if reference_kind == "detected_part"
+            else "assembly_board-v1_aruco"
         ),
         "captured_at": time.time(),
     }
+    if is_place_recording:
+        camera_role = "xarm6" if child_frame_id == "link_eef" else "ur5e"
+        step["relative_reference"].update(
+            {
+                "camera_role": camera_role,
+                "generation": 3,
+                "pose": deepcopy(
+                    {
+                        **reference_position_m,
+                        "qx": 0.0,
+                        "qy": 0.0,
+                        "qz": 0.0,
+                        "qw": 1.0,
+                    }
+                ),
+            }
+        )
+        step["relative_pose"] = deepcopy(
+            relative_pose
+            or {
+                **relative_position_m,
+                "qx": pose["qx"],
+                "qy": pose["qy"],
+                "qz": pose["qz"],
+                "qw": pose["qw"],
+            }
+        )
     return step
 
 
@@ -352,6 +416,8 @@ def test_five_function_definitions_preserve_exact_primitive_composition() -> Non
             ("lift", "move_relative"),
         ],
         "place_approach": [
+            ("move_to_destination_location", "move_to_named_pose"),
+            ("localize_assembly_board_v1", "localize_assembly_board_v1"),
             ("compute_place_targets", "compute_place_targets"),
             ("move_above_destination", "move_cartesian"),
             ("descend", "move_cartesian"),
@@ -1360,6 +1426,173 @@ def test_pick_approach_requires_idle_before_physical_staging() -> None:
     assert agent.primitive_calls == []
 
 
+def test_manual_pick_approach_skips_only_resource_state_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._current_state = "picked"
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_approach",
+            robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert agent._current_state == "at_pick"
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian",
+    ]
+
+
+def test_manual_pick_approach_keeps_held_part_guard() -> None:
+    agent = _Agent(execution_mode="physical")
+    agent._current_state = "picked"
+    agent._held_part = "MG"
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_approach",
+            robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result == {
+        "status": "blocked",
+        "content": "Cannot move-to-pick while already holding a part.",
+    }
+    assert agent.primitive_calls == []
+
+
+def test_manual_authority_cannot_be_supplied_as_a_task_keyword() -> None:
+    agent = _Agent(execution_mode="physical")
+    agent._current_state = "picked"
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_approach",
+            manual_function_execution_authority=(
+                robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY
+            ),
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result == {
+        "status": "blocked",
+        "content": "pick_approach requires the robot to be idle.",
+    }
+    assert agent.primitive_calls == []
+
+
+@pytest.mark.parametrize(
+    ("robot", "origin_resource_location"),
+    [("ur5e", "prusa-mk4-2"), ("xarm6", "prusa-mk4-1")],
+)
+def test_manual_pick_grasp_skips_only_resource_state_for_both_robots(
+    robot: str,
+    origin_resource_location: str,
+) -> None:
+    agent = _Agent(execution_mode="physical", robot=robot)
+    agent._current_state = "idle"
+    agent._task_ctx = {
+        "part_name": "MG",
+        "origin_resource_location": origin_resource_location,
+        "model_name": "gear_medium",
+        "gripper_close_position": 0.37,
+        "travel_z": 0.8,
+    }
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "pick_grasp",
+            robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+            origin_resource_location=origin_resource_location,
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert agent._current_state == "picked"
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "grasp_part",
+        "delay",
+        "move_relative",
+    ]
+
+
+def test_manual_place_functions_skip_only_resource_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    _place_recording(tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._current_state = "idle"
+    agent._held_part = "MG"
+    agent._gripper_state = "closed"
+
+    approach_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert approach_result["status"] == "completed"
+    assert agent._current_state == "positioned"
+    assert set(agent._task_ctx["resolved_cartesian_positions"]["descend"]) == {
+        "x",
+        "y",
+        "z",
+        "qx",
+        "qy",
+        "qz",
+        "qw",
+    }
+
+    agent._current_state = "picked"
+    agent.primitive_calls.clear()
+    insert_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert insert_result["status"] == "completed"
+    assert agent._current_state == "placed"
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "delay",
+        "release_part",
+        "delay",
+        "move_relative",
+    ]
+
+
 @pytest.mark.parametrize(
     ("current_state", "task_part", "task_origin", "expected_message"),
     [
@@ -1631,6 +1864,20 @@ def test_place_insert_requires_exact_positioned_resource_state() -> None:
             lambda steps: steps[0]["relative_position_m"].update({"x": float("nan")}),
             "relative_position_m.x is not finite",
         ),
+        (
+            lambda steps: steps[0].pop("relative_pose"),
+            "relative_pose for place_approach.move_above_destination is missing",
+        ),
+        (
+            lambda steps: steps[0]["relative_pose"].update({"x": 0.0}),
+            "relative_pose translation does not reconstruct the captured pose",
+        ),
+        (
+            lambda steps: steps[0]["relative_reference"].update(
+                {"source": "computed_destination"}
+            ),
+            "relative_reference.source must be assembly_board-v1_aruco",
+        ),
     ],
 )
 def test_invalid_physical_recording_fails_closed_before_motion(
@@ -1701,6 +1948,431 @@ def test_simulation_ignores_hardware_recordings(
     assert len(move_calls) == 2
     assert move_calls[0]["x"] == pytest.approx(0.1)
     assert "qx" not in move_calls[0]
+
+
+def test_simulation_place_keeps_static_targets_without_board_localization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    agent = _Agent(execution_mode="simulation")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian",
+    ]
+    assert agent.primitive_calls[0][1]["assembly_board_v1_aruco"] is None
+    assert agent.primitive_calls[1][1] == pytest.approx(
+        {"x": 0.5, "y": 0.6, "z": 1.2, "speed": None}
+    )
+    assert agent.primitive_calls[2][1] == pytest.approx(
+        {"x": 0.5, "y": 0.6, "z": 0.3}
+    )
+
+
+def test_physical_place_stages_then_rotates_full_relative_pose_with_frozen_aruco(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    square_root_half = 2.0**-0.5
+    agent.assembly_board_v1_aruco_pose = {
+        "x": 1.0,
+        "y": 2.0,
+        "z": 0.3,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": square_root_half,
+        "qw": square_root_half,
+    }
+    agent.assembly_board_v1_aruco_generation = 9
+    relative_orientation = {
+        "qx": square_root_half,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": square_root_half,
+    }
+    recording_path = _write_recording(
+        tmp_path,
+        function_name="place_approach",
+        location="assembly_board-v1",
+        part_name="MG",
+        steps=[
+            _relative_recorded_step(
+                "move_above_destination",
+                {"x": 0.6, "y": 0.6, "z": 0.5, **relative_orientation},
+                relative_position_m={"x": 0.1, "y": 0.0, "z": 0.2},
+                relative_pose={
+                    "x": 0.1,
+                    "y": 0.0,
+                    "z": 0.2,
+                    **relative_orientation,
+                },
+                reference_kind="destination_target",
+                reference_name="assembly_board-v1",
+                reference_position_m={"x": 0.5, "y": 0.6, "z": 0.3},
+            ),
+            _relative_recorded_step(
+                "descend",
+                {"x": 0.6, "y": 0.6, "z": 0.3, **relative_orientation},
+                relative_position_m={"x": 0.1, "y": 0.0, "z": 0.0},
+                relative_pose={
+                    "x": 0.1,
+                    "y": 0.0,
+                    "z": 0.0,
+                    **relative_orientation,
+                },
+                reference_kind="destination_target",
+                reference_name="assembly_board-v1",
+                reference_position_m={"x": 0.5, "y": 0.6, "z": 0.3},
+            ),
+        ],
+    )
+    recorded_payload = json.loads(recording_path.read_text(encoding="utf-8"))
+    assert {
+        step["relative_reference"]["generation"]
+        for step in recorded_payload["steps"]
+    } == {3}
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+            speed=0.08,
+        )
+    )
+
+    assert result["status"] == "completed", result
+    assert [primitive for primitive, _params in agent.primitive_calls[:3]] == [
+        "move_to_named_pose",
+        "localize_assembly_board_v1",
+        "compute_place_targets",
+    ]
+    assert agent.primitive_calls[0][1] == {
+        "pose_name": "assembly_board-v1",
+        "speed": 0.08,
+    }
+    localization = agent.primitive_calls[2][1]["assembly_board_v1_aruco"]
+    assert localization["camera_role"] == "ur5e"
+    assert localization["generation"] == 9
+    assert localization["pose"] == pytest.approx(agent.assembly_board_v1_aruco_pose)
+    move_calls = [
+        params for primitive, params in agent.primitive_calls if primitive == "move_cartesian"
+    ]
+    assert move_calls == pytest.approx(
+        [
+            {
+                "x": 1.0,
+                "y": 2.1,
+                "z": 0.5,
+                "qx": 0.5,
+                "qy": 0.5,
+                "qz": 0.5,
+                "qw": 0.5,
+                "speed": 0.08,
+            },
+            {
+                "x": 1.0,
+                "y": 2.1,
+                "z": 0.3,
+                "qx": 0.5,
+                "qy": 0.5,
+                "qz": 0.5,
+                "qw": 0.5,
+            },
+        ]
+    )
+    assert agent._task_ctx["assembly_board_v1_aruco_generation"] == 9
+    assert agent._task_ctx["assembly_board_v1_aruco"] == localization
+
+
+def test_physical_non_board_place_preserves_static_recording_without_aruco(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    quaternion = {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+    above = {"x": 0.4, "y": -0.2, "z": 0.7, **quaternion}
+    target = {"x": 0.4, "y": -0.2, "z": 0.35, **quaternion}
+    _write_recording(
+        tmp_path,
+        function_name="place_approach",
+        location="inspection_station",
+        part_name="MG",
+        steps=[
+            _recorded_step("move_above_destination", above),
+            _recorded_step("descend", target),
+        ],
+    )
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+
+    approach_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="inspection_station",
+            part_name="MG",
+            speed=0.1,
+        )
+    )
+
+    assert approach_result["status"] == "completed", approach_result
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian",
+    ]
+    assert agent.primitive_calls[0][1] == {
+        "pose_name": "inspection_station",
+        "speed": 0.1,
+    }
+    assert agent.primitive_calls[2][1] == pytest.approx({**above, "speed": 0.1})
+    assert agent.primitive_calls[3][1] == pytest.approx(target)
+    assert "assembly_board_v1_aruco" not in agent._task_ctx
+
+    agent.primitive_calls.clear()
+    insert_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            destination_location="inspection_station",
+            part_name="MG",
+        )
+    )
+    assert insert_result["status"] == "completed", insert_result
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "delay",
+        "release_part",
+        "delay",
+        "move_relative",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("invalid_field", "invalid_value", "expected_message"),
+    [
+        ("camera_role", "xarm6", "camera_role does not match the executing robot"),
+        ("captured_at", time.time() - 30.0, "ArUco pose is stale"),
+    ],
+)
+def test_physical_place_rejects_invalid_role_specific_aruco_after_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_field: str,
+    invalid_value: Any,
+    expected_message: str,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    _place_recording(tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    execute_primitive = agent._execute_primitive
+
+    async def invalid_localization(
+        primitive: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = await execute_primitive(primitive, params)
+        if primitive == "localize_assembly_board_v1":
+            result[invalid_field] = invalid_value
+        return result
+
+    agent._execute_primitive = invalid_localization  # type: ignore[method-assign]
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["step"] == "place_approach.localize_assembly_board_v1"
+    assert expected_message in result["content"]
+    assert "Completed motion steps: move_to_destination_location" in result["content"]
+    assert "move_above_destination and descend were not commanded" in result["content"]
+    assert [primitive for primitive, _params in agent.primitive_calls] == [
+        "move_to_named_pose",
+        "localize_assembly_board_v1",
+    ]
+
+
+def test_physical_place_insert_rejects_changed_board_generation_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    _place_recording(tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    approach_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+    assert approach_result["status"] == "completed"
+    agent._task_ctx["assembly_board_v1_aruco_generation"] = 8
+    agent.primitive_calls.clear()
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["step"] == "place_insert.assembly_board_v1_aruco_generation_lock"
+    assert "generation lock changed" in result["content"]
+    assert agent.primitive_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "expected_message"),
+    [
+        (
+            "accepted_assembly_board_v1_aruco_generation",
+            8,
+            "accepted generation changed after place_approach",
+        ),
+        (
+            "accepted_assembly_board_v1_aruco_calibration_id",
+            "replacement-calibration",
+            "calibration identity changed after place_approach",
+        ),
+    ],
+)
+def test_physical_place_insert_rejects_reaccepted_or_recalibrated_board(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: object,
+    expected_message: str,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    _place_recording(tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    approach_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+    assert approach_result["status"] == "completed"
+    setattr(agent, field, replacement)
+    agent.primitive_calls.clear()
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["step"] == "place_insert.assembly_board_v1_aruco_generation_lock"
+    assert expected_message in result["content"]
+    assert agent.primitive_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "expected_message"),
+    [
+        (
+            "accepted_assembly_board_v1_aruco_generation",
+            8,
+            "accepted generation changed after place_approach",
+        ),
+        (
+            "accepted_assembly_board_v1_aruco_calibration_id",
+            "replacement-calibration",
+            "calibration identity changed after place_approach",
+        ),
+    ],
+)
+def test_physical_place_insert_rechecks_board_lock_after_release_delay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: object,
+    expected_message: str,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    _place_recording(tmp_path)
+    agent = _Agent(execution_mode="physical")
+    agent._held_part = "MG"
+    agent._current_state = "picked"
+    approach_result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+    assert approach_result["status"] == "completed"
+    execute_primitive = agent._execute_primitive
+
+    async def change_board_lock_after_delay(
+        primitive: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = await execute_primitive(primitive, params)
+        if primitive == "delay":
+            setattr(agent, field, replacement)
+        return result
+
+    agent._execute_primitive = change_board_lock_after_delay  # type: ignore[method-assign]
+    agent.primitive_calls.clear()
+
+    result = asyncio.run(
+        execute_robot_task(
+            agent,
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["step"] == "place_insert.assembly_board_v1_aruco_generation_lock"
+    assert expected_message in result["content"]
+    assert [primitive for primitive, _params in agent.primitive_calls] == ["delay"]
 
 
 def test_xarm6_replays_relative_place_recording_with_link_eef_evidence(

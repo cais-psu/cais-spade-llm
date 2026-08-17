@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Any
+
+_CAIS_ROS_LOG_DIR = Path(__file__).resolve().parents[1] / "log" / "ros"
 
 ROS2_ENV = (
     "unset VIRTUAL_ENV PYTHONHOME; "
     "export PATH=/usr/bin:/usr/local/bin:$PATH; "
+    f"mkdir -p {shlex.quote(str(_CAIS_ROS_LOG_DIR))}; "
+    f"export ROS_LOG_DIR={shlex.quote(str(_CAIS_ROS_LOG_DIR))}; "
     "source /opt/ros/humble/setup.bash && "
     "source $HOME/ros2_ws/install/setup.bash && "
 )

@@ -56,6 +56,7 @@ from cais_spade_llm.ui.perception_manager import (
     PerceptionManager,
 )
 from cais_spade_llm.ui.process_registry import UIProcessRegistry
+from cais_spade_llm.utils.runtime_cleanup import prune_hardware_run_logs
 
 log = logging.getLogger("ui.bridge")
 
@@ -127,6 +128,7 @@ _XARM6_HARDWARE_JOINTS = (
 )
 _ROS_ACTION_SERVICE_SNAPSHOT_TTL_SEC = 15.0
 _ROS_ACTION_SERVICE_MIN_REFRESH_INTERVAL_SEC = 2.5
+_UR5E_RTDE_HARDWARE_STACK_STATUS_STALE_FAILURE_SEC = 6.0
 _UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = max(
     1.0,
     ros2_processes.hardware_arms_float(
@@ -225,6 +227,38 @@ _UR5E_MAX_JOINT_SPEED_DEG_S = math.degrees(
             1.125,
         ),
     )
+)
+_UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M = max(
+    0.0001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "rtde", "cartesian_position_tolerance_m"),
+        0.002,
+    ),
+)
+_UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD = max(
+    0.001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "rtde", "cartesian_orientation_tolerance_rad"),
+        math.radians(2.0),
+    ),
+)
+_XARM6_MANUAL_DEPENDENT_POSITION_TOLERANCE_M = max(
+    0.0001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("xarm6", "cartesian", "position_tolerance_m"),
+        0.003,
+    ),
+)
+_XARM6_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD = max(
+    0.001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("xarm6", "cartesian", "orientation_tolerance_rad"),
+        math.radians(3.0),
+    ),
 )
 _UR5E_RTDE_TRAJECTORY_STATUS = Path(
     ros2_processes.hardware_arms_str(
@@ -5105,8 +5139,20 @@ class SystemBridge:
         if paths is None:
             paths = {}
             self._ros2_process_log_paths = paths
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
         path = _LOG_DIR / f"{process_name}__run_{time.time_ns()}.log"
+        path.touch(exist_ok=True)
         paths[process_name] = path
+        try:
+            report = prune_hardware_run_logs(_LOG_DIR, apply=True)
+        except (OSError, ValueError) as exc:
+            log.warning("Hardware Stack run-log pruning failed: %s", exc)
+        else:
+            if report["errors"]:
+                log.warning(
+                    "Hardware Stack run-log pruning completed with errors: %s",
+                    "; ".join(str(error) for error in report["errors"]),
+                )
         return path
 
     def _next_hardware_stack_generation(self) -> int:
@@ -6958,6 +7004,74 @@ class SystemBridge:
         """Persist the surveyed stationary ChArUco board pose."""
         return self.perception_manager.save_stationary_board_pose(pose)
 
+    def perception_save_assembly_board_v1_marker_length(
+        self,
+        marker_length_m: float,
+    ) -> dict[str, Any]:
+        """Persist the common physical assembly_board-v1 ArUco marker length."""
+        return self.perception_manager.save_assembly_board_v1_marker_length(marker_length_m)
+
+    def _perception_change_with_robot_function_execution_lock(
+        self,
+        operation_name: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        """Serialize a perception identity change with physical task execution."""
+        execution_lock = self._ur5e_robot_function_execution_lock
+        if not execution_lock.acquire(blocking=False):
+            active = str(
+                self._ur5e_robot_function_execution_active
+                or "Physical robot function execution"
+            )
+            raise RuntimeError(
+                f"{operation_name} is unavailable while physical robot function execution "
+                f"is active: {active}."
+            )
+        try:
+            return operation()
+        finally:
+            execution_lock.release()
+
+    def perception_locate_and_accept_assembly_board_v1(
+        self,
+        role: str,
+        *,
+        only_if_unaccepted: bool = False,
+    ) -> dict[str, Any]:
+        """Accept one role's fresh stable board pose without requesting robot motion."""
+
+        def _accept() -> dict[str, Any]:
+            if only_if_unaccepted:
+                status = self.perception_manager.assembly_board_v1_aruco_status(role)
+                try:
+                    accepted_generation = int(
+                        status.get("accepted_generation", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    accepted_generation = 0
+                if bool(status.get("accepted")) or accepted_generation > 0:
+                    return {
+                        **status,
+                        "success": True,
+                        "auto_accepted": False,
+                    }
+            result = self.perception_manager.locate_and_accept_assembly_board_v1(role)
+            if not only_if_unaccepted:
+                return result
+            return {
+                **result,
+                "auto_accepted": True,
+            }
+
+        return self._perception_change_with_robot_function_execution_lock(
+            f"Locate & Accept Board ({role})",
+            _accept,
+        )
+
+    def perception_assembly_board_v1_aruco_status(self, role: str) -> dict[str, Any]:
+        """Read one role's live and accepted assembly_board-v1 ArUco status."""
+        return self.perception_manager.assembly_board_v1_aruco_status(role)
+
     def perception_start_camera(self, role: str) -> str | None:
         """Start one RealSense driver and its preview writer."""
         return self.perception_manager.start_camera(role)
@@ -7016,11 +7130,17 @@ class SystemBridge:
 
     def perception_activate_calibration(self, role: str) -> Path:
         """Activate an accepted role-specific candidate calibration."""
-        return self.perception_manager.activate_calibration(role)
+        return self._perception_change_with_robot_function_execution_lock(
+            f"Activate calibration ({role})",
+            lambda: self.perception_manager.activate_calibration(role),
+        )
 
     def perception_rollback_calibration(self, role: str) -> Path:
         """Restore the previous accepted role-specific calibration."""
-        return self.perception_manager.rollback_calibration(role)
+        return self._perception_change_with_robot_function_execution_lock(
+            f"Rollback calibration ({role})",
+            lambda: self.perception_manager.rollback_calibration(role),
+        )
 
     def perception_start_table_plane_calibration(self) -> str | None:
         """Start the authoritative 10-frame UR5e table-plane calibration."""
@@ -7728,6 +7848,36 @@ class SystemBridge:
             return "xArm6 hardware snapshot has invalid six-joint positions"
         return None
 
+    def _wait_for_ur5e_hardware_snapshot_ready(
+        self,
+        *,
+        driver_process_name: str,
+        state_publisher_process_name: str,
+        ros_domain_id: int,
+        timeout_sec: float = 20.0,
+    ) -> str | None:
+        """Wait for UR5e joint feedback and the complete world-to-tool0 TF tree."""
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        last_error = "UR5e hardware snapshot has not completed"
+        while time.monotonic() < deadline:
+            for process_name in (driver_process_name, state_publisher_process_name):
+                if self.ros2_proc_status(process_name) != "running":
+                    return (
+                        f"{process_name} exited before UR5e hardware feedback and "
+                        "TF world -> tool0 became ready"
+                    )
+            snapshot = self._snapshot_robot_waypoint(
+                "ur5e",
+                source="hardware",
+                hardware_domain_id=int(ros_domain_id),
+                include_world_tool_pose=True,
+            )
+            last_error = str(snapshot.get("error") or "").strip()
+            if not last_error:
+                return None
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        return last_error
+
     def _wait_for_xarm6_relayed_tf_ready(
         self,
         *,
@@ -8187,7 +8337,11 @@ class SystemBridge:
                     f"UR5e RTDE status ownership changed: status process_id={status_pid}, "
                     f"tracked pid={tracked_process.pid}. Repair Hardware Stack."
                 )
-            elif updated_at <= 0.0 or time.time() - updated_at > 2.5:
+            elif (
+                updated_at <= 0.0
+                or time.time() - updated_at
+                > _UR5E_RTDE_HARDWARE_STACK_STATUS_STALE_FAILURE_SEC
+            ):
                 rtde_failure = "UR5e RTDE status stopped advancing. Repair Hardware Stack."
             elif rtde_status.get("rtde_reset_required") is True:
                 rtde_failure = str(
@@ -11537,6 +11691,7 @@ class SystemBridge:
                     "relative_position_m": deepcopy(
                         step.get("relative_position_m") or {}
                     ),
+                    "relative_pose": deepcopy(step.get("relative_pose") or {}),
                     "relative_reference": deepcopy(
                         step.get("relative_reference") or {}
                     ),
@@ -11615,6 +11770,7 @@ class SystemBridge:
                     "relative_position_m": deepcopy(
                         dict(step).get("relative_position_m") or {}
                     ),
+                    "relative_pose": deepcopy(dict(step).get("relative_pose") or {}),
                     "relative_reference": deepcopy(
                         dict(step).get("relative_reference") or {}
                     ),
@@ -13073,6 +13229,148 @@ class SystemBridge:
             ),
         }
 
+    def _manual_dependent_function_pose_error(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        resource_agent: Any,
+        task_context: dict[str, Any],
+        motion_readiness: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Require manual close or release to remain at the preceding descend pose."""
+        preceding_function = (
+            "pick_approach" if function_name == "pick_grasp" else "place_approach"
+        )
+        expected_tool_frame = "link_eef" if robot == "xarm6" else "tool0"
+        expected = dict(
+            dict(task_context.get("resolved_cartesian_positions") or {}).get("descend")
+            or {}
+        )
+        numeric_fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        try:
+            expected_values = {
+                field: float(expected[field]) for field in numeric_fields
+            }
+        except (KeyError, TypeError, ValueError):
+            return {}, (
+                f"{function_name} requires {preceding_function}.descend to establish a complete "
+                f"world -> {expected_tool_frame} pose. Run {preceding_function} before "
+                f"{function_name}."
+            )
+        if not all(math.isfinite(value) for value in expected_values.values()):
+            return {}, (
+                f"{function_name} requires a finite {preceding_function}.descend "
+                f"world -> {expected_tool_frame} pose. Run {preceding_function} again."
+            )
+
+        current_readiness = self._robot_function_execution_pose_readiness(
+            target,
+            robot,
+            resource_agent,
+        )
+        current_details = {
+            key: value for key, value in current_readiness.items() if key != "success"
+        }
+        if not bool(current_readiness.get("success")):
+            return current_details, str(
+                current_readiness.get("blocked_reason")
+                or f"TF world -> {expected_tool_frame} is unavailable."
+            )
+        current = dict(
+            dict(current_readiness.get("waypoint") or {}).get("pose") or {}
+        )
+        if (
+            str(current.get("frame_id") or "").strip() != "world"
+            or str(current.get("child_frame_id") or "").strip() != expected_tool_frame
+        ):
+            return current_details, (
+                f"{function_name} current pose must be world -> {expected_tool_frame}."
+            )
+        try:
+            current_values = {
+                field: float(current[field]) for field in numeric_fields
+            }
+        except (KeyError, TypeError, ValueError):
+            return current_details, (
+                f"{function_name} current world -> {expected_tool_frame} pose is incomplete."
+            )
+        if not all(math.isfinite(value) for value in current_values.values()):
+            return current_details, (
+                f"{function_name} current world -> {expected_tool_frame} pose is invalid."
+            )
+
+        expected_quaternion = tuple(
+            expected_values[field] for field in ("qx", "qy", "qz", "qw")
+        )
+        current_quaternion = tuple(
+            current_values[field] for field in ("qx", "qy", "qz", "qw")
+        )
+        expected_norm = math.sqrt(sum(value * value for value in expected_quaternion))
+        current_norm = math.sqrt(sum(value * value for value in current_quaternion))
+        if expected_norm <= 1e-12 or current_norm <= 1e-12:
+            return current_details, (
+                f"{function_name} requires valid {preceding_function}.descend and current "
+                f"world -> {expected_tool_frame} orientations."
+            )
+        quaternion_dot = abs(
+            sum(
+                (expected_value / expected_norm) * (current_value / current_norm)
+                for expected_value, current_value in zip(
+                    expected_quaternion,
+                    current_quaternion,
+                    strict=True,
+                )
+            )
+        )
+        rotation_error_rad = 2.0 * math.acos(min(1.0, max(0.0, quaternion_dot)))
+        translation_error_m = math.sqrt(
+            sum(
+                (current_values[field] - expected_values[field]) ** 2
+                for field in ("x", "y", "z")
+            )
+        )
+        if robot == "ur5e":
+            position_tolerance_m = float(
+                motion_readiness.get("cartesian_position_tolerance_m")
+                or _UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
+            )
+            orientation_tolerance_rad = float(
+                motion_readiness.get("cartesian_orientation_tolerance_rad")
+                or _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
+            )
+        else:
+            controller = getattr(resource_agent, "_controller", None)
+            position_tolerance_m = float(
+                getattr(controller, "_xarm6_cartesian_position_tolerance_m", 0.0)
+                or _XARM6_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
+            )
+            orientation_tolerance_rad = float(
+                getattr(controller, "_xarm6_cartesian_orientation_tolerance_rad", 0.0)
+                or _XARM6_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
+            )
+        pose_readiness = {
+            **current_details,
+            "manual_preceding_function": preceding_function,
+            "manual_pose_translation_error_m": translation_error_m,
+            "manual_pose_rotation_error_rad": rotation_error_rad,
+            "manual_pose_position_tolerance_m": position_tolerance_m,
+            "manual_pose_orientation_tolerance_rad": orientation_tolerance_rad,
+        }
+        if (
+            translation_error_m > position_tolerance_m
+            or rotation_error_rad > orientation_tolerance_rad
+        ):
+            return pose_readiness, (
+                f"{function_name} requires the current world -> {expected_tool_frame} pose to "
+                f"remain at {preceding_function}.descend; position error "
+                f"{1000.0 * translation_error_m:.2f} mm (limit "
+                f"{1000.0 * position_tolerance_m:.2f} mm), rotation error "
+                f"{math.degrees(rotation_error_rad):.2f} deg (limit "
+                f"{math.degrees(orientation_tolerance_rad):.2f} deg)."
+            )
+        return pose_readiness, ""
+
     def _digital_twin_ur5e_motion_readiness(
         self,
         target: str,
@@ -13113,6 +13411,25 @@ class SystemBridge:
                         f"'{_UR5E_RTDE_TRAJECTORY_ACTION}'."
                     )
         rtde_status = self._ur5e_rtde_trajectory_status()
+        for tolerance_name, fallback in (
+            (
+                "cartesian_position_tolerance_m",
+                _UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M,
+            ),
+            (
+                "cartesian_orientation_tolerance_rad",
+                _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD,
+            ),
+        ):
+            try:
+                tolerance = float(rtde_status.get(tolerance_name, fallback))
+            except (TypeError, ValueError):
+                tolerance = fallback
+            readiness[tolerance_name] = (
+                tolerance
+                if math.isfinite(tolerance) and tolerance > 0.0
+                else fallback
+            )
         try:
             rtde_status_domain_id = int(rtde_status["ros_domain_id"])
         except (KeyError, TypeError, ValueError):
@@ -13460,6 +13777,87 @@ class SystemBridge:
         )
         return (str(path) if path is not None else ""), error
 
+    def _digital_twin_assembly_board_v1_accepted_status(
+        self,
+        robot: str,
+        *,
+        allow_post_staging_acceptance: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        """Validate one arm's accepted assembly_board-v1 baseline without motion."""
+        robot_key = str(robot or "").strip().lower()
+        try:
+            status = dict(
+                self.perception_manager.assembly_board_v1_aruco_status(robot_key)
+                or {}
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return {}, (
+                f"assembly_board-v1 ArUco status is unavailable for {robot_key}: {exc}"
+            )
+        if "accepted_baseline_ready" in status:
+            if not bool(status.get("accepted_baseline_ready")):
+                if allow_post_staging_acceptance and bool(
+                    status.get("post_staging_acceptance_allowed")
+                ):
+                    return status, ""
+                return status, str(
+                    status.get("accepted_baseline_error")
+                    or f"Locate & Accept Board for {robot_key} before place_approach."
+                )
+            return status, ""
+        if not bool(status.get("accepted")):
+            return status, f"Locate & Accept Board for {robot_key} before place_approach."
+        if bool(status.get("calibration_changed")):
+            return status, (
+                f"The {robot_key} camera calibration changed after board acceptance; "
+                "use Locate & Accept Board again."
+            )
+        if bool(status.get("movement_evidence_valid") and status.get("movement_blocked")):
+            return status, (
+                "assembly_board-v1 moved more than 10 mm or 2 deg from the accepted "
+                f"{robot_key} pose; use Locate & Accept Board again."
+            )
+        return status, ""
+
+    @staticmethod
+    def _digital_twin_place_insert_board_lock_error(
+        robot: str,
+        task_context: dict[str, Any],
+        board_status: dict[str, Any],
+    ) -> str:
+        """Require place_insert to retain the board generation frozen by place_approach."""
+        frozen = dict(task_context.get("assembly_board_v1_aruco") or {})
+        robot_key = str(robot or "").strip().lower()
+        if not frozen:
+            return "place_insert requires the assembly_board-v1 pose frozen by place_approach."
+        if str(frozen.get("destination_location") or "") != "assembly_board-v1":
+            return "place_insert frozen assembly_board-v1 destination is invalid."
+        if str(frozen.get("camera_role") or "").strip().lower() != robot_key:
+            return "place_insert frozen assembly_board-v1 camera role does not match the robot."
+        try:
+            frozen_generation = int(frozen["generation"])
+            stored_generation = int(task_context["assembly_board_v1_aruco_generation"])
+            accepted_generation = int(board_status.get("accepted_generation", 0) or 0)
+        except (KeyError, TypeError, ValueError):
+            return "place_insert frozen assembly_board-v1 generation is invalid."
+        if frozen_generation < 1 or stored_generation != frozen_generation:
+            return "place_insert assembly_board-v1 generation lock changed."
+        if accepted_generation != frozen_generation:
+            return (
+                "place_insert assembly_board-v1 accepted generation changed after "
+                "place_approach."
+            )
+        frozen_calibration_id = str(frozen.get("calibration_id") or "").strip()
+        accepted_calibration_id = str(
+            board_status.get("accepted_calibration_id") or ""
+        ).strip()
+        if not frozen_calibration_id or accepted_calibration_id != frozen_calibration_id:
+            return (
+                "place_insert assembly_board-v1 calibration identity changed after "
+                "place_approach."
+            )
+        return ""
+
     def _digital_twin_robot_function_execution_preflight(  # noqa: C901, PLR0911, PLR0912, PLR0915 - explicit motion gates.
         self,
         target: str,
@@ -13545,8 +13943,18 @@ class SystemBridge:
             getattr(resource_agent, function_name, None)
         ):
             return None, {}, {}, f"The {robot} executable {function_name} is not callable."
+        if not callable(
+            getattr(
+                resource_agent,
+                "_execute_registered_robot_task_for_manual_function_execution",
+                None,
+            )
+        ):
+            return None, {}, {}, (
+                f"The physical {robot} Function Execution runtime does not support "
+                "manual commissioning."
+            )
 
-        current_state = str(getattr(resource_agent, "_current_state", "") or "").strip()
         held_part = getattr(resource_agent, "_held_part", None)
         gripper_state = str(getattr(resource_agent, "_gripper_state", "") or "")
         task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
@@ -13554,20 +13962,6 @@ class SystemBridge:
         readiness: dict[str, Any] = {}
 
         if function_name == "pick_approach":
-            if robot == "ur5e" and current_state == "at_pick":
-                if held_part not in (None, ""):
-                    return None, {}, {}, "pick_approach requires an empty ur5e gripper."
-                if gripper_state != "open":
-                    return None, {}, {}, (
-                        "pick_approach can reset ur5e state 'at_pick' to 'idle' only when "
-                        "gripper_state is 'open'."
-                    )
-                readiness["pick_approach_reset_to_idle"] = True
-            elif current_state != "idle":
-                return None, {}, {}, (
-                    f"pick_approach requires {robot} state 'idle'; current state is "
-                    f"'{current_state or '<empty>'}'."
-                )
             if held_part not in (None, ""):
                 return None, {}, {}, f"pick_approach requires an empty {robot} gripper."
             named_error = (
@@ -13596,11 +13990,6 @@ class SystemBridge:
                 "part_name": part_name,
             }
         elif function_name == "pick_grasp":
-            if current_state != "at_pick":
-                return None, {}, {}, (
-                    f"pick_grasp requires {robot} state 'at_pick'; current state is "
-                    f"'{current_state or '<empty>'}'."
-                )
             if held_part not in (None, ""):
                 return None, {}, {}, f"pick_grasp requires an empty {robot} gripper."
             if str(task_context.get("part_name") or "") != part_name:
@@ -13629,11 +14018,6 @@ class SystemBridge:
                 "part_name": part_name,
             }
         elif function_name == "place_approach":
-            if current_state != "picked":
-                return None, {}, {}, (
-                    f"place_approach requires {robot} state 'picked'; current state is "
-                    f"'{current_state or '<empty>'}'."
-                )
             if str(held_part or "") != part_name:
                 return None, {}, {}, (
                     f"place_approach part_name does not match the part held by {robot}."
@@ -13642,6 +14026,26 @@ class SystemBridge:
                 return None, {}, {}, (
                     f"place_approach requires {robot} gripper_state 'closed'."
                 )
+            named_error = (
+                self._ur5e_named_position_error(resource_agent, destination_location)
+                if robot == "ur5e"
+                else self._xarm6_named_position_error(
+                    resource_agent,
+                    destination_location,
+                )
+            )
+            if named_error:
+                return None, {}, {}, named_error
+            if destination_location == "assembly_board-v1":
+                board_status, board_error = (
+                    self._digital_twin_assembly_board_v1_accepted_status(
+                        robot,
+                        allow_post_staging_acceptance=True,
+                    )
+                )
+                readiness["assembly_board_v1_aruco"] = deepcopy(board_status)
+                if board_error:
+                    return None, {}, readiness, board_error
             recording_path, recording_error = (
                 self._digital_twin_place_approach_recording_error(
                     resource_agent,
@@ -13657,11 +14061,6 @@ class SystemBridge:
                 "part_name": part_name,
             }
         elif function_name == "place_insert":
-            if current_state != "positioned":
-                return None, {}, {}, (
-                    f"place_insert requires {robot} state 'positioned'; current state is "
-                    f"'{current_state or '<empty>'}'."
-                )
             if str(held_part or "") != part_name:
                 return None, {}, {}, (
                     f"place_insert part_name does not match the part held by {robot}."
@@ -13674,6 +14073,20 @@ class SystemBridge:
                 return None, {}, {}, (
                     "place_insert destination_location does not match the active place context."
                 )
+            if destination_location == "assembly_board-v1":
+                board_status, board_error = (
+                    self._digital_twin_assembly_board_v1_accepted_status(robot)
+                )
+                readiness["assembly_board_v1_aruco"] = deepcopy(board_status)
+                if board_error:
+                    return None, {}, readiness, board_error
+                board_lock_error = self._digital_twin_place_insert_board_lock_error(
+                    robot,
+                    task_context,
+                    board_status,
+                )
+                if board_lock_error:
+                    return None, {}, readiness, board_lock_error
             lift_error = self._ur5e_return_height_error(resource_agent, function_name)
             if lift_error:
                 return None, {}, {}, lift_error
@@ -13707,6 +14120,21 @@ class SystemBridge:
         readiness.update(motion_readiness)
         if motion_error:
             return None, {}, readiness, motion_error
+
+        if function_name in {"pick_grasp", "place_insert"}:
+            dependent_pose_readiness, dependent_pose_error = (
+                self._manual_dependent_function_pose_error(
+                    target,
+                    robot,
+                    function_name,
+                    resource_agent,
+                    task_context,
+                    motion_readiness,
+                )
+            )
+            readiness.update(dependent_pose_readiness)
+            if dependent_pose_error:
+                return None, {}, readiness, dependent_pose_error
 
         if function_name in {"pick_approach", "pick_grasp", "place_insert"}:
             if robot == "ur5e":
@@ -13987,11 +14415,6 @@ class SystemBridge:
                 "pick_grasp is ready to close the stock RG2 on the STL-grounded smooth "
                 "raised hub and lift without another descent."
             )
-        if ready and bool(readiness.get("pick_approach_reset_to_idle")):
-            ready_message = (
-                f"{ready_message} After confirmation, the stale ur5e state 'at_pick' "
-                "will reset to 'idle' without robot motion before pick_approach starts."
-            )
         return {
             "success": ready,
             "ready": ready,
@@ -14042,6 +14465,9 @@ class SystemBridge:
             "staging": f"Staging {robot} at origin_resource_location.",
             "settling": f"Waiting for {robot} to become stationary.",
             "detection": "Running fresh /detect_all inference.",
+            "board_localization": (
+                "Collecting ten fresh assembly_board-v1 ArUco observations after staging."
+            ),
             "executing": f"Executing {active_function}.",
             "failed": "Fresh /detect_all did not complete.",
         }
@@ -14184,41 +14610,6 @@ class SystemBridge:
                     "message": error or f"{robot} robot function execution is not ready.",
                 }
 
-            state_reset_message = ""
-            if bool(readiness.get("pick_approach_reset_to_idle")):
-                current_state = str(
-                    getattr(resource_agent, "_current_state", "") or ""
-                ).strip()
-                held_part = getattr(resource_agent, "_held_part", None)
-                gripper_state = str(
-                    getattr(resource_agent, "_gripper_state", "") or ""
-                ).strip()
-                if current_state == "at_pick":
-                    if held_part not in (None, "") or gripper_state != "open":
-                        return {
-                            **base,
-                            "message": (
-                                "ur5e state changed after readiness; pick_approach did not "
-                                "reset or start. The gripper must be empty and open."
-                            ),
-                        }
-                    resource_agent._current_state = "idle"
-                    resource_agent._task_ctx = {}
-                    resource_agent._recovery_pose_ref = None
-                    state_reset_message = (
-                        "Reset ur5e state from 'at_pick' to 'idle' without robot motion "
-                        "before pick_approach."
-                    )
-                    log.info(state_reset_message)
-                elif current_state != "idle":
-                    return {
-                        **base,
-                        "message": (
-                            "ur5e state changed after readiness; pick_approach did not "
-                            f"reset or start (current state is '{current_state or '<empty>'}')."
-                        ),
-                    }
-
             self._ur5e_robot_function_execution_stage = "dispatch"
             callback_was_set = hasattr(resource_agent, "_robot_task_progress_callback")
             previous_progress_callback = getattr(
@@ -14239,10 +14630,15 @@ class SystemBridge:
             def _task_progress(task_name: str, step_id: str) -> None:
                 if task_name != function_name:
                     return
-                if step_id == "move_to_origin_resource_location":
+                if step_id in {
+                    "move_to_origin_resource_location",
+                    "move_to_destination_location",
+                }:
                     self._ur5e_robot_function_execution_stage = "staging"
                 elif step_id == "detect_parts":
                     self._ur5e_robot_function_execution_stage = "settling"
+                elif step_id == "localize_assembly_board_v1":
+                    self._ur5e_robot_function_execution_stage = "board_localization"
                 else:
                     self._ur5e_robot_function_execution_stage = "executing"
 
@@ -14268,6 +14664,31 @@ class SystemBridge:
                         computed_at=float(computed_at),
                     )
 
+            def _post_staging_accept_assembly_board_v1(
+                minimum_sample_started_at: float,
+            ) -> dict[str, Any]:
+                status = dict(
+                    self.perception_manager.assembly_board_v1_aruco_status(robot)
+                    or {}
+                )
+                if bool(status.get("calibration_changed")):
+                    raise RuntimeError(
+                        f"The active {robot} calibration identity changed; "
+                        "automatic post-staging board acceptance is blocked."
+                    )
+                if not bool(status.get("post_staging_acceptance_allowed")):
+                    raise RuntimeError(
+                        str(
+                            status.get("accepted_baseline_error")
+                            or "automatic post-staging assembly_board-v1 acceptance "
+                            "is unavailable"
+                        )
+                    )
+                return self.perception_manager.locate_and_accept_assembly_board_v1(
+                    robot,
+                    minimum_sample_started_at=minimum_sample_started_at,
+                )
+
             def _restore_runtime_callbacks() -> None:
                 if callback_was_set:
                     resource_agent._robot_task_progress_callback = previous_progress_callback
@@ -14290,9 +14711,51 @@ class SystemBridge:
             resource_agent._robot_task_computed_pose_callback = (
                 _computed_pose_callback
             )
-            generated_function = getattr(resource_agent, function_name)
+            manual_function = getattr(
+                resource_agent,
+                "_execute_registered_robot_task_for_manual_function_execution",
+                None,
+            )
+            if not callable(manual_function):
+                _restore_runtime_callbacks()
+                return {
+                    **base,
+                    **readiness,
+                    "message": (
+                        f"The physical {robot} Function Execution runtime does not support "
+                        "manual commissioning."
+                    ),
+                }
+
+            def _manual_pre_execute() -> str:
+                if function_name not in {"pick_grasp", "place_insert"}:
+                    return ""
+                _pose_readiness, pose_error = (
+                    self._manual_dependent_function_pose_error(
+                        target,
+                        robot,
+                        function_name,
+                        resource_agent,
+                        dict(getattr(resource_agent, "_task_ctx", {}) or {}),
+                        readiness,
+                    )
+                )
+                return pose_error
+
             runtime_task = asyncio.create_task(
-                self._run_on_agent_runtime(generated_function(**call_kwargs))
+                self._run_on_agent_runtime(
+                    manual_function(
+                        function_name,
+                        _manual_pre_execute,
+                        (
+                            _post_staging_accept_assembly_board_v1
+                            if function_name == "place_approach"
+                            and destination_location == "assembly_board-v1"
+                            else None
+                        ),
+                        **call_kwargs,
+                    )
+                )
             )
             try:
                 result = await asyncio.shield(runtime_task)
@@ -14306,11 +14769,15 @@ class SystemBridge:
                             resource_agent,
                             completed_result,
                         )
-                        record_result(
-                            resource_agent,
-                            function_name,
-                            completed_result,
-                        )
+                        if not bool(
+                            isinstance(completed_result, dict)
+                            and completed_result.get("manual_pre_execute_blocked")
+                        ):
+                            record_result(
+                                resource_agent,
+                                function_name,
+                                completed_result,
+                            )
                     except asyncio.CancelledError:
                         record_result(
                             resource_agent,
@@ -14349,10 +14816,10 @@ class SystemBridge:
                 return {
                     **base,
                     "message": (
-                        f"{state_reset_message} {function_name} execution failed: {exc}. "
+                        f"{function_name} execution failed: {exc}. "
                         "Physical state may have "
                         "changed; inspect the robot and recover before retrying."
-                    ).strip(),
+                    ),
                 }
 
             _restore_runtime_callbacks()
@@ -14365,11 +14832,12 @@ class SystemBridge:
                 )
                 return {**base, "message": f"{function_name} returned an invalid result."}
             _cache_completed_computed_poses(resource_agent, result)
-            record_result(
-                resource_agent,
-                function_name,
-                result,
-            )
+            if not bool(result.get("manual_pre_execute_blocked")):
+                record_result(
+                    resource_agent,
+                    function_name,
+                    result,
+                )
             status = str(result.get("status") or "").strip().lower()
             message = str(result.get("content") or result.get("message") or "").strip()
             success = status == "completed"
@@ -14394,8 +14862,6 @@ class SystemBridge:
                     if success
                     else f"{function_name} did not complete (status={status or 'unknown'})."
                 )
-            if state_reset_message:
-                message = f"{state_reset_message} {message}"
             return {
                 **base,
                 "success": success,
@@ -14923,7 +15389,7 @@ class SystemBridge:
             "blocked_reason": "",
         }
 
-    def _robot_function_relative_reference(  # noqa: C901 - explicit read-only reference gates.
+    def _robot_function_relative_reference(  # noqa: C901, PLR0912, PLR0915
         self,
         *,
         resource_agent: Any,
@@ -14931,6 +15397,7 @@ class SystemBridge:
         name: str,
         step_name: str,
         part_name: str,
+        robot: str = "",
     ) -> dict[str, Any]:
         """Resolve the current world reference used by one relative capture."""
         controller = getattr(resource_agent, "_controller", None)
@@ -14969,7 +15436,7 @@ class SystemBridge:
                     if len(matching_rows) > 1:
                         message = (
                             f"requested part {part_name!r} matched {len(matching_rows)} "
-                            "detections; Preview Resolved Pose is ambiguous"
+                            "detections; the Cartesian reference is ambiguous"
                         )
                     else:
                         detail = str(getattr(controller, "_last_failure_message", "") or "")
@@ -14977,13 +15444,13 @@ class SystemBridge:
                             message = detail
                         elif detected:
                             message = (
-                                f"Preview Resolved Pose needs one fresh {part_name!r} detection; "
+                                f"Resolving this pose needs one fresh {part_name!r} detection; "
                                 f"the latest accepted detections were {detected}. No position "
                                 "was buffered and the existing saved position is unchanged."
                             )
                         else:
                             message = (
-                                f"Preview Resolved Pose needs one fresh {part_name!r} detection, "
+                                f"Resolving this pose needs one fresh {part_name!r} detection, "
                                 "but the latest validated camera frame contained no accepted "
                                 "part detections. No position was buffered and the existing "
                                 "saved position is unchanged."
@@ -15039,6 +15506,164 @@ class SystemBridge:
                     "computed": deepcopy(computed),
                 }
             if function_name == "place_approach":
+                destination_location = str(name).strip()
+                robot_key = str(
+                    robot
+                    or getattr(resource_agent, "agent_name", "")
+                    or str(getattr(resource_agent, "jid", "")).split("@", maxsplit=1)[0]
+                ).strip().lower()
+                board_status: dict[str, Any] = {}
+                if destination_location == "assembly_board-v1":
+                    try:
+                        board_status = self.perception_manager.assembly_board_v1_aruco_status(
+                            robot_key
+                        )
+                    except (AttributeError, RuntimeError, ValueError) as exc:
+                        return {
+                            "success": False,
+                            "message": (
+                                f"assembly_board-v1 ArUco localization is unavailable for "
+                                f"{robot_key or 'this robot'}: {exc}"
+                            ),
+                        }
+                    if not board_status.get("accepted"):
+                        return {
+                            "success": False,
+                            "message": (
+                                f"Locate & Accept Board for {robot_key} before capturing or "
+                                "testing place_approach."
+                            ),
+                        }
+                    if (
+                        "accepted_baseline_ready" in board_status
+                        and not board_status.get("accepted_baseline_ready")
+                    ):
+                        detail = str(
+                            board_status.get("accepted_baseline_error") or ""
+                        ).strip()
+                        return {
+                            "success": False,
+                            "message": detail
+                            or (
+                                f"The accepted assembly_board-v1 baseline for {robot_key} "
+                                "is not usable; use Locate & Accept Board again."
+                            ),
+                        }
+                    accepted_calibration_id = str(
+                        board_status.get("accepted_calibration_id") or ""
+                    ).strip()
+                    current_calibration_id = str(
+                        board_status.get("active_calibration_id")
+                        or board_status.get("calibration_id")
+                        or ""
+                    ).strip()
+                    if not accepted_calibration_id:
+                        return {
+                            "success": False,
+                            "message": (
+                                "The accepted assembly_board-v1 calibration identity is "
+                                f"unavailable for {robot_key}; use Locate & Accept Board again."
+                            ),
+                        }
+                    if (
+                        current_calibration_id
+                        and current_calibration_id != accepted_calibration_id
+                    ):
+                        return {
+                            "success": False,
+                            "message": (
+                                "The assembly_board-v1 calibration identity changed for "
+                                f"{robot_key}; use Locate & Accept Board again."
+                            ),
+                        }
+                    live_pose_ready = bool(board_status.get("ready_to_accept"))
+                    if live_pose_ready and board_status.get("movement_blocked"):
+                        return {
+                            "success": False,
+                            "message": (
+                                "assembly_board-v1 moved more than 10 mm or 2 deg from the "
+                                f"accepted {robot_key} pose; use Locate & Accept Board again."
+                            ),
+                        }
+                    board_pose_source = "live_stable" if live_pose_ready else "accepted"
+                    board_pose = dict(
+                        board_status.get("pose")
+                        if live_pose_ready
+                        else board_status.get("accepted_pose")
+                        or {}
+                    )
+                    try:
+                        board_pose = {
+                            field: float(board_pose[field])
+                            for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                        }
+                        board_captured_at = float(
+                            board_status.get("frame_captured_at")
+                            if live_pose_ready
+                            else board_status.get("accepted_frame_captured_at")
+                            or board_status.get("accepted_at")
+                            or 0.0
+                        )
+                        accepted_generation = int(
+                            board_status.get("accepted_generation", 0) or 0
+                        )
+                        marker_length_m = float(board_status["marker_length_m"])
+                    except (KeyError, TypeError, ValueError):
+                        board_pose = {}
+                        board_captured_at = 0.0
+                        accepted_generation = 0
+                        marker_length_m = 0.0
+                    if (
+                        not board_pose
+                        or not all(math.isfinite(value) for value in board_pose.values())
+                        or board_captured_at <= 0.0
+                        or accepted_generation < 1
+                        or not math.isfinite(marker_length_m)
+                        or marker_length_m <= 0.0
+                    ):
+                        return {
+                            "success": False,
+                            "message": (
+                                "The accepted assembly_board-v1 pose is invalid for "
+                                f"{robot_key}; make the tag visible and use Locate & Accept "
+                                "Board again."
+                            ),
+                        }
+                    frozen_assembly_board_v1_aruco = {
+                        "destination_location": "assembly_board-v1",
+                        "camera_role": robot_key,
+                        "generation": accepted_generation,
+                        "captured_at": board_captured_at,
+                        "sample_started_at": float(
+                            board_status.get("sample_started_at") or 0.0
+                        ),
+                        "frame_id": "world",
+                        "pose": deepcopy(board_pose),
+                        "calibration_id": accepted_calibration_id,
+                        "marker_dictionary": str(
+                            board_status.get("dictionary") or "DICT_ARUCO_ORIGINAL"
+                        ),
+                        "marker_id": int(board_status.get("marker_id") or 70),
+                        "marker_length_m": marker_length_m,
+                        "sample_count": int(board_status.get("sample_count") or 0),
+                        "translation_delta_m": board_status.get("translation_delta_m"),
+                        "rotation_delta_deg": board_status.get("rotation_delta_deg"),
+                        "source": "assembly_board-v1_aruco",
+                        "observation_source": board_pose_source,
+                    }
+                    for quality_field in (
+                        "reprojection_error_px",
+                        "translation_spread_m",
+                        "rotation_spread_deg",
+                    ):
+                        try:
+                            quality_value = float(board_status[quality_field])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if math.isfinite(quality_value):
+                            frozen_assembly_board_v1_aruco[quality_field] = quality_value
+                else:
+                    frozen_assembly_board_v1_aruco = {}
                 compute_place_targets = getattr(controller, "compute_place_targets", None)
                 if not callable(compute_place_targets):
                     return {
@@ -15050,6 +15675,7 @@ class SystemBridge:
                     product_geometry=product_geometry,
                     part_name=part_name,
                     destination_location=str(name).strip(),
+                    assembly_board_v1_aruco=frozen_assembly_board_v1_aruco,
                 )
                 if not isinstance(computed, dict) or not computed.get("success"):
                     return {
@@ -15074,17 +15700,40 @@ class SystemBridge:
                         "success": False,
                         "message": "configured destination target contains non-finite world XYZ",
                     }
-                return {
-                    "success": True,
-                    "reference": {
+                if destination_location == "assembly_board-v1":
+                    position_m = {
+                        field: float(board_pose[field]) for field in ("x", "y", "z")
+                    }
+                    reference = {
                         "kind": "destination_target",
                         "frame_id": "world",
-                        "name": str(name).strip(),
+                        "name": "assembly_board-v1",
+                        "position_m": position_m,
+                        "pose": deepcopy(board_pose),
+                        "source": "assembly_board-v1_aruco",
+                        "captured_at": board_captured_at,
+                        "camera_role": robot_key,
+                        "generation": accepted_generation,
+                        "calibration_id": accepted_calibration_id,
+                        "marker_length_m": marker_length_m,
+                        "observation_source": board_pose_source,
+                    }
+                else:
+                    reference = {
+                        "kind": "destination_target",
+                        "frame_id": "world",
+                        "name": destination_location,
                         "position_m": position_m,
                         "source": "computed_destination",
                         "captured_at": time.time(),
-                    },
+                    }
+                return {
+                    "success": True,
+                    "reference": reference,
                     "computed": deepcopy(computed),
+                    "assembly_board_v1_aruco": deepcopy(
+                        frozen_assembly_board_v1_aruco
+                    ),
                 }
             return {
                 "success": False,
@@ -15104,7 +15753,77 @@ class SystemBridge:
             else:
                 controller._last_start_pose = remembered_start_pose
 
-    def digital_twin_capture_function_step(
+    @staticmethod
+    def _robot_function_pose_relative_to_reference(
+        reference_pose: dict[str, Any],
+        world_tool_pose: dict[str, Any],
+    ) -> dict[str, float]:
+        """Return reference_T_tool for two finite world-frame poses."""
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        try:
+            reference = {field: float(reference_pose[field]) for field in fields}
+            tool = {field: float(world_tool_pose[field]) for field in fields}
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if not all(math.isfinite(value) for value in (*reference.values(), *tool.values())):
+            return {}
+
+        def _normalized_quaternion(pose: dict[str, float]) -> tuple[float, float, float, float]:
+            quaternion = tuple(pose[field] for field in ("qx", "qy", "qz", "qw"))
+            norm = math.sqrt(sum(value * value for value in quaternion))
+            if norm <= 1e-12:
+                raise ValueError("quaternion norm is zero")
+            return tuple(value / norm for value in quaternion)
+
+        def _multiply(
+            left: tuple[float, float, float, float],
+            right: tuple[float, float, float, float],
+        ) -> tuple[float, float, float, float]:
+            lx, ly, lz, lw = left
+            rx, ry, rz, rw = right
+            return (
+                lw * rx + lx * rw + ly * rz - lz * ry,
+                lw * ry - lx * rz + ly * rw + lz * rx,
+                lw * rz + lx * ry - ly * rx + lz * rw,
+                lw * rw - lx * rx - ly * ry - lz * rz,
+            )
+
+        try:
+            reference_quaternion = _normalized_quaternion(reference)
+            tool_quaternion = _normalized_quaternion(tool)
+        except ValueError:
+            return {}
+        inverse_reference = (
+            -reference_quaternion[0],
+            -reference_quaternion[1],
+            -reference_quaternion[2],
+            reference_quaternion[3],
+        )
+        world_delta = (
+            tool["x"] - reference["x"],
+            tool["y"] - reference["y"],
+            tool["z"] - reference["z"],
+        )
+        rotated = _multiply(
+            _multiply(inverse_reference, (*world_delta, 0.0)),
+            reference_quaternion,
+        )
+        relative_quaternion = _multiply(inverse_reference, tool_quaternion)
+        relative_norm = math.sqrt(sum(value * value for value in relative_quaternion))
+        if relative_norm <= 1e-12:
+            return {}
+        relative_quaternion = tuple(value / relative_norm for value in relative_quaternion)
+        return {
+            "x": rotated[0],
+            "y": rotated[1],
+            "z": rotated[2],
+            "qx": relative_quaternion[0],
+            "qy": relative_quaternion[1],
+            "qz": relative_quaternion[2],
+            "qw": relative_quaternion[3],
+        }
+
+    def digital_twin_capture_function_step(  # noqa: C901, PLR0912
         self,
         target: str,
         robot: str,
@@ -15183,17 +15902,23 @@ class SystemBridge:
         self._ur5e_robot_function_execution_active = (
             f"{function_name}.{step_key} Capture Pose"
         )
+        readiness: dict[str, Any] = {}
+        resolved: dict[str, Any] = {}
         try:
             with self._ur5e_robot_function_preflight_lock:
                 readiness = self._robot_function_capture_snapshot(target, robot_key)
-                computed_baseline = self._robot_function_computed_pose(
-                    target=target,
-                    robot=robot_key,
-                    function_name=function_name,
-                    name=name,
-                    part_name=str(part_name or "").strip(),
-                    step_name=step_key,
-                )
+                if readiness.get("success"):
+                    resolved = self._resolve_robot_function_position(
+                        target,
+                        robot_key,
+                        function_name,
+                        name,
+                        step_key,
+                        part_name=str(part_name or "").strip(),
+                        readiness=readiness,
+                        resource_agent=resource_agent,
+                        computed_source="capture",
+                    )
         finally:
             self._ur5e_robot_function_execution_active = None
             if agent_lock_acquired:
@@ -15205,42 +15930,13 @@ class SystemBridge:
                 "message": str(readiness.get("blocked_reason") or "capture is not ready"),
                 "readiness": readiness,
             }
-        if not computed_baseline:
+        if not resolved.get("success"):
             return {
                 "success": False,
-                "message": (
-                    f"Preview Resolved Pose or run {function_name}.{step_key} before "
-                    "Capture Pose so its exact computed pose is available. No pose was "
-                    "buffered and the existing saved pose is unchanged."
+                "message": str(
+                    resolved.get("message")
+                    or f"could not resolve {function_name}.{step_key} for Capture Pose"
                 ),
-                "readiness": readiness,
-            }
-        current_provenance = self._robot_function_computed_pose_provenance(
-            target=target,
-            robot=robot_key,
-            function_name=function_name,
-            name=name,
-            part_name=str(part_name or "").strip(),
-            step_name=step_key,
-            readiness=readiness,
-        )
-        provenance_error = self._robot_function_computed_pose_provenance_error(
-            dict(computed_baseline.get("computed_provenance") or {}),
-            current_provenance,
-        )
-        if provenance_error:
-            return {
-                "success": False,
-                "message": (
-                    f"Capture Pose did not buffer {function_name}.{step_key}: "
-                    f"{provenance_error}. Preview Resolved Pose again for this exact "
-                    "robot, function, location, part, and step before Capture Pose. "
-                    "No pose was buffered and the existing saved pose is unchanged."
-                ),
-                "computed_provenance": deepcopy(
-                    computed_baseline.get("computed_provenance") or {}
-                ),
-                "current_provenance": current_provenance,
                 "readiness": readiness,
             }
         waypoint = dict(readiness.get("waypoint") or {})
@@ -15253,14 +15949,43 @@ class SystemBridge:
             self._robot_function_safe_name(name),
             str(part_name or "").strip(),
         )
-        relative_reference = dict(computed_baseline.get("relative_reference") or {})
+        relative_reference = dict(resolved.get("computed_reference") or {})
+        relative_pose: dict[str, float] = {}
+        if (
+            function_name == "place_approach"
+            and str(name or "").strip() == "assembly_board-v1"
+        ):
+            board_pose = dict(relative_reference.get("pose") or {})
+            relative_pose = self._robot_function_pose_relative_to_reference(
+                board_pose,
+                pose,
+            )
+            if (
+                str(relative_reference.get("kind") or "") != "destination_target"
+                or str(relative_reference.get("frame_id") or "") != "world"
+                or str(relative_reference.get("name") or "") != "assembly_board-v1"
+                or str(relative_reference.get("source") or "")
+                != "assembly_board-v1_aruco"
+                or str(relative_reference.get("camera_role") or "") != robot_key
+                or not relative_reference.get("generation")
+                or not relative_pose
+            ):
+                return {
+                    "success": False,
+                    "message": (
+                        "Capture Pose did not buffer place_approach: Locate & Accept Board "
+                        f"for {robot_key} so the full assembly_board-v1 ArUco relative "
+                        "pose is available."
+                    ),
+                    "readiness": readiness,
+                }
         try:
             computed_position_m = {
-                field: float(dict(computed_baseline["computed_position_m"])[field])
+                field: float(dict(resolved["computed_position"])[field])
                 for field in ("x", "y", "z")
             }
-            computed_at = float(computed_baseline["computed_at"])
-            relative_position_m = {
+            computed_at = float(resolved["computed_at"])
+            computed_pose_delta_m = {
                 field: float(pose[field]) - computed_position_m[field]
                 for field in ("x", "y", "z")
             }
@@ -15268,31 +15993,38 @@ class SystemBridge:
             return {
                 "success": False,
                 "message": (
-                    f"The cached computed pose for {function_name}.{step_key} is invalid. "
-                    "Preview Resolved Pose again before Capture Pose. No pose was buffered."
+                    f"The computed pose for {function_name}.{step_key} is invalid. "
+                    "No pose was buffered."
                 ),
                 "readiness": readiness,
             }
         if not all(
             math.isfinite(value)
-            for value in (*computed_position_m.values(), *relative_position_m.values(), computed_at)
+            for value in (
+                *computed_position_m.values(),
+                *computed_pose_delta_m.values(),
+                computed_at,
+            )
         ):
             return {
                 "success": False,
                 "message": (
-                    f"The cached computed pose for {function_name}.{step_key} is not finite. "
-                    "Preview Resolved Pose again before Capture Pose. No pose was buffered."
+                    f"The computed pose for {function_name}.{step_key} is not finite. "
+                    "No pose was buffered."
                 ),
                 "readiness": readiness,
             }
         largest_axis = max(
-            relative_position_m,
-            key=lambda field: abs(relative_position_m[field]),
+            computed_pose_delta_m,
+            key=lambda field: abs(computed_pose_delta_m[field]),
         )
-        largest_axis_offset_m = abs(relative_position_m[largest_axis])
-        if largest_axis_offset_m > _ROBOT_FUNCTION_CAPTURE_MAX_AXIS_OFFSET_M:
+        largest_axis_offset_m = abs(computed_pose_delta_m[largest_axis])
+        if (
+            function_name != "place_approach"
+            and largest_axis_offset_m > _ROBOT_FUNCTION_CAPTURE_MAX_AXIS_OFFSET_M
+        ):
             offset_mm = {
-                field: relative_position_m[field] * 1000.0
+                field: computed_pose_delta_m[field] * 1000.0
                 for field in ("x", "y", "z")
             }
             return {
@@ -15300,7 +16032,7 @@ class SystemBridge:
                 "message": (
                     f"Capture Pose did not buffer {function_name}.{step_key}: the current "
                     f"world -> {'tool0' if robot_key == 'ur5e' else 'link_eef'} pose is not "
-                    "near its cached computed pose. "
+                    "near its freshly computed pose. "
                     f"Offset X={offset_mm['x']:+.1f} mm, Y={offset_mm['y']:+.1f} mm, "
                     f"Z={offset_mm['z']:+.1f} mm; {largest_axis.upper()} exceeds the "
                     f"{_ROBOT_FUNCTION_CAPTURE_MAX_AXIS_OFFSET_M * 1000.0:.0f} mm "
@@ -15312,9 +16044,14 @@ class SystemBridge:
                 "current_position_m": {
                     field: float(pose[field]) for field in ("x", "y", "z")
                 },
-                "relative_position_m": relative_position_m,
+                "relative_position_m": computed_pose_delta_m,
                 "readiness": readiness,
             }
+        relative_position_m = (
+            {field: relative_pose[field] for field in ("x", "y", "z")}
+            if relative_pose
+            else computed_pose_delta_m
+        )
         step = {
             "step_name": step_key,
             "primitive": primitive,
@@ -15329,7 +16066,7 @@ class SystemBridge:
             "relative_position_m": relative_position_m,
             "relative_reference": relative_reference,
             "computed_position_m": computed_position_m,
-            "computed_source": str(computed_baseline.get("computed_source") or ""),
+            "computed_source": str(resolved.get("computed_source") or "capture"),
             "computed_at": computed_at,
             "waypoint": {
                 "joint_names": list(waypoint.get("joint_names") or []),
@@ -15340,6 +16077,8 @@ class SystemBridge:
                 "source": source,
             },
         }
+        if relative_pose:
+            step["relative_pose"] = relative_pose
         with self._digital_twin_record_lock:
             steps = self._digital_twin_function_steps.setdefault(key, [])
             steps[:] = [item for item in steps if str(item.get("step_name") or "") != step_key]
@@ -15354,7 +16093,12 @@ class SystemBridge:
             "success": True,
             "message": (
                 f"captured robot pose for {robot_key} {function_name}.{step['step_name']} "
-                "relative to its computed pose with offset "
+                + (
+                    "relative to assembly_board-v1 ArUco with pose "
+                    if relative_pose
+                    else "relative to its computed pose with offset "
+                )
+                +
                 f"X={relative_position_m['x'] * 1000.0:+.1f} mm, "
                 f"Y={relative_position_m['y'] * 1000.0:+.1f} mm, "
                 f"Z={relative_position_m['z'] * 1000.0:+.1f} mm; use Save/Replace Pose "
@@ -15366,6 +16110,7 @@ class SystemBridge:
                 field: float(pose[field]) for field in ("x", "y", "z")
             },
             "relative_position_m": relative_position_m,
+            "relative_pose": relative_pose,
             "step": deepcopy(step),
             "readiness": readiness,
         }
@@ -15909,7 +16654,7 @@ class SystemBridge:
             "message": f"cleared {function_name}.{step_key} for {safe_name}",
         }
 
-    def digital_twin_preview_function_position(
+    def _resolve_robot_function_position(  # noqa: C901, PLR0912
         self,
         target: str,
         robot: str,
@@ -15918,8 +16663,11 @@ class SystemBridge:
         step_name: str,
         *,
         part_name: str = "",
+        readiness: dict[str, Any] | None = None,
+        resource_agent: Any | None = None,
+        computed_source: str = "resolve",
     ) -> dict[str, Any]:
-        """Resolve one taught Cartesian step without commanding robot motion."""
+        """Resolve one taught Cartesian step from one read-only robot snapshot."""
         cfg, request_error = self._robot_function_validate_request(
             target, robot, function_name
         )
@@ -15929,17 +16677,18 @@ class SystemBridge:
         if part_error:
             return {"success": False, "message": part_error}
         robot_key = str(robot or "").strip().lower()
-        resource_agent = (
-            self._physical_ur5e_robot_agent()
-            if robot_key == "ur5e"
-            else self._physical_xarm6_robot_agent()
-        )
+        if resource_agent is None:
+            resource_agent = (
+                self._physical_ur5e_robot_agent()
+                if robot_key == "ur5e"
+                else self._physical_xarm6_robot_agent()
+            )
         if resource_agent is None:
             return {
                 "success": False,
                 "message": (
                     f"Prepare the physical {robot_key} Function Execution runtime before "
-                    "previewing a position."
+                    "resolving a position."
                 ),
             }
         if (
@@ -15984,10 +16733,14 @@ class SystemBridge:
                 "success": False,
                 "message": (
                     f"The physical {robot_key} state is uncertain. Inspect the robot and "
-                    "complete Robot Functions -> move_home before Preview Resolved Pose."
+                    "complete Robot Functions -> move_home before resolving a position."
                 ),
             }
-        readiness = self._robot_function_capture_snapshot(target, robot_key)
+        readiness = (
+            deepcopy(readiness)
+            if readiness is not None
+            else self._robot_function_capture_snapshot(target, robot_key)
+        )
         if not readiness.get("success"):
             return {
                 "success": False,
@@ -16028,6 +16781,7 @@ class SystemBridge:
                 name=name,
                 step_name=step_key,
                 part_name=str(part_name or "").strip(),
+                robot=robot_key,
             )
             if not reference_result.get("success"):
                 return dict(reference_result)
@@ -16042,6 +16796,7 @@ class SystemBridge:
                 name=name,
                 step_name=step_key,
                 part_name=str(part_name or "").strip(),
+                robot=robot_key,
             )
             if not reference_result.get("success"):
                 return dict(reference_result)
@@ -16054,11 +16809,16 @@ class SystemBridge:
                     )
                 },
             )
-            step_outputs = {"place_targets": targets}
+            step_outputs = {
+                "place_targets": targets,
+                "assembly_board_v1_aruco": deepcopy(
+                    reference_result.get("assembly_board_v1_aruco") or {}
+                ),
+            }
         else:
             return {
                 "success": False,
-                "message": f"{function_name} has no computed Cartesian target preview.",
+                "message": f"{function_name} has no computed Cartesian target.",
             }
         step_index = cartesian_steps.index(template_step)
         pose_key = "approach_pose" if step_index == 0 else "target_pose"
@@ -16073,7 +16833,7 @@ class SystemBridge:
             step_name=step_key,
             computed_position=computed_position,
             relative_reference=dict(reference_result.get("reference") or {}),
-            computed_source="preview",
+            computed_source=computed_source,
             computed_at=computed_at,
             computed_provenance=self._robot_function_computed_pose_provenance(
                 target=target,
@@ -16090,12 +16850,14 @@ class SystemBridge:
                 "success": False,
                 "message": f"computed pose is invalid for {function_name}.{step_key}",
             }
-        validation_error = _apply_cartesian_overrides_to_targets(
-            task=task,
-            physical_overrides=overrides,
-            step_outputs=step_outputs,
-            agent=resource_agent,
-        )
+        validation_error = ""
+        if computed_source != "capture":
+            validation_error = _apply_cartesian_overrides_to_targets(
+                task=task,
+                physical_overrides=overrides,
+                step_outputs=step_outputs,
+                agent=resource_agent,
+            )
         if validation_error:
             return {
                 "success": False,
@@ -16128,11 +16890,11 @@ class SystemBridge:
         return {
             "success": True,
             "message": (
-                f"previewed computed and resolved pose for {function_name}.{step_key}; "
+                f"resolved computed and saved pose for {function_name}.{step_key}; "
                 "no robot motion was requested."
             ),
             "computed_position": deepcopy(baseline.get("computed_pose") or {}),
-            "computed_source": "preview",
+            "computed_source": computed_source,
             "computed_at": computed_at,
             "computed_reference": deepcopy(
                 baseline.get("relative_reference") or {}
@@ -16167,7 +16929,28 @@ class SystemBridge:
             },
         }
 
-    def digital_twin_test_function_position(  # noqa: C901 - explicit motion safety gates.
+    def digital_twin_preview_function_position(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        name: str,
+        step_name: str,
+        *,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for read-only Cartesian position resolution."""
+        return self._resolve_robot_function_position(
+            target,
+            robot,
+            function_name,
+            name,
+            step_name,
+            part_name=part_name,
+            computed_source="preview",
+        )
+
+    def digital_twin_test_function_position(  # noqa: C901, PLR0912
         self,
         target: str,
         robot: str,
@@ -16253,17 +17036,19 @@ class SystemBridge:
                 "success": False,
                 "message": f"{function_name}.{step_key} is not a move_cartesian step.",
             }
-        preview = self.digital_twin_preview_function_position(
+        resolved = self._resolve_robot_function_position(
             target,
             robot,
             function_name,
             name,
             step_key,
             part_name=part_name,
+            resource_agent=resource_agent,
+            computed_source="test_position",
         )
-        if not preview.get("success"):
-            return dict(preview)
-        params = dict(preview.get("resolved_position") or {})
+        if not resolved.get("success"):
+            return dict(resolved)
+        params = dict(resolved.get("resolved_position") or {})
 
         if robot_key == "ur5e":
             motion_readiness, motion_error = self._digital_twin_ur5e_motion_readiness(
@@ -18064,16 +18849,15 @@ class SystemBridge:
                     "dual robots xarm6 hardware feedback or TF world -> "
                     f"link_eef is not ready: {err}"
                 )
-            snapshot = self._snapshot_robot_waypoint(
-                "ur5e",
-                source="hardware",
-                hardware_domain_id=self._default_ros_domain_id(),
-                include_world_tool_pose=True,
+            err = self._wait_for_ur5e_hardware_snapshot_ready(
+                driver_process_name=ur5e_driver,
+                state_publisher_process_name=state_publisher,
+                ros_domain_id=self._default_ros_domain_id(),
             )
-            if snapshot.get("error"):
+            if err:
                 return _rollback(
                     "dual robots ur5e feedback or TF world -> tool0 is not ready: "
-                    f"{snapshot['error']}"
+                    f"{err}"
                 )
             err = self._validate_xarm6_cartesian_frames(
                 ros_domain_id=self._default_ros_domain_id(),
@@ -18293,16 +19077,15 @@ class SystemBridge:
                 if err:
                     return _rollback_ur5e(f"{key} state publisher startup failed: {err}")
                 started_here.append(state_publisher)
-            snapshot = self._snapshot_robot_waypoint(
-                "ur5e",
-                source="hardware",
-                hardware_domain_id=self._default_ros_domain_id(),
-                include_world_tool_pose=True,
+            err = self._wait_for_ur5e_hardware_snapshot_ready(
+                driver_process_name=driver_name,
+                state_publisher_process_name=state_publisher,
+                ros_domain_id=self._default_ros_domain_id(),
             )
-            if snapshot.get("error"):
+            if err:
                 return _rollback_ur5e(
                     "ur5e hardware feedback or TF world -> tool0 is not ready: "
-                    f"{snapshot['error']}"
+                    f"{err}"
                 )
             err = self._wait_for_ur5e_cartesian_frame_ready(
                 driver_name,

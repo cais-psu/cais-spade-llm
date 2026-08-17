@@ -1,6 +1,7 @@
 SHELL := /usr/bin/env bash
 
 .PHONY: install run run-physical-ur5e headless setup-perception-host bootstrap-gazebo check
+.PHONY: cleanup-report cleanup cleanup-global-ros
 
 install:
 	poetry install
@@ -27,3 +28,12 @@ check:
 	poetry check
 	poetry run python -m compileall -q cais_spade_llm ros2
 	poetry run python -m cais_spade_llm.ui_main --help
+
+cleanup-report:
+	poetry run python -m cais_spade_llm.utils.runtime_cleanup --scope all
+
+cleanup:
+	poetry run python -m cais_spade_llm.utils.runtime_cleanup --scope cais --apply
+
+cleanup-global-ros:
+	poetry run python -m cais_spade_llm.utils.runtime_cleanup --scope global-ros --apply

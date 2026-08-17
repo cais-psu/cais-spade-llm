@@ -177,7 +177,15 @@ def replay(args: argparse.Namespace) -> None:  # noqa: C901 - explicit safety st
     client = ActionClient(node, MoveGroup, "/move_action")
     try:
         if not client.wait_for_server(timeout_sec=10.0):
-            raise RuntimeError("/move_action is unavailable; start the correct hardware MoveIt stack")
+            error = "/move_action is unavailable; start the correct hardware MoveIt stack"
+            _write_status(
+                status_path,
+                state="preview_failed" if args.preview_only else "failed",
+                pose_index=0,
+                pose_count=len(poses),
+                error=error,
+            )
+            raise RuntimeError(error)
         if args.preview_only:
             for index, pose in enumerate(poses, start=1):
                 _write_status(

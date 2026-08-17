@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable
+from datetime import datetime
 
 from nicegui import context, ui
 from nicegui.client import Client
@@ -49,6 +50,132 @@ _HARDWARE_PROC_NAMES = (
     "hardware_dual_robots_moveit",
     "hardware_robot_state_publisher",
 )
+
+
+def _assembly_board_v1_tag_currently_visible(status: dict) -> bool:
+    """Return whether ID 70 is visible in a fresh live snapshot."""
+    if not status.get("visible") or not status.get("valid"):
+        return False
+    try:
+        frame_age_sec = float(status["frame_age_sec"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return math.isfinite(frame_age_sec) and 0.0 <= frame_age_sec <= 2.0
+
+
+def _assembly_board_v1_readiness(status: dict) -> dict[str, object]:
+    """Describe whether one arm's accepted assembly_board-v1 pose is usable."""
+    accepted = bool(status.get("accepted"))
+    accepted_baseline_ready = status.get("accepted_baseline_ready")
+    accepted_baseline_error = str(status.get("accepted_baseline_error") or "").strip()
+    if accepted_baseline_ready is not None:
+        if not bool(accepted_baseline_ready):
+            if not accepted:
+                if bool(status.get("post_staging_acceptance_allowed")):
+                    message = (
+                        "Board not accepted, so Capture Pose is blocked. Confirmed Run "
+                        "place_approach will move to assembly_board-v1, collect ten fresh "
+                        "ArUco ID 70 observations, and accept the board automatically."
+                    )
+                else:
+                    message = accepted_baseline_error or (
+                        "Board not accepted, and confirmed Run place_approach cannot accept "
+                        "it automatically until the active calibration and 76 mm marker "
+                        "configuration are ready."
+                    )
+            elif bool(status.get("post_staging_acceptance_allowed")):
+                message = (
+                    "The accepted board baseline must be refreshed, so Capture Pose is "
+                    "blocked. Confirmed Run place_approach will move to assembly_board-v1, "
+                    "collect ten fresh ArUco ID 70 observations, and reaccept the board "
+                    "automatically before approaching it."
+                )
+            else:
+                message = accepted_baseline_error or (
+                    "The existing accepted board baseline cannot be refreshed automatically "
+                    "during confirmed Run place_approach. Resolve the board calibration or "
+                    "configuration warning first."
+                )
+            message = message.replace(
+                "use Locate & Accept Board again.",
+                "resolve this before confirmed Run place_approach.",
+            ).replace(
+                "use Locate & Accept Board",
+                "resolve this before confirmed Run place_approach",
+            )
+            return {
+                "usable": False,
+                "level": "red",
+                "message": message,
+            }
+        if _assembly_board_v1_tag_currently_visible(status):
+            return {
+                "usable": True,
+                "level": "green",
+                "message": "Accepted board baseline is usable and ArUco ID 70 is visible.",
+            }
+        if status.get("visible"):
+            return {
+                "usable": True,
+                "level": "amber",
+                "message": (
+                    "Accepted board baseline is usable. The latest ArUco ID 70 snapshot is "
+                    "not fresh; Capture Pose remains available and place_approach will "
+                    "localize again before descent."
+                ),
+            }
+        return {
+            "usable": True,
+            "level": "amber",
+            "message": (
+                "Accepted board baseline is usable. ArUco ID 70 is currently occluded; Capture "
+                "Pose remains available and place_approach will localize again before descent."
+            ),
+        }
+    calibration_changed = bool(status.get("calibration_changed"))
+    known_live_pose = bool(status.get("visible") and status.get("valid") and status.get("pose"))
+    movement_blocked = bool(status.get("movement_blocked") and known_live_pose)
+    if not accepted:
+        return {
+            "usable": False,
+            "level": "red",
+            "message": (
+                "Board not accepted. A fresh stable ArUco ID 70 observation is required "
+                "before Capture Pose or Run place_approach."
+            ),
+        }
+    if calibration_changed:
+        return {
+            "usable": False,
+            "level": "red",
+            "message": (
+                "The accepted board pose uses a different camera calibration. "
+                "A fresh stable ArUco ID 70 observation is required."
+            ),
+        }
+    if movement_blocked:
+        return {
+            "usable": False,
+            "level": "red",
+            "message": (
+                "A valid live observation shows assembly_board-v1 moved beyond 10 mm or "
+                "2 deg. A fresh stable ArUco ID 70 observation is required."
+            ),
+        }
+    if _assembly_board_v1_tag_currently_visible(status):
+        return {
+            "usable": True,
+            "level": "green",
+            "message": "Accepted board baseline is usable and ArUco ID 70 is visible.",
+        }
+    return {
+        "usable": True,
+        "level": "amber",
+        "message": (
+            "Accepted board baseline is usable. ArUco ID 70 is currently occluded; Capture "
+            "Pose remains available and place_approach will localize again before descent."
+        ),
+    }
 
 
 def _client_alive(element) -> bool:
@@ -1193,11 +1320,45 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     ui.label(
         "The function and step IDs come from the Python robot task registry. "
         "Run executes only the exact selected function. This is manual commissioning and does "
-        "not advance ProductAgent/CCA workflow state. Start System is not required for manual "
-        "Function Execution."
+        "not require the assembly sequence resource_state or advance ProductAgent/CCA workflow "
+        "state. Held-part, gripper, task-context, readiness, and confirmation checks still "
+        "apply. Start System is not required for manual Function Execution."
     ).classes("text-xs text-slate-500")
 
     ui.label("Function Execution").classes("text-sm font-semibold mt-2")
+    assembly_board_v1_state: dict[str, object] = {
+        "refreshing": False,
+        "status_loaded": False,
+        "status": {},
+        "named_position_exists": False,
+        "last_failure": "",
+        "selection": (),
+    }
+    with ui.card().classes("w-full p-3") as assembly_board_v1_panel:
+        ui.label("assembly_board-v1 Board Readiness").classes("text-sm font-semibold")
+        assembly_board_v1_named_position = ui.label("").classes("text-xs")
+        with ui.row().classes("items-center gap-1 w-full"):
+            assembly_board_v1_warning_icon = ui.icon("warning", color="red")
+            assembly_board_v1_status = ui.label("").classes("text-xs font-semibold")
+        assembly_board_v1_acceptance = ui.label("").classes("text-xs text-slate-600")
+        assembly_board_v1_calibration = ui.label("").classes("text-xs text-slate-600")
+        assembly_board_v1_observation = ui.label("").classes("text-xs text-slate-600")
+        assembly_board_v1_movement = ui.label("").classes("text-xs text-slate-600")
+        assembly_board_v1_failure = ui.label("").classes("text-xs text-red-700")
+        assembly_board_v1_insert_guidance = ui.label(
+            "Using the assembly_board-v1 pose frozen by place_approach. Do not move or "
+            "re-accept the board."
+        ).classes("text-xs font-semibold text-amber-700")
+        assembly_board_v1_automatic_status = ui.label("").classes(
+            "text-xs font-semibold text-blue-700"
+        )
+        ui.label(
+            "Confirmed Run place_approach first moves to the saved assembly_board-v1 "
+            "observation position, collects ten fresh ArUco ID 70 observations, and "
+            "automatically accepts or reaccepts the board before any Cartesian approach."
+        ).classes("text-xs text-slate-500")
+    assembly_board_v1_panel.set_visibility(False)
+
     execution_status = ui.label("Run readiness is checked automatically without motion.").classes(
         "text-xs text-slate-500"
     )
@@ -1238,6 +1399,262 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
 
     def _current_part_name() -> str:
         return str(part_select.value or "").strip()
+
+    def _assembly_board_v1_selected() -> bool:
+        return bool(
+            _current_function() in {"place_approach", "place_insert"}
+            and _current_destination_location() == "assembly_board-v1"
+        )
+
+    def _assembly_board_v1_selection() -> tuple[str, str, str]:
+        return (
+            _current_robot(),
+            _current_function(),
+            _current_destination_location(),
+        )
+
+    def _assembly_board_v1_accepted_usable() -> bool:
+        if (
+            not _assembly_board_v1_selected()
+            or not assembly_board_v1_state.get("status_loaded")
+            or assembly_board_v1_state.get("selection") != _assembly_board_v1_selection()
+        ):
+            return False
+        status = dict(assembly_board_v1_state.get("status") or {})
+        return bool(_assembly_board_v1_readiness(status)["usable"])
+
+    def _render_assembly_board_v1_readiness() -> None:
+        selected = _assembly_board_v1_selected()
+        assembly_board_v1_panel.set_visibility(selected)
+        if not selected:
+            return
+        robot = _current_robot()
+        function_name = _current_function()
+        state_matches = bool(
+            assembly_board_v1_state.get("status_loaded")
+            and assembly_board_v1_state.get("selection") == _assembly_board_v1_selection()
+        )
+        status = dict(assembly_board_v1_state.get("status") or {}) if state_matches else {}
+        named_position_exists = bool(
+            state_matches and assembly_board_v1_state.get("named_position_exists")
+        )
+        readiness = _assembly_board_v1_readiness(status)
+        assembly_board_v1_named_position.set_text(
+            (
+                f"Named position assembly_board-v1 exists for {robot}."
+                if named_position_exists
+                else f"Named position assembly_board-v1 is missing for {robot}."
+            )
+            if state_matches
+            else f"Checking named position assembly_board-v1 for {robot}..."
+        )
+        assembly_board_v1_named_position.classes(
+            replace=(
+                "text-xs text-green-700"
+                if named_position_exists
+                else "text-xs text-red-700"
+                if state_matches
+                else "text-xs text-slate-500"
+            )
+        )
+        if state_matches:
+            level = str(readiness["level"])
+            status_classes = {
+                "green": "text-xs font-semibold text-green-700",
+                "amber": "text-xs font-semibold text-amber-700",
+                "red": "text-xs font-semibold text-red-700",
+            }[level]
+            assembly_board_v1_status.set_text(str(readiness["message"]))
+            assembly_board_v1_status.classes(replace=status_classes)
+            assembly_board_v1_warning_icon.set_visibility(
+                level == "red" or not named_position_exists
+            )
+        else:
+            assembly_board_v1_status.set_text(
+                f"Checking the accepted assembly_board-v1 baseline for {robot}..."
+            )
+            assembly_board_v1_status.classes(replace="text-xs font-semibold text-slate-500")
+            assembly_board_v1_warning_icon.set_visibility(False)
+
+        accepted_generation = int(status.get("accepted_generation", 0) or 0)
+        accepted_at = status.get("accepted_at")
+        accepted_at_text = "not available"
+        if accepted_at is not None:
+            try:
+                accepted_at_text = (
+                    datetime.fromtimestamp(float(accepted_at))
+                    .astimezone()
+                    .strftime("%Y-%m-%d %H:%M:%S %Z")
+                )
+            except (OSError, OverflowError, TypeError, ValueError):
+                accepted_at_text = str(accepted_at)
+        assembly_board_v1_acceptance.set_text(
+            f"Camera role: {robot} | accepted: {bool(status.get('accepted'))} | "
+            f"generation: {accepted_generation} | accepted at: {accepted_at_text}"
+        )
+        active_calibration_id = str(
+            status.get("active_calibration_id")
+            or status.get("calibration_id")
+            or "unavailable"
+        )
+        accepted_calibration_id = str(status.get("accepted_calibration_id") or "unavailable")
+        assembly_board_v1_calibration.set_text(
+            f"Calibration: active={active_calibration_id} | accepted={accepted_calibration_id}"
+        )
+        sample_count = int(status.get("sample_count", 0) or 0)
+        required_sample_count = int(status.get("required_sample_count", 10) or 10)
+        tag_currently_visible = _assembly_board_v1_tag_currently_visible(status)
+        assembly_board_v1_observation.set_text(
+            f"ArUco ID 70 currently visible: {tag_currently_visible} | "
+            f"stable: {bool(status.get('stable'))} | "
+            f"samples: {sample_count}/{required_sample_count}"
+        )
+        translation_delta_m = status.get("translation_delta_m")
+        rotation_delta_deg = status.get("rotation_delta_deg")
+        if (
+            status.get("movement_blocked")
+            and not status.get("calibration_changed")
+            and not status.get("movement_evidence_valid")
+        ):
+            movement_text = (
+                "A prior valid observation proved movement beyond 10 mm or 2 deg; "
+                "confirmed Run place_approach will verify it again from the saved "
+                "observation position before any board approach."
+            )
+        elif not tag_currently_visible:
+            movement_text = (
+                "Movement is unknown without a fresh ArUco ID 70 observation; this is not "
+                "evidence that the board moved."
+            )
+        elif translation_delta_m is None or rotation_delta_deg is None:
+            movement_text = "Movement from the accepted board pose is not available."
+        else:
+            movement_text = (
+                f"Movement from accepted pose: {float(translation_delta_m) * 1000.0:.2f} mm, "
+                f"{float(rotation_delta_deg):.2f} deg (limits: 10 mm, 2 deg)."
+            )
+        assembly_board_v1_movement.set_text(movement_text)
+        movement_is_blocked = bool(status.get("movement_blocked"))
+        assembly_board_v1_movement.classes(
+            replace=("text-xs text-red-700" if movement_is_blocked else "text-xs text-slate-600")
+        )
+
+        accepted_usable = bool(readiness["usable"])
+        last_failure = str(assembly_board_v1_state.get("last_failure") or "").strip()
+        post_staging_acceptance_allowed = bool(
+            status.get("post_staging_acceptance_allowed")
+        )
+        if function_name == "place_approach" and not accepted_usable and last_failure:
+            failure_text = last_failure
+        elif (
+            function_name == "place_approach"
+            and not accepted_usable
+            and post_staging_acceptance_allowed
+        ):
+            failure_text = (
+                "Capture Pose remains blocked. Run place_approach will move to the saved "
+                "assembly_board-v1 observation position and obtain the required fresh "
+                "10-frame observation automatically."
+            )
+        elif function_name == "place_approach" and not accepted_usable:
+            failure_text = (
+                "Confirmed Run place_approach is blocked: "
+                + str(readiness["message"])
+            )
+        else:
+            failure_text = ""
+        assembly_board_v1_failure.set_text(failure_text)
+        assembly_board_v1_failure.classes(
+            replace=(
+                "text-xs text-amber-700"
+                if bool(readiness["usable"])
+                else "text-xs text-red-700"
+            )
+        )
+        assembly_board_v1_failure.set_visibility(bool(failure_text))
+        assembly_board_v1_insert_guidance.set_visibility(function_name == "place_insert")
+        if function_name == "place_insert":
+            automatic_text = ""
+        elif accepted_usable:
+            automatic_text = (
+                "The accepted board baseline is available for Capture Pose. Confirmed Run "
+                "place_approach will still move to assembly_board-v1, collect ten fresh "
+                "post-motion observations, and freeze the resulting board pose."
+            )
+        elif post_staging_acceptance_allowed:
+            automatic_text = (
+                "No manual camera staging is required. Confirmed Run place_approach will "
+                "stage at assembly_board-v1, collect ten fresh post-motion observations, "
+                "and automatically accept or reaccept the board before approaching it."
+            )
+        else:
+            automatic_text = (
+                "Confirmed Run place_approach cannot accept the board automatically until "
+                "the calibration or configuration warning above is resolved."
+            )
+        assembly_board_v1_automatic_status.set_text(automatic_text)
+        assembly_board_v1_automatic_status.set_visibility(bool(automatic_text))
+
+    async def _refresh_assembly_board_v1_readiness() -> None:
+        if not _client_alive(assembly_board_v1_panel):
+            return
+        if not _assembly_board_v1_selected():
+            _render_assembly_board_v1_readiness()
+            return
+        if assembly_board_v1_state.get("refreshing"):
+            return
+        selection = _assembly_board_v1_selection()
+        robot = selection[0]
+        old_gate = (
+            _assembly_board_v1_accepted_usable(),
+            bool(assembly_board_v1_state.get("named_position_exists")),
+        )
+        assembly_board_v1_state["refreshing"] = True
+        try:
+            status_result, named_positions = await asyncio.gather(
+                asyncio.to_thread(
+                    bridge.perception_assembly_board_v1_aruco_status,
+                    robot,
+                ),
+                asyncio.to_thread(bridge.list_named_positions, robot),
+            )
+            if selection != _assembly_board_v1_selection():
+                return
+            assembly_board_v1_state.update(
+                {
+                    "status_loaded": True,
+                    "status": dict(status_result),
+                    "named_position_exists": "assembly_board-v1" in named_positions,
+                    "selection": selection,
+                }
+            )
+            status = dict(status_result)
+            if bool(_assembly_board_v1_readiness(status)["usable"]):
+                assembly_board_v1_state["last_failure"] = ""
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if selection != _assembly_board_v1_selection():
+                return
+            assembly_board_v1_state.update(
+                {
+                    "status_loaded": False,
+                    "status": {},
+                    "named_position_exists": False,
+                    "last_failure": str(exc),
+                    "selection": selection,
+                }
+            )
+        finally:
+            assembly_board_v1_state["refreshing"] = False
+        if not _client_alive(assembly_board_v1_panel):
+            return
+        _render_assembly_board_v1_readiness()
+        new_gate = (
+            _assembly_board_v1_accepted_usable(),
+            bool(assembly_board_v1_state.get("named_position_exists")),
+        )
+        if old_gate != new_gate:
+            _render_execution()
+            _render_steps()
 
     def _default_location(function_name: str, options: list[str]) -> str:
         if function_name in {"pick_approach", "pick_grasp"} and "prusa-mk4-2" in options:
@@ -1313,8 +1730,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     f"The UR5e will stage at {values.get('origin_resource_location', '')}, "
                     "request a fresh MG detection, open the stock RG2, and descend to the "
                     "smooth raised hub target calculated from the actual Gear_Medium.STL. "
-                    "If the empty, open runtime is still at_pick, it will reset to idle "
-                    "without robot motion immediately before staging. "
                     "The gripper remains open for visual confirmation; the Gazebo MG is not "
                     "used for physical geometry."
                 )
@@ -1331,9 +1746,19 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 )
             return f"The {robot} will grasp and lift {part_name}."
         if function_name == "place_approach":
+            destination_location = values.get("destination_location", "")
+            if destination_location == "assembly_board-v1":
+                return (
+                    f"The {robot} will first move {part_name} to the saved "
+                    "assembly_board-v1 observation position, collect ten fresh ArUco ID 70 "
+                    "observations, and automatically accept or reaccept the current board "
+                    "pose if needed. It will then use that frozen pose for the saved approach "
+                    "and descend positions. If localization fails, it remains at the "
+                    "observation position and does not approach the board."
+                )
             return (
                 f"The {robot} will move {part_name} to the saved approach and descend positions "
-                f"for {values.get('destination_location', '')}."
+                f"for {destination_location}."
             )
         if function_name == "place_insert":
             return (
@@ -1424,6 +1849,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     finally:
                         pending_execution.clear()
                         execution.update({"busy": False, "active_function": ""})
+                        if (
+                            function_name == "place_approach"
+                            and values.get("destination_location") == "assembly_board-v1"
+                            and _client_alive(assembly_board_v1_panel)
+                        ):
+                            await _refresh_assembly_board_v1_readiness()
                         if _client_alive(run_button):
                             run_button.props(remove="loading")
                             _render_execution()
@@ -1710,6 +2141,37 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         teleop_readiness = bridge.teleop_cartesian_readiness(_current_robot())
         if teleop_readiness.get("smooth_hold_active"):
             blocker = "Release Cartesian Smooth Hold before Function Execution."
+        board_run_blocked = False
+        if (
+            function_name == "place_approach"
+            and _current_destination_location() == "assembly_board-v1"
+        ):
+            board_status = dict(assembly_board_v1_state.get("status") or {})
+            post_staging_acceptance_allowed = bool(
+                board_status.get("post_staging_acceptance_allowed")
+            )
+            board_run_blocked = bool(
+                not assembly_board_v1_state.get("named_position_exists")
+                or (
+                    not _assembly_board_v1_accepted_usable()
+                    and not post_staging_acceptance_allowed
+                )
+            )
+            if board_run_blocked:
+                if not assembly_board_v1_state.get("status_loaded"):
+                    board_blocker = (
+                        "Checking assembly_board-v1 Board Readiness before place_approach."
+                    )
+                elif not assembly_board_v1_state.get("named_position_exists"):
+                    board_blocker = (
+                        f"Save the assembly_board-v1 named position for {_current_robot()} "
+                        "before Run place_approach."
+                    )
+                else:
+                    board_blocker = str(
+                        _assembly_board_v1_readiness(board_status)["message"]
+                    )
+                blocker = f"{blocker} {board_blocker}".strip()
         execution_blocker.set_text(blocker)
         execution_blocker.set_visibility(bool(blocker))
         enabled = bool(
@@ -1718,6 +2180,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             and has_location
             and (not needs_part or _current_part_name())
             and controls_enabled
+            and not board_run_blocked
         )
         run_button.set_enabled(enabled)
         show_gripper_close_test = bool(
@@ -1734,6 +2197,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 and controls_enabled
             )
         )
+        _render_assembly_board_v1_readiness()
 
     async def _capture_position(step_name: str, primitive: str) -> None:
         client = _current_client()
@@ -1939,105 +2403,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 _render_execution()
                 _render_steps()
 
-    async def _preview_position(step_name: str) -> None:
-        client = _current_client()
-        if execution.get("busy") or execution.get("checking"):
-            _notify("A robot function check or execution is already active.", type="warning")
-            return
-        robot = _current_robot()
-        function_name = _current_function()
-        recording_name = _current_recording_name()
-        part_name = _current_part_name()
-        execution.update(
-            {
-                "checking": True,
-                "active_function": f"{function_name}.{step_name} Preview Resolved Pose",
-            }
-        )
-        _render_execution()
-        _render_steps()
-        try:
-            execution_status.set_text(
-                f"Preparing the physical {robot} Function Execution runtime; no motion."
-            )
-            execution_status.classes(replace="text-xs text-amber-700")
-            preparation = await bridge.digital_twin_prepare_function_position(
-                target,
-                robot,
-            )
-            if not preparation.get("success"):
-                message = str(
-                    preparation.get("message")
-                    or f"Physical {robot} Function Execution preparation failed."
-                )
-                execution_status.set_text(message)
-                execution_status.classes(replace="text-xs text-red-700")
-                _notify(message, type="warning", timeout=7000, client=client)
-                return
-            result = await asyncio.to_thread(
-                bridge.digital_twin_preview_function_position,
-                target,
-                robot,
-                function_name,
-                recording_name,
-                step_name,
-                part_name=part_name,
-            )
-            message = str(result.get("message") or "")
-            resolved = dict(result.get("resolved_position") or {})
-            computed = dict(result.get("computed_position") or {})
-            if result.get("success") and resolved:
-                message = (
-                    f"{message} Computed world -> "
-                    f"{'tool0' if robot == 'ur5e' else 'link_eef'}: "
-                    f"x={float(computed['x']):.6f}, "
-                    f"y={float(computed['y']):.6f}, "
-                    f"z={float(computed['z']):.6f}; resolved: "
-                    f"x={float(resolved['x']):.6f}, "
-                    f"y={float(resolved['y']):.6f}, "
-                    f"z={float(resolved['z']):.6f}."
-                )
-                relative_position = dict(result.get("relative_position_m") or {})
-                current_computed = dict(
-                    result.get("resolved_computed_position_m") or {}
-                )
-                if relative_position and current_computed:
-                    message += (
-                        f" Saved calibration XYZ offset=({float(relative_position['x']):+.6f}, "
-                        f"{float(relative_position['y']):+.6f}, "
-                        f"{float(relative_position['z']):+.6f}) m from the computed pose "
-                        f"({float(current_computed['x']):.6f}, "
-                        f"{float(current_computed['y']):.6f}, "
-                        f"{float(current_computed['z']):.6f})."
-                    )
-                diagnostics = dict(result.get("diagnostics") or {})
-                if diagnostics.get("finger_tooth_clearance_m") is not None:
-                    message += (
-                        " MG tooth clearance="
-                        f"{float(diagnostics['finger_tooth_clearance_m']) * 1000.0:.2f} mm, "
-                        "hub overlap="
-                        f"{float(diagnostics['finger_hub_overlap_m']) * 1000.0:.2f} mm."
-                    )
-            execution_status.set_text(message)
-            execution_status.classes(
-                replace=(
-                    "text-xs text-green-700"
-                    if result.get("success")
-                    else "text-xs text-red-700"
-                )
-            )
-            _notify(
-                message,
-                type="positive" if result.get("success") else "warning",
-                timeout=7000,
-                client=client,
-            )
-        finally:
-            execution.update({"checking": False, "active_function": ""})
-            if _client_alive(run_button):
-                _render_execution()
-                _render_steps()
-
     def _render_steps() -> None:  # noqa: C901, PLR0912, PLR0915 - operator states stay local.
         function_name = _current_function()
         name = _current_recording_name()
@@ -2045,6 +2410,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             execution.get("busy")
             or execution.get("checking")
             or execution.get("preparing")
+        )
+        board_capture_blocked = bool(
+            function_name == "place_approach"
+            and name == "assembly_board-v1"
+            and not _assembly_board_v1_accepted_usable()
         )
         template = bridge.digital_twin_function_template(function_name)
         saved_steps = {
@@ -2154,13 +2524,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 saved = saved_steps.get(step_name)
                 buffered = buffered_steps.get(step_name)
                 position = buffered or saved
-                position_sources = dict(position.get("position_sources") or {}) if position else {}
-                relative_ready = bool(
-                    position
-                    and set(position_sources.values()) == {"captured_relative"}
-                    and dict(position.get("relative_position_m") or {})
-                    and dict(position.get("relative_reference") or {})
-                )
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-2 w-full"):
                         ui.label(step_name).classes("text-sm font-semibold")
@@ -2192,6 +2555,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         relative_position = dict(
                             position.get("relative_position_m") or {}
                         )
+                        relative_pose = dict(position.get("relative_pose") or {})
                         relative_reference = dict(
                             position.get("relative_reference") or {}
                         )
@@ -2225,10 +2589,22 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                                 f"z={float(reference_position.get('z', 0.0)):.9f}; "
                                 f"source={relative_reference.get('source')}"
                             ).classes("text-xs text-slate-600")
-                            ui.label(
-                                "Replay adds this saved world-axis XYZ calibration to the "
-                                "current computed pose and keeps the captured quaternion unchanged."
-                            ).classes("text-xs text-slate-500")
+                            if (
+                                relative_reference.get("source")
+                                == "assembly_board-v1_aruco"
+                                and relative_pose
+                            ):
+                                ui.label(
+                                    "Replay composes the current ArUco ID 70 world pose with "
+                                    "this saved full relative SE(3) pose, applying board "
+                                    "translation and rotation."
+                                ).classes("text-xs text-slate-500")
+                            else:
+                                ui.label(
+                                    "Replay adds this saved world-axis XYZ calibration to the "
+                                    "current computed pose and "
+                                    "keeps the captured quaternion unchanged."
+                                ).classes("text-xs text-slate-500")
                     with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
                         capture_button = ui.button(
                             "Capture Pose",
@@ -2237,6 +2613,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         ).props("flat dense")
                         if (
                             controls_blocked
+                            or board_capture_blocked
                             or not name
                             or (
                                 function_name in {"pick_approach", "place_approach"}
@@ -2262,23 +2639,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         )
                         if controls_blocked or (not buffered and not saved):
                             clear_button.disable()
-
-                        preview_button = ui.button(
-                            "Preview Resolved Pose",
-                            on_click=lambda _e, s=step_name: asyncio.create_task(
-                                _preview_position(s)
-                            ),
-                            icon="visibility",
-                        ).props("outline dense")
-                        if (
-                            controls_blocked
-                            or not name
-                            or (
-                                function_name in {"pick_approach", "place_approach"}
-                                and not _current_part_name()
-                            )
-                        ):
-                            preview_button.disable()
 
                         test_robot = _current_robot()
                         test_part_name = _current_part_name()
@@ -2337,11 +2697,17 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
         pending_execution.clear()
         run_confirm.close()
+        assembly_board_v1_state.update(
+            {
+                "last_failure": "",
+            }
+        )
         _sync_location()
         _sync_part_name()
         _reset_execution_status()
         _render_execution()
         _render_steps()
+        asyncio.create_task(_refresh_assembly_board_v1_readiness())
 
     def _part_name_changed(_e=None) -> None:
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
@@ -2355,9 +2721,15 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
         pending_execution.clear()
         run_confirm.close()
+        assembly_board_v1_state.update(
+            {
+                "last_failure": "",
+            }
+        )
         _reset_execution_status()
         _render_execution()
         _render_steps()
+        asyncio.create_task(_refresh_assembly_board_v1_readiness())
 
     robot_select.on_value_change(_selection_changed)
     function_select.on_value_change(_selection_changed)
@@ -2382,6 +2754,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             execution_status.classes(replace="text-xs text-amber-700")
 
     ui.timer(0.2, _refresh_function_execution_progress)
+    ui.timer(2.0, _refresh_assembly_board_v1_readiness, immediate=True)
     ui.label(
         "Capture checks read-only readiness automatically. Run and Test Position are separate "
         "physical motion actions requiring the selected robot's remote-control mode and "

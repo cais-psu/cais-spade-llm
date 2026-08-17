@@ -20,6 +20,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from cais_spade_llm.product.profile import ProductProfile
 
 destination_token_from_place_inputs = ProductProfile.destination_token_from_place_inputs
@@ -30,6 +32,21 @@ logger = logging.getLogger(__name__)
 
 _PHYSICAL_DETECTION_MAX_AGE_SEC = 10.0
 _PHYSICAL_DETECTION_FUTURE_TOLERANCE_SEC = 1.0
+_ASSEMBLY_BOARD_V1 = "assembly_board-v1"
+_ASSEMBLY_BOARD_ARUCO_DICTIONARY = "DICT_ARUCO_ORIGINAL"
+_ASSEMBLY_BOARD_ARUCO_ID = 70
+_ASSEMBLY_BOARD_ARUCO_MARKER_LENGTH_M = 0.076
+_ASSEMBLY_BOARD_ARUCO_MAX_AGE_SEC = 2.0
+_ASSEMBLY_BOARD_ARUCO_MINIMUM_SAMPLES = 10
+_ASSEMBLY_BOARD_ARUCO_MAX_TRANSLATION_SPREAD_M = 0.002
+_ASSEMBLY_BOARD_ARUCO_MAX_ROTATION_SPREAD_DEG = 0.5
+_ASSEMBLY_BOARD_ARUCO_MAX_BASELINE_TRANSLATION_M = 0.010
+_ASSEMBLY_BOARD_ARUCO_MAX_BASELINE_ROTATION_DEG = 2.0
+_ASSEMBLY_BOARD_ARUCO_WAIT_SEC = 15.0
+_PERCEPTION_CAMERA_CONFIG = Path(
+    "~/.config/cais-spade-llm/perception_cameras.yaml"
+).expanduser()
+_PERCEPTION_PREVIEW_ROOT = Path("/tmp/cais_perception_previews")
 
 
 def _import_linkattacher_srvs():
@@ -94,6 +111,35 @@ def _normalized_optional_quaternion(
     if norm <= 1e-12:
         return None, "orientation quaternion must be non-zero"
     return tuple(value / norm for value in numeric), None
+
+
+def _pose_from_mapping(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise ValueError("pose must be an object")
+    pose = {
+        field: float(value[field])
+        for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+    }
+    if not all(math.isfinite(item) for item in pose.values()):
+        raise ValueError("pose contains a non-finite value")
+    quaternion, error = _normalized_optional_quaternion(
+        pose["qx"], pose["qy"], pose["qz"], pose["qw"]
+    )
+    if error or quaternion is None:
+        raise ValueError(error or "pose quaternion is invalid")
+    pose.update(dict(zip(("qx", "qy", "qz", "qw"), quaternion, strict=True)))
+    return pose
+
+
+def _pose_delta(left: dict[str, float], right: dict[str, float]) -> tuple[float, float]:
+    translation_m = math.sqrt(
+        sum((float(left[field]) - float(right[field])) ** 2 for field in ("x", "y", "z"))
+    )
+    left_q = tuple(float(left[field]) for field in ("qx", "qy", "qz", "qw"))
+    right_q = tuple(float(right[field]) for field in ("qx", "qy", "qz", "qw"))
+    dot = abs(sum(a * b for a, b in zip(left_q, right_q, strict=True)))
+    rotation_deg = math.degrees(2.0 * math.acos(max(-1.0, min(1.0, dot))))
+    return translation_m, rotation_deg
 
 
 def _physical_detection_error(
@@ -2124,6 +2170,354 @@ class GazeboPickPlaceController:
                     result[provenance_field] = target[provenance_field]
         return result
 
+    def _assembly_board_v1_aruco_paths(self) -> tuple[Path, Path]:
+        snapshot_path = Path(
+            getattr(
+                self,
+                "_assembly_board_v1_aruco_snapshot_path",
+                _PERCEPTION_PREVIEW_ROOT
+                / str(self.robot_name or "").strip().lower()
+                / "assembly_board-v1_aruco.json",
+            )
+        ).expanduser()
+        config_path = Path(
+            getattr(
+                self,
+                "_assembly_board_v1_aruco_config_path",
+                _PERCEPTION_CAMERA_CONFIG,
+            )
+        ).expanduser()
+        return snapshot_path, config_path
+
+    def _assembly_board_v1_aruco_acceptance(self) -> tuple[dict[str, Any], str]:
+        _snapshot_path, config_path = self._assembly_board_v1_aruco_paths()
+        try:
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except FileNotFoundError:
+            return {}, f"ArUco configuration is unavailable: {config_path}"
+        except (OSError, yaml.YAMLError) as exc:
+            return {}, f"could not read ArUco configuration {config_path}: {exc}"
+        config = dict(payload.get(_ASSEMBLY_BOARD_V1 + "_aruco") or {})
+        role = str(self.robot_name or "").strip().lower()
+        role_config = dict(dict(config.get("roles") or {}).get(role) or {})
+        marker_length_m = _as_float(
+            config.get("marker_length_m"),
+            _ASSEMBLY_BOARD_ARUCO_MARKER_LENGTH_M,
+        )
+        try:
+            accepted_pose = _pose_from_mapping(role_config.get("accepted_pose"))
+            accepted_generation = int(role_config.get("accepted_generation", 0) or 0)
+            accepted_at = float(role_config.get("accepted_at", 0.0) or 0.0)
+        except (TypeError, ValueError, KeyError):
+            return {}, (
+                f"{role} has no accepted {_ASSEMBLY_BOARD_V1} ArUco pose; "
+                "use Perception -> Locate & Accept Board"
+            )
+        calibration_id = str(role_config.get("calibration_id") or "").strip()
+        if accepted_generation < 1 or accepted_at <= 0.0 or not calibration_id:
+            return {}, (
+                f"{role} has no accepted {_ASSEMBLY_BOARD_V1} ArUco pose; "
+                "use Perception -> Locate & Accept Board"
+            )
+        if bool(role_config.get("movement_blocked", False)):
+            return {}, (
+                f"{_ASSEMBLY_BOARD_V1} moved more than 10 mm or 2 deg from the "
+                f"accepted {role} pose; use Perception -> Locate & Accept Board again"
+            )
+        if not math.isclose(
+            marker_length_m,
+            _ASSEMBLY_BOARD_ARUCO_MARKER_LENGTH_M,
+            abs_tol=1e-9,
+        ):
+            return {}, (
+                f"{_ASSEMBLY_BOARD_V1} marker length is {marker_length_m * 1000.0:.3f} mm; "
+                "76.000 mm is required"
+            )
+        return {
+            "marker_length_m": marker_length_m,
+            "accepted_pose": accepted_pose,
+            "accepted_generation": accepted_generation,
+            "accepted_at": accepted_at,
+            "calibration_id": calibration_id,
+        }, ""
+
+    def _validated_assembly_board_v1_aruco_snapshot(  # noqa: C901, PLR0912
+        self,
+        *,
+        snapshot: dict[str, Any],
+        acceptance: dict[str, Any],
+        requested_at: float,
+        now: float,
+    ) -> tuple[dict[str, Any], str]:
+        role = str(self.robot_name or "").strip().lower()
+        if str(snapshot.get("camera_role") or "").strip().lower() != role:
+            return {}, f"ArUco snapshot camera_role does not match {role}"
+        if str(snapshot.get("resource_location") or "").strip() != _ASSEMBLY_BOARD_V1:
+            return {}, f"ArUco snapshot does not describe {_ASSEMBLY_BOARD_V1}"
+        dictionary = str(
+            snapshot.get("marker_dictionary") or snapshot.get("dictionary") or ""
+        ).strip()
+        if dictionary != _ASSEMBLY_BOARD_ARUCO_DICTIONARY:
+            return {}, f"ArUco snapshot dictionary must be {_ASSEMBLY_BOARD_ARUCO_DICTIONARY}"
+        try:
+            marker_id = int(snapshot.get("marker_id"))
+            marker_length_m = float(snapshot.get("marker_length_m"))
+            sample_count = int(snapshot.get("sample_count", 0) or 0)
+            frame_captured_at = float(snapshot.get("frame_captured_at", 0.0) or 0.0)
+            sample_started_at = float(
+                snapshot.get("sample_started_at")
+                or snapshot.get("window_started_at")
+                or 0.0
+            )
+            reprojection_error_px = float(
+                snapshot.get("reprojection_error_px", math.inf)
+            )
+            translation_spread_m = float(
+                snapshot.get("translation_spread_m", math.inf)
+            )
+            rotation_spread_deg = float(
+                snapshot.get("rotation_spread_deg", math.inf)
+            )
+        except (TypeError, ValueError) as exc:
+            return {}, f"ArUco snapshot has invalid numeric provenance: {exc}"
+        if marker_id != _ASSEMBLY_BOARD_ARUCO_ID:
+            return {}, f"ArUco marker ID must be {_ASSEMBLY_BOARD_ARUCO_ID}"
+        if not math.isclose(
+            marker_length_m,
+            float(acceptance["marker_length_m"]),
+            abs_tol=1e-9,
+        ):
+            return {}, "ArUco snapshot marker length differs from the accepted configuration"
+        if not all(
+            math.isfinite(value)
+            for value in (
+                marker_length_m,
+                frame_captured_at,
+                sample_started_at,
+                reprojection_error_px,
+                translation_spread_m,
+                rotation_spread_deg,
+            )
+        ):
+            return {}, "ArUco snapshot has non-finite numeric provenance"
+        if not bool(snapshot.get("valid")):
+            return {}, str(
+                snapshot.get("last_error")
+                or "ArUco ID 70 snapshot is not valid"
+            )
+        if not bool(snapshot.get("visible")):
+            return {}, str(snapshot.get("last_error") or "ArUco ID 70 is not visible")
+        if bool(snapshot.get("pose_ambiguous")):
+            return {}, "ArUco ID 70 pose is geometrically ambiguous"
+        if not bool(snapshot.get("stable")) or not bool(snapshot.get("world_pose_ready")):
+            return {}, str(
+                snapshot.get("last_error")
+                or "ArUco ID 70 does not yet have a stable world pose"
+            )
+        if sample_count < _ASSEMBLY_BOARD_ARUCO_MINIMUM_SAMPLES:
+            return {}, (
+                f"ArUco stability window has {sample_count}/"
+                f"{_ASSEMBLY_BOARD_ARUCO_MINIMUM_SAMPLES} samples"
+            )
+        if sample_started_at + 1e-6 < requested_at:
+            return {}, "waiting for ten ArUco observations captured after staging motion"
+        age_sec = now - frame_captured_at
+        if age_sec < -_PHYSICAL_DETECTION_FUTURE_TOLERANCE_SEC:
+            return {}, "ArUco snapshot timestamp is in the future"
+        if age_sec > _ASSEMBLY_BOARD_ARUCO_MAX_AGE_SEC:
+            return {}, f"ArUco snapshot is stale (age={age_sec:.2f}s)"
+        if reprojection_error_px > 1.0:
+            return {}, (
+                f"ArUco reprojection error {reprojection_error_px:.3f} px exceeds 1.000 px"
+            )
+        if translation_spread_m > _ASSEMBLY_BOARD_ARUCO_MAX_TRANSLATION_SPREAD_M:
+            return {}, (
+                f"ArUco translation spread {translation_spread_m * 1000.0:.3f} mm "
+                "exceeds 2.000 mm"
+            )
+        if rotation_spread_deg > _ASSEMBLY_BOARD_ARUCO_MAX_ROTATION_SPREAD_DEG:
+            return {}, (
+                f"ArUco rotation spread {rotation_spread_deg:.3f} deg exceeds 0.500 deg"
+            )
+        calibration = dict(snapshot.get("calibration") or {})
+        calibration_id = str(
+            snapshot.get("calibration_id")
+            or calibration.get("identity")
+            or calibration.get("id")
+            or ""
+        ).strip()
+        if not calibration_id:
+            return {}, "ArUco snapshot has no hand-eye calibration identity"
+        if calibration_id != str(acceptance["calibration_id"]):
+            return {}, (
+                "ArUco hand-eye calibration changed after board acceptance; "
+                "use Perception -> Locate & Accept Board again"
+            )
+        raw_pose = snapshot.get("pose") or snapshot.get("world_pose")
+        try:
+            pose = _pose_from_mapping(raw_pose)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {}, f"ArUco snapshot world pose is invalid: {exc}"
+        frame_id = str(
+            snapshot.get("frame_id")
+            or dict(raw_pose or {}).get("frame_id")
+            or ""
+        ).strip()
+        if frame_id != "world":
+            return {}, "ArUco snapshot pose must be expressed in world"
+        translation_delta_m, rotation_delta_deg = _pose_delta(
+            dict(acceptance["accepted_pose"]), pose
+        )
+        if (
+            translation_delta_m > _ASSEMBLY_BOARD_ARUCO_MAX_BASELINE_TRANSLATION_M
+            or rotation_delta_deg > _ASSEMBLY_BOARD_ARUCO_MAX_BASELINE_ROTATION_DEG
+        ):
+            return {}, (
+                f"{_ASSEMBLY_BOARD_V1} moved {translation_delta_m * 1000.0:.1f} mm / "
+                f"{rotation_delta_deg:.2f} deg from the accepted {role} baseline; "
+                "use Perception -> Locate & Accept Board"
+            )
+        return {
+            "success": True,
+            "destination_location": _ASSEMBLY_BOARD_V1,
+            "camera_role": role,
+            "frame_id": "world",
+            "pose": pose,
+            "captured_at": frame_captured_at,
+            "sample_started_at": sample_started_at,
+            "sample_count": sample_count,
+            "generation": int(acceptance["accepted_generation"]),
+            "accepted_at": float(acceptance["accepted_at"]),
+            "calibration_id": calibration_id,
+            "marker_dictionary": dictionary,
+            "marker_id": marker_id,
+            "marker_length_m": marker_length_m,
+            "reprojection_error_px": reprojection_error_px,
+            "translation_spread_m": translation_spread_m,
+            "rotation_spread_deg": rotation_spread_deg,
+            "translation_delta_m": translation_delta_m,
+            "rotation_delta_deg": rotation_delta_deg,
+            "source": "assembly_board-v1_aruco",
+        }, ""
+
+    def _request_assembly_board_v1_post_staging_acceptance(
+        self,
+        callback: Any,
+        requested_at: float,
+    ) -> tuple[dict[str, Any], str, str]:
+        """Request manager-owned acceptance, then reread its persisted authority."""
+        callback_error = ""
+        try:
+            callback(requested_at)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            callback_error = str(exc)
+        acceptance, acceptance_error = self._assembly_board_v1_aruco_acceptance()
+        return acceptance, acceptance_error, callback_error
+
+    def localize_assembly_board_v1(
+        self,
+        destination_location: str,
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Return one post-staging, stable per-arm ArUco pose without moving.
+
+        The accepted pose is frozen by the task runtime and used for the complete
+        ``place_approach``/``place_insert`` pair.
+        """
+        destination = str(destination_location or "").strip()
+        if self.execution_mode != "physical":
+            return {
+                "success": True,
+                "destination_location": destination,
+                "camera_role": str(self.robot_name or "").strip().lower(),
+                "source": "simulation_geometry",
+            }
+        if destination != _ASSEMBLY_BOARD_V1:
+            return {
+                "success": False,
+                "message": (
+                    f"localize_assembly_board_v1 requires destination_location "
+                    f"{_ASSEMBLY_BOARD_V1!r}, received {destination or '<empty>'!r}"
+                ),
+            }
+        requested_at = time.time()
+        post_staging_accept_callback = getattr(
+            self,
+            "_assembly_board_v1_post_staging_accept_callback",
+            None,
+        )
+        acceptance, acceptance_error = self._assembly_board_v1_aruco_acceptance()
+        if acceptance_error and not callable(post_staging_accept_callback):
+            return {"success": False, "message": acceptance_error}
+        snapshot_path, _config_path = self._assembly_board_v1_aruco_paths()
+        timeout_sec = max(
+            0.0,
+            _as_float(
+                getattr(self, "_assembly_board_v1_aruco_wait_sec", None),
+                _ASSEMBLY_BOARD_ARUCO_WAIT_SEC,
+            ),
+        )
+        deadline = time.monotonic() + timeout_sec
+        last_error = f"waiting for {snapshot_path}"
+        while True:
+            try:
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                if not isinstance(snapshot, dict):
+                    last_error = "ArUco snapshot is not a JSON object"
+                else:
+                    callback_error = ""
+                    if acceptance_error and callable(post_staging_accept_callback):
+                        acceptance, acceptance_error, callback_error = (
+                            self._request_assembly_board_v1_post_staging_acceptance(
+                                post_staging_accept_callback,
+                                requested_at,
+                            )
+                        )
+                        if not callback_error and not acceptance_error:
+                            continue
+                    if acceptance_error:
+                        last_error = callback_error or acceptance_error
+                        validated = {}
+                    else:
+                        validated, last_error = (
+                            self._validated_assembly_board_v1_aruco_snapshot(
+                                snapshot=snapshot,
+                                acceptance=acceptance,
+                                requested_at=requested_at,
+                                now=time.time(),
+                            )
+                        )
+                    if (
+                        last_error.startswith(f"{_ASSEMBLY_BOARD_V1} moved ")
+                        and callable(post_staging_accept_callback)
+                    ):
+                        acceptance, acceptance_error, callback_error = (
+                            self._request_assembly_board_v1_post_staging_acceptance(
+                                post_staging_accept_callback,
+                                requested_at,
+                            )
+                        )
+                        if callback_error or acceptance_error:
+                            last_error = callback_error or acceptance_error
+                        else:
+                            continue
+                    if not last_error:
+                        validated["part_name"] = str(part_name or "").strip()
+                        return validated
+            except FileNotFoundError:
+                last_error = f"ArUco snapshot is unavailable: {snapshot_path}"
+            except (OSError, json.JSONDecodeError) as exc:
+                last_error = f"could not read ArUco snapshot {snapshot_path}: {exc}"
+            if time.monotonic() >= deadline:
+                return {
+                    "success": False,
+                    "message": (
+                        f"{self.robot_name} could not localize {_ASSEMBLY_BOARD_V1} "
+                        f"after its observation pose: {last_error}"
+                    ),
+                }
+            time.sleep(0.05)
+
     def compute_place_targets(
         self,
         pick_ctx: dict[str, Any] | None = None,
@@ -2131,6 +2525,7 @@ class GazeboPickPlaceController:
         part_name: str = "",
         z_adjustment_m: float = 0.0,
         destination_location: str = "",
+        assembly_board_v1_aruco: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         ---
@@ -2141,6 +2536,7 @@ class GazeboPickPlaceController:
           product_geometry: {type: object, description: "Optional geometry override dict"}
           z_adjustment_m: {type: number, description: "Extra Z vertical adjustment"}
           destination_location: {type: string, description: "Optional symbolic destination token, such as assembly_board-v1, resolved internally to placement geometry when available"}
+          assembly_board_v1_aruco: {type: object, description: "Frozen per-arm assembly_board-v1 ArUco observation for physical placement"}
         preconditions: {}
         effects: {}
         ---
@@ -2164,6 +2560,41 @@ class GazeboPickPlaceController:
             destination_location=destination_location,
             product_geometry=product_geometry,
         )
+        frozen_board_pose = dict(assembly_board_v1_aruco or {})
+        if self.execution_mode == "physical" and symbolic_destination == _ASSEMBLY_BOARD_V1:
+            if not frozen_board_pose:
+                return {
+                    "success": False,
+                    "message": (
+                        "physical assembly_board-v1 placement requires a fresh frozen "
+                        "localize_assembly_board_v1 observation"
+                    ),
+                }
+            if (
+                str(frozen_board_pose.get("destination_location") or "").strip()
+                != _ASSEMBLY_BOARD_V1
+                or str(frozen_board_pose.get("camera_role") or "").strip().lower()
+                != str(self.robot_name or "").strip().lower()
+                or str(frozen_board_pose.get("frame_id") or "").strip() != "world"
+            ):
+                return {
+                    "success": False,
+                    "message": "frozen assembly_board-v1 ArUco observation provenance is invalid",
+                }
+            try:
+                _pose_from_mapping(frozen_board_pose.get("pose"))
+                generation = int(frozen_board_pose.get("generation", 0) or 0)
+                captured_at = float(frozen_board_pose.get("captured_at", 0.0) or 0.0)
+            except (KeyError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "message": f"frozen assembly_board-v1 ArUco pose is invalid: {exc}",
+                }
+            if generation < 1 or captured_at <= 0.0:
+                return {
+                    "success": False,
+                    "message": "frozen assembly_board-v1 ArUco generation is invalid",
+                }
         if symbolic_destination and not has_place_geometry_fields(geo):
             return {
                 "success": False,
@@ -2249,7 +2680,7 @@ class GazeboPickPlaceController:
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
         place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
 
-        return {
+        result = {
             "success": True,
             "part_name": target_part_name,
             "destination_location": requested_destination,
@@ -2269,6 +2700,9 @@ class GazeboPickPlaceController:
             "target_origin_pose": target_origin_pose,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
+        if frozen_board_pose:
+            result["assembly_board_v1_aruco"] = frozen_board_pose
+        return result
 
     def get_tcp_offset_z(self) -> float:
         """Return the world-frame Z offset between EE link and TCP link."""

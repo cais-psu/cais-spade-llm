@@ -59,6 +59,7 @@ def _filter_synthesis_primitive_catalog(
 
 ROBOT_PRIMITIVE_KIND_MAP = {
     "detect_parts": "observe",
+    "localize_assembly_board_v1": "observe",
     "get_current_pose": "observe",
     "compute_pick_targets": "pick",
     "compute_place_targets": "place",
@@ -128,6 +129,21 @@ ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP = {
         "z": "number",
         "pose": {"x": "number", "y": "number", "z": "number"},
         "orientation": {"qx": "number", "qy": "number", "qz": "number", "qw": "number"},
+    },
+    "localize_assembly_board_v1": {
+        "camera_role": "string",
+        "generation": "integer",
+        "captured_at": "number",
+        "frame_id": "string",
+        "pose": {
+            "x": "number",
+            "y": "number",
+            "z": "number",
+            "qx": "number",
+            "qy": "number",
+            "qz": "number",
+            "qw": "number",
+        },
     },
     "get_current_pose": {
         "pose": {
@@ -1549,6 +1565,7 @@ _ROBOT_PROMPT_HIDDEN_PRIMITIVES = frozenset(
         "move_pose",
         "delay",
         "get_current_pose",
+        "localize_assembly_board_v1",
     }
 )
 

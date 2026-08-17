@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -15,7 +16,7 @@ import yaml
 
 from cais_spade_llm.resources.robot.robot_primitives import _normalize_detected_item_output
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
-from cais_spade_llm.resources.sensor.physical import calibrate_hand_eye
+from cais_spade_llm.resources.sensor.physical import calibrate_hand_eye, calibration_pose_replay
 from cais_spade_llm.resources.sensor.physical.realsense_pose_estimator import (
     CalibrationError,
     ColorIntrinsics,
@@ -42,6 +43,70 @@ from cais_spade_llm.resources.sensor.physical.roboflow_detector import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_calibration_preview_records_missing_move_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeNode:
+        def __init__(self, _name: str) -> None:
+            pass
+
+        def destroy_node(self) -> None:
+            pass
+
+    class FakeActionClient:
+        def __init__(self, _node: object, _action: object, _name: str) -> None:
+            pass
+
+        @staticmethod
+        def wait_for_server(*, timeout_sec: float) -> bool:
+            assert timeout_sec == 10.0
+            return False
+
+    fake_rclpy = SimpleNamespace(
+        init=lambda: None,
+        ok=lambda: True,
+        shutdown=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "rclpy", fake_rclpy)
+    monkeypatch.setitem(
+        sys.modules,
+        "moveit_msgs.action",
+        SimpleNamespace(MoveGroup=object),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy.action",
+        SimpleNamespace(ActionClient=FakeActionClient),
+    )
+    monkeypatch.setitem(sys.modules, "rclpy.node", SimpleNamespace(Node=FakeNode))
+
+    poses_path = tmp_path / "poses.yaml"
+    poses_path.write_text(yaml.safe_dump({"poses": [{} for _ in range(20)]}), encoding="utf-8")
+    status_path = tmp_path / "status.json"
+    with pytest.raises(RuntimeError, match="/move_action is unavailable"):
+        calibration_pose_replay.replay(
+            SimpleNamespace(
+                confirmed=False,
+                preview_only=True,
+                poses=str(poses_path),
+                control=str(tmp_path / "control.json"),
+                status=str(status_path),
+                camera_role="xarm6",
+                planning_group="xarm6",
+                capture_command=[],
+            )
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "preview_failed"
+    assert status["pose_index"] == 0
+    assert status["pose_count"] == 20
+    assert status["error"] == (
+        "/move_action is unavailable; start the correct hardware MoveIt stack"
+    )
 
 
 def _twin_sync_module() -> object:
@@ -388,6 +453,93 @@ def test_hand_eye_rejects_park_horaud_disagreement(
 
     with pytest.raises(RuntimeError, match="PARK/HORAUD disagreement"):
         calibrate_hand_eye.solve_calibration(samples, tmp_path / "calibration.yaml")
+
+
+def test_xarm6_calibration_uses_controller_pose_and_active_offset() -> None:
+    capture = object.__new__(calibrate_hand_eye._CaptureNode)
+    capture.camera_role = "xarm6"
+    capture.world_frame = "world"
+    capture.tool_frame = "link_eef"
+    capture.xarm6_robot_state_received_monotonic = time.monotonic()
+    capture.xarm6_robot_state = SimpleNamespace(
+        pose=[100.0, 200.0, 300.0, 0.0, 0.0, math.pi / 2.0],
+        offset=[0.0, 0.0, 100.0, 0.0, 0.0, 0.0],
+    )
+    capture.transform = lambda target, source: (
+        np.eye(4)
+        if (target, source) == ("world", "link_base")
+        else pytest.fail(f"unexpected TF lookup: {target} -> {source}")
+    )
+
+    world_to_eef = capture.calibration_tool_pose("world", "link_eef")
+
+    assert world_to_eef[:3, 3] == pytest.approx([0.1, 0.2, 0.2])
+    assert world_to_eef[:3, :3] == pytest.approx(
+        calibrate_hand_eye._xarm6_pose_matrix(
+            [0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0]
+        )[:3, :3]
+    )
+
+
+def test_xarm6_calibration_rejects_stale_controller_pose() -> None:
+    capture = object.__new__(calibrate_hand_eye._CaptureNode)
+    capture.camera_role = "xarm6"
+    capture.world_frame = "world"
+    capture.tool_frame = "link_eef"
+    capture.xarm6_robot_state = SimpleNamespace(
+        pose=[0.0] * 6,
+        offset=[0.0] * 6,
+    )
+    capture.xarm6_robot_state_received_monotonic = time.monotonic() - 3.0
+
+    with pytest.raises(RuntimeError, match="fresh /xarm6/xarm/robot_states"):
+        capture.calibration_tool_pose("world", "link_eef")
+
+
+def test_xarm6_solve_rejects_legacy_tf_samples(tmp_path: Path) -> None:
+    samples = tmp_path / "samples.json"
+    samples.write_text(json.dumps(_hand_eye_samples()), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="legacy TF robot pose"):
+        calibrate_hand_eye.solve_calibration(
+            samples,
+            tmp_path / "calibration.yaml",
+            camera_role="xarm6",
+            parent_frame="link_eef",
+        )
+
+
+def test_xarm6_solve_accepts_controller_fk_samples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOpenCV:
+        CALIB_HAND_EYE_PARK = 1
+        CALIB_HAND_EYE_HORAUD = 2
+
+        @staticmethod
+        def calibrateHandEye(
+            *_args: object,
+            method: int,
+        ) -> tuple[np.ndarray, np.ndarray]:
+            assert method in {1, 2}
+            return np.eye(3), np.zeros((3, 1))
+
+    monkeypatch.setattr(calibrate_hand_eye, "_opencv", lambda: FakeOpenCV())
+    payload = _hand_eye_samples()
+    for sample in payload["samples"]:
+        sample["robot_pose_source"] = "xarm6_controller_fk"
+    samples = tmp_path / "samples.json"
+    samples.write_text(json.dumps(payload), encoding="utf-8")
+
+    calibration = calibrate_hand_eye.solve_calibration(
+        samples,
+        tmp_path / "calibration.yaml",
+        camera_role="xarm6",
+        parent_frame="link_eef",
+    )
+
+    assert calibration["validation"]["accepted"] is True
 
 
 def test_physical_perception_converts_missing_tf_to_calibration_error() -> None:

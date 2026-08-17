@@ -22,6 +22,10 @@ import sys
 
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
 from cais_spade_llm.utils.logging_setup import install_startup_logging_filters
+from cais_spade_llm.utils.runtime_cleanup import (
+    cleanup_runtime_artifacts,
+    format_cleanup_report,
+)
 from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
 
 install_startup_logging_filters()
@@ -203,6 +207,25 @@ def _cleanup_ros2_shm() -> None:
         LOGGER.info("Startup cleanup: removed stale shared-memory / Gazebo temp files.")
 
 
+def _cleanup_cais_runtime_artifacts() -> None:
+    """Prune CAIS-owned runtime logs without blocking UI startup."""
+    try:
+        report = cleanup_runtime_artifacts(
+            apply=True,
+            include_cais=True,
+            include_caches=False,
+            include_global_ros=False,
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("CAIS runtime log cleanup failed: %s", exc)
+        return
+    formatted = format_cleanup_report(report).replace("\n", "; ")
+    if report["errors"]:
+        LOGGER.warning("CAIS runtime log cleanup completed with errors: %s", formatted)
+    else:
+        LOGGER.info("CAIS runtime log cleanup completed: %s", formatted)
+
+
 # UI startup and shutdown cleanup.
 def _install_exit_cleanup() -> None:
     """Register atexit + SIGTERM handler to guarantee process cleanup."""
@@ -224,6 +247,7 @@ def _run_ui() -> None:
     # Clean slate: kill any leftover processes from a previous session.
     _kill_stale_ros2_processes(reason="startup")
     _cleanup_ros2_shm()
+    _cleanup_cais_runtime_artifacts()
     # Register cleanup for when this session exits.
     _install_exit_cleanup()
     print(

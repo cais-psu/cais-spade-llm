@@ -20,6 +20,7 @@ from cais_spade_llm.function_analyzer import (
     FunctionAnalyzer,  # Introspects agent methods for tool schemas.
 )
 from cais_spade_llm.prompts import BASE_INSTRUCTIONS, PROMPT_MAS_AGENT, ROLE_BLOCKS
+from cais_spade_llm.utils.runtime_cleanup import cais_log_dir, install_action_log_handlers
 
 load_dotenv()
 
@@ -150,22 +151,10 @@ class LlmAgent(Agent):
 
         # logging
         self.logger = logging.getLogger(f"agent:{self.agent_name}")
-        if not self.logger.handlers:
-            # Defer handler creation until the first instance with this name to avoid duplicate logs.
-            self.logger.setLevel(logging.INFO)
-            os.makedirs("cais_spade_llm/log", exist_ok=True)
-            fh = logging.FileHandler(
-                f"cais_spade_llm/log/{self.agent_name}_actions.log",
-                mode="a",
-                encoding="utf-8",
-            )
-            fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            fh.setFormatter(fmt)
-            ch = logging.StreamHandler()
-            ch.setFormatter(fmt)
-            # Mirror logs to disk (for audits) and stdout (for dev convenience).
-            self.logger.addHandler(fh)
-            self.logger.addHandler(ch)
+        install_action_log_handlers(
+            self.logger,
+            cais_log_dir() / f"{self.agent_name}_actions.log",
+        )
 
         # tools registry
         self.function_analyzer = FunctionAnalyzer()

@@ -411,7 +411,10 @@ def test_ur5e_world_z_step_preserves_exact_rtde_rotation_vector(
     server._joint_states_fresh = lambda: True
     server._read_actual_q = lambda: [0.0] * 6
     server._ensure_control_program_for_goal = lambda: None
-    server._cartesian_frame_validation = lambda: (True, "ready", 0.0, 0.0)
+    frame_validations: list[bool] = []
+    server._cartesian_frame_validation = lambda: (
+        frame_validations.append(True) or (True, "ready", 0.0, 0.0)
+    )
     server._lookup_rigid_transform = lambda target, source: (
         ((0.0, 0.0, 0.9), (0.0, 0.0, 0.0, 1.0))
         if (target, source) == ("world", "base")
@@ -451,6 +454,7 @@ def test_ur5e_world_z_step_preserves_exact_rtde_rotation_vector(
     result = server._execute_relative_cartesian(goal)
 
     assert result.error_code == 0
+    assert frame_validations == [True]
     assert move_l_targets == [target_pose]
     assert move_l_targets[0][3:6] == start_pose[3:6]
 

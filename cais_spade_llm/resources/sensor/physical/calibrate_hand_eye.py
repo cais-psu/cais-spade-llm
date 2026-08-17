@@ -93,6 +93,19 @@ def _matrix_from_transform_message(message: Any) -> np.ndarray:
     return matrix
 
 
+def _xarm6_pose_matrix(values: list[float] | tuple[float, ...]) -> np.ndarray:
+    """Return one xArm6 controller Cartesian pose as a homogeneous transform."""
+    from scipy.spatial.transform import Rotation
+
+    converted = [float(value) for value in values]
+    if len(converted) != 6 or not all(math.isfinite(value) for value in converted):
+        raise RuntimeError("xArm6 robot_states pose must contain six finite values")
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = Rotation.from_euler("xyz", converted[3:6]).as_matrix()
+    matrix[:3, 3] = np.asarray(converted[:3], dtype=np.float64) / 1000.0
+    return matrix
+
+
 def _quaternion_from_matrix(rotation: np.ndarray) -> tuple[float, float, float, float]:
     from scipy.spatial.transform import Rotation
 
@@ -196,6 +209,8 @@ class _CaptureNode:
         self.image: np.ndarray | None = None
         self.camera_matrix: np.ndarray | None = None
         self.distortion: np.ndarray | None = None
+        self.xarm6_robot_state: Any | None = None
+        self.xarm6_robot_state_received_monotonic = 0.0
         self.node.create_subscription(
             Image,
             color_topic,
@@ -208,6 +223,17 @@ class _CaptureNode:
             self._on_info,
             10,
         )
+        if camera_role == "xarm6":
+            try:
+                from xarm_msgs.msg import RobotMsg
+            except ImportError as exc:
+                raise RuntimeError("xarm_msgs is unavailable for xArm6 calibration") from exc
+            self.node.create_subscription(
+                RobotMsg,
+                "/xarm6/xarm/robot_states",
+                self._on_xarm6_robot_state,
+                20,
+            )
 
     def _on_image(self, message: Any) -> None:
         self.image = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
@@ -215,6 +241,10 @@ class _CaptureNode:
     def _on_info(self, message: Any) -> None:
         self.camera_matrix = np.asarray(message.k, dtype=np.float64).reshape(3, 3)
         self.distortion = np.asarray(message.d, dtype=np.float64)
+
+    def _on_xarm6_robot_state(self, message: Any) -> None:
+        self.xarm6_robot_state = message
+        self.xarm6_robot_state_received_monotonic = time.monotonic()
 
     def spin_for(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -243,6 +273,26 @@ class _CaptureNode:
                 ) from exc
             raise RuntimeError(f"TF {target} -> {source} is unavailable: {exc}") from exc
         return _matrix_from_transform_message(message.transform)
+
+    def calibration_tool_pose(self, target: str, source: str) -> np.ndarray:
+        """Return the physical robot pose used by one hand-eye sample."""
+        if self.camera_role != "xarm6":
+            return self.transform(target, source)
+        if target != self.world_frame or source != self.tool_frame:
+            return self.transform(target, source)
+        message = self.xarm6_robot_state
+        age_sec = time.monotonic() - self.xarm6_robot_state_received_monotonic
+        if message is None or age_sec > 2.0:
+            raise RuntimeError(
+                "fresh /xarm6/xarm/robot_states is unavailable for xArm6 calibration"
+            )
+        try:
+            base_to_tcp = _xarm6_pose_matrix(list(message.pose))
+            eef_to_tcp = _xarm6_pose_matrix(list(message.offset))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("xArm6 robot_states pose or offset is invalid") from exc
+        world_to_base = self.transform(self.world_frame, "link_base")
+        return world_to_base @ base_to_tcp @ np.linalg.inv(eef_to_tcp)
 
 
 def capture_samples(  # noqa: PLR0913 - camera topics and TF frames must remain explicit.
@@ -289,9 +339,9 @@ def capture_samples(  # noqa: PLR0913 - camera topics and TF frames must remain 
             if capture.image is None or capture.camera_matrix is None or capture.distortion is None:
                 logger.warning("Rejected: color image or CameraInfo is unavailable")
                 continue
-            tool_before = capture.transform(world_frame, tool_frame)
+            tool_before = capture.calibration_tool_pose(world_frame, tool_frame)
             capture.spin_for(0.5)
-            tool_after = capture.transform(world_frame, tool_frame)
+            tool_after = capture.calibration_tool_pose(world_frame, tool_frame)
             translation_m = float(np.linalg.norm(tool_after[:3, 3] - tool_before[:3, 3]))
             rotation_delta = tool_before[:3, :3].T @ tool_after[:3, :3]
             rotation_deg = math.degrees(
@@ -321,6 +371,9 @@ def capture_samples(  # noqa: PLR0913 - camera topics and TF frames must remain 
                     "camera_link_to_optical": link_to_optical.tolist(),
                     "reprojection_error_px": reprojection_error,
                     "corner_count": corner_count,
+                    "robot_pose_source": (
+                        "xarm6_robot_states" if camera_role == "xarm6" else "tf"
+                    ),
                     "captured_at": time.time(),
                 }
             )
@@ -375,6 +428,15 @@ def capture_one_sample(  # noqa: PLR0913 - camera topics and TF frames must rema
     samples = existing.get("samples", []) if isinstance(existing, dict) else []
     if not isinstance(samples, list):
         raise RuntimeError(f"calibration samples are invalid: {output}")
+    if camera_role == "xarm6" and samples and any(
+        row.get("robot_pose_source") != "xarm6_robot_states"
+        for row in samples
+        if isinstance(row, dict)
+    ):
+        raise RuntimeError(
+            "existing xArm6 samples use the legacy TF robot pose; archive and start a fresh "
+            "xArm6 sample set before Save Pose + Capture"
+        )
 
     rclpy.init()
     capture = _CaptureNode(
@@ -392,9 +454,9 @@ def capture_one_sample(  # noqa: PLR0913 - camera topics and TF frames must rema
             raise RuntimeError("color image or CameraInfo is unavailable")
         tool_after: np.ndarray | None = None
         if not stationary_camera:
-            tool_before = capture.transform(world_frame, tool_frame)
+            tool_before = capture.calibration_tool_pose(world_frame, tool_frame)
             capture.spin_for(0.5)
-            tool_after = capture.transform(world_frame, tool_frame)
+            tool_after = capture.calibration_tool_pose(world_frame, tool_frame)
             translation_m = float(np.linalg.norm(tool_after[:3, 3] - tool_before[:3, 3]))
             rotation_delta = tool_before[:3, :3].T @ tool_after[:3, :3]
             rotation_deg = math.degrees(
@@ -420,6 +482,9 @@ def capture_one_sample(  # noqa: PLR0913 - camera topics and TF frames must rema
         }
         if tool_after is not None:
             sample["base_to_tool"] = tool_after.tolist()
+            sample["robot_pose_source"] = (
+                "xarm6_robot_states" if camera_role == "xarm6" else "tf"
+            )
         samples.append(sample)
         _atomic_json_write(
             output,
@@ -490,6 +555,16 @@ def solve_calibration(
     samples = samples_payload.get("samples", [])
     if not isinstance(samples, list) or len(samples) < MINIMUM_ACCEPTED_POSES:
         raise RuntimeError(f"at least {MINIMUM_ACCEPTED_POSES} accepted poses are required")
+    if camera_role == "xarm6" and any(
+        row.get("robot_pose_source")
+        not in {"xarm6_robot_states", "xarm6_controller_fk"}
+        for row in samples
+        if isinstance(row, dict)
+    ):
+        raise RuntimeError(
+            "xArm6 calibration rejected: samples use the legacy TF robot pose; capture a "
+            "fresh xArm6 sample set using /xarm6/xarm/robot_states"
+        )
 
     base_to_tool = [np.asarray(row["base_to_tool"], dtype=np.float64) for row in samples]
     camera_to_board = [np.asarray(row["camera_to_board"], dtype=np.float64) for row in samples]

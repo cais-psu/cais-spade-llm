@@ -1904,7 +1904,17 @@ class UR5eRTDETrajectoryServer(Node):
         self._next_status_heartbeat_monotonic = now + 1.0
         with self._active_lock:
             validate_frames = self._active_goal is None
-        if validate_frames and not self.monitor_only and self.control is not None:
+        cartesian_readiness_cached = bool(
+            self._cartesian_frame_ready
+            and self._cartesian_function_ready
+            and self._cartesian_jog_ready
+        )
+        if (
+            validate_frames
+            and not cartesian_readiness_cached
+            and not self.monitor_only
+            and self.control is not None
+        ):
             (
                 self._cartesian_frame_ready,
                 self._cartesian_frame_message,

@@ -1,0 +1,211 @@
+{
+  "robot": "ur5e",
+  "function_name": "place_approach",
+  "name": "assembly_board-v1",
+  "capture_source": "hardware",
+  "replay_targets": [
+    "hardware",
+    "digital_twin"
+  ],
+  "steps": [
+    {
+      "step_name": "move_above_destination",
+      "primitive": "move_cartesian",
+      "params": {
+        "x": 0.005017590078130484,
+        "y": 0.09586326009677637,
+        "z": 1.3328252362699704,
+        "qx": 0.9999402742443452,
+        "qy": 0.008271334066236796,
+        "qz": -0.004984176680882356,
+        "qw": -0.005117710398435844
+      },
+      "capture_source": "hardware",
+      "captured_at": 1786651504.7642581,
+      "position_sources": {
+        "x": "captured_relative",
+        "y": "captured_relative",
+        "z": "captured_relative"
+      },
+      "relative_position_m": {
+        "x": -0.13367327379785138,
+        "y": 0.04467495696763442,
+        "z": 0.29790874260841654
+      },
+      "relative_reference": {
+        "kind": "destination_target",
+        "frame_id": "world",
+        "name": "assembly_board-v1",
+        "position_m": {
+          "x": 0.1474838300982016,
+          "y": 0.039576628362275004,
+          "z": 1.04102187718555
+        },
+        "pose": {
+          "x": 0.1474838300982016,
+          "y": 0.039576628362275004,
+          "z": 1.04102187718555,
+          "qx": -0.019329276013999863,
+          "qy": -0.015036009562832887,
+          "qz": -0.0007586061917077788,
+          "qw": 0.9996998159556932
+        },
+        "source": "assembly_board-v1_aruco",
+        "captured_at": 1786651348.6845376,
+        "camera_role": "ur5e",
+        "generation": 5,
+        "calibration_id": "ce2da819-e953-4a84-b809-6d32e72cf9a8",
+        "marker_length_m": 0.076,
+        "observation_source": "accepted"
+      },
+      "computed_position_m": {
+        "x": 0.0,
+        "y": 0.08,
+        "z": 1.3262041486863978
+      },
+      "computed_source": "capture",
+      "computed_at": 1786651504.732434,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          -1.2211297194110315,
+          -1.4027927380851288,
+          -2.183727741241455,
+          -1.1388312143138428,
+          1.564804196357727,
+          -2.808009211217062
+        ],
+        "pose": {
+          "frame_id": "world",
+          "child_frame_id": "tool0",
+          "x": 0.005017590078130484,
+          "y": 0.09586326009677637,
+          "z": 1.3328252362699704,
+          "qx": 0.9999402742443452,
+          "qy": 0.008271334066236796,
+          "qz": -0.004984176680882356,
+          "qw": -0.005117710398435844
+        },
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      },
+      "relative_pose": {
+        "x": -0.13367327379785138,
+        "y": 0.04467495696763442,
+        "z": 0.29790874260841654,
+        "qx": 0.9994599696784333,
+        "qy": 0.009046802611381341,
+        "qz": -0.019861795463993796,
+        "qw": -0.024564882532641157
+      }
+    },
+    {
+      "step_name": "descend",
+      "primitive": "move_cartesian",
+      "params": {
+        "x": 0.005025960221038021,
+        "y": 0.09580408676103902,
+        "z": 1.3006694893484427,
+        "qx": 0.7012021025615025,
+        "qy": 0.7129279690458808,
+        "qz": 7.065217148792808e-05,
+        "qw": -0.0070226294017424005
+      },
+      "capture_source": "hardware",
+      "captured_at": 1786651610.480755,
+      "position_sources": {
+        "x": "captured_relative",
+        "y": "captured_relative",
+        "z": "captured_relative"
+      },
+      "relative_position_m": {
+        "x": -0.13463249307464306,
+        "y": 0.04585783337251567,
+        "z": 0.2657890238454184
+      },
+      "relative_reference": {
+        "kind": "destination_target",
+        "frame_id": "world",
+        "name": "assembly_board-v1",
+        "position_m": {
+          "x": 0.1474838300982016,
+          "y": 0.039576628362275004,
+          "z": 1.04102187718555
+        },
+        "pose": {
+          "x": 0.1474838300982016,
+          "y": 0.039576628362275004,
+          "z": 1.04102187718555,
+          "qx": -0.019329276013999863,
+          "qy": -0.015036009562832887,
+          "qz": -0.0007586061917077788,
+          "qw": 0.9996998159556932
+        },
+        "source": "assembly_board-v1_aruco",
+        "captured_at": 1786651348.6845376,
+        "camera_role": "ur5e",
+        "generation": 5,
+        "calibration_id": "ce2da819-e953-4a84-b809-6d32e72cf9a8",
+        "marker_length_m": 0.076,
+        "observation_source": "accepted"
+      },
+      "computed_position_m": {
+        "x": 0.0,
+        "y": 0.08,
+        "z": 1.2762041486863978
+      },
+      "computed_source": "capture",
+      "computed_at": 1786651610.4475667,
+      "waypoint": {
+        "joint_names": [
+          "shoulder_pan_joint",
+          "shoulder_lift_joint",
+          "elbow_joint",
+          "wrist_1_joint",
+          "wrist_2_joint",
+          "wrist_3_joint"
+        ],
+        "joint_positions": [
+          -1.2211745421039026,
+          -1.4478327941945572,
+          -2.240063428878784,
+          -1.0372391504100342,
+          1.5648951530456543,
+          -4.378905717526571
+        ],
+        "pose": {
+          "frame_id": "world",
+          "child_frame_id": "tool0",
+          "x": 0.005025960221038021,
+          "y": 0.09580408676103902,
+          "z": 1.3006694893484427,
+          "qx": 0.7012021025615025,
+          "qy": 0.7129279690458808,
+          "qz": 7.065217148792808e-05,
+          "qw": -0.0070226294017424005
+        },
+        "gripper_joint": null,
+        "gripper_position": null,
+        "source": "hardware"
+      },
+      "relative_pose": {
+        "x": -0.13463249307464306,
+        "y": 0.04585783337251567,
+        "z": 0.2657890238454184,
+        "qx": 0.7003161012915953,
+        "qy": 0.7131389377233105,
+        "qz": 0.0033024035248820243,
+        "qw": -0.03129389565981488
+      }
+    }
+  ],
+  "part_name": "MG"
+}

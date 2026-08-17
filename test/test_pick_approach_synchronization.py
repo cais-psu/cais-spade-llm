@@ -449,6 +449,90 @@ def test_rtde_cached_timestamp_does_not_refresh_or_publish_joint_states(
     assert len(published) == 1
 
 
+def test_rtde_ready_heartbeat_reuses_cached_cartesian_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    receive_timestamp = [100.0]
+    server.receive = SimpleNamespace(
+        getActualQ=lambda: [0.25] * 6,
+        getTimestamp=lambda: receive_timestamp[0],
+    )
+    server.control = SimpleNamespace(
+        moveL=lambda *_args, **_kwargs: True,
+        isPoseWithinSafetyLimits=lambda *_args, **_kwargs: True,
+        getTCPOffset=lambda: [0.0] * 6,
+        jogStart=lambda *_args, **_kwargs: True,
+        jogStop=lambda: True,
+    )
+    server.receive_factory = None
+    server.monitor_only = False
+    server._receive_lock = threading.Lock()
+    server._receive_error = ""
+    server._receive_transport_failed = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._last_receive_timestamp = None
+    server._receive_watch_started_monotonic = 0.0
+    server._idle_receive_reconnect_count = 0
+    server.current_positions = None
+    server.current_positions_monotonic = None
+    server._joint_status_announced = True
+    server._active_lock = threading.Lock()
+    server._active_goal = None
+    server._active_goal_status = None
+    server._active_motion_kind = ""
+    server._latched_terminal_status = None
+    server._cartesian_frame_ready = True
+    server._cartesian_function_ready = True
+    server._cartesian_jog_ready = True
+    server._cartesian_frame_message = "UR5e Cartesian frame validation ready"
+    server._cartesian_frame_position_error_m = 0.0
+    server._cartesian_frame_orientation_error_rad = 0.0
+    server._next_status_heartbeat_monotonic = 0.0
+    server._check_jog_watchdog = lambda: None
+    server._joint_state_pub = SimpleNamespace(publish=lambda _message: None)
+    server.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: SimpleNamespace())
+    )
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+    server._cartesian_frame_validation = lambda: pytest.fail(
+        "a fully cached Cartesian readiness result must not block the heartbeat"
+    )
+    monkeypatch.setattr(
+        module,
+        "JointState",
+        lambda: SimpleNamespace(header=SimpleNamespace(), name=[], position=[]),
+    )
+    now = [1.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+
+    server._publish_joint_state()
+
+    assert statuses[-1]["state"] == "ready"
+    assert statuses[-1]["cartesian_function_ready"] is True
+    assert statuses[-1]["cartesian_jog_ready"] is True
+
+    validations: list[bool] = []
+    server._cartesian_frame_ready = False
+    server._cartesian_function_ready = False
+    server._cartesian_jog_ready = False
+    server._cartesian_frame_validation = lambda: (
+        validations.append(True) or (True, "ready again", 0.0, 0.0)
+    )
+    server._next_status_heartbeat_monotonic = 0.0
+    receive_timestamp[0] = 101.0
+    now[0] = 2.0
+
+    server._publish_joint_state()
+
+    assert validations == [True]
+    assert statuses[-1]["cartesian_function_ready"] is True
+    assert statuses[-1]["cartesian_jog_ready"] is True
+
+
 def test_rtde_receive_transport_loss_disconnects_once_without_reconnect() -> None:
     module = _load_rtde_server_module()
     server = object.__new__(module.UR5eRTDETrajectoryServer)
@@ -470,6 +554,9 @@ def test_rtde_receive_transport_loss_disconnects_once_without_reconnect() -> Non
     server._rtde_reset_reason = ""
     server._last_receive_timestamp = None
     server._joint_status_announced = True
+    server._cartesian_frame_ready = True
+    server._cartesian_function_ready = True
+    server._cartesian_jog_ready = True
     statuses: list[dict[str, Any]] = []
     server._write_status = lambda status: statuses.append(dict(status))
 
@@ -484,6 +571,9 @@ def test_rtde_receive_transport_loss_disconnects_once_without_reconnect() -> Non
     assert control_disconnects == [True]
     assert server.receive is None
     assert server.control is None
+    assert server._cartesian_frame_ready is False
+    assert server._cartesian_function_ready is False
+    assert server._cartesian_jog_ready is False
     assert factory_calls == []
 
 

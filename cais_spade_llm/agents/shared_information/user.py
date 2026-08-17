@@ -11,6 +11,8 @@ from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 from spade.template import Template
 
+from cais_spade_llm.utils.runtime_cleanup import cais_log_dir, install_action_log_handlers
+
 
 class User(Agent):
     """Minimal operator agent that tracks inbox messages and task statuses."""
@@ -29,16 +31,11 @@ class User(Agent):
 
         # Dedicated per-agent logger (file + console) for operator-visible trails.
         self.logger = logging.getLogger(f"agent_{self.name}")
-        self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
-        fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        fh = logging.FileHandler(f"cais_spade_llm/log/{self.name}_actions.log", mode="a")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        if not self.logger.handlers:
-            self.logger.addHandler(fh)
-            self.logger.addHandler(ch)
+        install_action_log_handlers(
+            self.logger,
+            cais_log_dir() / f"{self.name}_actions.log",
+        )
 
     async def setup(self):
         """Register inbox behaviours for common operator-facing message types."""

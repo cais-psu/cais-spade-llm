@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from cais_spade_llm.ui.bridge import SystemBridge
 
 CAMERA_ROLES = ("ur5e", "xarm6", "stationary")
+ASSEMBLY_BOARD_V1_ARUCO_ROLES = ("ur5e", "xarm6")
 CONFIG_PATH = Path("~/.config/cais-spade-llm/perception_cameras.yaml").expanduser()
 PREVIEW_ROOT = Path("/tmp/cais_perception_previews")
 SNAPSHOT_ROOT = Path("/tmp")
@@ -40,6 +41,10 @@ CAMERA_RESET_SETTLE_SEC = 2.0
 CAMERA_DEVICE_DISCOVERY_CACHE_SEC = 30.0
 CAMERA_DEVICE_DISCOVERY_FAILURE_CACHE_SEC = 10.0
 MINIMUM_CALIBRATION_JOINT_DELTA_RAD = math.radians(5.0)
+ASSEMBLY_BOARD_V1_MARKER_LENGTH_M = 0.076
+ASSEMBLY_BOARD_V1_TRANSLATION_LIMIT_M = 0.010
+ASSEMBLY_BOARD_V1_ROTATION_LIMIT_DEG = 2.0
+ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC = 2.0
 UR5E_CALIBRATION_MONITOR_STATUS = Path(
     "/tmp/cais_ur5e_calibration_monitor_status.json"
 )
@@ -88,7 +93,7 @@ DEFAULT_CAMERA_CONFIG: dict[str, Any] = {
             "serial": "",
             "camera_namespace": "xarm6_camera",
             "camera_name": "xarm6_camera",
-            "parent_frame": "xarm6_link_eef",
+            "parent_frame": "link_eef",
             "calibration_mode": "hand_eye",
             "calibration_path": str(CALIBRATION_ROOT / "xarm6_realsense_hand_eye.yaml"),
             "samples_path": "/tmp/xarm6_hand_eye_samples.json",
@@ -132,6 +137,20 @@ DEFAULT_CAMERA_CONFIG: dict[str, Any] = {
         "roll": 0.0,
         "pitch": 0.0,
         "yaw": 0.0,
+    },
+    "assembly_board-v1_aruco": {
+        "marker_length_m": ASSEMBLY_BOARD_V1_MARKER_LENGTH_M,
+        "roles": {
+            role: {
+                "accepted_generation": 0,
+                "accepted_pose": {},
+                "accepted_at": None,
+                "frame_captured_at": None,
+                "calibration_id": "",
+                "movement_blocked": False,
+            }
+            for role in ASSEMBLY_BOARD_V1_ARUCO_ROLES
+        },
     },
 }
 
@@ -248,6 +267,15 @@ def validate_camera_config(payload: dict[str, Any]) -> dict[str, Any]:
         for field in ("camera_namespace", "camera_name", "parent_frame", "calibration_path"):
             if not str(camera.get(field) or "").strip():
                 raise ValueError(f"camera role {role} is missing {field}")
+    assembly_board_v1_aruco = payload.get("assembly_board-v1_aruco")
+    if not isinstance(assembly_board_v1_aruco, dict):
+        raise ValueError("perception camera configuration is missing assembly_board-v1_aruco")
+    try:
+        marker_length_m = float(assembly_board_v1_aruco["marker_length_m"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("assembly_board-v1 ArUco marker_length_m must be finite") from exc
+    if not math.isfinite(marker_length_m) or marker_length_m <= 0.0:
+        raise ValueError("assembly_board-v1 ArUco marker_length_m must be finite and positive")
     return payload
 
 
@@ -267,6 +295,7 @@ class PerceptionManager:
         self._devices_discovery_lock = threading.Lock()
         self._wsl_devices_discovery_lock = threading.Lock()
         self._connection_lock = threading.RLock()
+        self._assembly_board_v1_config_lock = threading.RLock()
         self._desired_connected: set[str] = set()
         self._desired_perception: set[str] = set()
         self._recovery: dict[str, dict[str, Any]] = {
@@ -314,6 +343,20 @@ class PerceptionManager:
             board_pose = saved.get("stationary_board_world_pose")
             if isinstance(board_pose, dict):
                 merged["stationary_board_world_pose"].update(board_pose)
+            saved_aruco = saved.get("assembly_board-v1_aruco")
+            if isinstance(saved_aruco, dict):
+                if "marker_length_m" in saved_aruco:
+                    merged["assembly_board-v1_aruco"]["marker_length_m"] = saved_aruco[
+                        "marker_length_m"
+                    ]
+                saved_roles = saved_aruco.get("roles")
+                if isinstance(saved_roles, dict):
+                    for role in ASSEMBLY_BOARD_V1_ARUCO_ROLES:
+                        saved_role = saved_roles.get(role)
+                        if isinstance(saved_role, dict):
+                            merged["assembly_board-v1_aruco"]["roles"][role].update(
+                                saved_role
+                            )
         return validate_camera_config(merged)
 
     def save_assignments(self, assignments: dict[str, str]) -> dict[str, Any]:
@@ -332,6 +375,44 @@ class PerceptionManager:
         values = {name: float(pose[name]) for name in ("x", "y", "z", "roll", "pitch", "yaw")}
         payload["stationary_board_world_pose"] = {"configured": True, **values}
         _atomic_yaml_write(self.config_path, payload)
+        return payload
+
+    def save_assembly_board_v1_marker_length(
+        self,
+        marker_length_m: float,
+    ) -> dict[str, Any]:
+        """Persist the common physical side length of the assembly_board-v1 ArUco tag."""
+        try:
+            length = float(marker_length_m)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("assembly_board-v1 ArUco marker length must be finite") from exc
+        if not math.isfinite(length) or length <= 0.0:
+            raise ValueError("assembly_board-v1 ArUco marker length must be finite and positive")
+        if not math.isclose(
+            length,
+            ASSEMBLY_BOARD_V1_MARKER_LENGTH_M,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("assembly_board-v1 ArUco marker length must be exactly 0.076 m")
+        with self._assembly_board_v1_config_lock:
+            payload = self.config()
+            previous_length = float(
+                payload["assembly_board-v1_aruco"]["marker_length_m"]
+            )
+            payload["assembly_board-v1_aruco"]["marker_length_m"] = length
+            if not math.isclose(previous_length, length, abs_tol=1e-12):
+                for role in ASSEMBLY_BOARD_V1_ARUCO_ROLES:
+                    payload["assembly_board-v1_aruco"]["roles"][role].update(
+                        {
+                            "accepted_pose": {},
+                            "accepted_at": None,
+                            "frame_captured_at": None,
+                            "calibration_id": "",
+                            "movement_blocked": False,
+                        }
+                    )
+            _atomic_yaml_write(self.config_path, payload)
         return payload
 
     @staticmethod
@@ -722,6 +803,557 @@ class PerceptionManager:
         return SNAPSHOT_ROOT / f"cais_physical_perception_{role}.json"
 
     @staticmethod
+    def _assembly_board_v1_aruco_path(role: str) -> Path:
+        return PREVIEW_ROOT / role / "assembly_board-v1_aruco.json"
+
+    @staticmethod
+    def _finite_pose(payload: Any) -> dict[str, float]:
+        if not isinstance(payload, dict):
+            return {}
+        source = dict(payload)
+        position = source.get("position") or source.get("translation")
+        if isinstance(position, dict):
+            for field in ("x", "y", "z"):
+                source.setdefault(field, position.get(field))
+        orientation = source.get("orientation") or source.get("quaternion")
+        if isinstance(orientation, dict):
+            for field, orientation_field in (
+                ("qx", "x"),
+                ("qy", "y"),
+                ("qz", "z"),
+                ("qw", "w"),
+            ):
+                source.setdefault(field, orientation.get(field, orientation.get(orientation_field)))
+        try:
+            pose = {
+                field: float(source[field])
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            }
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if not all(math.isfinite(value) for value in pose.values()):
+            return {}
+        quaternion_norm = math.sqrt(
+            sum(pose[field] * pose[field] for field in ("qx", "qy", "qz", "qw"))
+        )
+        if quaternion_norm <= 1e-12:
+            return {}
+        for field in ("qx", "qy", "qz", "qw"):
+            pose[field] /= quaternion_norm
+        return pose
+
+    @staticmethod
+    def _assembly_board_v1_movement(
+        accepted_pose: dict[str, Any],
+        live_pose: dict[str, Any],
+    ) -> tuple[float | None, float | None]:
+        accepted = PerceptionManager._finite_pose(accepted_pose)
+        live = PerceptionManager._finite_pose(live_pose)
+        if not accepted or not live:
+            return None, None
+        translation_delta_m = math.sqrt(
+            sum((live[field] - accepted[field]) ** 2 for field in ("x", "y", "z"))
+        )
+        quaternion_dot = abs(
+            sum(
+                live[field] * accepted[field]
+                for field in ("qx", "qy", "qz", "qw")
+            )
+        )
+        rotation_delta_deg = math.degrees(
+            2.0 * math.acos(max(-1.0, min(1.0, quaternion_dot)))
+        )
+        return translation_delta_m, rotation_delta_deg
+
+    def assembly_board_v1_aruco_status(  # noqa: C901, PLR0912, PLR0915 - explicit snapshot contract.
+        self,
+        role: str,
+    ) -> dict[str, Any]:
+        """Return one role's live assembly_board-v1 ArUco pose and accepted baseline."""
+        key = str(role or "").strip().lower()
+        if key not in ASSEMBLY_BOARD_V1_ARUCO_ROLES:
+            raise ValueError(f"assembly_board-v1 ArUco is unavailable for camera role: {role}")
+        config = self.config()["assembly_board-v1_aruco"]
+        accepted = dict((config.get("roles") or {}).get(key) or {})
+        snapshot_path = self._assembly_board_v1_aruco_path(key)
+        snapshot = self._read_json(snapshot_path)
+        marker = snapshot.get("marker")
+        marker = dict(marker) if isinstance(marker, dict) else {}
+        stability = snapshot.get("stability")
+        stability = dict(stability) if isinstance(stability, dict) else {}
+        quality = snapshot.get("quality")
+        quality = dict(quality) if isinstance(quality, dict) else {}
+        calibration = snapshot.get("calibration")
+        calibration = dict(calibration) if isinstance(calibration, dict) else {}
+        raw_pose = snapshot.get("pose") or snapshot.get("world_pose") or {}
+        pose = self._finite_pose(raw_pose)
+        raw_frame_id = (
+            dict(raw_pose).get("frame_id") if isinstance(raw_pose, dict) else ""
+        )
+        frame_id = str(raw_frame_id or snapshot.get("frame_id") or "").strip()
+        if pose and not frame_id:
+            frame_id = "world"
+        try:
+            frame_captured_at = float(
+                snapshot.get("frame_captured_at")
+                or snapshot.get("captured_at")
+                or snapshot.get("updated_at")
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            frame_captured_at = 0.0
+        frame_age_sec = (
+            max(0.0, time.time() - frame_captured_at) if frame_captured_at > 0.0 else None
+        )
+        try:
+            sample_count = int(
+                snapshot.get("sample_count", stability.get("window_frame_count", 0)) or 0
+            )
+        except (TypeError, ValueError):
+            sample_count = 0
+        try:
+            required_sample_count = int(
+                snapshot.get(
+                    "required_sample_count",
+                    stability.get("required_window_frame_count", 10),
+                )
+                or 10
+            )
+        except (TypeError, ValueError):
+            required_sample_count = 10
+        valid = bool(snapshot.get("valid", False))
+        visible = bool(
+            snapshot.get(
+                "visible",
+                snapshot.get("marker_visible", valid or sample_count > 0),
+            )
+        )
+        stable = bool(snapshot.get("stable", snapshot.get("pose_stable", valid)))
+        calibration_id = str(
+            snapshot.get("calibration_id")
+            or snapshot.get("calibration_identity")
+            or calibration.get("identity")
+            or calibration.get("calibration_id")
+            or ""
+        ).strip()
+        calibration_ready = bool(
+            snapshot.get(
+                "calibration_ready",
+                calibration.get("ready", bool(calibration_id)),
+            )
+        )
+        camera = self._camera(key)
+        active_calibration = self._calibration_file_status(camera)
+        active_calibration_id = str(active_calibration.get("calibration_id") or "").strip()
+        active_calibration_ready = bool(
+            active_calibration.get("ready") and active_calibration_id
+        )
+        world_pose_ready = bool(
+            snapshot.get("world_pose_ready", valid and bool(pose and frame_id == "world"))
+        )
+        try:
+            marker_length_m = float(
+                snapshot.get(
+                    "marker_length_m",
+                    marker.get("marker_length_m", config["marker_length_m"]),
+                )
+            )
+        except (TypeError, ValueError):
+            marker_length_m = 0.0
+        try:
+            accepted_generation = int(accepted.get("accepted_generation", 0) or 0)
+        except (TypeError, ValueError):
+            accepted_generation = 0
+        accepted_pose = self._finite_pose(accepted.get("accepted_pose") or {})
+        accepted_calibration_id = str(accepted.get("calibration_id") or "")
+        calibration_changed = bool(
+            accepted_generation > 0
+            and accepted_calibration_id
+            and active_calibration_id
+            and accepted_calibration_id != active_calibration_id
+        )
+        translation_delta_m, rotation_delta_deg = self._assembly_board_v1_movement(
+            accepted_pose,
+            pose,
+        )
+        error = str(
+            snapshot.get("error")
+            or snapshot.get("last_error")
+            or snapshot.get("pose_error")
+            or ""
+        ).strip()
+        if not snapshot and not error:
+            error = "assembly_board-v1 ArUco snapshot is unavailable"
+        snapshot_role = str(snapshot.get("camera_role") or "").strip().lower()
+        resource_location = str(
+            snapshot.get("resource_location")
+            or snapshot.get("name")
+            or "assembly_board-v1"
+        ).strip()
+        marker_length_matches = bool(
+            math.isfinite(marker_length_m)
+            and abs(marker_length_m - float(config["marker_length_m"])) <= 1e-9
+        )
+        dictionary = str(
+            snapshot.get("marker_dictionary")
+            or snapshot.get("dictionary")
+            or marker.get("dictionary")
+            or ""
+        ).strip()
+        try:
+            marker_id = int(snapshot.get("marker_id", marker.get("id")))
+        except (TypeError, ValueError):
+            marker_id = None
+        reprojection_error_px = quality.get(
+            "median_reprojection_error_px",
+            snapshot.get(
+                "reprojection_error_px",
+                snapshot.get("median_reprojection_error_px"),
+            ),
+        )
+        translation_spread_m = snapshot.get(
+            "translation_spread_m",
+            stability.get("translation_spread_m"),
+        )
+        rotation_spread_deg = snapshot.get(
+            "rotation_spread_deg",
+            stability.get("rotation_spread_deg"),
+        )
+        try:
+            reprojection_error_px = float(reprojection_error_px)
+        except (TypeError, ValueError):
+            reprojection_error_px = None
+        try:
+            translation_spread_m = float(translation_spread_m)
+        except (TypeError, ValueError):
+            translation_spread_m = None
+        try:
+            rotation_spread_deg = float(rotation_spread_deg)
+        except (TypeError, ValueError):
+            rotation_spread_deg = None
+        quality_ready = bool(
+            valid
+            and dictionary == "DICT_ARUCO_ORIGINAL"
+            and marker_id == 70
+            and sample_count >= 10
+            and reprojection_error_px is not None
+            and math.isfinite(reprojection_error_px)
+            and reprojection_error_px <= 1.0
+            and translation_spread_m is not None
+            and math.isfinite(translation_spread_m)
+            and translation_spread_m <= 0.002
+            and rotation_spread_deg is not None
+            and math.isfinite(rotation_spread_deg)
+            and rotation_spread_deg <= 0.5
+        )
+        ready_to_accept = bool(
+            snapshot
+            and snapshot_role == key
+            and resource_location == "assembly_board-v1"
+            and frame_age_sec is not None
+            and frame_age_sec <= ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC
+            and visible
+            and stable
+            and calibration_ready
+            and bool(calibration_id)
+            and active_calibration_ready
+            and calibration_id == active_calibration_id
+            and world_pose_ready
+            and frame_id == "world"
+            and bool(pose)
+            and marker_length_matches
+            and quality_ready
+            and not error
+        )
+        movement_evidence_valid = bool(
+            ready_to_accept
+            and accepted_generation > 0
+            and bool(accepted_pose)
+            and translation_delta_m is not None
+            and rotation_delta_deg is not None
+        )
+        excessive_movement = bool(
+            movement_evidence_valid
+            and (
+                translation_delta_m > ASSEMBLY_BOARD_V1_TRANSLATION_LIMIT_M
+                or rotation_delta_deg > ASSEMBLY_BOARD_V1_ROTATION_LIMIT_DEG
+            )
+        )
+        latched_movement_blocked = bool(accepted.get("movement_blocked", False))
+        if excessive_movement and not latched_movement_blocked:
+            with self._assembly_board_v1_config_lock:
+                payload = self.config()
+                role_config = payload["assembly_board-v1_aruco"]["roles"][key]
+                try:
+                    current_generation = int(
+                        role_config.get("accepted_generation", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    current_generation = 0
+                if current_generation == accepted_generation:
+                    role_config["movement_blocked"] = True
+                    _atomic_yaml_write(self.config_path, payload)
+                    latched_movement_blocked = True
+        movement_blocked = latched_movement_blocked or calibration_changed
+        accepted_baseline = accepted_generation > 0 and bool(accepted_pose)
+        calibration_identity_matches = bool(
+            accepted_baseline
+            and accepted_calibration_id
+            and active_calibration_ready
+            and accepted_calibration_id == active_calibration_id
+        )
+        accepted_baseline_error = ""
+        if not accepted_baseline:
+            accepted_baseline_error = (
+                f"Locate & Accept Board for {key} before using assembly_board-v1."
+            )
+        elif not accepted_calibration_id:
+            accepted_baseline_error = (
+                "The accepted assembly_board-v1 calibration identity is unavailable; "
+                f"use Locate & Accept Board for {key} again."
+            )
+        elif not active_calibration_ready:
+            accepted_baseline_error = (
+                f"The active {key} calibration identity is unavailable."
+            )
+        elif calibration_changed:
+            accepted_baseline_error = (
+                f"The active {key} calibration identity changed; "
+                "use Locate & Accept Board again."
+            )
+        elif latched_movement_blocked:
+            accepted_baseline_error = (
+                "assembly_board-v1 moved more than 10 mm or 2 deg from the accepted "
+                f"{key} pose; use Locate & Accept Board again."
+            )
+        accepted_baseline_ready = bool(
+            accepted_baseline
+            and calibration_identity_matches
+            and not latched_movement_blocked
+        )
+        try:
+            accepted_at = float(accepted.get("accepted_at"))
+            accepted_frame_captured_at = float(accepted.get("frame_captured_at"))
+        except (TypeError, ValueError):
+            accepted_at = 0.0
+            accepted_frame_captured_at = 0.0
+        accepted_metadata_ready = bool(
+            math.isfinite(accepted_at)
+            and accepted_at > 0.0
+            and math.isfinite(accepted_frame_captured_at)
+            and accepted_frame_captured_at > 0.0
+        )
+        configured_marker_length_ready = math.isclose(
+            float(config["marker_length_m"]),
+            ASSEMBLY_BOARD_V1_MARKER_LENGTH_M,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        unaccepted_configuration = bool(
+            accepted_generation == 0
+            and not accepted_pose
+            and not accepted_calibration_id
+            and accepted.get("accepted_at") is None
+            and accepted.get("frame_captured_at") is None
+            and not latched_movement_blocked
+        )
+        movement_reaccept_configuration = bool(
+            accepted_baseline
+            and accepted_metadata_ready
+            and calibration_identity_matches
+            and latched_movement_blocked
+            and not calibration_changed
+        )
+        post_staging_acceptance_allowed = bool(
+            str(camera.get("calibration_mode") or "").strip() == "hand_eye"
+            and active_calibration_ready
+            and configured_marker_length_ready
+            and (unaccepted_configuration or movement_reaccept_configuration)
+        )
+        return {
+            "resource_location": resource_location,
+            "camera_role": snapshot_role,
+            "snapshot_path": str(snapshot_path),
+            "marker_id": marker_id,
+            "dictionary": dictionary,
+            "marker_length_m": marker_length_m,
+            "configured_marker_length_m": float(config["marker_length_m"]),
+            "marker_length_matches": marker_length_matches,
+            "frame_captured_at": frame_captured_at or None,
+            "sample_started_at": snapshot.get("sample_started_at"),
+            "sample_count": sample_count,
+            "required_sample_count": required_sample_count,
+            "frame_age_sec": frame_age_sec,
+            "visible": visible,
+            "stable": stable,
+            "world_pose_ready": world_pose_ready,
+            "reprojection_error_px": reprojection_error_px,
+            "translation_spread_m": translation_spread_m,
+            "rotation_spread_deg": rotation_spread_deg,
+            "quality_ready": quality_ready,
+            "valid": valid,
+            "calibration_id": calibration_id,
+            "calibration_ready": calibration_ready,
+            "active_calibration_id": active_calibration_id,
+            "active_calibration_ready": active_calibration_ready,
+            "frame_id": frame_id,
+            "pose": pose,
+            "error": error,
+            "last_failure": error,
+            "ready_to_accept": ready_to_accept,
+            "accepted": accepted_baseline,
+            "accepted_generation": accepted_generation,
+            "generation": accepted_generation,
+            "accepted_pose": accepted_pose,
+            "accepted_at": accepted.get("accepted_at"),
+            "accepted_frame_captured_at": accepted.get("frame_captured_at"),
+            "accepted_calibration_id": accepted_calibration_id,
+            "calibration_changed": calibration_changed,
+            "translation_delta_m": translation_delta_m,
+            "rotation_delta_deg": rotation_delta_deg,
+            "movement_evidence_valid": movement_evidence_valid,
+            "movement_blocked": movement_blocked,
+            "accepted_baseline_ready": accepted_baseline_ready,
+            "accepted_baseline_error": accepted_baseline_error,
+            "calibration_identity_matches": calibration_identity_matches,
+            "post_staging_acceptance_allowed": post_staging_acceptance_allowed,
+            "placement_blocked": not accepted_baseline_ready,
+            "placement_blocked_reason": accepted_baseline_error,
+            "translation_limit_m": ASSEMBLY_BOARD_V1_TRANSLATION_LIMIT_M,
+            "rotation_limit_deg": ASSEMBLY_BOARD_V1_ROTATION_LIMIT_DEG,
+        }
+
+    def locate_and_accept_assembly_board_v1(  # noqa: C901, PLR0912, PLR0915 - explicit acceptance gates.
+        self,
+        role: str,
+        *,
+        minimum_sample_started_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Accept one fresh stable ArUco pose as the role's no-motion board baseline.
+
+        Args:
+            role: Camera role that produced the ArUco observation.
+            minimum_sample_started_at: Optional earliest accepted stability-window
+                start time, expressed as Unix epoch seconds.
+
+        Returns:
+            The accepted role status and its new generation.
+
+        Raises:
+            RuntimeError: If the current observation is not acceptable.
+            ValueError: If ``minimum_sample_started_at`` is not finite.
+        """
+        key = str(role or "").strip().lower()
+        minimum_started_at: float | None = None
+        if minimum_sample_started_at is not None:
+            if isinstance(minimum_sample_started_at, bool):
+                raise ValueError("minimum_sample_started_at must be finite")
+            try:
+                minimum_started_at = float(minimum_sample_started_at)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("minimum_sample_started_at must be finite") from exc
+            if not math.isfinite(minimum_started_at):
+                raise ValueError("minimum_sample_started_at must be finite")
+        status = self.assembly_board_v1_aruco_status(key)
+        sample_started_at_error = ""
+        if minimum_started_at is not None:
+            raw_sample_started_at = status.get("sample_started_at")
+            if isinstance(raw_sample_started_at, bool):
+                sample_started_at_error = (
+                    "stability window sample_started_at is missing or invalid"
+                )
+            else:
+                try:
+                    sample_started_at = float(raw_sample_started_at)
+                except (TypeError, ValueError):
+                    sample_started_at_error = (
+                        "stability window sample_started_at is missing or invalid"
+                    )
+                else:
+                    if not math.isfinite(sample_started_at):
+                        sample_started_at_error = (
+                            "stability window sample_started_at is missing or invalid"
+                        )
+                    elif sample_started_at < minimum_started_at:
+                        sample_started_at_error = (
+                            "stability window began before the post-staging request"
+                        )
+        if not status["ready_to_accept"] or sample_started_at_error:
+            reasons: list[str] = []
+            if status["camera_role"] != key:
+                reasons.append(f"snapshot camera_role is {status['camera_role'] or 'missing'}")
+            if status["resource_location"] != "assembly_board-v1":
+                reasons.append("snapshot is not assembly_board-v1")
+            if status["frame_age_sec"] is None:
+                reasons.append("no frame timestamp")
+            elif status["frame_age_sec"] > ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC:
+                reasons.append(f"frame is stale ({status['frame_age_sec']:.2f} s)")
+            if not status["visible"]:
+                reasons.append("tag is not visible")
+            if not status["stable"]:
+                reasons.append("pose is not stable")
+            if not status["calibration_ready"] or not status["calibration_id"]:
+                reasons.append("camera calibration identity is unavailable")
+            if not status["active_calibration_ready"]:
+                reasons.append("active camera calibration identity is unavailable")
+            elif status["calibration_id"] != status["active_calibration_id"]:
+                reasons.append("snapshot calibration identity does not match the active calibration")
+            if not status["world_pose_ready"] or status["frame_id"] != "world":
+                reasons.append("world pose is unavailable")
+            if not status["marker_length_matches"]:
+                reasons.append("snapshot marker length does not match the saved marker length")
+            if status["dictionary"] != "DICT_ARUCO_ORIGINAL":
+                reasons.append("marker dictionary must be DICT_ARUCO_ORIGINAL")
+            if status["marker_id"] != 70:
+                reasons.append("marker ID must be 70")
+            if status["sample_count"] < 10:
+                reasons.append(f"stability window has {status['sample_count']}/10 samples")
+            reprojection_error_px = status["reprojection_error_px"]
+            if reprojection_error_px is None or reprojection_error_px > 1.0:
+                reasons.append("reprojection error must be at most 1 px")
+            translation_spread_m = status["translation_spread_m"]
+            if translation_spread_m is None or translation_spread_m > 0.002:
+                reasons.append("translation spread must be at most 2 mm")
+            rotation_spread_deg = status["rotation_spread_deg"]
+            if rotation_spread_deg is None or rotation_spread_deg > 0.5:
+                reasons.append("rotation spread must be at most 0.5 deg")
+            if status["error"]:
+                reasons.append(status["error"])
+            if sample_started_at_error:
+                reasons.append(sample_started_at_error)
+            raise RuntimeError(
+                "Cannot accept assembly_board-v1 for " + key + ": " + "; ".join(reasons)
+            )
+        previous_translation_delta_m = status["translation_delta_m"]
+        previous_rotation_delta_deg = status["rotation_delta_deg"]
+        with self._assembly_board_v1_config_lock:
+            payload = self.config()
+            role_config = payload["assembly_board-v1_aruco"]["roles"][key]
+            generation = int(role_config.get("accepted_generation", 0) or 0) + 1
+            role_config.update(
+                {
+                    "accepted_generation": generation,
+                    "accepted_pose": dict(status["pose"]),
+                    "accepted_at": time.time(),
+                    "frame_captured_at": status["frame_captured_at"],
+                    "calibration_id": status["active_calibration_id"],
+                    "movement_blocked": False,
+                }
+            )
+            _atomic_yaml_write(self.config_path, payload)
+        accepted_status = self.assembly_board_v1_aruco_status(key)
+        return {
+            **accepted_status,
+            "success": True,
+            "previous_translation_delta_m": previous_translation_delta_m,
+            "previous_rotation_delta_deg": previous_rotation_delta_deg,
+            "message": (
+                f"Accepted assembly_board-v1 ArUco pose for {key} as generation "
+                f"{generation}; no robot motion was requested."
+            ),
+        }
+
+    @staticmethod
     def _process_names(role: str) -> dict[str, str]:
         return {
             "camera": "realsense_camera" if role == "ur5e" else f"realsense_camera_{role}",
@@ -734,7 +1366,7 @@ class PerceptionManager:
             "calibration_state_publisher": f"{role}_calibration_state_publisher",
         }
 
-    def _domain_id(self) -> int:
+    def _domain_id(self, robot: str = "ur5e") -> int:
         hardware_processes = getattr(self.bridge, "_DIGITAL_TWIN_HARDWARE_PROCESS_NAMES", set())
         active_from_status = getattr(self.bridge, "_active_digital_twin_target_from_status", None)
         active_target = active_from_status() if callable(active_from_status) else None
@@ -753,7 +1385,7 @@ class PerceptionManager:
                 return int(
                     domain_lookup(
                         target_cfg,
-                        "ur5e",
+                        robot,
                         domains,
                     )
                 )
@@ -843,7 +1475,7 @@ class PerceptionManager:
     def _ensure_ur5e_calibration_monitor(self, *, domain_id: int | None = None) -> None:
         """Start only the read-only UR5e state and TF publishers needed by calibration."""
         names = self._process_names("ur5e")
-        resolved_domain_id = self._domain_id() if domain_id is None else int(domain_id)
+        resolved_domain_id = self._domain_id("ur5e") if domain_id is None else int(domain_id)
         state_publisher = names["calibration_state_publisher"]
         full_state_publisher_running = self._ur5e_full_state_publisher_running()
         if full_state_publisher_running:
@@ -927,6 +1559,7 @@ class PerceptionManager:
                 "sensor_msgs/msg/JointState",
             ],
             timeout=12.0,
+            role="ur5e",
         )
         if result.returncode == 0:
             return
@@ -1021,7 +1654,7 @@ class PerceptionManager:
             error = self.bridge._start_tracked_ros2_command(
                 names["camera"],
                 self._logged_command(names["camera"], command),
-                ros_domain_id=self._domain_id(),
+                ros_domain_id=self._domain_id(key),
             )
         if error and "already running" not in error:
             return error
@@ -1037,22 +1670,32 @@ class PerceptionManager:
             return detail or f"{key} RealSense camera stopped during startup; see {camera_log}"
 
         preview_dir = PREVIEW_ROOT / key
-        for filename in ("status.json", "color.jpg", "depth.jpg"):
+        for filename in (
+            "status.json",
+            "assembly_board-v1_aruco.json",
+            "color.jpg",
+            "depth.jpg",
+        ):
             with suppress(OSError):
                 (preview_dir / filename).unlink(missing_ok=True)
         topics = self._topics(camera)
         expected_rate_hz = str(camera["color_profile"]).rsplit("x", maxsplit=1)[-1]
+        marker_length_m = float(self.config()["assembly_board-v1_aruco"]["marker_length_m"])
         preview_command = (
             f"{self.venv_python} -m "
             "cais_spade_llm.resources.sensor.physical.realsense_preview_node "
             f"--camera-role {key} --color-topic {topics['color']} "
-            f"--depth-topic {topics['depth']} --output-root {PREVIEW_ROOT}"
-            f" --expected-rate-hz {expected_rate_hz}"
+            f"--depth-topic {topics['depth']} --camera-info-topic {topics['camera_info']} "
+            f"--world-frame world --parent-frame {camera['parent_frame']} "
+            f"--camera-optical-frame {camera['camera_name']}_color_optical_frame "
+            f"--hand-eye-config {camera['calibration_path']} "
+            f"--marker-length-m {marker_length_m} --output-root {PREVIEW_ROOT} "
+            f"--expected-rate-hz {expected_rate_hz}"
         )
         preview_error = self.bridge._start_tracked_ros2_command(
             names["preview"],
             self._logged_command(names["preview"], preview_command),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id(key),
         )
         if preview_error and "already running" not in preview_error:
             return preview_error
@@ -1210,7 +1853,7 @@ class PerceptionManager:
             return "ROBOFLOW_API_KEY is not configured in the ignored .env file."
         if key == "ur5e":
             try:
-                self._ensure_ur5e_calibration_monitor(domain_id=self._domain_id())
+                self._ensure_ur5e_calibration_monitor(domain_id=self._domain_id(key))
             except RuntimeError as exc:
                 return f"UR5e state/TF monitoring is not ready: {exc}"
         if key == "ur5e" and self._ur5e_digital_twin_process_running("perception"):
@@ -1253,7 +1896,7 @@ class PerceptionManager:
         return self.bridge._start_tracked_ros2_command(
             process_name,
             self._logged_command(process_name, command),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id(key),
         )
 
     def start_perception(self, role: str) -> str | None:
@@ -1361,7 +2004,7 @@ class PerceptionManager:
                 process_name,
                 f"ros2 run rqt_image_view rqt_image_view {topic}",
             ),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id(key),
         )
 
     def save_snapshot(self, role: str, stream: str = "color") -> Path:
@@ -1389,7 +2032,11 @@ class PerceptionManager:
                     source = PREVIEW_ROOT / role / f"{stream}.jpg"
                     if source.is_file():
                         shutil.copy2(source, target / f"{role}_{stream}_{index:03d}.jpg")
-                for status_name in ("status.json", "detection_status.json"):
+                for status_name in (
+                    "status.json",
+                    "detection_status.json",
+                    "assembly_board-v1_aruco.json",
+                ):
                     status = PREVIEW_ROOT / role / status_name
                     if status.is_file():
                         shutil.copy2(
@@ -1444,10 +2091,11 @@ class PerceptionManager:
         arguments: list[str],
         *,
         timeout: float,
+        role: str = "ur5e",
     ) -> subprocess.CompletedProcess[str]:
         command = (
             self.bridge._ROS2_ENV
-            + self.bridge._ros2_domain_export(self._domain_id())
+            + self.bridge._ros2_domain_export(self._domain_id(role))
             + " ".join(shlex.quote(argument) for argument in arguments)
         )
         return subprocess.run(
@@ -1462,36 +2110,55 @@ class PerceptionManager:
         camera = self._camera(role)
         if role == "ur5e":
             return self._read_ur5e_rtde_joint_state(camera)
-        topic = str(camera.get("joint_state_topic") or "").strip()
-        if not topic:
-            raise RuntimeError(f"{role} does not use a reviewed robot pose set")
-        result = self._run_ros_command(
-            [
-                "timeout",
-                "8",
-                "ros2",
-                "topic",
-                "echo",
-                "--once",
-                topic,
-                "sensor_msgs/msg/JointState",
-            ],
-            timeout=10.0,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                result.stderr.strip() or result.stdout.strip() or f"{topic} is unavailable"
+        source = f"{role} hardware joint feedback"
+        if role == "xarm6":
+            snapshot = self.bridge._snapshot_robot_waypoint(
+                "xarm6",
+                source="hardware",
+                hardware_domain_id=self._domain_id("xarm6"),
             )
-        try:
-            document = next(
-                row for row in yaml.safe_load_all(result.stdout) if isinstance(row, dict)
+            error = str(snapshot.get("error") or "").strip()
+            if error:
+                raise RuntimeError(f"{source} is unavailable: {error}")
+            try:
+                names = [str(value) for value in snapshot["joint_names"]]
+                positions = [float(value) for value in snapshot["positions"]]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"could not parse {source}") from exc
+        else:
+            topic = str(camera.get("joint_state_topic") or "").strip()
+            if not topic:
+                raise RuntimeError(f"{role} does not use a reviewed robot pose set")
+            result = self._run_ros_command(
+                [
+                    "timeout",
+                    "8",
+                    "ros2",
+                    "topic",
+                    "echo",
+                    "--once",
+                    topic,
+                    "sensor_msgs/msg/JointState",
+                ],
+                timeout=10.0,
+                role=role,
             )
-            names = [str(value) for value in document["name"]]
-            positions = [float(value) for value in document["position"]]
-        except (KeyError, StopIteration, TypeError, ValueError, yaml.YAMLError) as exc:
-            raise RuntimeError(f"could not parse {topic}") from exc
+            if result.returncode != 0:
+                raise RuntimeError(
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or f"{topic} is unavailable"
+                )
+            try:
+                document = next(
+                    row for row in yaml.safe_load_all(result.stdout) if isinstance(row, dict)
+                )
+                names = [str(value) for value in document["name"]]
+                positions = [float(value) for value in document["position"]]
+            except (KeyError, StopIteration, TypeError, ValueError, yaml.YAMLError) as exc:
+                raise RuntimeError(f"could not parse {topic}") from exc
         if not names or len(names) != len(positions):
-            raise RuntimeError(f"{topic} returned an incomplete joint state")
+            raise RuntimeError(f"{source} returned an incomplete joint state")
         by_name = dict(zip(names, positions, strict=True))
         selected = next(
             (
@@ -1502,7 +2169,7 @@ class PerceptionManager:
             None,
         )
         if not selected:
-            raise RuntimeError(f"{topic} does not contain the six {role} arm joints")
+            raise RuntimeError(f"{source} does not contain the six {role} arm joints")
         return {
             "names": selected,
             "positions": [by_name[name] for name in selected],
@@ -1640,6 +2307,7 @@ class PerceptionManager:
             result = self._run_ros_command(
                 self._calibration_capture_command(key),
                 timeout=18.0,
+                role=key,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("ChArUco capture timed out") from exc
@@ -1723,7 +2391,7 @@ class PerceptionManager:
                 ]
             )
         try:
-            result = self._run_ros_command(arguments, timeout=40.0)
+            result = self._run_ros_command(arguments, timeout=40.0, role=key)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("calibration solve timed out") from exc
         if result.returncode != 0:
@@ -1775,7 +2443,7 @@ class PerceptionManager:
         return self.bridge._start_tracked_ros2_command(
             process_name,
             self._logged_command(process_name, command),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id("ur5e"),
         )
 
     def calibration_replay_control(self, role: str, action: str) -> Path:
@@ -1801,7 +2469,15 @@ class PerceptionManager:
         if self._pose_count(camera) < 20:
             return f"at least 20 reviewed {key} calibration poses are required"
         status_path = Path(f"/tmp/cais_{key}_calibration_replay_status.json")
-        if self._read_json(status_path).get("state") != "preview_ready":
+        preview_status = self._read_json(status_path)
+        if preview_status.get("state") != "preview_ready":
+            preview_error = str(preview_status.get("error") or "").strip()
+            if preview_error:
+                return f"{key} calibration preview failed: {preview_error}"
+            if preview_status.get("state") == "previewing":
+                pose_index = int(preview_status.get("pose_index", 0) or 0)
+                pose_count = int(preview_status.get("pose_count", 0) or 0)
+                return f"{key} calibration preview is still running ({pose_index}/{pose_count})"
             return "preview all reviewed calibration poses successfully before confirmation"
         sample_path = Path(str(camera["samples_path"])).expanduser()
         if sample_path.is_file():
@@ -1841,7 +2517,7 @@ class PerceptionManager:
         return self.bridge._start_tracked_ros2_command(
             process_name,
             self._logged_command(process_name, command),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id(key),
         )
 
     def preview_calibration_replay(self, role: str) -> str | None:
@@ -1852,6 +2528,16 @@ class PerceptionManager:
         camera = self._camera(key)
         if self._pose_count(camera) < 20:
             return f"at least 20 reviewed {key} calibration poses are required"
+        status_path = Path(f"/tmp/cais_{key}_calibration_replay_status.json")
+        _atomic_json_write(
+            status_path,
+            {
+                "updated_at": time.time(),
+                "state": "preview_starting",
+                "pose_index": 0,
+                "pose_count": self._pose_count(camera),
+            },
+        )
         arguments = [
             str(self.venv_python),
             "-m",
@@ -1865,7 +2551,7 @@ class PerceptionManager:
             "--control",
             f"/tmp/cais_{key}_calibration_replay_control.json",
             "--status",
-            f"/tmp/cais_{key}_calibration_replay_status.json",
+            str(status_path),
             "--preview-only",
         ]
         process_name = self._process_names(key)["calibration_preview"]
@@ -1873,7 +2559,7 @@ class PerceptionManager:
         return self.bridge._start_tracked_ros2_command(
             process_name,
             self._logged_command(process_name, command),
-            ros_domain_id=self._domain_id(),
+            ros_domain_id=self._domain_id(key),
         )
 
     def test_detection(self, role: str) -> dict[str, Any]:
@@ -1883,7 +2569,7 @@ class PerceptionManager:
         requested_at = time.time()
         command = (
             self.bridge._ROS2_ENV
-            + self.bridge._ros2_domain_export(self._domain_id())
+            + self.bridge._ros2_domain_export(self._domain_id(key))
             + f"timeout 35 ros2 service call {service} std_srvs/srv/Trigger '{{}}'"
         )
         try:
@@ -2099,6 +2785,11 @@ class PerceptionManager:
             samples = self._read_json(Path(str(camera["samples_path"])).expanduser())
             names = self._process_names(role)
             calibration = self._calibration_file_status(camera)
+            assembly_board_v1_aruco = (
+                self.assembly_board_v1_aruco_status(role)
+                if role in ASSEMBLY_BOARD_V1_ARUCO_ROLES
+                else {}
+            )
             camera_process = self.bridge.ros2_proc_status(names["camera"])
             perception_process = self.bridge.ros2_proc_status(names["perception"])
             if role == "ur5e" and self._ur5e_digital_twin_process_running("camera"):
@@ -2158,6 +2849,7 @@ class PerceptionManager:
                 "calibration_path": str(calibration_path),
                 "calibration_ready": calibration["ready"],
                 "calibration": calibration,
+                "assembly_board-v1_aruco": assembly_board_v1_aruco,
                 "sample_count": len(samples.get("samples", [])),
                 "pose_count": self._pose_count(camera),
                 "replay": self._read_json(
@@ -2190,6 +2882,7 @@ class PerceptionManager:
             "wsl_devices": wsl_rows,
             "cameras": cameras,
             "stationary_board_world_pose": config["stationary_board_world_pose"],
+            "assembly_board-v1_aruco": config["assembly_board-v1_aruco"],
             "digital_twin": self._read_json(Path("/tmp/cais_physical_part_twin_status.json")),
             "cross_camera_comparisons": self._cross_camera_comparisons(cameras),
             "lg_status": "LG unavailable: model has no large_gear class",

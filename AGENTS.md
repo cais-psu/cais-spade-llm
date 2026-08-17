@@ -59,8 +59,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   `poetry run python -m cais_spade_llm.ui_main --help`.
 - For ROS2 launch/script/RViz changes, run `make bootstrap-gazebo` before
   checking installed workspace behavior.
-- Use `test/` for focused or temporary tests when a feature needs them. Broad
-  permanent test suites are not required unless the user asks for them.
+- Extend the nearest existing test suite for bug fixes.
+- Create a new test file only for a coherent new subsystem.
+- Place throwaway reproduction tests outside the repository and remove any
+  temporary repository tests before handoff.
+- Never delete regression coverage merely to reduce the test file count.
 - Run any focused tests you create or restore for the touched feature.
 - If live ROS2 or hardware validation is unavailable, say so and report the
   static, import, compile, CLI, or focused tests that did run.

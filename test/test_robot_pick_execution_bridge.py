@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 import time
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from cais_spade_llm.agents.resource_agent import robot_agent as robot_agent_module
+from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
 from cais_spade_llm.resources.robot import robot_task_runtime
 from cais_spade_llm.ui.bridge import SystemBridge
 
@@ -20,6 +24,15 @@ ACTUAL_MG_STL = str(
     (ROOT / "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL").resolve()
 )
 ACTUAL_MG_STL_SHA256 = "73d2c5d06497db2042ec6624a45558398ee47c9e55ccd87d49184c179a501507"
+MANUAL_DESCEND_POSE = {
+    "x": 0.3,
+    "y": 0.4,
+    "z": 1.1,
+    "qx": 0.0,
+    "qy": 1.0,
+    "qz": 0.0,
+    "qw": 0.0,
+}
 
 
 def _mg_product_geometry(part_name: str = "MG") -> dict[str, Any]:
@@ -58,6 +71,9 @@ def _mg_task_context() -> dict[str, Any]:
         "predicted_closing_z_displacement_m": -0.02616,
         "gripper_close_position": 0.047,
         "travel_z": 1.2,
+        "resolved_cartesian_positions": {
+            "descend": deepcopy(MANUAL_DESCEND_POSE),
+        },
     }
 
 
@@ -115,6 +131,7 @@ class _PhysicalUR5eAgent:
         self.named_positions = {
             "home": [0.0, -1.0, -2.0, -1.5, 1.5, 0.0],
             "prusa-mk4-2": [0.1, -0.8, -2.1, -1.6, 1.5, -3.1],
+            "assembly_board-v1": [0.2, -0.9, -2.0, -1.4, 1.5, -3.0],
         }
         self._current_state = state
         self._held_part = held_part
@@ -173,6 +190,36 @@ class _PhysicalUR5eAgent:
         self._current_state = "idle"
         return {"status": "completed", "content": "At home position."}
 
+    async def _execute_registered_robot_task_for_manual_function_execution(
+        self,
+        function_name: str,
+        pre_execute: Any = None,
+        post_staging_acceptance: Any = None,
+        /,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if callable(pre_execute):
+            pre_execute_error = str(pre_execute() or "").strip()
+            if pre_execute_error:
+                return {
+                    "status": "blocked",
+                    "content": pre_execute_error,
+                    "manual_pre_execute_blocked": True,
+                }
+        callback_name = "_assembly_board_v1_post_staging_accept_callback"
+        install_callback = bool(
+            callable(post_staging_acceptance)
+            and function_name == "place_approach"
+            and kwargs.get("destination_location") == "assembly_board-v1"
+        )
+        if install_callback:
+            setattr(self._controller, callback_name, post_staging_acceptance)
+        try:
+            return await getattr(self, function_name)(**kwargs)
+        finally:
+            if install_callback:
+                delattr(self._controller, callback_name)
+
 
 def _healthy_status(target: str) -> dict[str, Any]:
     return {
@@ -222,12 +269,34 @@ def _ready_bridge(agent: _PhysicalUR5eAgent) -> SystemBridge:
         "success": True,
         "world_tool0_ready": True,
         "blocked_reason": "",
+        "waypoint": {
+            "source": "hardware",
+            "pose": {
+                **deepcopy(MANUAL_DESCEND_POSE),
+                "frame_id": "world",
+                "child_frame_id": "link_eef" if _robot == "xarm6" else "tool0",
+            },
+        },
     }
     bridge.physical_perception_ready = lambda: (True, "")
     bridge._robot_function_product_geometry_for_part = _mg_product_geometry
     bridge._digital_twin_place_approach_recording_error = lambda _agent, _destination, _part: (
         "/tmp/assembly_board-v1__MG__hardware.json",
         "",
+    )
+    bridge.perception_manager = SimpleNamespace(
+        assembly_board_v1_aruco_status=lambda role: {
+            "camera_role": role,
+            "accepted": True,
+            "accepted_baseline_ready": True,
+            "accepted_baseline_error": "",
+            "accepted_generation": 1,
+            "accepted_calibration_id": f"{role}-calibration",
+            "active_calibration_id": f"{role}-calibration",
+            "calibration_changed": False,
+            "movement_evidence_valid": False,
+            "movement_blocked": False,
+        }
     )
 
     async def _run_on_agent_runtime(coroutine: Any) -> Any:
@@ -251,6 +320,16 @@ def _agent_for(function_name: str) -> _PhysicalUR5eAgent:
         agent._task_ctx = {
             "destination_location": "assembly_board-v1",
             "travel_z": 1.2,
+            "assembly_board_v1_aruco_generation": 1,
+            "assembly_board_v1_aruco": {
+                "destination_location": "assembly_board-v1",
+                "camera_role": "ur5e",
+                "generation": 1,
+                "calibration_id": "ur5e-calibration",
+            },
+            "resolved_cartesian_positions": {
+                "descend": deepcopy(MANUAL_DESCEND_POSE),
+            },
         }
         return agent
     return _PhysicalUR5eAgent(state="placed")
@@ -304,7 +383,6 @@ def test_generic_execution_dispatches_each_exact_generated_method(
 ) -> None:
     agent = _agent_for(function_name)
     bridge = _ready_bridge(agent)
-
     result = asyncio.run(
         bridge.digital_twin_execute_robot_function(
             "dual robots",
@@ -317,6 +395,124 @@ def test_generic_execution_dispatches_each_exact_generated_method(
 
     assert result["success"] is True
     assert agent.calls == [(function_name, expected_kwargs)]
+
+
+def test_robot_agent_manual_function_execution_uses_private_identity_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(RobotAgent)
+    agent.agent_name = "ur5e"
+    agent._robot_motion_lock = threading.Lock()
+    observed: dict[str, Any] = {}
+
+    async def _execute(
+        actual_agent: Any,
+        task_name: str,
+        authority: object | None = None,
+        /,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        observed.update(
+            {
+                "agent": actual_agent,
+                "task_name": task_name,
+                "authority": authority,
+                "kwargs": kwargs,
+            }
+        )
+        return {"status": "completed"}
+
+    monkeypatch.setattr(robot_agent_module, "execute_robot_task", _execute)
+    pre_execute_lock_states: list[bool] = []
+
+    def _pre_execute() -> str:
+        pre_execute_lock_states.append(agent._robot_motion_lock.locked())
+        return ""
+
+    result = asyncio.run(
+        agent._execute_registered_robot_task_for_manual_function_execution(
+            "pick_approach",
+            _pre_execute,
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result == {"status": "completed"}
+    assert observed == {
+        "agent": agent,
+        "task_name": "pick_approach",
+        "authority": robot_task_runtime._MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+        "kwargs": {
+            "origin_resource_location": "prusa-mk4-2",
+            "part_name": "MG",
+        },
+    }
+    assert pre_execute_lock_states == [True]
+    assert agent._robot_motion_lock.locked() is False
+
+    observed.clear()
+    blocked = asyncio.run(
+        agent._execute_registered_robot_task_for_manual_function_execution(
+            "pick_grasp",
+            lambda: "current TCP moved",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+    assert blocked == {
+        "status": "blocked",
+        "content": "current TCP moved",
+        "manual_pre_execute_blocked": True,
+    }
+    assert observed == {}
+
+
+def test_robot_agent_scopes_post_staging_acceptance_to_its_motion_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(RobotAgent)
+    agent.agent_name = "ur5e"
+    agent._robot_motion_lock = threading.Lock()
+    agent._controller = SimpleNamespace()
+
+    def callback(_requested_at: float) -> None:
+        pass
+
+    async def _execute(
+        actual_agent: Any,
+        task_name: str,
+        _authority: object | None = None,
+        /,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        assert task_name == "place_approach"
+        assert actual_agent._robot_motion_lock.locked() is True
+        assert (
+            actual_agent._controller._assembly_board_v1_post_staging_accept_callback
+            is callback
+        )
+        return {"status": "completed"}
+
+    monkeypatch.setattr(robot_agent_module, "execute_robot_task", _execute)
+
+    result = asyncio.run(
+        agent._execute_registered_robot_task_for_manual_function_execution(
+            "place_approach",
+            None,
+            callback,
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result == {"status": "completed"}
+    assert not hasattr(
+        agent._controller,
+        "_assembly_board_v1_post_staging_accept_callback",
+    )
+    assert agent._robot_motion_lock.locked() is False
+    assert agent._robot_motion_lock.locked() is False
 
 
 @pytest.mark.parametrize("target", ["ur5e only", "dual robots"])
@@ -362,8 +558,8 @@ def test_pick_approach_readiness_blocks_without_actual_mg_stl_geometry() -> None
     assert agent.calls == []
 
 
-def test_pick_approach_readiness_accepts_resettable_at_pick_without_mutation() -> None:
-    agent = _PhysicalUR5eAgent(state="at_pick")
+def test_pick_approach_readiness_ignores_manual_sequence_state_without_mutation() -> None:
+    agent = _PhysicalUR5eAgent(state="picked")
     agent._task_ctx = _mg_task_context()
     retained_context = deepcopy(agent._task_ctx)
     bridge = _ready_bridge(agent)
@@ -379,20 +575,21 @@ def test_pick_approach_readiness_accepts_resettable_at_pick_without_mutation() -
     )
 
     assert result["ready"] is True
-    assert result["pick_approach_reset_to_idle"] is True
-    assert "will reset to 'idle' without robot motion" in result["message"]
-    assert agent._current_state == "at_pick"
+    assert "pick_approach_reset_to_idle" not in result
+    assert "state 'idle'" not in result["message"]
+    assert agent._current_state == "picked"
     assert agent._task_ctx == retained_context
     assert agent.calls == []
 
 
-def test_confirmed_pick_approach_resets_at_pick_before_dispatch() -> None:
-    agent = _PhysicalUR5eAgent(state="at_pick")
+def test_confirmed_pick_approach_dispatches_manual_mode_without_state_rewrite() -> None:
+    agent = _PhysicalUR5eAgent(state="picked")
     agent._task_ctx = _mg_task_context()
+    retained_context = deepcopy(agent._task_ctx)
     agent._recovery_pose_ref = "stale-pick"
     observed: dict[str, Any] = {}
 
-    async def _pick_approach_after_reset(**kwargs: Any) -> dict[str, Any]:
+    async def _pick_approach_manual(**kwargs: Any) -> dict[str, Any]:
         observed["state"] = agent._current_state
         observed["task_ctx"] = deepcopy(agent._task_ctx)
         observed["recovery_pose_ref"] = agent._recovery_pose_ref
@@ -400,7 +597,7 @@ def test_confirmed_pick_approach_resets_at_pick_before_dispatch() -> None:
         agent._current_state = "at_pick"
         return {"status": "completed", "content": "Arrived at the live pick target."}
 
-    agent.pick_approach = _pick_approach_after_reset  # type: ignore[method-assign]
+    agent.pick_approach = _pick_approach_manual  # type: ignore[method-assign]
     bridge = _ready_bridge(agent)
 
     result = asyncio.run(
@@ -416,32 +613,18 @@ def test_confirmed_pick_approach_resets_at_pick_before_dispatch() -> None:
 
     assert result["success"] is True
     assert observed == {
-        "state": "idle",
-        "task_ctx": {},
-        "recovery_pose_ref": None,
+        "state": "picked",
+        "task_ctx": retained_context,
+        "recovery_pose_ref": "stale-pick",
     }
-    assert result["message"].startswith(
-        "Reset ur5e state from 'at_pick' to 'idle' without robot motion"
-    )
     assert agent._current_state == "at_pick"
 
 
-@pytest.mark.parametrize(
-    ("held_part", "gripper_state", "expected"),
-    [
-        ("MG", "closed", "empty ur5e gripper"),
-        (None, "closed", "gripper_state is 'open'"),
-    ],
-)
-def test_pick_approach_does_not_reset_unsafe_at_pick_state(
-    held_part: str | None,
-    gripper_state: str,
-    expected: str,
-) -> None:
+def test_pick_approach_manual_run_still_requires_an_empty_gripper() -> None:
     agent = _PhysicalUR5eAgent(
-        state="at_pick",
-        held_part=held_part,
-        gripper_state=gripper_state,
+        state="picked",
+        held_part="MG",
+        gripper_state="closed",
     )
     agent._task_ctx = _mg_task_context()
     bridge = _ready_bridge(agent)
@@ -457,14 +640,14 @@ def test_pick_approach_does_not_reset_unsafe_at_pick_state(
     )
 
     assert result["ready"] is False
-    assert expected in result["message"]
-    assert agent._current_state == "at_pick"
+    assert "empty ur5e gripper" in result["message"]
+    assert agent._current_state == "picked"
     assert agent._task_ctx
     assert agent.calls == []
 
 
-def test_pick_approach_uncertain_state_blocks_before_at_pick_reset() -> None:
-    agent = _PhysicalUR5eAgent(state="at_pick")
+def test_pick_approach_manual_readiness_does_not_rewrite_uncertain_sequence_state() -> None:
+    agent = _PhysicalUR5eAgent(state="picked")
     agent._task_ctx = _mg_task_context()
     bridge = _ready_bridge(agent)
     bridge._ur5e_robot_function_state_uncertain = True
@@ -481,10 +664,254 @@ def test_pick_approach_uncertain_state_blocks_before_at_pick_reset() -> None:
 
     assert result["ready"] is True
     assert "state is uncertain" not in result["message"]
-    assert result["pick_approach_reset_to_idle"] is True
-    assert agent._current_state == "at_pick"
+    assert "pick_approach_reset_to_idle" not in result
+    assert agent._current_state == "picked"
     assert agent._task_ctx
     assert agent.calls == []
+
+
+@pytest.mark.parametrize(
+    ("function_name", "manual_state", "arguments"),
+    [
+        (
+            "pick_approach",
+            "positioned",
+            {"origin_resource_location": "prusa-mk4-2", "part_name": "MG"},
+        ),
+        (
+            "pick_grasp",
+            "idle",
+            {"origin_resource_location": "prusa-mk4-2", "part_name": "MG"},
+        ),
+        (
+            "place_approach",
+            "idle",
+            {"destination_location": "assembly_board-v1", "part_name": "MG"},
+        ),
+        (
+            "place_insert",
+            "picked",
+            {"destination_location": "assembly_board-v1", "part_name": "MG"},
+        ),
+    ],
+)
+def test_manual_function_readiness_ignores_only_sequence_state(
+    function_name: str,
+    manual_state: str,
+    arguments: dict[str, str],
+) -> None:
+    agent = _agent_for(function_name)
+    agent._current_state = manual_state
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            function_name,
+            **arguments,
+        )
+    )
+
+    assert result["ready"] is True, result
+    assert agent._current_state == manual_state
+    assert agent.calls == []
+
+
+def test_manual_pick_grasp_requires_pick_approach_descend_pose() -> None:
+    agent = _agent_for("pick_grasp")
+    agent._current_state = "idle"
+    agent._task_ctx.pop("resolved_cartesian_positions")
+    bridge = _ready_bridge(agent)
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert "pick_approach.descend" in result["message"]
+    assert "Run pick_approach before pick_grasp" in result["message"]
+    assert agent.calls == []
+
+
+def test_manual_place_insert_rejects_tcp_moved_from_place_approach_descend() -> None:
+    agent = _agent_for("place_insert")
+    agent._current_state = "picked"
+    bridge = _ready_bridge(agent)
+    moved_pose = {**deepcopy(MANUAL_DESCEND_POSE), "x": MANUAL_DESCEND_POSE["x"] + 0.003}
+    bridge._robot_function_capture_snapshot = lambda _target, _robot: {
+        "success": True,
+        "world_tool0_ready": True,
+        "blocked_reason": "",
+        "waypoint": {
+            "source": "hardware",
+            "pose": {
+                **moved_pose,
+                "frame_id": "world",
+                "child_frame_id": "tool0",
+            },
+        },
+    }
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert "place_approach.descend" in result["message"]
+    assert "3.00 mm" in result["message"]
+    assert "limit 2.00 mm" in result["message"]
+    assert agent.calls == []
+
+
+def test_manual_pick_grasp_rechecks_tcp_after_acquiring_agent_motion_lock() -> None:
+    agent = _agent_for("pick_grasp")
+    agent._current_state = "idle"
+    bridge = _ready_bridge(agent)
+    poses = iter(
+        (
+            deepcopy(MANUAL_DESCEND_POSE),
+            {
+                **deepcopy(MANUAL_DESCEND_POSE),
+                "x": MANUAL_DESCEND_POSE["x"] + 0.003,
+            },
+        )
+    )
+
+    def _snapshot(_target: str, _robot: str) -> dict[str, Any]:
+        return {
+            "success": True,
+            "world_tool0_ready": True,
+            "blocked_reason": "",
+            "waypoint": {
+                "source": "hardware",
+                "pose": {
+                    **next(poses),
+                    "frame_id": "world",
+                    "child_frame_id": "tool0",
+                },
+            },
+        }
+
+    bridge._robot_function_capture_snapshot = _snapshot
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "pick_grasp",
+            origin_resource_location="prusa-mk4-2",
+            part_name="MG",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked"
+    assert "pick_approach.descend" in result["message"]
+    assert agent.calls == []
+    assert agent._robot_motion_lock.locked() is False
+    assert bridge._ur5e_robot_function_state_uncertain is False
+
+
+@pytest.mark.parametrize(
+    ("robot", "child_frame_id", "position_tolerance_m", "orientation_tolerance_rad"),
+    [
+        ("ur5e", "tool0", 0.002, 0.0349065850),
+        ("xarm6", "link_eef", 0.003, 0.0523598776),
+    ],
+)
+def test_manual_dependent_pose_uses_role_tolerance_and_quaternion_sign(
+    robot: str,
+    child_frame_id: str,
+    position_tolerance_m: float,
+    orientation_tolerance_rad: float,
+) -> None:
+    bridge = object.__new__(SystemBridge)
+    expected = {
+        "x": 0.0,
+        "y": 0.1,
+        "z": 1.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+    }
+    current = {
+        **expected,
+        "x": expected["x"] + position_tolerance_m,
+        "qw": -1.0,
+        "frame_id": "world",
+        "child_frame_id": child_frame_id,
+    }
+    bridge._robot_function_execution_pose_readiness = lambda *_args: {
+        "success": True,
+        "world_tool0_ready": True,
+        "waypoint": {"source": "hardware", "pose": deepcopy(current)},
+    }
+    controller = SimpleNamespace(
+        _xarm6_cartesian_position_tolerance_m=position_tolerance_m,
+        _xarm6_cartesian_orientation_tolerance_rad=orientation_tolerance_rad,
+    )
+    resource_agent = SimpleNamespace(_controller=controller)
+    task_context = {
+        "resolved_cartesian_positions": {"descend": deepcopy(expected)}
+    }
+    motion_readiness = {
+        "cartesian_position_tolerance_m": position_tolerance_m,
+        "cartesian_orientation_tolerance_rad": orientation_tolerance_rad,
+    }
+
+    readiness, error = bridge._manual_dependent_function_pose_error(
+        "dual robots",
+        robot,
+        "pick_grasp",
+        resource_agent,
+        task_context,
+        motion_readiness,
+    )
+
+    assert error == ""
+    assert readiness["manual_pose_translation_error_m"] == pytest.approx(
+        position_tolerance_m
+    )
+    assert readiness["manual_pose_rotation_error_rad"] == pytest.approx(0.0)
+
+    current["x"] += 1e-5
+    _readiness, moved_error = bridge._manual_dependent_function_pose_error(
+        "dual robots",
+        robot,
+        "pick_grasp",
+        resource_agent,
+        task_context,
+        motion_readiness,
+    )
+    assert "position error" in moved_error
+
+    current["x"] = expected["x"]
+    half_angle = 0.5 * (orientation_tolerance_rad + 1e-4)
+    current.update({"qz": math.sin(half_angle), "qw": math.cos(half_angle)})
+    _readiness, rotated_error = bridge._manual_dependent_function_pose_error(
+        "dual robots",
+        robot,
+        "pick_grasp",
+        resource_agent,
+        task_context,
+        motion_readiness,
+    )
+    assert "rotation error" in rotated_error
 
 
 def test_pick_grasp_readiness_blocks_invalid_stl_grounded_context() -> None:
@@ -663,7 +1090,7 @@ def test_mg_close_test_requires_at_pick_empty_mg_context_and_motion_locks(
     )
 
     assert idle["success"] is False
-    assert "state 'at_pick'" in idle["message"]
+    assert "active pick context" in idle["message"]
     assert idle_agent._controller.gripper_calls == []
 
     closed_agent = _agent_for("pick_grasp")
@@ -976,6 +1403,393 @@ def test_place_functions_require_logically_closed_gripper(function_name: str) ->
     assert agent.calls == []
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        {
+            "accepted": False,
+            "accepted_generation": 0,
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": (
+                "Locate & Accept Board for ur5e before using assembly_board-v1."
+            ),
+            "post_staging_acceptance_allowed": True,
+        },
+        {
+            "accepted": True,
+            "accepted_generation": 5,
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": (
+                "assembly_board-v1 moved more than 10 mm or 2 deg from the accepted "
+                "ur5e pose."
+            ),
+            "movement_blocked": True,
+            "post_staging_acceptance_allowed": True,
+        },
+    ],
+)
+def test_place_approach_allows_post_staging_board_acceptance(
+    status: dict[str, Any],
+) -> None:
+    agent = _agent_for("place_approach")
+    bridge = _ready_bridge(agent)
+    bridge.perception_manager.assembly_board_v1_aruco_status = lambda _role: dict(status)
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert agent.calls == [
+        (
+            "place_approach",
+            {
+                "destination_location": "assembly_board-v1",
+                "part_name": "MG",
+                "product_geometry": _mg_product_geometry(),
+            },
+        )
+    ]
+
+
+def test_place_approach_still_blocks_post_staging_acceptance_after_calibration_change() -> None:
+    agent = _agent_for("place_approach")
+    bridge = _ready_bridge(agent)
+    bridge.perception_manager.assembly_board_v1_aruco_status = lambda _role: {
+        "accepted": True,
+        "accepted_generation": 5,
+        "accepted_baseline_ready": False,
+        "accepted_baseline_error": "The active ur5e calibration identity changed.",
+        "calibration_changed": True,
+        "post_staging_acceptance_allowed": False,
+    }
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert "calibration identity changed" in result["message"]
+    assert agent.calls == []
+
+
+def test_place_approach_post_staging_acceptance_is_scoped_to_confirmed_runtime() -> None:
+    agent = _agent_for("place_approach")
+    bridge = _ready_bridge(agent)
+    calls: list[tuple[str, object]] = []
+
+    bridge.perception_manager.assembly_board_v1_aruco_status = lambda role: {
+        "camera_role": role,
+        "accepted": True,
+        "accepted_generation": 5,
+        "accepted_baseline_ready": False,
+        "accepted_baseline_error": "board movement requires post-staging acceptance",
+        "movement_blocked": True,
+        "calibration_changed": False,
+        "post_staging_acceptance_allowed": True,
+    }
+
+    def _accept(role: str, *, minimum_sample_started_at: float | None = None) -> dict[str, Any]:
+        calls.append((role, minimum_sample_started_at))
+        return {"success": True, "accepted_generation": 6}
+
+    bridge.perception_manager.locate_and_accept_assembly_board_v1 = _accept
+
+    async def _place_approach(**kwargs: Any) -> dict[str, Any]:
+        callback = getattr(
+            agent._controller,
+            "_assembly_board_v1_post_staging_accept_callback",
+        )
+        assert callable(callback)
+        accepted = callback(123.5)
+        assert accepted["accepted_generation"] == 6
+        agent.calls.append(("place_approach", kwargs))
+        return {"status": "completed", "content": "Reached assembly_board-v1."}
+
+    agent.place_approach = _place_approach
+
+    result = asyncio.run(
+        bridge.digital_twin_execute_robot_function(
+            "dual robots",
+            "ur5e",
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+            confirmed=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert calls == [("ur5e", 123.5)]
+    assert not hasattr(
+        agent._controller,
+        "_assembly_board_v1_post_staging_accept_callback",
+    )
+
+
+def test_place_approach_accepts_occluded_but_usable_board_baseline() -> None:
+    agent = _agent_for("place_approach")
+    bridge = _ready_bridge(agent)
+    bridge.perception_manager.assembly_board_v1_aruco_status = lambda _role: {
+        "accepted": True,
+        "accepted_baseline_ready": True,
+        "accepted_baseline_error": "",
+        "accepted_generation": 1,
+        "accepted_calibration_id": "ur5e-calibration",
+        "visible": False,
+        "movement_evidence_valid": False,
+        "movement_blocked": False,
+    }
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "place_approach",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is True
+
+
+def test_place_insert_rejects_reaccepted_board_before_confirmation() -> None:
+    agent = _agent_for("place_insert")
+    bridge = _ready_bridge(agent)
+    bridge.perception_manager.assembly_board_v1_aruco_status = lambda _role: {
+        "accepted": True,
+        "accepted_baseline_ready": True,
+        "accepted_baseline_error": "",
+        "accepted_generation": 2,
+        "accepted_calibration_id": "ur5e-calibration",
+    }
+
+    result = asyncio.run(
+        bridge.digital_twin_robot_function_execution_readiness(
+            "dual robots",
+            "ur5e",
+            "place_insert",
+            destination_location="assembly_board-v1",
+            part_name="MG",
+        )
+    )
+
+    assert result["ready"] is False
+    assert "accepted generation changed after place_approach" in result["message"]
+    assert agent.calls == []
+
+
+@pytest.mark.parametrize(
+    ("bridge_method", "manager_method", "expected"),
+    [
+        (
+            "perception_locate_and_accept_assembly_board_v1",
+            "locate_and_accept_assembly_board_v1",
+            {"success": True, "accepted_generation": 2},
+        ),
+        (
+            "perception_activate_calibration",
+            "activate_calibration",
+            Path("/tmp/ur5e_realsense_hand_eye.yaml"),
+        ),
+        (
+            "perception_rollback_calibration",
+            "rollback_calibration",
+            Path("/tmp/ur5e_realsense_hand_eye.yaml"),
+        ),
+    ],
+)
+def test_board_acceptance_and_calibration_identity_changes_use_execution_lock(
+    bridge_method: str,
+    manager_method: str,
+    expected: object,
+) -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+    calls: list[str] = []
+
+    def _change(role: str) -> object:
+        assert bridge._ur5e_robot_function_execution_lock.locked() is True
+        calls.append(role)
+        return expected
+
+    setattr(bridge.perception_manager, manager_method, _change)
+
+    result = getattr(bridge, bridge_method)("ur5e")
+
+    assert result == expected
+    assert calls == ["ur5e"]
+    assert bridge._ur5e_robot_function_execution_lock.acquire(blocking=False) is True
+    bridge._ur5e_robot_function_execution_lock.release()
+
+
+@pytest.mark.parametrize(
+    ("bridge_method", "manager_method", "operation_name"),
+    [
+        (
+            "perception_locate_and_accept_assembly_board_v1",
+            "locate_and_accept_assembly_board_v1",
+            "Locate & Accept Board (xarm6)",
+        ),
+        (
+            "perception_activate_calibration",
+            "activate_calibration",
+            "Activate calibration (xarm6)",
+        ),
+        (
+            "perception_rollback_calibration",
+            "rollback_calibration",
+            "Rollback calibration (xarm6)",
+        ),
+    ],
+)
+def test_board_acceptance_and_calibration_identity_changes_refuse_during_execution(
+    bridge_method: str,
+    manager_method: str,
+    operation_name: str,
+) -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+    calls: list[str] = []
+    setattr(
+        bridge.perception_manager,
+        manager_method,
+        lambda role: calls.append(role),
+    )
+    bridge._ur5e_robot_function_execution_active = "place_approach"
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    try:
+        with pytest.raises(RuntimeError) as error:
+            getattr(bridge, bridge_method)("xarm6")
+    finally:
+        bridge._ur5e_robot_function_execution_lock.release()
+
+    assert str(error.value) == (
+        f"{operation_name} is unavailable while physical robot function execution is active: "
+        "place_approach."
+    )
+    assert calls == []
+
+
+def test_board_acceptance_releases_execution_lock_after_perception_failure() -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+
+    def _fail(_role: str) -> dict[str, Any]:
+        raise RuntimeError("fresh stable ArUco observation is unavailable")
+
+    bridge.perception_manager.locate_and_accept_assembly_board_v1 = _fail
+
+    with pytest.raises(RuntimeError, match="fresh stable ArUco observation is unavailable"):
+        bridge.perception_locate_and_accept_assembly_board_v1("ur5e")
+
+    assert bridge._ur5e_robot_function_execution_lock.acquire(blocking=False) is True
+    bridge._ur5e_robot_function_execution_lock.release()
+
+
+def test_automatic_board_acceptance_is_idempotent_after_one_accepted_generation() -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+    calls: list[str] = []
+
+    def _status(role: str) -> dict[str, Any]:
+        assert bridge._ur5e_robot_function_execution_lock.locked() is True
+        calls.append(f"status:{role}")
+        return {
+            "camera_role": role,
+            "accepted": False,
+            "accepted_generation": 4,
+            "accepted_baseline_ready": True,
+        }
+
+    def _accept(role: str) -> dict[str, Any]:
+        calls.append(f"accept:{role}")
+        return {"success": True, "accepted_generation": 5}
+
+    bridge.perception_manager.assembly_board_v1_aruco_status = _status
+    bridge.perception_manager.locate_and_accept_assembly_board_v1 = _accept
+
+    result = bridge.perception_locate_and_accept_assembly_board_v1(
+        "ur5e",
+        only_if_unaccepted=True,
+    )
+
+    assert result == {
+        "camera_role": "ur5e",
+        "accepted": False,
+        "accepted_generation": 4,
+        "accepted_baseline_ready": True,
+        "success": True,
+        "auto_accepted": False,
+    }
+    assert calls == ["status:ur5e"]
+
+
+def test_automatic_board_acceptance_accepts_one_unaccepted_observation() -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+    calls: list[str] = []
+
+    def _status(role: str) -> dict[str, Any]:
+        assert bridge._ur5e_robot_function_execution_lock.locked() is True
+        calls.append(f"status:{role}")
+        return {
+            "camera_role": role,
+            "accepted": False,
+            "accepted_generation": 0,
+            "ready_to_accept": True,
+        }
+
+    def _accept(role: str) -> dict[str, Any]:
+        assert bridge._ur5e_robot_function_execution_lock.locked() is True
+        calls.append(f"accept:{role}")
+        return {
+            "success": True,
+            "camera_role": role,
+            "accepted": True,
+            "accepted_generation": 1,
+        }
+
+    bridge.perception_manager.assembly_board_v1_aruco_status = _status
+    bridge.perception_manager.locate_and_accept_assembly_board_v1 = _accept
+
+    result = bridge.perception_locate_and_accept_assembly_board_v1(
+        "xarm6",
+        only_if_unaccepted=True,
+    )
+
+    assert result == {
+        "success": True,
+        "camera_role": "xarm6",
+        "accepted": True,
+        "accepted_generation": 1,
+        "auto_accepted": True,
+    }
+    assert calls == ["status:xarm6", "accept:xarm6"]
+
+
+def test_solving_calibration_candidate_remains_unlocked() -> None:
+    bridge = _ready_bridge(_agent_for("place_approach"))
+    expected = Path("/tmp/ur5e_realsense_hand_eye.candidate.yaml")
+    bridge.perception_manager.solve_calibration = lambda role: expected
+    bridge._ur5e_robot_function_execution_active = "place_insert"
+    bridge._ur5e_robot_function_execution_lock.acquire()
+    try:
+        assert bridge.perception_solve_calibration("ur5e") == expected
+    finally:
+        bridge._ur5e_robot_function_execution_lock.release()
+
+
 def test_gripper_functions_require_exact_target_domain_rg2_action() -> None:
     agent = _agent_for("pick_grasp")
     bridge = _ready_bridge(agent)
@@ -1075,13 +1889,33 @@ def _recorded_step(step_name: str, z: float) -> dict[str, Any]:
             "y": -0.18,
             "z": z - 0.3,
         },
+        "relative_pose": {
+            "x": -0.61,
+            "y": -0.18,
+            "z": z - 0.3,
+            "qx": 0.0,
+            "qy": 0.70710678,
+            "qz": 0.0,
+            "qw": 0.70710678,
+        },
         "relative_reference": {
             "kind": "destination_target",
             "frame_id": "world",
             "name": "assembly_board-v1",
             "position_m": {"x": 0.5, "y": 0.6, "z": 0.3},
-            "source": "computed_destination",
+            "pose": {
+                "x": 0.5,
+                "y": 0.6,
+                "z": 0.3,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            },
+            "source": "assembly_board-v1_aruco",
             "captured_at": time.time(),
+            "camera_role": "ur5e",
+            "generation": 1,
         },
         "waypoint": {
             "pose": {

@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import yaml
 
+from cais_spade_llm.resources.sensor.physical import realsense_preview_node
 from cais_spade_llm.resources.sensor.physical.calibrate_hand_eye import (
     _CaptureNode,
     solve_stationary_calibration,
@@ -74,6 +75,89 @@ class _FakeBridge:
         return self.selected_hardware_stack
 
 
+def test_realsense_preview_uses_two_executor_workers_and_stops_before_destroy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+    fake_node = object()
+
+    class FakeRCLError(Exception):
+        pass
+
+    class FakePreview:
+        node = fake_node
+
+        def __init__(self, **kwargs: object) -> None:
+            events.append(("preview", kwargs))
+
+        @staticmethod
+        def destroy() -> None:
+            events.append("preview.destroy")
+
+    class FakeExecutor:
+        def __init__(self, *, num_threads: int) -> None:
+            events.append(("executor", num_threads))
+
+        @staticmethod
+        def add_node(node: object) -> None:
+            events.append(("executor.add_node", node))
+
+        @staticmethod
+        def spin() -> None:
+            events.append("executor.spin")
+            raise KeyboardInterrupt
+
+        @staticmethod
+        def shutdown() -> None:
+            events.append("executor.shutdown")
+
+    fake_rclpy = SimpleNamespace(
+        init=lambda *, args: events.append(("rclpy.init", args)),
+        ok=lambda: True,
+        shutdown=lambda: events.append("rclpy.shutdown"),
+        spin=lambda _node: pytest.fail("rclpy.spin must not run the preview node"),
+    )
+    monkeypatch.setitem(sys.modules, "rclpy", fake_rclpy)
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy.executors",
+        SimpleNamespace(MultiThreadedExecutor=FakeExecutor),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy._rclpy_pybind11",
+        SimpleNamespace(RCLError=FakeRCLError),
+    )
+    args = SimpleNamespace(
+        camera_role="ur5e",
+        color_topic="/camera/color",
+        depth_topic="/camera/depth",
+        output_root=tmp_path,
+        camera_info_topic="/camera/info",
+        world_frame="world",
+        parent_frame="tool0",
+        camera_optical_frame="camera_color_optical_frame",
+        hand_eye_config=None,
+        marker_length_m=0.076,
+        maximum_rate_hz=5.0,
+        expected_rate_hz=6.0,
+    )
+    monkeypatch.setattr(realsense_preview_node, "RealSensePreviewNode", FakePreview)
+    monkeypatch.setattr(
+        realsense_preview_node,
+        "_build_parser",
+        lambda: SimpleNamespace(parse_known_args=lambda: (args, ["--ros-args"])),
+    )
+
+    realsense_preview_node.main()
+
+    assert ("executor", 2) in events
+    assert ("executor.add_node", fake_node) in events
+    assert events.index("executor.shutdown") < events.index("preview.destroy")
+    assert events.index("preview.destroy") < events.index("rclpy.shutdown")
+
+
 @pytest.fixture
 def perception_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PerceptionManager:
     monkeypatch.setattr(manager_module, "CONFIG_PATH", tmp_path / "perception_cameras.yaml")
@@ -86,6 +170,12 @@ def perception_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Perce
         project_root=Path.cwd(),
         venv_python=Path("/tmp/cais-venv-python"),
     )
+    payload = manager.config()
+    for role in CAMERA_ROLES:
+        payload["cameras"][role]["calibration_path"] = str(
+            tmp_path / f"{role}_calibration.yaml"
+        )
+    manager_module._atomic_yaml_write(manager.config_path, payload)
     monkeypatch.setattr(manager, "_ensure_assigned_camera_available", lambda _serial: None)
     monkeypatch.setattr(
         manager,
@@ -113,6 +203,583 @@ def test_exact_camera_roles_and_duplicate_serial_rejection() -> None:
         validate_camera_config(payload)
 
 
+def _write_assembly_board_v1_snapshot(
+    manager: PerceptionManager,
+    role: str,
+    *,
+    frame_captured_at: float | None = None,
+    pose: dict[str, float] | None = None,
+    **overrides: object,
+) -> Path:
+    snapshot_path = manager._assembly_board_v1_aruco_path(role)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "camera_role": role,
+        "resource_location": "assembly_board-v1",
+        "valid": True,
+        "visible": True,
+        "stable": True,
+        "world_pose_ready": True,
+        "frame_id": "world",
+        "sample_started_at": time.time() - 0.5,
+        "frame_captured_at": frame_captured_at or time.time(),
+        "sample_count": 10,
+        "required_sample_count": 10,
+        "marker_dictionary": "DICT_ARUCO_ORIGINAL",
+        "marker_id": 70,
+        "marker_length_m": 0.076,
+        "pose": pose
+        or {
+            "frame_id": "world",
+            "x": 0.4,
+            "y": -0.2,
+            "z": 1.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
+        "reprojection_error_px": 0.4,
+        "translation_spread_m": 0.001,
+        "rotation_spread_deg": 0.25,
+        "calibration_id": f"{role}-calibration",
+        "last_error": "",
+    }
+    payload.update(overrides)
+    snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
+    calibration_path = Path(manager.config()["cameras"][role]["calibration_path"])
+    calibration_path.write_text(
+        yaml.safe_dump(
+            {
+                "calibration_id": str(payload.get("calibration_id") or ""),
+                "validation": {"accepted": True},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return snapshot_path
+
+
+def test_post_staging_acceptance_allowed_for_unaccepted_hand_eye_role(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    snapshot_path.unlink()
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["accepted_generation"] == 0
+    assert status["active_calibration_ready"] is True
+    assert status["configured_marker_length_m"] == pytest.approx(0.076)
+    assert status["post_staging_acceptance_allowed"] is True
+
+
+def test_post_staging_acceptance_allowed_for_latched_movement_with_matching_calibration(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    payload = perception_manager.config()
+    payload["assembly_board-v1_aruco"]["roles"]["ur5e"]["movement_blocked"] = True
+    manager_module._atomic_yaml_write(perception_manager.config_path, payload)
+    snapshot_path.unlink()
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["accepted"] is True
+    assert status["calibration_identity_matches"] is True
+    assert status["movement_blocked"] is True
+    assert status["post_staging_acceptance_allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("accepted_generation", 0),
+        ("accepted_pose", {}),
+        ("accepted_at", None),
+        ("calibration_id", ""),
+    ],
+)
+def test_post_staging_acceptance_rejects_malformed_existing_acceptance(
+    perception_manager: PerceptionManager,
+    field: str,
+    value: object,
+) -> None:
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    payload = perception_manager.config()
+    role_config = payload["assembly_board-v1_aruco"]["roles"]["ur5e"]
+    role_config["movement_blocked"] = True
+    role_config[field] = value
+    manager_module._atomic_yaml_write(perception_manager.config_path, payload)
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["post_staging_acceptance_allowed"] is False
+
+
+def test_post_staging_acceptance_requires_hand_eye_and_76_mm_configuration(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "xarm6")
+    snapshot_path.unlink()
+    payload = perception_manager.config()
+    payload["cameras"]["xarm6"]["calibration_mode"] = "stationary"
+    manager_module._atomic_yaml_write(perception_manager.config_path, payload)
+
+    assert perception_manager.assembly_board_v1_aruco_status("xarm6")[
+        "post_staging_acceptance_allowed"
+    ] is False
+
+    payload = perception_manager.config()
+    payload["cameras"]["xarm6"]["calibration_mode"] = "hand_eye"
+    payload["assembly_board-v1_aruco"]["marker_length_m"] = 0.075
+    manager_module._atomic_yaml_write(perception_manager.config_path, payload)
+
+    assert perception_manager.assembly_board_v1_aruco_status("xarm6")[
+        "post_staging_acceptance_allowed"
+    ] is False
+
+
+def test_assembly_board_v1_acceptance_persists_per_role_generation_and_movement(
+    perception_manager: PerceptionManager,
+) -> None:
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+
+    first = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+
+    assert first["success"] is True
+    assert first["accepted_generation"] == 1
+    config = perception_manager.config()["assembly_board-v1_aruco"]
+    assert config["marker_length_m"] == pytest.approx(0.076)
+    assert config["roles"]["ur5e"]["accepted_pose"] == pytest.approx(first["pose"])
+    assert config["roles"]["xarm6"]["accepted_generation"] == 0
+
+    moved_pose = {**first["pose"], "x": float(first["pose"]["x"]) + 0.011}
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e", pose=moved_pose)
+    moved = perception_manager.assembly_board_v1_aruco_status("ur5e")
+    assert moved["translation_delta_m"] == pytest.approx(0.011)
+    assert moved["rotation_delta_deg"] == pytest.approx(0.0)
+    assert moved["movement_evidence_valid"] is True
+    assert moved["movement_blocked"] is True
+    assert moved["accepted_baseline_ready"] is False
+    assert "moved more than 10 mm or 2 deg" in moved["accepted_baseline_error"]
+    assert perception_manager.config()["assembly_board-v1_aruco"]["roles"][
+        "ur5e"
+    ]["movement_blocked"] is True
+
+    moved_snapshot = json.loads(
+        perception_manager._assembly_board_v1_aruco_path("ur5e").read_text(
+            encoding="utf-8"
+        )
+    )
+    moved_snapshot.update(
+        {
+            "valid": False,
+            "visible": False,
+            "stable": False,
+            "world_pose_ready": False,
+            "pose": None,
+            "sample_count": 0,
+            "last_error": "assembly_board-v1 ArUco ID 70 is not visible",
+        }
+    )
+    perception_manager._assembly_board_v1_aruco_path("ur5e").write_text(
+        json.dumps(moved_snapshot),
+        encoding="utf-8",
+    )
+
+    occluded = perception_manager.assembly_board_v1_aruco_status("ur5e")
+    assert occluded["movement_evidence_valid"] is False
+    assert occluded["movement_blocked"] is True
+    assert occluded["accepted_baseline_ready"] is False
+    assert "moved more than 10 mm or 2 deg" in occluded["accepted_baseline_error"]
+
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e", pose=moved_pose)
+    second = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    assert second["accepted_generation"] == 2
+    assert second["movement_blocked"] is False
+    assert second["accepted_baseline_ready"] is True
+    assert second["previous_translation_delta_m"] == pytest.approx(0.011)
+    assert perception_manager.config()["assembly_board-v1_aruco"]["roles"][
+        "ur5e"
+    ]["movement_blocked"] is False
+
+
+def test_stale_movement_evidence_does_not_relatch_a_new_accepted_generation(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    first = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    moved_pose = {**first["pose"], "x": float(first["pose"]["x"]) + 0.011}
+    _write_assembly_board_v1_snapshot(perception_manager, "ur5e", pose=moved_pose)
+    original_movement = perception_manager._assembly_board_v1_movement
+    generation_advanced = False
+
+    def _advance_generation_before_latch(
+        accepted_pose: dict[str, object],
+        live_pose: dict[str, object],
+    ) -> tuple[float | None, float | None]:
+        nonlocal generation_advanced
+        movement = original_movement(accepted_pose, live_pose)
+        if not generation_advanced:
+            generation_advanced = True
+            with perception_manager._assembly_board_v1_config_lock:
+                payload = perception_manager.config()
+                role_config = payload["assembly_board-v1_aruco"]["roles"]["ur5e"]
+                role_config.update(
+                    {
+                        "accepted_generation": 2,
+                        "accepted_pose": dict(live_pose),
+                        "accepted_at": time.time(),
+                        "frame_captured_at": time.time(),
+                        "movement_blocked": False,
+                    }
+                )
+                manager_module._atomic_yaml_write(
+                    perception_manager.config_path,
+                    payload,
+                )
+        return movement
+
+    monkeypatch.setattr(
+        perception_manager,
+        "_assembly_board_v1_movement",
+        _advance_generation_before_latch,
+    )
+
+    perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    saved = perception_manager.config()["assembly_board-v1_aruco"]["roles"]["ur5e"]
+    assert saved["accepted_generation"] == 2
+    assert saved["movement_blocked"] is False
+
+
+@pytest.mark.parametrize("snapshot_role", [None, "", "xarm6"])
+def test_assembly_board_v1_snapshot_requires_explicit_matching_camera_role(
+    perception_manager: PerceptionManager,
+    snapshot_role: str | None,
+) -> None:
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        camera_role=snapshot_role,
+    )
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["camera_role"] == str(snapshot_role or "")
+    assert status["ready_to_accept"] is False
+    with pytest.raises(RuntimeError, match="snapshot camera_role"):
+        perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"marker_dictionary": "DICT_4X4_50"}, "DICT_ARUCO_ORIGINAL"),
+        ({"marker_id": 23}, "marker ID must be 70"),
+        ({"sample_count": 9}, "9/10 samples"),
+        ({"reprojection_error_px": 1.001}, "at most 1 px"),
+        ({"translation_spread_m": 0.002001}, "at most 2 mm"),
+        ({"rotation_spread_deg": 0.501}, "at most 0.5 deg"),
+    ],
+)
+def test_assembly_board_v1_acceptance_enforces_exact_quality_contract(
+    perception_manager: PerceptionManager,
+    overrides: dict[str, object],
+    expected: str,
+) -> None:
+    _write_assembly_board_v1_snapshot(perception_manager, "xarm6", **overrides)
+
+    with pytest.raises(RuntimeError, match=expected):
+        perception_manager.locate_and_accept_assembly_board_v1("xarm6")
+
+
+def test_post_staging_acceptance_requires_a_new_stability_window(
+    perception_manager: PerceptionManager,
+) -> None:
+    requested_at = time.time()
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        sample_started_at=requested_at - 0.001,
+    )
+
+    with pytest.raises(RuntimeError, match="before the post-staging request"):
+        perception_manager.locate_and_accept_assembly_board_v1(
+            "ur5e",
+            minimum_sample_started_at=requested_at,
+        )
+    assert perception_manager.config()["assembly_board-v1_aruco"]["roles"]["ur5e"][
+        "accepted_generation"
+    ] == 0
+
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        sample_started_at=requested_at,
+    )
+    accepted = perception_manager.locate_and_accept_assembly_board_v1(
+        "ur5e",
+        minimum_sample_started_at=requested_at,
+    )
+
+    assert accepted["success"] is True
+    assert accepted["accepted_generation"] == 1
+
+
+@pytest.mark.parametrize("sample_started_at", [None, float("nan")])
+def test_post_staging_acceptance_requires_finite_sample_started_at(
+    perception_manager: PerceptionManager,
+    sample_started_at: float | None,
+) -> None:
+    requested_at = time.time()
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        sample_started_at=sample_started_at,
+    )
+
+    with pytest.raises(RuntimeError, match="sample_started_at is missing or invalid"):
+        perception_manager.locate_and_accept_assembly_board_v1(
+            "ur5e",
+            minimum_sample_started_at=requested_at,
+        )
+
+
+def test_acceptance_without_post_staging_minimum_retains_existing_behavior(
+    perception_manager: PerceptionManager,
+) -> None:
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        sample_started_at=None,
+    )
+
+    accepted = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+
+    assert accepted["success"] is True
+    assert accepted["accepted_generation"] == 1
+
+
+def test_assembly_board_v1_snapshot_age_limit_is_two_seconds(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    monkeypatch.setattr(manager_module.time, "time", lambda: now)
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        frame_captured_at=now - 2.0,
+    )
+    assert perception_manager.assembly_board_v1_aruco_status("ur5e")[
+        "ready_to_accept"
+    ]
+
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        frame_captured_at=now - 2.001,
+    )
+    with pytest.raises(RuntimeError, match="frame is stale"):
+        perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+
+
+def test_assembly_board_v1_calibration_change_blocks_old_acceptance(
+    perception_manager: PerceptionManager,
+) -> None:
+    _write_assembly_board_v1_snapshot(perception_manager, "xarm6")
+    perception_manager.locate_and_accept_assembly_board_v1("xarm6")
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "xarm6",
+        calibration_id="replacement-calibration",
+    )
+
+    status = perception_manager.assembly_board_v1_aruco_status("xarm6")
+
+    assert status["calibration_changed"] is True
+    assert status["calibration_identity_matches"] is False
+    assert status["movement_blocked"] is True
+    assert status["accepted_baseline_ready"] is False
+    assert "calibration identity changed" in status["accepted_baseline_error"]
+    assert status["placement_blocked"] is True
+    assert status["ready_to_accept"] is True
+    assert status["post_staging_acceptance_allowed"] is False
+
+
+def test_missing_live_tag_does_not_claim_that_the_accepted_board_moved(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot.update(
+        {
+            "valid": False,
+            "visible": False,
+            "stable": False,
+            "world_pose_ready": False,
+            "pose": None,
+            "sample_count": 0,
+            "reprojection_error_px": None,
+            "translation_spread_m": None,
+            "rotation_spread_deg": None,
+            "last_error": "assembly_board-v1 ArUco ID 70 is not visible",
+        }
+    )
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["ready_to_accept"] is False
+    assert status["movement_evidence_valid"] is False
+    assert status["translation_delta_m"] is None
+    assert status["rotation_delta_deg"] is None
+    assert status["movement_blocked"] is False
+    assert status["accepted_baseline_ready"] is True
+    assert status["accepted_baseline_error"] == ""
+    assert status["placement_blocked"] is False
+
+
+def test_missing_live_snapshot_uses_active_calibration_without_claiming_movement(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    snapshot_path.unlink()
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["movement_evidence_valid"] is False
+    assert status["movement_blocked"] is False
+    assert status["accepted_baseline_ready"] is True
+    assert status["accepted_baseline_error"] == ""
+    assert status["placement_blocked"] is False
+    assert status["placement_blocked_reason"] == ""
+
+
+def test_active_calibration_change_blocks_baseline_without_live_tag(
+    perception_manager: PerceptionManager,
+) -> None:
+    snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
+    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    snapshot_path.unlink()
+    calibration_path = Path(
+        perception_manager.config()["cameras"]["ur5e"]["calibration_path"]
+    )
+    calibration_path.write_text(
+        "calibration_id: replacement-calibration\nvalidation:\n  accepted: true\n",
+        encoding="utf-8",
+    )
+
+    status = perception_manager.assembly_board_v1_aruco_status("ur5e")
+
+    assert status["movement_evidence_valid"] is False
+    assert status["calibration_changed"] is True
+    assert status["accepted_baseline_ready"] is False
+    assert "calibration identity changed" in status["accepted_baseline_error"]
+    assert status["placement_blocked"] is True
+
+
+def test_perception_page_distinguishes_unknown_movement_from_blocking() -> None:
+    class _Label:
+        def __init__(self) -> None:
+            self.text = ""
+            self.style = ""
+
+        def classes(self, *, replace: str) -> None:
+            self.style = replace
+
+    page = object.__new__(_PerceptionPage)
+    labels = {name: _Label() for name in ("source", "quality", "movement", "pose", "error")}
+    page.assembly_board_v1_labels = {"ur5e": labels}
+
+    page._refresh_assembly_board_v1_aruco(
+        "ur5e",
+        {
+            "camera_role": "ur5e",
+            "accepted_generation": 1,
+            "accepted_baseline_ready": True,
+            "accepted_baseline_error": "",
+            "movement_evidence_valid": False,
+            "error": "assembly_board-v1 ArUco ID 70 is not visible",
+        },
+    )
+
+    assert "movement from accepted pose=not evaluated" in labels["movement"].text
+    assert "accepted baseline=USABLE" in labels["movement"].text
+    assert labels["movement"].style == "text-xs text-amber-700"
+
+
+def test_marker_length_change_invalidates_both_accepted_role_baselines(
+    perception_manager: PerceptionManager,
+) -> None:
+    for role in ("ur5e", "xarm6"):
+        _write_assembly_board_v1_snapshot(perception_manager, role)
+        perception_manager.locate_and_accept_assembly_board_v1(role)
+
+    legacy = perception_manager.config()
+    legacy["assembly_board-v1_aruco"]["marker_length_m"] = 0.075
+    manager_module._atomic_yaml_write(perception_manager.config_path, legacy)
+
+    payload = perception_manager.save_assembly_board_v1_marker_length(0.076)
+
+    for role in ("ur5e", "xarm6"):
+        accepted = payload["assembly_board-v1_aruco"]["roles"][role]
+        assert accepted["accepted_pose"] == {}
+        assert accepted["accepted_at"] is None
+        assert accepted["calibration_id"] == ""
+
+    with pytest.raises(ValueError, match="exactly 0.076 m"):
+        perception_manager.save_assembly_board_v1_marker_length(0.075)
+
+
+def test_xarm6_calibration_uses_physical_link_eef(
+    perception_manager: PerceptionManager,
+) -> None:
+    camera = perception_manager.config()["cameras"]["xarm6"]
+    command = perception_manager._calibration_capture_command("xarm6")
+
+    assert camera["parent_frame"] == "link_eef"
+    assert command[command.index("--tool-frame") + 1] == "link_eef"
+
+
+def test_xarm6_calibration_replay_reports_preview_failure(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status_path = Path("/tmp/cais_xarm6_calibration_replay_status.json")
+    previous = status_path.read_bytes() if status_path.exists() else None
+    manager_module._atomic_json_write(
+        status_path,
+        {
+            "state": "preview_failed",
+            "pose_index": 0,
+            "pose_count": 25,
+            "error": "/move_action is unavailable; start the correct hardware MoveIt stack",
+        },
+    )
+    monkeypatch.setattr(perception_manager, "_pose_count", lambda _camera: 25)
+    try:
+        error = perception_manager.start_calibration_replay("xarm6", confirmed=True)
+    finally:
+        if previous is None:
+            status_path.unlink(missing_ok=True)
+        else:
+            status_path.write_bytes(previous)
+
+    assert error == (
+        "xarm6 calibration preview failed: /move_action is unavailable; "
+        "start the correct hardware MoveIt stack"
+    )
+
+
 def test_perception_uses_hardware_domain_for_externally_detected_twin(
     perception_manager: PerceptionManager,
 ) -> None:
@@ -122,6 +789,78 @@ def test_perception_uses_hardware_domain_for_externally_detected_twin(
     bridge._digital_twin_domain_ids = lambda: {"hardware": 42}
 
     assert perception_manager._domain_id() == 42
+
+
+def test_perception_uses_xarm6_domain_for_xarm6_capture(
+    perception_manager: PerceptionManager,
+) -> None:
+    bridge = perception_manager.bridge
+    bridge._DIGITAL_TWIN_HARDWARE_PROCESS_NAMES = set()
+    bridge._active_digital_twin_target_from_status = lambda: "dual robots"
+    bridge._digital_twin_domain_ids = lambda: {
+        "hardware": 42,
+        "hardware_xarm6": 42,
+        "hardware_ur5e": 43,
+    }
+    bridge._digital_twin_target = lambda _target: {"multiple_hardware_domains": True}
+    bridge._digital_twin_hardware_domain_id = (
+        lambda _target, robot, domains: domains[f"hardware_{robot}"]
+    )
+
+    assert perception_manager._domain_id("xarm6") == 42
+    assert perception_manager._domain_id("ur5e") == 43
+
+
+def test_xarm6_calibration_pose_uses_hardware_stack_snapshot(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, str, int]] = []
+
+    def _snapshot(
+        robot: str,
+        *,
+        source: str,
+        hardware_domain_id: int,
+    ) -> dict[str, object]:
+        observed.append((robot, source, hardware_domain_id))
+        return {
+            "joint_names": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
+            "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6],
+        }
+
+    perception_manager.bridge._snapshot_robot_waypoint = _snapshot
+    monkeypatch.setattr(
+        perception_manager,
+        "_run_ros_command",
+        lambda *_args, **_kwargs: pytest.fail(
+            "xArm6 capture must not depend on one hard-coded joint-state topic"
+        ),
+    )
+
+    joint_state = perception_manager._read_joint_state("xarm6")
+
+    assert joint_state["names"] == [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+    ]
+    assert joint_state["positions"] == [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]
+    assert observed == [("xarm6", "hardware", 0)]
+
+
+def test_xarm6_calibration_pose_reports_hardware_snapshot_error(
+    perception_manager: PerceptionManager,
+) -> None:
+    perception_manager.bridge._snapshot_robot_waypoint = lambda *_args, **_kwargs: {
+        "error": "hardware /joint_states has no xarm6 arm joints yet"
+    }
+
+    with pytest.raises(RuntimeError, match="xarm6 hardware joint feedback is unavailable"):
+        perception_manager._read_joint_state("xarm6")
 
 
 def test_ur5e_calibration_pose_uses_read_only_rtde_without_joint_states(

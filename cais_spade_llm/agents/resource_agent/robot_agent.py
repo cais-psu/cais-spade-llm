@@ -24,8 +24,11 @@ from cais_spade_llm.resources.robot import (
     XArm6HardwareController,
 )
 from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
-from cais_spade_llm.resources.robot.robot_tasks import (
+from cais_spade_llm.resources.robot.robot_task_runtime import (
+    _MANUAL_FUNCTION_EXECUTION_AUTHORITY,
     execute_robot_task,
+)
+from cais_spade_llm.resources.robot.robot_tasks import (
     resolve_robot_task_names,
     robot_task_names,
     robot_task_registry,
@@ -235,6 +238,65 @@ class RobotAgent(ResourceAgent):
         try:
             return await execute_robot_task(self, task_name, **kwargs)
         finally:
+            self._robot_motion_lock.release()
+
+    async def _execute_registered_robot_task_for_manual_function_execution(
+        self,
+        task_name: str,
+        pre_execute: Any = None,
+        post_staging_acceptance: Any = None,
+        /,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute one Control-page function without the assembly sequence token."""
+        if not self._robot_motion_lock.acquire(blocking=False):
+            return {
+                "status": "blocked",
+                "content": f"{self.agent_name} is already executing a robot task.",
+            }
+        controller = getattr(self, "_controller", None)
+        callback_name = "_assembly_board_v1_post_staging_accept_callback"
+        install_post_staging_acceptance = bool(
+            callable(post_staging_acceptance)
+            and task_name == "place_approach"
+            and str(kwargs.get("destination_location") or "").strip()
+            == "assembly_board-v1"
+            and controller is not None
+        )
+        callback_was_set = bool(
+            install_post_staging_acceptance and hasattr(controller, callback_name)
+        )
+        previous_callback = (
+            getattr(controller, callback_name, None)
+            if install_post_staging_acceptance
+            else None
+        )
+        if install_post_staging_acceptance:
+            setattr(controller, callback_name, post_staging_acceptance)
+        try:
+            if callable(pre_execute):
+                pre_execute_error = str(pre_execute() or "").strip()
+                if pre_execute_error:
+                    return {
+                        "status": "blocked",
+                        "content": pre_execute_error,
+                        "manual_pre_execute_blocked": True,
+                    }
+            return await execute_robot_task(
+                self,
+                task_name,
+                _MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+                **kwargs,
+            )
+        finally:
+            if install_post_staging_acceptance:
+                if callback_was_set:
+                    setattr(controller, callback_name, previous_callback)
+                else:
+                    try:
+                        delattr(controller, callback_name)
+                    except AttributeError:
+                        pass
             self._robot_motion_lock.release()
 
     @staticmethod
@@ -917,6 +979,7 @@ class RobotAgent(ResourceAgent):
             "open_gripper",
             "close_gripper",
             "detect_parts",
+            "localize_assembly_board_v1",
             "compute_pick_targets",
             "compute_place_targets",
             "attach_part",
