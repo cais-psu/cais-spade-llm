@@ -151,6 +151,11 @@ def build_ros2_launch_cmds(
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "run_perception:=false include_assembly_parts:=true include_loose_parts:=true"
         ),
+        "gazebo_dual_spec2skill": (
+            "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
+            "world_file:=table_spec2skill.world run_perception:=false "
+            "include_assembly_parts:=true include_loose_parts:=true"
+        ),
         "gazebo_dual_gazebo_only": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "launch_moveit:=false launch_rviz:=false "
@@ -421,6 +426,17 @@ def ros2_launch_required_paths(
             "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
         ),
     )
+    spec2skill_world_asset = (
+        (
+            cais_lab_robotics_share / "worlds" / "table_spec2skill.world",
+            "ROS2 workspace is missing the Spec2Skill NIST world. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+    )
+    dual_launch_assets = {
+        "gazebo_dual": dual_assets,
+        "gazebo_dual_spec2skill": (*dual_assets, *spec2skill_world_asset),
+    }
     dual_passive_assets = (
         (
             cais_lab_robotics_share
@@ -520,7 +536,8 @@ def ros2_launch_required_paths(
         repo_hardware_config_asset,
     )
 
-    if launch_key == "gazebo_dual":
+    selected_dual_assets = dual_launch_assets.get(launch_key)
+    if selected_dual_assets is not None:
         return [
             *workspace_cais,
             *workspace_xarm,
@@ -528,7 +545,7 @@ def ros2_launch_required_paths(
             *ur_stack,
             *onrobot_ws,
             *link_attacher_ws,
-            *dual_assets,
+            *selected_dual_assets,
         ]
     if launch_key == "gazebo_dual_passive":
         return [

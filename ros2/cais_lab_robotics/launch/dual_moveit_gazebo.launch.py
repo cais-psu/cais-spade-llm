@@ -461,6 +461,7 @@ def launch_setup(context, *args, **kwargs):
     xarm_prefix = 'xarm6_'
     ur5e_prefix = 'ur5e_'
     run_perception = LaunchConfiguration('run_perception')
+    world_file = LaunchConfiguration('world_file')
     include_assembly_parts = LaunchConfiguration('include_assembly_parts')
     include_loose_parts = LaunchConfiguration('include_loose_parts')
     launch_gazebo = _launch_arg_enabled(context, 'launch_gazebo', default='true')
@@ -476,6 +477,7 @@ def launch_setup(context, *args, **kwargs):
             ])
         ),
         launch_arguments={
+            'world_file': world_file,
             'run_perception': run_perception,
             'include_assembly_parts': include_assembly_parts,
             'include_loose_parts': include_loose_parts,
@@ -537,6 +539,11 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_file',
+            default_value='table.world',
+            description='Package-local Gazebo world filename under cais_lab_robotics/worlds.',
+        ),
         DeclareLaunchArgument(
             'launch_rviz',
             default_value='true',

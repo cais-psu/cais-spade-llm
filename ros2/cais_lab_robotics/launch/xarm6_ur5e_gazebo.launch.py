@@ -414,6 +414,21 @@ def _filtered_world(
     return temporary_path
 
 
+def _package_world_path(package_share, world_file):
+    """Resolve one package-local world filename and reject external paths."""
+    world_file = str(world_file or '').strip()
+    if (
+        not world_file
+        or Path(world_file).name != world_file
+        or not world_file.endswith('.world')
+    ):
+        raise RuntimeError('world_file must name a .world file under cais_lab_robotics/worlds')
+    world_path = Path(package_share) / 'worlds' / world_file
+    if not world_path.is_file():
+        raise RuntimeError(f'cais_lab_robotics world file is missing: {world_file}')
+    return world_path
+
+
 def launch_setup(context, *args, **kwargs):
     run_perception = LaunchConfiguration('run_perception')
     passive = _launch_arg_enabled(context, 'passive')
@@ -443,7 +458,10 @@ def launch_setup(context, *args, **kwargs):
 
     # ── Gazebo Classic ────────────────────────────────────────────────────────
     cais_lab_robotics_share = Path(get_package_share_directory('cais_lab_robotics'))
-    gazebo_world_path = cais_lab_robotics_share / 'worlds' / 'table.world'
+    gazebo_world_path = _package_world_path(
+        cais_lab_robotics_share,
+        LaunchConfiguration('world_file').perform(context),
+    )
     gazebo_world = (
         str(gazebo_world_path)
         if (
@@ -777,6 +795,11 @@ def launch_setup(context, *args, **kwargs):
             value=str(cais_lab_robotics_share / 'models'),
             prepend=True,
         ),
+        AppendEnvironmentVariable(
+            name='GAZEBO_MODEL_PATH',
+            value=str(cais_lab_robotics_share),
+            prepend=True,
+        ),
         gazebo_launch,
         combined_rsp,
         combined_spawn,
@@ -814,6 +837,11 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_file',
+            default_value='table.world',
+            description='Package-local Gazebo world filename under cais_lab_robotics/worlds.',
+        ),
         DeclareLaunchArgument(
             'run_perception',
             default_value='true',

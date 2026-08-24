@@ -38,6 +38,7 @@ _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
     ("Dashboard", "/", "dashboard"),
+    ("Spec2Skill", "/spec2skill", "account_tree"),
     ("Perception", "/perception", "photo_camera"),
     ("Control", "/control", "gamepad"),
     ("Safety", "/safety", "shield"),
@@ -159,6 +160,7 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
+    from cais_spade_llm.spec2skill import ui as spec2skill_ui
     from cais_spade_llm.ui.pages import control, dashboard, perception, products, resources, safety
 
     @app.get("/perception/stream/{camera_role}/{stream_name}")
@@ -255,6 +257,11 @@ def create_app() -> None:
     def control_page():
         _page_wrapper(bridge)
         control.render(bridge)
+
+    @ui.page("/spec2skill")
+    def spec2skill_page():
+        _page_wrapper(bridge)
+        spec2skill_ui.render(bridge)
 
     @ui.page("/perception")
     def perception_page():
