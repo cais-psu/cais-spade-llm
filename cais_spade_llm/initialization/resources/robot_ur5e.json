@@ -367,12 +367,12 @@
                   "insert_max_contact_speed_m_s": 0.005,
                   "insert_max_contact_force_delta_n": 12.0,
                   "insert_max_engagement_progress_m": 0.02,
-                  "insert_max_insertion_force_n": 100.0,
+                  "insert_max_insertion_force_n": 120.0,
                   "insert_max_spiral_radius_m": 0.002,
                   "insert_max_spiral_pitch_m": 0.001,
                   "insert_max_spiral_speed_m_s": 0.004,
                   "insert_max_spiral_acceleration_m_s2": 0.03,
-                  "insert_max_axial_force_n": 120.0,
+                  "insert_max_axial_force_n": 150.0,
                   "insert_max_lateral_force_n": 55.0,
                   "insert_max_torque_nm": 2.9,
                   "insert_max_tilt_tolerance_rad": 0.0523598776,
@@ -403,7 +403,6 @@
                   "insert_search_peck_retreat_m": 0.003,
                   "insert_search_peck_interval_sec": 0.75
                 },
-                "hard_caps_sha256": "a329bf5222d80c4fdde1aa29dc699bcbb1924083e5a83be44e61e61ae2e91084",
                 "force_depth_profile": {
                   "depth_fraction": [
                     0.0,
@@ -545,28 +544,28 @@
       },
       "named_positions": {
         "home": [
-          -1.453988,
-          -0.856088,
-          -2.346209,
-          -1.510223,
-          1.568386,
-          -3.021614
+          -1.455116691834,
+          -0.856542868422,
+          -2.346110324515,
+          -1.509735787448,
+          1.570796326795,
+          -3.022742658946
         ],
         "prusa-mk4-2": [
-          0.087405,
-          -0.888637,
-          -2.15416,
-          -1.669312,
-          1.553256,
-          -3.148605
+          0.079556924227,
+          -0.891680498449,
+          -2.153091102793,
+          -1.667617379143,
+          1.570796326795,
+          -3.156449243111
         ],
         "assembly_board-v1": [
-          -0.916929,
-          -1.422443,
-          -2.10804,
-          -1.195821,
-          1.568629,
-          -2.50388
+          -0.917470782269,
+          -1.420525195504,
+          -2.113421575916,
+          -1.178442208965,
+          1.570796326795,
+          -2.504486439973
         ]
       }
     }

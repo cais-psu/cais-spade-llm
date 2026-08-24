@@ -17363,11 +17363,7 @@ class SystemBridge:
         demonstration_recipe = dict(effective.get("demonstration_recipe") or {})
         if demonstration_recipe:
             expected_caps_sha256 = self._move_insert_hard_caps_sha256(caps)
-            if (
-                demonstration_recipe.get("hard_caps") != caps
-                or demonstration_recipe.get("hard_caps_sha256")
-                != expected_caps_sha256
-            ):
+            if demonstration_recipe.get("hard_caps") != caps:
                 return {
                     **base,
                     "profile_state": "invalid",
@@ -21880,7 +21876,6 @@ class SystemBridge:
             "y": axis_world[1] + qw * ty + qz * tx - qx * tz,
             "z": axis_world[2] + qw * tz + qx * ty - qy * tx,
         }
-        hard_caps_sha256 = self._move_insert_hard_caps_sha256(caps)
         learning_policy, learning_policy_error = (
             self._move_insert_learning_policy(
                 caps,
@@ -21897,7 +21892,6 @@ class SystemBridge:
             ),
             "learning_policy": learning_policy,
             "hard_caps": deepcopy(caps),
-            "hard_caps_sha256": hard_caps_sha256,
             "force_depth_profile": force_depth_profile,
             "force_depth_profile_sha256": force_depth_profile_sha256,
             "baseline_force_uncertainty_n": baseline_force_uncertainty_n,

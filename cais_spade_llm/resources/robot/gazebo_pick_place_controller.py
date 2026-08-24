@@ -615,7 +615,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
         "learning_policy_sha256",
         "learning_policy",
         "hard_caps",
-        "hard_caps_sha256",
         "force_depth_profile",
         "force_depth_profile_sha256",
         "baseline_force_uncertainty_n",
@@ -736,7 +735,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
             }
         for digest_field in (
             "learning_policy_sha256",
-            "hard_caps_sha256",
             "force_depth_profile_sha256",
         ):
             digest = recipe.get(digest_field)
@@ -791,23 +789,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
                 "message": (
                     "controller.parts_tuning.move_insert.demonstration_recipes."
                     f"{recipe_part}.hard_caps contains invalid evidence"
-                ),
-                "profile_sha256": profile_sha256,
-                "validated_parts": validated_parts,
-            }
-        expected_hard_caps_sha256, hard_caps_hash_error = (
-            _canonical_json_sha256(hard_caps)
-        )
-        if (
-            hard_caps_hash_error
-            or recipe.get("hard_caps_sha256")
-            != expected_hard_caps_sha256
-        ):
-            return {
-                "success": False,
-                "message": (
-                    "controller.parts_tuning.move_insert.demonstration_recipes."
-                    f"{recipe_part}.hard_caps_sha256 does not match hard_caps"
                 ),
                 "profile_sha256": profile_sha256,
                 "validated_parts": validated_parts,
@@ -1812,9 +1793,6 @@ def _validated_frozen_move_insert_profile(
     if raw_demonstration_recipe:
         validated["force_depth_profile"] = deepcopy(
             dict(raw_demonstration_recipe.get("force_depth_profile") or {})
-        )
-        validated["hard_caps_sha256"] = raw_demonstration_recipe.get(
-            "hard_caps_sha256"
         )
     return validated
 

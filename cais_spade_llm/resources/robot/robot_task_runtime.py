@@ -2094,7 +2094,7 @@ def _computed_cartesian_state(
     return positions, reference
 
 
-def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit reference and safety gates.
+def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912, PLR0915 - explicit reference and safety gates.
     *,
     task: RobotTaskDefinition,
     physical_overrides: dict[str, dict[str, Any]],
@@ -2238,6 +2238,64 @@ def _apply_cartesian_overrides_to_targets(  # noqa: C901, PLR0912 - explicit ref
         if pose_error:
             return pose_error
         targets[pose_key] = pose
+
+    if (
+        task.name in {"pick_approach", "place_approach"}
+        and _robot_name(agent) == "ur5e"
+        and (
+            task.name == "pick_approach"
+            or current_reference_name == "assembly_board-v1"
+        )
+    ):
+        descend_pose = dict(targets.get("target_pose") or {})
+        try:
+            descend_qx = float(descend_pose["qx"])
+            descend_qy = float(descend_pose["qy"])
+        except (KeyError, TypeError, ValueError):
+            return f"{task.name}.descend orientation is incomplete"
+        vertical_xy_norm = sqrt(descend_qx**2 + descend_qy**2)
+        if not isfinite(vertical_xy_norm) or vertical_xy_norm <= 1e-12:
+            return f"{task.name}.descend cannot resolve a vertical tool orientation"
+        vertical_orientation = {
+            "qx": descend_qx / vertical_xy_norm,
+            "qy": descend_qy / vertical_xy_norm,
+            "qz": 0.0,
+            "qw": 0.0,
+        }
+        for pose_key in ("approach_pose", "target_pose"):
+            pose = dict(targets.get(pose_key) or {})
+            if pose:
+                pose.update(vertical_orientation)
+                targets[pose_key] = pose
+
+        if descend_pose and task.name == "place_approach":
+            pre_insert_pose = dict(targets.get("pre_insert_pose") or {})
+            if pre_insert_pose:
+                pre_insert_pose.update(
+                    {
+                        "x": float(descend_pose["x"]),
+                        "y": float(descend_pose["y"]),
+                        **vertical_orientation,
+                    }
+                )
+                targets["pre_insert_pose"] = pre_insert_pose
+
+            insert_pose = dict(targets.get("insert_pose") or {})
+            if insert_pose:
+                insert_pose.update(
+                    {
+                        "x": float(descend_pose["x"]),
+                        "y": float(descend_pose["y"]),
+                        **vertical_orientation,
+                    }
+                )
+                targets["insert_pose"] = insert_pose
+            targets["insertion_axis_world"] = {
+                "x": 0.0,
+                "y": 0.0,
+                "z": -1.0,
+            }
+
     approach_pose = dict(targets.get("approach_pose") or {})
     target_pose = dict(targets.get("target_pose") or {})
     try:
