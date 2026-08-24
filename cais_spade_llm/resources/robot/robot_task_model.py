@@ -414,6 +414,19 @@ def _evaluate_guard_predicate(
     if predicate == "task_ctx_key_truthy":
         key = str(dict(resolved_args or {}).get("key") or "").strip()
         return bool(dict(dict(runtime_state or {}).get("_task_ctx") or {}).get(key))
+    if predicate == "move_insert_required":
+        task_context = dict(dict(runtime_state or {}).get("_task_ctx") or {})
+        execution_mode = str(getattr(agent, "execution_mode", "") or "")
+        if execution_mode == "physical":
+            return (
+                bool(task_context.get("move_insert_profile"))
+                and task_context.get("move_insert_mode") == "force_limited"
+            )
+        return (
+            execution_mode == "simulation"
+            and task_context.get("surface_role") == "assembly_slot"
+            and task_context.get("move_insert_mode") == "simulation_direct"
+        )
     if predicate == "execution_mode":
         expected = str(dict(resolved_args or {}).get("mode") or "").strip().lower()
         actual = str(getattr(agent, "execution_mode", "") or "").strip().lower() if agent else ""

@@ -70,6 +70,61 @@ def test_ros2_process_start_is_atomic(
     assert registered == [(process_name, 4100)]
 
 
+@pytest.mark.parametrize("lifecycle_state", ["starting", "running", "failed"])
+def test_selected_ur5e_hardware_stack_blocks_stale_calibration_publisher_start(
+    lifecycle_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge._ROS2_ENV = ""
+    bridge._BASE_HARDWARE_PROCESS_NAMES = set()
+    bridge._ros2_procs = {}
+    bridge._ros2_process_start_lock = threading.RLock()
+    bridge._hardware_stack_selected = "ur5e"
+    bridge._hardware_stack_lifecycle_state = lifecycle_state
+    bridge.ros2_proc_status = lambda _name: "stopped"
+    bridge._ros2_domain_export = lambda _domain_id: ""
+    popen_called = False
+
+    def _popen(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        nonlocal popen_called
+        popen_called = True
+        return SimpleNamespace(pid=4101, poll=lambda: None)
+
+    monkeypatch.setattr(bridge_module.subprocess, "Popen", _popen)
+
+    error = bridge._start_tracked_ros2_command(
+        "ur5e_calibration_state_publisher",
+        "run-calibration-state-publisher",
+    )
+
+    assert "reserves the unprefixed UR5e TF tree" in str(error)
+    assert popen_called is False
+
+
+def test_hardware_tf_authority_requires_calibration_process_terminal_state() -> None:
+    bridge = object.__new__(SystemBridge)
+    process = SimpleNamespace(pid=4102, poll=lambda: None)
+    bridge._ros2_procs = {"ur5e_calibration_state_publisher": process}
+    bridge._ros2_process_start_lock = threading.RLock()
+    state = {"value": "running"}
+    bridge.ros2_proc_status = lambda _name: state["value"]
+
+    def _stop(_name: str, *, reason: str = "explicit_stop") -> None:
+        assert reason == "hardware_robot_state_publisher_authority"
+        state["value"] = "stopped"
+        return None
+
+    bridge.ros2_stop = _stop
+
+    error = bridge._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+
+    assert error == (
+        "Hardware Stack requires exclusive UR5e TF authority, but "
+        "ur5e_calibration_state_publisher pid=4102 did not reach terminal state"
+    )
+
+
 def _bridge_with_exited_process(process_name: str, return_code: int) -> SystemBridge:
     bridge = object.__new__(SystemBridge)
     bridge._ros2_procs = {

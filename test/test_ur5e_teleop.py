@@ -19,6 +19,30 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operator_insertion_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.ui import bridge as bridge_module
+
+    monkeypatch.setattr(
+        bridge_module,
+        "_MOVE_INSERT_TRIALS_DIR",
+        tmp_path / "operator_move_insert_trials",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_INSERTION_DEMONSTRATIONS_DIR",
+        tmp_path / "operator_move_insert_demonstrations",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_HARDWARE_STATE_DIR",
+        tmp_path / "operator_hardware_state",
+    )
+
+
 def _teleop_module() -> Any:
     path = ROOT / "ros2/cais_lab_robotics/scripts/keyboard_teleop.py"
     spec = importlib.util.spec_from_file_location("keyboard_teleop_test", path)
@@ -56,6 +80,7 @@ def test_cartesian_readiness_waits_for_joint_state_before_environment_inference(
         1,
     )[0]
     assert "node._xarm6_last_stop_motion_confirmed" in smooth_branch
+    assert "node._ur5e_last_stop_motion_confirmed" in smooth_branch
     assert "response['state_uncertain']" in smooth_branch
 
 
@@ -281,6 +306,60 @@ def test_real_ur5e_joint_jog_sends_exact_speed_to_guarded_action() -> None:
     assert teleop._last_ur5e_joint_jog_state_uncertain is False
 
 
+def test_real_ur5e_cartesian_step_accepts_low_positive_speed_and_extends_timeout() -> None:
+    module = _teleop_module()
+
+    class _RelativeGoal:
+        def __init__(self) -> None:
+            self.world_translation_m = SimpleNamespace(x=0.0, y=0.0, z=0.0)
+            self.speed_m_s = 0.0
+            self.acceleration_m_s2 = 0.0
+
+    module.MoveUR5eRelativeCartesian = SimpleNamespace(Goal=_RelativeGoal)
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop.ur5e_hardware_relative_cartesian_action = (
+        module.UR5E_HARDWARE_RELATIVE_CARTESIAN_ACTION
+    )
+    teleop.ur5e_hardware_cartesian_speed_m_s = 0.05
+    teleop.ur5e_hardware_cartesian_max_speed_m_s = 0.10
+    teleop.ur5e_hardware_cartesian_acceleration_m_s2 = 0.10
+    teleop.ur5e_hardware_result_timeout_sec = 45.0
+    timeouts: list[float] = []
+    teleop._wait_future = lambda future, timeout: (
+        timeouts.append(float(timeout)) or future.done()
+    )
+    result = SimpleNamespace(
+        error_code=0,
+        error_string="",
+        final_translation_error_m=0.0001,
+        final_orientation_drift_rad=0.0001,
+    )
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: _ImmediateFuture(
+            SimpleNamespace(status=4, result=result)
+        ),
+    )
+    sent_goals: list[Any] = []
+    teleop.ur5e_hardware_relative_cartesian_client = SimpleNamespace(
+        wait_for_server=lambda timeout_sec: timeout_sec == pytest.approx(2.0),
+        send_goal_async=lambda goal: (
+            sent_goals.append(goal) or _ImmediateFuture(goal_handle)
+        ),
+    )
+
+    ok, message = teleop._move_ur5e_relative_cartesian(
+        (0.001, 0.0, 0.0),
+        velocity_scale=1.0,
+        speed_mm_s=0.025,
+    )
+
+    assert ok is True, message
+    assert len(sent_goals) == 1
+    assert sent_goals[0].speed_m_s == pytest.approx(0.000025)
+    assert timeouts == pytest.approx([3.0, 55.0])
+
+
 def test_ur5e_joint_jog_server_convergence_cancellation_and_uncertainty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,10 +494,12 @@ def test_ur5e_world_z_step_preserves_exact_rtde_rotation_vector(
     server._cartesian_frame_validation = lambda: (
         frame_validations.append(True) or (True, "ready", 0.0, 0.0)
     )
-    server._lookup_rigid_transform = lambda target, source: (
-        ((0.0, 0.0, 0.9), (0.0, 0.0, 0.0, 1.0))
-        if (target, source) == ("world", "base")
-        else pytest.fail(f"unexpected TF lookup: {target} <- {source}")
+    world_base = ((0.0, 0.0, 0.9), (0.0, 0.0, 0.0, 1.0))
+    server._validated_cartesian_world_base = lambda: (
+        world_base,
+        "ready",
+        0.0,
+        0.0,
     )
     server._active_tcp_offset = lambda: (
         (0.0, 0.0, 0.0),
@@ -482,9 +563,470 @@ def test_ur5e_active_tcp_offset_round_trip_uses_base_and_tool0_only() -> None:
     assert orientation_error < 1e-12
     conversion_source = inspect.getsource(server._resolve_cartesian_target)
     validation_source = inspect.getsource(server._cartesian_frame_validation)
-    assert '_lookup_rigid_transform("world", "base")' in conversion_source
+    mount_validation_source = inspect.getsource(
+        server._cartesian_frame_validation_with_world_base
+    )
+    assert "_validated_cartesian_world_base()" in conversion_source
+    assert '_lookup_rigid_transform("world", "base")' not in conversion_source
+    assert '_lookup_rigid_transform("world", "base")' in mount_validation_source
     assert '"base_link"' not in conversion_source + validation_source
     assert '"flange"' not in conversion_source + validation_source
+
+
+def test_ur5e_cartesian_world_base_matches_protected_mount(tmp_path: Path) -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    expected_world_base = module._configured_cartesian_world_base()
+    actual_base_tcp = (
+        (0.1, -0.2, 0.3),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    tool0_tcp = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
+    expected_world_tool0 = module._compose_transform(
+        expected_world_base,
+        actual_base_tcp,
+    )
+    transforms = {
+        ("world", "base"): expected_world_base,
+        ("world", "tool0"): expected_world_tool0,
+    }
+    server._lookup_rigid_transform = lambda target, source: transforms[(target, source)]
+    server._active_tcp_offset = lambda: tool0_tcp
+    server._read_actual_tcp_transform = lambda: actual_base_tcp
+
+    ready, message, position_error, orientation_error = (
+        server._cartesian_frame_validation()
+    )
+
+    assert expected_world_base[0] == pytest.approx((0.0, 0.5, 1.021))
+    assert expected_world_base[1] == pytest.approx((0.0, 0.0, 0.0, 1.0))
+    assert ready is True
+    assert message == "UR5e Cartesian frame validation ready"
+    assert position_error == pytest.approx(0.0)
+    assert orientation_error == pytest.approx(0.0)
+    assert server._cartesian_world_base_ready is True
+    assert server._cartesian_world_base_expected == expected_world_base
+    assert server._cartesian_world_base_observed == expected_world_base
+    assert server._cartesian_world_base_position_error_m == pytest.approx(0.0)
+    assert server._cartesian_world_base_orientation_error_rad == pytest.approx(0.0)
+    server.monitor_only = False
+    server.ros_domain_id = 42
+    server.status_file = tmp_path / "status.json"
+    server.terminal_status_file = tmp_path / "terminal.json"
+    server._status_lock = threading.Lock()
+    server._insertion_demonstration_lock = threading.Lock()
+    server._active_insertion_demonstration_status = {}
+    server._rtde_reset_required = False
+    server._write_status({"state": "ready"})
+    status = json.loads(server.status_file.read_text(encoding="utf-8"))
+    assert status["cartesian_world_base_ready"] is True
+    assert status["cartesian_world_base_expected"]["y"] == pytest.approx(0.5)
+    assert status["cartesian_world_base_observed"]["y"] == pytest.approx(0.5)
+    assert status["cartesian_world_base_position_error_m"] == pytest.approx(0.0)
+    assert status["cartesian_world_base_orientation_error_rad"] == pytest.approx(0.0)
+
+
+def test_ur5e_cartesian_world_base_rejects_internally_consistent_wrong_tf_once() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    wrong_world_base = (
+        (0.0, 0.0, 1.021),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    correct_world_base = module._configured_cartesian_world_base()
+    actual_base_tcp = (
+        (0.1, -0.2, 0.3),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    wrong_world_tool0 = module._compose_transform(
+        wrong_world_base,
+        actual_base_tcp,
+    )
+    world_base_values = iter((wrong_world_base, correct_world_base))
+    world_base_lookups: list[bool] = []
+
+    def lookup(target: str, source: str) -> Any:
+        if (target, source) == ("world", "base"):
+            world_base_lookups.append(True)
+            return next(world_base_values)
+        if (target, source) == ("world", "tool0"):
+            return wrong_world_tool0
+        return pytest.fail(f"unexpected TF lookup: {target} <- {source}")
+
+    server._lookup_rigid_transform = lookup
+    server._active_tcp_offset = lambda: (
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    server._read_actual_tcp_transform = lambda: actual_base_tcp
+
+    ready, message, _position_error, _orientation_error = (
+        server._cartesian_frame_validation()
+    )
+
+    assert ready is False
+    assert "protected ur5e.rtde.cartesian_world_base" in message
+    assert world_base_lookups == [True]
+    assert server._cartesian_world_base_ready is False
+    assert server._cartesian_world_base_expected == correct_world_base
+    assert server._cartesian_world_base_observed == wrong_world_base
+    assert server._cartesian_world_base_position_error_m == pytest.approx(0.5)
+    assert server._cartesian_world_base_orientation_error_rad == pytest.approx(0.0)
+
+
+def test_ur5e_cartesian_world_base_missing_config_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _rtde_server_module()
+    monkeypatch.setattr(module, "UR5E_RTDE_CARTESIAN_WORLD_BASE", None)
+    monkeypatch.setattr(
+        module,
+        "UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR",
+        "ur5e.rtde.cartesian_world_base.y_m is missing or is not a finite number",
+    )
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._lookup_rigid_transform = lambda *_args: pytest.fail(
+        "missing protected mount config must reject before TF lookup"
+    )
+
+    ready, message, position_error, orientation_error = (
+        server._cartesian_frame_validation()
+    )
+
+    assert ready is False
+    assert "cartesian_world_base.y_m is missing" in message
+    assert math.isinf(position_error)
+    assert math.isinf(orientation_error)
+    assert server._cartesian_world_base_expected is None
+    assert server._cartesian_world_base_observed is None
+
+
+def test_ur5e_cartesian_world_base_parser_has_no_invalid_value_fallback(
+    tmp_path: Path,
+) -> None:
+    module = _rtde_server_module()
+    config_path = tmp_path / "invalid_mount.yaml"
+    config_path.write_text(
+        """ur5e:
+  rtde:
+    cartesian_world_base:
+      x_m: 0.0
+      y_m: 0.5
+      z_m: 1.021
+      roll_rad: 0.0
+      pitch_rad: 0.0
+      yaw_rad: .nan
+""",
+        encoding="utf-8",
+    )
+
+    module._apply_hardware_arms_config(config_path)
+
+    assert module.UR5E_RTDE_CARTESIAN_WORLD_BASE is None
+    assert (
+        module.UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR
+        == "ur5e.rtde.cartesian_world_base.yaw_rad is missing or is not a finite number"
+    )
+    with pytest.raises(RuntimeError, match="protected ur5e.rtde.cartesian_world_base"):
+        module._configured_cartesian_world_base()
+
+
+def test_ur5e_world_frame_conversions_have_no_unvalidated_mount_lookup() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+
+    for method in (
+        server._resolve_cartesian_target,
+        server._execute_insert,
+        server._execute_insertion_demonstration,
+        server._execute_relative_cartesian,
+        server._set_cartesian_jog,
+    ):
+        source = inspect.getsource(method)
+        assert '_lookup_rigid_transform("world", "base")' not in source
+
+
+def _install_wrong_ur5e_world_base(server: Any) -> None:
+    wrong_world_base = (
+        (0.0, 0.0, 1.021),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    server._lookup_rigid_transform = lambda target, source: (
+        wrong_world_base
+        if (target, source) == ("world", "base")
+        else pytest.fail(f"wrong mount must reject before {target} <- {source} lookup")
+    )
+    server._active_tcp_offset = lambda: pytest.fail(
+        "wrong mount must reject before reading the active TCP offset"
+    )
+    server._read_actual_tcp_transform = lambda: pytest.fail(
+        "wrong mount must reject before reading the active TCP pose"
+    )
+
+
+def test_ur5e_main_cartesian_rejects_wrong_mount_before_move_l() -> None:
+    module = _rtde_server_module()
+
+    class _Result:
+        pass
+
+    module.MoveUR5eCartesian = SimpleNamespace(Result=_Result)
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._shutdown_requested = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._latched_terminal_status = None
+    server._active_goal = None
+    server._active_goal_status = None
+    server._active_motion_kind = ""
+    server._connect_control_for_goal = lambda: None
+    server._joint_states_fresh = lambda: True
+    server._read_actual_q = lambda: [0.0] * 6
+    server._ensure_control_program_for_goal = lambda: None
+    server.control = SimpleNamespace(
+        moveL=lambda *_args, **_kwargs: pytest.fail(
+            "wrong mount must reject before moveL"
+        )
+    )
+    _install_wrong_ur5e_world_base(server)
+    server._finish_active_goal_status = lambda *_args, **_kwargs: None
+    server._clear_active_goal = lambda _goal: None
+    server._stop_motion = lambda: pytest.fail(
+        "a pre-motion mount rejection must not stop unknown motion"
+    )
+    request = SimpleNamespace(
+        target_tool0_pose=SimpleNamespace(
+            header=SimpleNamespace(frame_id="world"),
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.1, z=1.2),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        ),
+        speed_m_s=0.05,
+        acceleration_m_s2=0.10,
+    )
+    outcomes: list[str] = []
+    goal = SimpleNamespace(
+        request=request,
+        abort=lambda: outcomes.append("aborted"),
+        is_cancel_requested=False,
+    )
+
+    result = server._execute_cartesian(goal)
+
+    assert result.error_code == -2
+    assert "protected ur5e.rtde.cartesian_world_base" in result.error_string
+    assert outcomes == ["aborted"]
+
+
+def test_ur5e_relative_cartesian_rejects_wrong_mount_before_move_l() -> None:
+    module = _rtde_server_module()
+
+    class _Result:
+        pass
+
+    module.MoveUR5eRelativeCartesian = SimpleNamespace(Result=_Result)
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._active_lock = threading.Lock()
+    server._shutdown_requested = False
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._active_goal = None
+    server._active_goal_status = None
+    server._active_motion_kind = ""
+    server._latched_terminal_status = None
+    server._connect_control_for_goal = lambda: None
+    server._joint_states_fresh = lambda: True
+    server._read_actual_q = lambda: [0.0] * 6
+    server._ensure_control_program_for_goal = lambda: None
+    server.control = SimpleNamespace(
+        moveL=lambda *_args, **_kwargs: pytest.fail(
+            "wrong mount must reject before moveL"
+        )
+    )
+    _install_wrong_ur5e_world_base(server)
+    server._finish_active_goal_status = lambda *_args, **_kwargs: None
+    server._clear_active_goal = lambda _goal: None
+    server._stop_motion = lambda: pytest.fail(
+        "a pre-motion mount rejection must not stop unknown motion"
+    )
+    outcomes: list[str] = []
+    goal = SimpleNamespace(
+        request=SimpleNamespace(
+            world_translation_m=SimpleNamespace(x=0.01, y=0.0, z=0.0),
+            speed_m_s=0.05,
+            acceleration_m_s2=0.10,
+        ),
+        abort=lambda: outcomes.append("aborted"),
+    )
+
+    result = server._execute_relative_cartesian(goal)
+
+    assert result.error_code == -2
+    assert "protected ur5e.rtde.cartesian_world_base" in result.error_string
+    assert outcomes == ["aborted"]
+
+
+def test_ur5e_cartesian_smooth_hold_rejects_wrong_mount_before_jog_start() -> None:
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._shutdown_requested = False
+    server._active_lock = threading.Lock()
+    server._active_goal = None
+    server._jog_session_token = object()
+    server._connect_control_for_goal = lambda: None
+    server._joint_states_fresh = lambda: True
+    server.control = SimpleNamespace(
+        jogStart=lambda *_args, **_kwargs: pytest.fail(
+            "wrong mount must reject before jogStart"
+        )
+    )
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+    _install_wrong_ur5e_world_base(server)
+    request = SimpleNamespace(
+        stop=False,
+        world_linear_velocity_m_s=SimpleNamespace(x=0.01, y=0.0, z=0.0),
+        acceleration_m_s2=0.10,
+        watchdog_sec=0.25,
+    )
+    response = SimpleNamespace(accepted=None, message="")
+
+    result = server._set_cartesian_jog(request, response)
+
+    assert result is response
+    assert response.accepted is False
+    assert "protected ur5e.rtde.cartesian_world_base" in response.message
+    assert statuses[-1]["state"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("speed_mm_s", "speed_m_s"),
+    [
+        (5.0, 0.005),
+        (100.0, 0.100),
+    ],
+)
+def test_ur5e_cartesian_smooth_hold_sends_metres_per_second_to_jog_start(
+    speed_mm_s: float,
+    speed_m_s: float,
+) -> None:
+    """Verify service m/s is converted to ur_rtde jogStart translation mm/s."""
+    module = _rtde_server_module()
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server._shutdown_requested = False
+    server._active_lock = threading.Lock()
+    server._active_goal = None
+    server._active_motion_kind = ""
+    server._active_goal_status = None
+    server._jog_session_token = object()
+    server._connect_control_for_goal = lambda: None
+    server._joint_states_fresh = lambda: True
+    frame_validations: list[bool] = []
+    server._validated_cartesian_world_base = lambda: (
+        frame_validations.append(True)
+        or (
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            "UR5e Cartesian frame validation ready",
+            0.0,
+            0.0,
+        )
+    )
+    server._cartesian_frame_validation = lambda: pytest.fail(
+        "Smooth Hold must not repeat full frame validation after the accepted sample"
+    )
+    server._read_actual_tcp_pose = lambda: [0.0] * 6
+    jog_calls: list[tuple[list[float], int, float]] = []
+    server.control = SimpleNamespace(
+        FEATURE_BASE=0,
+        isPoseWithinSafetyLimits=lambda _pose: True,
+        jogStart=lambda speeds, feature, acceleration: (
+            jog_calls.append((list(speeds), int(feature), float(acceleration))) or True
+        ),
+    )
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+    request = SimpleNamespace(
+        stop=False,
+        world_linear_velocity_m_s=SimpleNamespace(x=speed_m_s, y=0.0, z=0.0),
+        acceleration_m_s2=0.10,
+        watchdog_sec=0.25,
+    )
+    response = SimpleNamespace(accepted=None, message="")
+
+    first_result = server._set_cartesian_jog(request, response)
+    second_response = SimpleNamespace(accepted=None, message="")
+    second_result = server._set_cartesian_jog(request, second_response)
+
+    assert first_result is response
+    assert second_result is second_response
+    assert response.accepted is True
+    assert second_response.accepted is True
+    assert frame_validations == [True]
+    assert jog_calls == [
+        ([speed_mm_s, 0.0, 0.0, 0.0, 0.0, 0.0], 0, 0.10),
+        ([speed_mm_s, 0.0, 0.0, 0.0, 0.0, 0.0], 0, 0.10),
+    ]
+    assert statuses[-1]["world_linear_velocity_m_s"] == pytest.approx(
+        [speed_m_s, 0.0, 0.0]
+    )
+    assert statuses[-1]["base_linear_velocity_mm_s"] == pytest.approx(
+        [speed_mm_s, 0.0, 0.0]
+    )
+
+
+def test_ur5e_insertion_demonstration_rejects_wrong_mount_before_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _rtde_server_module()
+
+    class _Result:
+        pass
+
+    module.RecordUR5eInsertionDemonstration = SimpleNamespace(Result=_Result)
+    monkeypatch.setattr(module, "INSERT_DEMONSTRATION_TRACE_ROOT", tmp_path / "traces")
+    server = object.__new__(module.UR5eRTDETrajectoryServer)
+    server.monitor_only = False
+    server.receive = object()
+    server.control = object()
+    server._rtde_reset_required = False
+    server._rtde_reset_reason = ""
+    server._confirm_stationary_after_stop = lambda *, timeout_sec: True
+    server._read_feedback_timestamp = lambda: pytest.fail(
+        "wrong mount must reject before trace sampling"
+    )
+    statuses: list[dict[str, Any]] = []
+    server._write_status = lambda status: statuses.append(dict(status))
+    _install_wrong_ur5e_world_base(server)
+    outcomes: list[str] = []
+    request = SimpleNamespace(
+        recording_id="wrong-mount-demonstration",
+        part_name="MG",
+        destination_location="assembly_board-v1",
+        context_sha256="a" * 64,
+        expected_start_tool0_pose=SimpleNamespace(
+            header=SimpleNamespace(frame_id="world"),
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.1, z=1.2),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        ),
+        max_duration_sec=1.0,
+    )
+    goal = SimpleNamespace(
+        request=request,
+        abort=lambda: outcomes.append("aborted"),
+    )
+
+    result = server._execute_insertion_demonstration(goal)
+
+    assert result.error_code == -1
+    assert "protected ur5e.rtde.cartesian_world_base" in result.error_string
+    assert outcomes == ["aborted"]
+    assert statuses[-1]["state"] == "blocked"
+    assert not (tmp_path / "traces").exists()
 
 
 def test_ur5e_prusa_mk4_2_mg_target_is_inside_configured_coarse_reach() -> None:
@@ -637,7 +1179,7 @@ def test_xarm6_step_session_reuses_mode_zero_and_exact_speed() -> None:
     requests: list[Any] = []
 
     def _call_service(_client: Any, request: Any, timeout_sec: float) -> tuple[Any, None]:
-        assert timeout_sec == pytest.approx(10.0)
+        assert timeout_sec == pytest.approx(float(request.timeout) + 2.0)
         requests.append(request)
         state["pose"][0] += float(request.pose[0])
         state["pose"][1] += float(request.pose[1])
@@ -671,17 +1213,24 @@ def test_xarm6_step_session_reuses_mode_zero_and_exact_speed() -> None:
     ok, message = teleop._move_xarm6_relative_cartesian(
         (0.0, 0.0, 0.01),
         velocity_scale=1.0,
+        speed_mm_s=0.025,
+        restore_trajectory_control=False,
+    )
+    assert ok is True, message
+    ok, message = teleop._move_xarm6_relative_cartesian(
+        (0.0, 0.0, 0.01),
+        velocity_scale=1.0,
         speed_mm_s=100.025,
         restore_trajectory_control=False,
     )
     assert ok is False
-    assert "[5.0, 100.000] mm/s" in message
+    assert "(0, 100.000] mm/s" in message
 
-    assert len(requests) == 4
+    assert len(requests) == 5
     assert [request.speed for request in requests] == pytest.approx(
-        [12.3, 12.3, 100.0, 50.0]
+        [12.3, 12.3, 100.0, 50.0, 0.025]
     )
-    assert [request.relative for request in requests] == [True, True, True, True]
+    assert [request.relative for request in requests] == [True] * 5
 
 
 def test_xarm6_workspace_rejection_is_identified_before_motion_attempt() -> None:
@@ -742,6 +1291,12 @@ def test_xarm6_smooth_hold_uses_the_same_cartesian_speed_limit() -> None:
         -100.0,
         watchdog_sec=0.3,
     ) == (True, "OK")
+    assert teleop.set_cartesian_jog(
+        "xarm6",
+        "z",
+        0.025,
+        watchdog_sec=0.3,
+    ) == (True, "OK")
     ok, message = teleop.set_cartesian_jog(
         "xarm6",
         "x",
@@ -749,10 +1304,11 @@ def test_xarm6_smooth_hold_uses_the_same_cartesian_speed_limit() -> None:
         watchdog_sec=0.3,
     )
     assert ok is False
-    assert "[5.0, 100.000] mm/s" in message
+    assert "(0, 100.000] mm/s" in message
     assert commands == [
         ([0.03, 0.0, 0.0], 0.3),
         ([0.0, -0.1, 0.0], 0.3),
+        ([0.0, 0.0, 0.000025], 0.3),
     ]
 
 
@@ -800,6 +1356,134 @@ def _initialize_xarm6_smooth_state(teleop: Any) -> None:
     teleop._xarm6_smooth_pending_error = ""
     teleop._xarm6_smooth_refresh_stop = threading.Event()
     teleop._xarm6_smooth_refresh_thread = None
+
+
+def _initialize_ur5e_smooth_state(teleop: Any) -> None:
+    teleop._ur5e_smooth_state_lock = threading.Lock()
+    teleop._ur5e_smooth_service_lock = threading.Lock()
+    teleop._ur5e_smooth_world_velocity_m_s = [0.0] * 3
+    teleop._ur5e_smooth_watchdog_sec = 0.50
+    teleop._ur5e_smooth_heartbeat_monotonic = time.monotonic()
+    teleop._ur5e_smooth_pending_error = ""
+    teleop._ur5e_smooth_refresh_stop = threading.Event()
+    teleop._ur5e_smooth_refresh_thread = None
+    teleop._ur5e_last_stop_motion_confirmed = True
+
+
+def test_ur5e_smooth_hold_starts_refresh_beside_ros_service() -> None:
+    module = _teleop_module()
+    assert module.SetUR5eCartesianJog is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._ur5e_smooth_active = False
+    _initialize_ur5e_smooth_state(teleop)
+    teleop.ur5e_hardware_cartesian_jog_service = (
+        "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
+    )
+    teleop.ur5e_hardware_cartesian_jog_client = SimpleNamespace(
+        wait_for_service=lambda timeout_sec: timeout_sec == pytest.approx(2.0)
+    )
+    sends: list[tuple[list[float], float, bool, float]] = []
+    teleop._send_ur5e_cartesian_jog = (
+        lambda velocity, watchdog, *, stop, timeout_sec: (
+            sends.append(
+                (
+                    list(velocity),
+                    float(watchdog),
+                    bool(stop),
+                    float(timeout_sec),
+                )
+            )
+            or (True, "UR5e Cartesian Smooth Hold active")
+        )
+    )
+    refresh_starts: list[bool] = []
+    teleop._start_ur5e_cartesian_jog_refresh = lambda: (
+        refresh_starts.append(True) or (True, "OK")
+    )
+
+    assert teleop._set_ur5e_cartesian_jog((0.08, 0.0, 0.0), 0.50) == (
+        True,
+        "UR5e Cartesian Smooth Hold active",
+    )
+    assert teleop._ur5e_smooth_active is True
+    assert sends == [([0.08, 0.0, 0.0], 0.50, False, 3.0)]
+    assert refresh_starts == [True]
+
+
+def test_ur5e_smooth_hold_update_refreshes_ui_heartbeat_without_ros_round_trip() -> None:
+    module = _teleop_module()
+    assert module.SetUR5eCartesianJog is not None
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._ur5e_smooth_active = True
+    _initialize_ur5e_smooth_state(teleop)
+    teleop.ur5e_hardware_cartesian_jog_service = (
+        "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
+    )
+    teleop.ur5e_hardware_cartesian_jog_client = SimpleNamespace(
+        wait_for_service=lambda **_kwargs: pytest.fail(
+            "the UI heartbeat must not wait for service discovery"
+        )
+    )
+    teleop._send_ur5e_cartesian_jog = lambda *_args, **_kwargs: pytest.fail(
+        "the UI heartbeat must not wait for the ROS service round trip"
+    )
+    previous_heartbeat = teleop._ur5e_smooth_heartbeat_monotonic
+
+    assert teleop._set_ur5e_cartesian_jog((0.0, -0.04, 0.0), 0.50) == (
+        True,
+        "UR5e Cartesian Smooth Hold active",
+    )
+    assert teleop._ur5e_smooth_world_velocity_m_s == pytest.approx(
+        [0.0, -0.04, 0.0]
+    )
+    assert teleop._ur5e_smooth_heartbeat_monotonic >= previous_heartbeat
+
+
+def test_ur5e_smooth_hold_refresh_runs_next_to_ros_service() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._ur5e_smooth_active = True
+    _initialize_ur5e_smooth_state(teleop)
+    teleop._ur5e_smooth_world_velocity_m_s = [0.0, 0.0, -0.025]
+    refreshes: list[tuple[list[float], float, bool, float]] = []
+    teleop._send_ur5e_cartesian_jog = (
+        lambda velocity, watchdog, *, stop, timeout_sec: (
+            refreshes.append(
+                (
+                    list(velocity),
+                    float(watchdog),
+                    bool(stop),
+                    float(timeout_sec),
+                )
+            )
+            or (True, "UR5e Cartesian Smooth Hold active")
+        )
+    )
+
+    assert teleop._ur5e_refresh_cartesian_jog_once() is True
+    assert refreshes == [([0.0, 0.0, -0.025], 0.50, False, 0.40)]
+
+
+def test_ur5e_smooth_hold_expired_ui_heartbeat_stops_with_exact_error() -> None:
+    module = _teleop_module()
+    teleop = object.__new__(module.KeyboardTeleop)
+    teleop._ur5e_smooth_active = True
+    _initialize_ur5e_smooth_state(teleop)
+    teleop._ur5e_smooth_heartbeat_monotonic = time.monotonic() - 1.0
+    stops: list[bool] = []
+
+    def _stop(*, clear_pending_error: bool = True) -> tuple[bool, str]:
+        stops.append(clear_pending_error)
+        teleop._ur5e_smooth_active = False
+        return True, "stopped"
+
+    teleop._stop_ur5e_cartesian_jog = _stop
+
+    assert teleop._ur5e_refresh_cartesian_jog_once() is False
+    assert stops == [False]
+    assert teleop._ur5e_smooth_pending_error.startswith(
+        "UR5e Cartesian Smooth Hold UI heartbeat expired after "
+    )
 
 
 def test_xarm6_controller_state_wait_observes_ufactory_transition() -> None:
@@ -1776,10 +2460,13 @@ def test_xarm6_gripper_uses_hardware_service_budget() -> None:
     ]
 
 
-def test_real_ur5e_jog_preflight_surfaces_rtde_readiness_failure() -> None:
+def test_real_ur5e_jog_preflight_surfaces_rtde_readiness_failure(
+    tmp_path: Path,
+) -> None:
     from cais_spade_llm.ui.bridge import SystemBridge
 
     bridge = object.__new__(SystemBridge)
+    bridge._move_insert_trials_dir = tmp_path / "move_insert_trials"
     bridge.teleop_target = lambda _robot, _op: {
         "ready": True,
         "warning": "",
@@ -1944,9 +2631,9 @@ def test_bridge_sends_exact_physical_speeds_and_rejects_invalid_values() -> None
         requests.append({**payload, "timeout_sec": timeout_sec}) or (True, "OK")
     )
     bridge.teleop_motion_settings = lambda _robot: {
-        "cartesian_speed_min_mm_s": 5.0,
+        "cartesian_speed_min_mm_s": 0.0,
         "cartesian_speed_max_mm_s": 50.0,
-        "joint_speed_min_deg_s": 0.1,
+        "joint_speed_min_deg_s": 0.0,
         "joint_speed_max_deg_s": 64.0,
     }
 
@@ -1962,6 +2649,8 @@ def test_bridge_sends_exact_physical_speeds_and_rejects_invalid_values() -> None
     assert requests[1]["speed_deg_s"] == pytest.approx(24.5)
     assert bridge.teleop_jog("ur5e", "x", 2.0, speed_mm_s=math.nan)[0] is False
     assert bridge.teleop_joint("ur5e", 3, -2.0, speed_deg_s=100.0)[0] is False
+    assert bridge.teleop_jog("ur5e", "x", 2.0, speed_mm_s=0.0)[0] is False
+    assert bridge.teleop_joint("ur5e", 3, -2.0, speed_deg_s=0.0)[0] is False
     assert len(requests) == 2
 
 
@@ -1973,7 +2662,8 @@ def test_bridge_reports_distinct_xarm6_cartesian_default_and_maximum() -> None:
 
     settings = bridge.teleop_motion_settings("xarm6")
 
-    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(5.0)
+    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(0.0)
+    assert settings["joint_speed_min_deg_s"] == pytest.approx(0.0)
     assert settings["cartesian_speed_default_mm_s"] == pytest.approx(50.0)
     assert settings["cartesian_speed_max_mm_s"] == pytest.approx(100.0)
     assert settings["cartesian_acceleration_mm_s2"] == pytest.approx(42.25)
@@ -1987,18 +2677,21 @@ def test_bridge_reports_distinct_ur5e_cartesian_default_and_maximum() -> None:
 
     settings = bridge.teleop_motion_settings("ur5e")
 
-    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(5.0)
-    assert settings["cartesian_speed_default_mm_s"] == pytest.approx(50.0)
+    assert settings["cartesian_speed_min_mm_s"] == pytest.approx(0.0)
+    assert settings["joint_speed_min_deg_s"] == pytest.approx(0.0)
+    assert settings["cartesian_speed_default_mm_s"] == pytest.approx(80.0)
     assert settings["cartesian_speed_max_mm_s"] == pytest.approx(100.0)
 
 
 def test_ur5e_rtde_cartesian_default_and_maximum_are_distinct() -> None:
     module = _rtde_server_module()
 
-    assert 0.05 == pytest.approx(module.UR5E_RTDE_CARTESIAN_SPEED_M_S)
-    assert 0.10 == pytest.approx(module.UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S)
+    assert module.UR5E_RTDE_CARTESIAN_SPEED_M_S == pytest.approx(0.08)
+    assert module.UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S == pytest.approx(0.10)
     status = module._status_base()
-    assert status["cartesian_speed_default_m_s"] == pytest.approx(0.05)
+    assert module.UR5E_RTDE_GOAL_TOLERANCE_RAD == pytest.approx(0.025)
+    assert status["joint_goal_tolerance_rad"] == pytest.approx(0.025)
+    assert status["cartesian_speed_default_m_s"] == pytest.approx(0.08)
     assert status["cartesian_speed_limit_m_s"] == pytest.approx(0.10)
 
 
@@ -2667,7 +3360,7 @@ def test_bridge_passes_configured_rtde_action_and_uses_daemon_free_preflight() -
     assert "--include-hidden-services --no-daemon --spin-time 2.0" in bridge
 
 
-def test_ros_action_discovery_rate_limits_forced_refreshes(
+def test_ros_action_discovery_refreshes_negative_snapshot_without_losing_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from cais_spade_llm.ui import bridge as bridge_module
@@ -2680,10 +3373,18 @@ def test_ros_action_discovery_rate_limits_forced_refreshes(
     now = [100.0]
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
 
+    required_services = "\n".join(
+        (
+            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory/_action/send_goal",
+            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory/_action/get_result",
+            "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory/_action/cancel_goal",
+        )
+    )
+
     def _command(*_args, **_kwargs) -> tuple[bool, str]:
         nonlocal calls
         calls += 1
-        return False, ""
+        return (False, "") if calls == 1 else (True, required_services)
 
     bridge._ros2_command_output = _command
 
@@ -2696,17 +3397,17 @@ def test_ros_action_discovery_rate_limits_forced_refreshes(
     bridge._ros_action_service_snapshot_for_domain(
         ros_domain_id=42,
         timeout_sec=8.0,
-        force_refresh=True,
     )
     assert calls == 1
 
     now[0] = 103.0
-    bridge._ros_action_service_snapshot_for_domain(
+    ok, services = bridge._ros_action_service_snapshot_for_domain(
         ros_domain_id=42,
         timeout_sec=8.0,
-        force_refresh=True,
     )
     assert calls == 2
+    assert ok is True
+    assert set(required_services.splitlines()) <= services
 
     now[0] = 110.0
     bridge._ros_action_service_snapshot_for_domain(
@@ -2860,6 +3561,65 @@ def test_named_position_readiness_rejects_another_domain_status() -> None:
     assert ready is False
     assert "ROS_DOMAIN_ID=43" in message
     assert "requested ROS_DOMAIN_ID=42" in message
+
+
+def test_ur5e_cartesian_preflight_reuses_fresh_motion_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._ur5e_named_position_readiness_cache = None
+    bridge.teleop_target = lambda _robot, _operation: {
+        "warning": "",
+        "environment": "real",
+        "ros_domain_id": 42,
+        "source": "hardware",
+        "hardware_stack_generation": 7,
+        "required_processes": ["hardware_ur5e_rtde_trajectory_server"],
+    }
+    bridge._ur5e_rtde_trajectory_status = lambda: {
+        "state": "ready",
+        "message": "UR5e RTDE trajectory server ready",
+        "ros_domain_id": 42,
+        "rtde_control_connected": True,
+        "updated_at": 100.0,
+    }
+    action_checks: list[bool] = []
+    bridge._ros_action_readiness_error = lambda *_args, **_kwargs: (
+        action_checks.append(True) or None
+    )
+    state_checks: list[bool] = []
+    bridge.teleop_state = lambda _robot: (
+        state_checks.append(True)
+        or (
+            True,
+            "fresh UR5e state",
+            {"joint_state_age_sec": 0.05},
+        )
+    )
+    wall_time = [100.5]
+    monotonic_time = [10.0]
+    monkeypatch.setattr("cais_spade_llm.ui.bridge.time.time", lambda: wall_time[0])
+    monkeypatch.setattr(
+        "cais_spade_llm.ui.bridge.time.monotonic",
+        lambda: monotonic_time[0],
+    )
+
+    first = bridge.teleop_named_position_readiness("ur5e")
+    monotonic_time[0] = 10.2
+    second = bridge.teleop_named_position_readiness("ur5e")
+
+    assert first == second
+    assert first[0] is True
+    assert action_checks == [True]
+    assert state_checks == [True]
+
+    monotonic_time[0] = 12.0
+    wall_time[0] = 100.7
+    assert bridge.teleop_named_position_readiness("ur5e")[0] is True
+    assert action_checks == [True, True]
+    assert state_checks == [True, True]
 
 
 def test_dual_twin_waiting_robot_mirror_reports_repair_needed() -> None:
@@ -3084,6 +3844,7 @@ def test_ur5e_state_publisher_can_launch_without_moveit_or_rviz() -> None:
 def test_control_page_bounds_ros_readiness_refresh_work() -> None:
     control = (ROOT / "cais_spade_llm/ui/pages/control.py").read_text(encoding="utf-8")
 
+    assert "await asyncio.to_thread(\n                    _launch_snapshot" in control
     assert "named_pos_readiness_state = {" in control
     assert '"ready": False,' in control
     assert "def _update_named_position_go_enabled()" in control
@@ -3095,12 +3856,24 @@ def test_control_page_bounds_ros_readiness_refresh_work() -> None:
     assert "await asyncio.to_thread(bridge.digital_twin_statuses)" in control
     assert "signature = _signature(rows)" in control
     assert "signature = _signature()" not in control
-    assert "initial_robot = (" in control
-    assert 'bridge.teleop_target("ur5e", "state")' in control
+    assert 'initial_robot = "ur5e"' in control
     assert 'f"Trajectory interface ({robot}): {message}"' in control
     assert "ui.timer(3.0, _refresh_named_position_readiness)" in control
     assert '"Repair Twin" if repair_needed else "Start Twin"' in control
     assert "repair=repair_needed" in control
+
+
+def test_cartesian_smooth_active_status_does_not_run_full_teleop_preflight() -> None:
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    bridge = object.__new__(SystemBridge)
+    bridge._teleop_smooth_session_lock = threading.Lock()
+    bridge._teleop_smooth_session = None
+
+    assert bridge.teleop_cartesian_smooth_active("ur5e") is False
+    bridge._teleop_smooth_session = {"robot": "ur5e"}
+    assert bridge.teleop_cartesian_smooth_active("ur5e") is True
+    assert bridge.teleop_cartesian_smooth_active("xarm6") is False
 
 
 def test_external_ur5e_digital_twin_status_resolves_named_position_target() -> None:

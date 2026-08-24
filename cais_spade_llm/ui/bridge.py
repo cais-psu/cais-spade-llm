@@ -14,19 +14,24 @@ import shlex
 import shutil
 import signal
 import socket
+import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+import zipfile
+from collections.abc import Callable, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
@@ -60,6 +65,18 @@ from cais_spade_llm.utils.runtime_cleanup import prune_hardware_run_logs
 
 log = logging.getLogger("ui.bridge")
 
+_ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT: ContextVar[dict[str, Any] | None] = (
+    ContextVar("robot_function_execution_lock_context", default=None)
+)
+_MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT: ContextVar[bool] = ContextVar(
+    "move_insert_preflight_required_context",
+    default=False,
+)
+_MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT: ContextVar[bool] = ContextVar(
+    "move_insert_confirmation_preflight_context",
+    default=False,
+)
+
 # Filesystem locations used throughout the runtime.
 _BASE = Path(__file__).resolve().parent.parent  # cais_spade_llm/
 _PROJECT_ROOT = _BASE.parent  # repo root
@@ -76,6 +93,144 @@ _PRODUCT_ORDERS_DIR = _BASE / "specification" / "products" / "orders"
 _SAFETY_REQUIREMENTS_DIR = _BASE / "specification" / "safety"
 _XARM6_RESOURCE = _RESOURCE_DIR / "robot_xarm6.json"
 _UR5E_RESOURCE = _RESOURCE_DIR / "robot_ur5e.json"
+_MOVE_INSERT_OVERRIDE_FIELDS = ("insertion_force_n", "spiral_radius_m")
+_MOVE_INSERT_OVERRIDE_METADATA_FIELDS = (
+    "calibration_id",
+    "generation",
+    "updated_at",
+    "profile_sha256",
+)
+_MOVE_INSERT_SUPPORTED_PARTS = ("SG", "MG", "LG", "SCP", "MCP", "LCP")
+_MOVE_INSERT_UNSUPPORTED_PARTS = ("SRP", "MRP", "LRP")
+_MOVE_INSERT_DEMONSTRATION_RECIPE_VERSION = 9
+_MOVE_INSERT_LEARNING_POLICY_VERSION = 12
+_MOVE_INSERT_QUALIFICATION_POLICY_VERSION = 3
+_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS = 1
+_MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS = (
+    "robot",
+    "tool_frame",
+    "destination_location",
+    "part_name",
+    "profile_sha256",
+    "hard_caps_sha256",
+    "place_approach_recording_sha256",
+    "board_calibration_id",
+    "board_geometry_sha256",
+    "recording_id",
+    "demonstration_sha256",
+)
+_MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS = 16
+_MOVE_INSERT_FORCE_DEPTH_MINIMUM_SAMPLES = 8
+_MOVE_INSERT_CONTACT_HOLD_SEC = 0.10
+_MOVE_INSERT_FORCE_UNCERTAINTY_FLOOR_N = 4.0
+_MOVE_INSERT_TORQUE_UNCERTAINTY_FLOOR_NM = 0.05
+_MOVE_INSERT_TRIALS_DIR = (
+    Path.home() / ".local" / "share" / "cais-spade-llm" / "move_insert_trials"
+)
+_INSERTION_DEMONSTRATIONS_DIR = (
+    Path.home()
+    / ".local"
+    / "share"
+    / "cais-spade-llm"
+    / "move_insert_demonstrations"
+)
+_HARDWARE_STATE_DIR = (
+    Path.home() / ".local" / "share" / "cais-spade-llm" / "hardware_state"
+)
+_INSERTION_DEMONSTRATION_TRACE_ROOT = (
+    Path("/tmp") / "cais_ur5e_insertion_demonstrations"
+)
+_MOVE_INSERT_SERVER_TRACE_ROOT = Path("/tmp") / "cais_ur5e_insert_trials"
+_LEGACY_MOVE_INSERT_PENDING_TRIAL_ID = "move-insert-1787252468260-c4bc2cae"
+_LEGACY_MG_INSERTION_DEMONSTRATION = {
+    "part_name": "MG",
+    "trial_id": _LEGACY_MOVE_INSERT_PENDING_TRIAL_ID,
+    "recording_id": "insertion-demonstration-1787242384762-ed399f4b",
+    "demonstration_sha256": (
+        "7345d1d91fe5322c26d2e51d7265cf5fa3c27d6da2913f07248828262ce11323"
+    ),
+    "profile_sha256": (
+        "55f69e1180283da3d7d72d25d34dcf1769d63208d70383d653835b9aea4e171b"
+    ),
+    "calibration_id": "insertion-demonstration-7345d1d91fe5322c",
+    "reason": (
+        "Legacy MG learning clipped the demonstrated force/torque envelope to "
+        "protected hard caps. The source demonstration reached 115.004 N axial, "
+        "21.857 N lateral, and 4.813 Nm torque and cannot authorize motion."
+    ),
+}
+_MOVE_INSERT_EFFECTIVE_FIELDS = (
+    "pre_insert_offset_m",
+    "contact_speed_m_s",
+    "contact_force_delta_n",
+    "engagement_progress_m",
+    "insertion_force_n",
+    "spiral_radius_m",
+    "spiral_pitch_m",
+    "spiral_speed_m_s",
+    "spiral_acceleration_m_s2",
+    "max_axial_force_n",
+    "max_lateral_force_n",
+    "max_torque_nm",
+    "tilt_tolerance_rad",
+    "seated_depth_tolerance_m",
+    "settle_time_sec",
+)
+_MOVE_INSERT_FORCE_DEPTH_FIELDS = (
+    "depth_fraction",
+    "axial_upper_n",
+    "lateral_upper_n",
+    "torque_upper_nm",
+)
+_MOVE_INSERT_HARD_CAPS = {
+    "pre_insert_offset_m": "insert_max_travel_m",
+    "contact_speed_m_s": "insert_max_contact_speed_m_s",
+    "contact_force_delta_n": "insert_max_contact_force_delta_n",
+    "engagement_progress_m": "insert_max_engagement_progress_m",
+    "insertion_force_n": "insert_max_insertion_force_n",
+    "spiral_radius_m": "insert_max_spiral_radius_m",
+    "spiral_pitch_m": "insert_max_spiral_pitch_m",
+    "spiral_speed_m_s": "insert_max_spiral_speed_m_s",
+    "spiral_acceleration_m_s2": "insert_max_spiral_acceleration_m_s2",
+    "max_axial_force_n": "insert_max_axial_force_n",
+    "max_lateral_force_n": "insert_max_lateral_force_n",
+    "max_torque_nm": "insert_max_torque_nm",
+    "tilt_tolerance_rad": "insert_max_tilt_tolerance_rad",
+    "seated_depth_tolerance_m": "insert_max_seated_depth_tolerance_m",
+    "settle_time_sec": "insert_max_settle_time_sec",
+}
+_MOVE_INSERT_RELIEF_POLICY_CAPS = (
+    "insert_max_tool_flange_torque_nm",
+    "insert_soft_filter_window_sec",
+    "insert_soft_overload_hold_sec",
+    "insert_relief_unload_dwell_sec",
+    "insert_relief_clear_dwell_sec",
+    "insert_relief_timeout_sec",
+    "insert_relief_axial_force_ratio",
+    "insert_relief_reverse_force_ratio",
+    "insert_relief_clear_hysteresis_ratio",
+    "insert_relief_resume_ramp_sec",
+    "insert_relief_search_force_ratio",
+    "insert_relief_search_speed_ratio",
+    "insert_relief_backoff_step_m",
+    "insert_max_relief_retreat_m",
+    "insert_relief_stationary_speed_m_s",
+    "insert_relief_stationary_angular_speed_rad_s",
+    "insert_max_relief_cycles",
+)
+_MOVE_INSERT_MG_TACTILE_POLICY_CAPS = (
+    "insert_max_contact_search_radius_m",
+    "insert_max_disengagement_cycles",
+    "insert_search_peck_retreat_m",
+    "insert_search_peck_interval_sec",
+)
+_MOVE_INSERT_REQUIRED_HARD_CAPS = (
+    *_MOVE_INSERT_HARD_CAPS.values(),
+    *_MOVE_INSERT_RELIEF_POLICY_CAPS,
+    "insert_max_timeout_sec",
+    "insert_start_position_tolerance_m",
+    "insert_start_orientation_tolerance_rad",
+)
 _UR5E_GAZEBO_ARM_TRAJECTORY_TOPICS = ros2_processes.hardware_arms_value(
     _HARDWARE_ARMS_CONFIG,
     ("ur5e", "gazebo_trajectory_topics"),
@@ -100,10 +255,19 @@ _UR5E_RTDE_TRAJECTORY_ACTION = ros2_processes.hardware_arms_str(
     ("ur5e", "hardware_trajectory_action"),
     "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
 )
+_UR5E_RTDE_RESET_UNCERTAINTY_REASON = (
+    "Reset UR5e RTDE replaced the control process without robot motion; "
+    "inspect the physical UR5e before commanding motion."
+)
 _UR5E_RTDE_CARTESIAN_ACTION = ros2_processes.hardware_arms_str(
     _HARDWARE_ARMS_CONFIG,
     ("ur5e", "hardware_cartesian_action"),
     "/cais_ur5e_rtde_cartesian_controller/move_cartesian",
+)
+_UR5E_RTDE_INSERT_ACTION = ros2_processes.hardware_arms_str(
+    _HARDWARE_ARMS_CONFIG,
+    ("ur5e", "hardware_insert_action"),
+    "/cais_ur5e_rtde_cartesian_controller/move_insert",
 )
 _UR5E_RTDE_RELATIVE_CARTESIAN_ACTION = ros2_processes.hardware_arms_str(
     _HARDWARE_ARMS_CONFIG,
@@ -156,6 +320,7 @@ _UR5E_RTDE_CLIENT_RESULT_TIMEOUT_SEC = max(
     + 5.0,
 )
 _UR5E_TELEOP_HANDOFF_TIMEOUT_SEC = 2.0
+_UR5E_TELEOP_READINESS_CACHE_SEC = 1.5
 _XARM6_CARTESIAN_SMOOTH_HANDOFF_TIMEOUT_SEC = 30.0
 _XARM6_TRAJECTORY_MODE_PREPARATION_TIMEOUT_SEC = 100.0
 _XARM6_CARTESIAN_SESSION_IDLE_SEC = 10.0
@@ -244,6 +409,30 @@ _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD = max(
         math.radians(2.0),
     ),
 )
+_UR5E_INSERT_START_POSITION_TOLERANCE_M = max(
+    0.0001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "rtde", "insert_start_position_tolerance_m"),
+        0.003,
+    ),
+)
+_UR5E_INSERT_START_ORIENTATION_TOLERANCE_RAD = max(
+    0.001,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "rtde", "insert_start_orientation_tolerance_rad"),
+        math.radians(2.0),
+    ),
+)
+_UR5E_NAMED_POSITION_TOLERANCE_RAD = max(
+    1e-6,
+    ros2_processes.hardware_arms_float(
+        _HARDWARE_ARMS_CONFIG,
+        ("ur5e", "rtde", "joint_goal_tolerance_rad"),
+        0.025,
+    ),
+)
 _XARM6_MANUAL_DEPENDENT_POSITION_TOLERANCE_M = max(
     0.0001,
     ros2_processes.hardware_arms_float(
@@ -267,6 +456,12 @@ _UR5E_RTDE_TRAJECTORY_STATUS = Path(
         "/tmp/cais_ur5e_rtde_trajectory_status.json",
     )
 )
+_UR5E_RTDE_TRAJECTORY_LAST_TERMINAL_STATUS = (
+    _UR5E_RTDE_TRAJECTORY_STATUS.with_name(
+        f"{_UR5E_RTDE_TRAJECTORY_STATUS.stem}_last_terminal"
+        f"{_UR5E_RTDE_TRAJECTORY_STATUS.suffix}"
+    )
+)
 _UR5E_DETECTION_STATUS = Path(
     "/tmp/cais_perception_previews/ur5e/detection_status.json"
 )
@@ -284,6 +479,7 @@ _UR5E_RG2_GRIPPER_STATUS = Path(
         "/tmp/cais_ur5e_rg2_gripper_status.json",
     )
 )
+_UR5E_OPERATOR_HELD_PART_EVIDENCE_MAX_AGE_SEC = 8.0
 _USER_VERIFIED_PLAN = _BASE / "user_verified_plan"
 _USER_VERIFIED_SAFETY = _BASE / "user_verified_safety"
 _SAFETY_INTENT_APPROVALS = _USER_VERIFIED_SAFETY / "intent_approvals.json"
@@ -375,6 +571,13 @@ class SystemBridge:
         | _DIGITAL_TWIN_SYNC_PROCESS_NAMES
         | _DIGITAL_TWIN_MARKER_PROCESS_NAMES
         | _DIGITAL_TWIN_PERCEPTION_PROCESS_NAMES
+    )
+    _ASSEMBLY_FUNCTION_ORDER = (
+        "pick_approach",
+        "pick_grasp",
+        "place_approach",
+        "place_insert",
+        "move_home",
     )
     _GAZEBO_PROCESS_NAMES = _BASE_GAZEBO_PROCESS_NAMES | _DIGITAL_TWIN_GAZEBO_PROCESS_NAMES
     _HARDWARE_PROCESS_NAMES = _BASE_HARDWARE_PROCESS_NAMES | _DIGITAL_TWIN_HARDWARE_PROCESS_NAMES
@@ -679,6 +882,11 @@ class SystemBridge:
         self._teleop_server_ros_domain_id: int | None = None
         self._teleop_server_lock = threading.Lock()
         self._teleop_request_sequence = 0
+        self._ur5e_named_position_readiness_cache: tuple[
+            tuple[Any, ...],
+            float,
+            str,
+        ] | None = None
         self._teleop_smooth_session_lock = threading.Lock()
         self._teleop_smooth_session: dict[str, Any] | None = None
         self._teleop_xarm6_cartesian_session_lock = threading.RLock()
@@ -705,6 +913,15 @@ class SystemBridge:
         self._digital_twin_function_steps: dict[str, list[dict[str, Any]]] = {}
         self._digital_twin_function_computed_poses: dict[str, dict[str, Any]] = {}
         self._digital_twin_record_lock = threading.Lock()
+        self._move_insert_profile_edit_lock = threading.Lock()
+        self._move_insert_trial_lock = threading.RLock()
+        self._move_insert_trials: dict[str, dict[str, Any]] = {}
+        self._insertion_demonstration_lock = threading.RLock()
+        self._insertion_demonstration: dict[str, Any] | None = None
+        self._move_insert_suspended_parts: dict[str, str] = {}
+        self._move_insert_last_trial_by_selection: dict[
+            tuple[str, str, str, str], str
+        ] = {}
         self._ur5e_robot_function_execution_lock = threading.Lock()
         self._ur5e_robot_function_preflight_lock = threading.Lock()
         self._ur5e_rtde_reset_lock = threading.Lock()
@@ -712,6 +929,14 @@ class SystemBridge:
         self._ur5e_robot_function_execution_stage: str = ""
         self._ur5e_robot_function_execution_started_at: float = 0.0
         self._robot_function_execution_robot: str = ""
+        self._assembly_step_index: int = 0
+        self._assembly_step_count: int = 0
+        self._assembly_completed_functions: list[str] = []
+        self._assembly_failed_function: str = ""
+        self._robot_function_execution_active_step: str = ""
+        self._assembly_move_insert_profile_sha256: str = ""
+        self._assembly_move_insert_effective: dict[str, Any] = {}
+        self._ur5e_move_insert_profile_reload_required: bool = False
         self._ur5e_robot_function_agent: Any | None = None
         self._ur5e_robot_function_agent_domain_id: int | None = None
         self._ur5e_robot_function_agent_lifecycle_lock = asyncio.Lock()
@@ -719,6 +944,52 @@ class SystemBridge:
         self._ur5e_robot_function_state_uncertain_reason: str = ""
         self._ur5e_cartesian_jog_state_uncertain: bool = False
         self._ur5e_cartesian_jog_state_uncertain_reason: str = ""
+        durable_ur5e_uncertainty, durable_ur5e_uncertainty_error = (
+            self._read_ur5e_hardware_state_uncertainty()
+        )
+        if durable_ur5e_uncertainty_error:
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = (
+                durable_ur5e_uncertainty_error
+            )
+            self._ur5e_cartesian_jog_state_uncertain = True
+            self._ur5e_cartesian_jog_state_uncertain_reason = (
+                durable_ur5e_uncertainty_error
+            )
+        elif durable_ur5e_uncertainty is not None:
+            uncertainty_reason = str(
+                durable_ur5e_uncertainty.get("reason")
+                or "UR5e physical state requires fresh stationary validation."
+            )
+            passive_baseline = bool(
+                durable_ur5e_uncertainty.get("source")
+                == "insertion_demonstration"
+                and uncertainty_reason.startswith(
+                    "Recording stationary force baseline."
+                )
+            )
+            if passive_baseline:
+                baseline_clear_error = (
+                    self._clear_ur5e_hardware_state_uncertainty()
+                )
+                if baseline_clear_error:
+                    self._ur5e_robot_function_state_uncertain = True
+                    self._ur5e_robot_function_state_uncertain_reason = (
+                        baseline_clear_error
+                    )
+                    self._ur5e_cartesian_jog_state_uncertain = True
+                    self._ur5e_cartesian_jog_state_uncertain_reason = (
+                        baseline_clear_error
+                    )
+            else:
+                self._ur5e_robot_function_state_uncertain = True
+                self._ur5e_robot_function_state_uncertain_reason = (
+                    uncertainty_reason
+                )
+                self._ur5e_cartesian_jog_state_uncertain = True
+                self._ur5e_cartesian_jog_state_uncertain_reason = (
+                    uncertainty_reason
+                )
         self._xarm6_robot_function_agent: Any | None = None
         self._xarm6_robot_function_agent_domain_id: int | None = None
         self._xarm6_robot_function_agent_lifecycle_lock = asyncio.Lock()
@@ -5836,6 +6107,23 @@ class SystemBridge:
                     f"{selected_stack} Hardware Stack lifecycle is {lifecycle_state}. "
                     "Motion is available only after Hardware Stack reaches running."
                 )
+                last_error = str(
+                    lifecycle_snapshot.get("last_error") or ""
+                ).strip()
+                failed_process = str(
+                    lifecycle_snapshot.get("failed_process") or ""
+                ).strip()
+                rtde_failure_kind = str(
+                    lifecycle_snapshot.get("rtde_failure_kind") or ""
+                ).strip()
+                if last_error:
+                    warning += f" Last error: {last_error}"
+                if failed_process:
+                    warning += f" Failed process: {failed_process}."
+                if rtde_failure_kind:
+                    warning += (
+                        f" RTDE failure kind: {rtde_failure_kind}."
+                    )
             elif (
                 selected_stack
                 and op_key in {"cartesian", "cartesian_smooth", "cartesian_readiness"}
@@ -6072,6 +6360,14 @@ class SystemBridge:
         agent_lock_acquired = False
         reset_active_set = False
         try:
+            demonstration_error = self._insertion_demonstration_blocking_error()
+            if demonstration_error:
+                return False, demonstration_error
+            pending_review_error = self._move_insert_pending_review_error(
+                allow_terminal_recovery=True,
+            )
+            if pending_review_error:
+                return False, pending_review_error
             if not hardware_lifecycle_lock.acquire(blocking=False):
                 return False, (
                     "Reset UR5e RTDE is unavailable while Hardware Stack start or stop "
@@ -6149,8 +6445,7 @@ class SystemBridge:
                 )
             self._ur5e_robot_function_state_uncertain = True
             self._ur5e_robot_function_state_uncertain_reason = (
-                "Reset UR5e RTDE replaced the control process without robot motion; "
-                "inspect the physical UR5e before commanding motion."
+                _UR5E_RTDE_RESET_UNCERTAINTY_REASON
             )
             self._stop_teleop_server()
             if mirror_process:
@@ -6260,10 +6555,12 @@ class SystemBridge:
                         f"{convergence_error}"
                     )
 
+            self._ur5e_robot_function_state_uncertain = False
+            self._ur5e_robot_function_state_uncertain_reason = ""
             return True, (
-                "UR5e RTDE connection reset completed without robot motion. Inspect the "
-                "physical UR5e before commanding motion. Robot Functions will apply their "
-                "normal fresh readiness and function-state checks."
+                "UR5e RTDE connection reset completed without robot motion. Fresh RTDE "
+                "feedback, action services, and physical joint state were reacquired. "
+                "Cartesian motion will apply its normal fresh readiness checks."
             )
         finally:
             if reset_active_set:
@@ -6287,6 +6584,22 @@ class SystemBridge:
             return False, warning
         if target.get("environment") != "real":
             return True, "Gazebo trajectory interface ready"
+        readiness_identity = (
+            key,
+            str(target.get("source") or ""),
+            target.get("ros_domain_id"),
+            target.get("hardware_stack_generation"),
+            tuple(target.get("required_processes") or ()),
+        )
+        if key == "ur5e":
+            cached = getattr(self, "_ur5e_named_position_readiness_cache", None)
+            if cached is not None:
+                cached_identity, expires_monotonic, cached_message = cached
+                if (
+                    cached_identity == readiness_identity
+                    and time.monotonic() <= expires_monotonic
+                ):
+                    return True, cached_message
         if key == "xarm6":
             action_name = (
                 "/xarm6/xarm6_traj_controller/follow_joint_trajectory"
@@ -6394,7 +6707,19 @@ class SystemBridge:
             return False, "UR5e joint state freshness is unavailable"
         if joint_state_age_sec > 2.0:
             return False, f"UR5e joint state is stale ({joint_state_age_sec:.2f} s old)"
-        return True, f"UR5e RTDE action ready: {_UR5E_RTDE_TRAJECTORY_ACTION}"
+        message = f"UR5e RTDE action ready: {_UR5E_RTDE_TRAJECTORY_ACTION}"
+        cache_lifetime_sec = min(
+            _UR5E_TELEOP_READINESS_CACHE_SEC,
+            max(0.0, 3.0 - rtde_status_age_sec),
+            max(0.0, 2.0 - joint_state_age_sec),
+        )
+        if cache_lifetime_sec > 0.0:
+            self._ur5e_named_position_readiness_cache = (
+                readiness_identity,
+                time.monotonic() + cache_lifetime_sec,
+                message,
+            )
+        return True, message
 
     @staticmethod
     def _ur5e_rtde_result_timeout_requires_repair(
@@ -7001,8 +7326,16 @@ class SystemBridge:
         return self.perception_manager.save_assignments(assignments)
 
     def perception_save_stationary_board_pose(self, pose: dict[str, Any]) -> dict[str, Any]:
-        """Persist the surveyed stationary ChArUco board pose."""
+        """Persist the legacy surveyed pose ignored by stationary inspection."""
         return self.perception_manager.save_stationary_board_pose(pose)
+
+    def perception_reset_stationary_calibration_samples(self) -> dict[str, Any]:
+        """Archive legacy stationary samples retained for compatibility."""
+        return self.perception_manager.reset_stationary_calibration_samples()
+
+    def perception_stationary_inspection_configuration(self) -> dict[str, Any]:
+        """Return read-only stationary assembly inspection registration status."""
+        return self.perception_manager.stationary_inspection_configuration()
 
     def perception_save_assembly_board_v1_marker_length(
         self,
@@ -7093,7 +7426,7 @@ class SystemBridge:
         return self.perception_manager.reconcile_connections()
 
     def perception_start_detection(self, role: str) -> str | None:
-        """Start one complete camera stack and request its first detection."""
+        """Start one stack; wrist roles also request their first detection."""
         return self.perception_manager.start_detection(role)
 
     def perception_stop_detection(self, role: str) -> None:
@@ -7566,9 +7899,14 @@ class SystemBridge:
             if cached is not None:
                 cached_identity, cached_at, cached_ok, cached_services = cached
                 cache_age = now - cached_at
+                snapshot_ttl_sec = (
+                    _ROS_ACTION_SERVICE_SNAPSHOT_TTL_SEC
+                    if cached_ok
+                    else _ROS_ACTION_SERVICE_MIN_REFRESH_INTERVAL_SEC
+                )
                 use_cached = (
                     cached_identity == identity
-                    and 0.0 <= cache_age <= _ROS_ACTION_SERVICE_SNAPSHOT_TTL_SEC
+                    and 0.0 <= cache_age <= snapshot_ttl_sec
                     and (
                         not force_refresh
                         or cache_age < _ROS_ACTION_SERVICE_MIN_REFRESH_INTERVAL_SEC
@@ -7999,6 +8337,7 @@ class SystemBridge:
         """Require fresh, process-owned UR5e frame validation after TF starts."""
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         last_problem = "Cartesian frame validation has not completed"
+        last_diagnostics: dict[str, Any] = {}
         while time.monotonic() < deadline:
             proc = self._ros2_procs.get(process_name)
             if proc is None or proc.poll() is not None:
@@ -8026,6 +8365,7 @@ class SystemBridge:
             for field in (
                 "cartesian_jog_ready",
                 "cartesian_function_ready",
+                "cartesian_world_base_ready",
                 "relative_cartesian_action_ready",
                 "cartesian_jog_service_ready",
             ):
@@ -8042,8 +8382,40 @@ class SystemBridge:
             validation_message = str(
                 status.get("cartesian_frame_validation_message") or ""
             ).strip()
+            world_base_message = str(
+                status.get("cartesian_world_base_message") or ""
+            ).strip()
+            last_diagnostics = {
+                "position_error_m": status.get(
+                    "cartesian_frame_position_error_m"
+                ),
+                "orientation_error_rad": status.get(
+                    "cartesian_frame_orientation_error_rad"
+                ),
+                "cartesian_world_base_ready": bool(
+                    status.get("cartesian_world_base_ready") is True
+                ),
+                "cartesian_world_base_message": world_base_message,
+                "cartesian_world_base_expected": status.get(
+                    "cartesian_world_base_expected"
+                ),
+                "cartesian_world_base_observed": status.get(
+                    "cartesian_world_base_observed"
+                ),
+                "cartesian_world_base_position_error_m": status.get(
+                    "cartesian_world_base_position_error_m"
+                ),
+                "cartesian_world_base_orientation_error_rad": status.get(
+                    "cartesian_world_base_orientation_error_rad"
+                ),
+            }
             if problems:
-                last_problem = "; ".join(problems + ([validation_message] if validation_message else []))
+                details = [*problems]
+                if world_base_message:
+                    details.append(world_base_message)
+                if validation_message and validation_message not in details:
+                    details.append(validation_message)
+                last_problem = "; ".join(details)
                 time.sleep(0.25)
                 continue
             self._hardware_cartesian_readiness_states()["ur5e"] = {
@@ -8053,14 +8425,7 @@ class SystemBridge:
                     getattr(self, "_hardware_stack_lifecycle_generation", 0) or 0
                 ),
                 "message": validation_message or "UR5e Cartesian frame validation ready",
-                "diagnostics": {
-                    "position_error_m": status.get(
-                        "cartesian_frame_position_error_m"
-                    ),
-                    "orientation_error_rad": status.get(
-                        "cartesian_frame_orientation_error_rad"
-                    ),
-                },
+                "diagnostics": last_diagnostics,
             }
             return None
         self._hardware_cartesian_readiness_states()["ur5e"] = {
@@ -8070,6 +8435,7 @@ class SystemBridge:
                 getattr(self, "_hardware_stack_lifecycle_generation", 0) or 0
             ),
             "message": last_problem,
+            "diagnostics": last_diagnostics,
         }
         return f"UR5e Cartesian frame validation timed out: {last_problem}"
 
@@ -8167,21 +8533,65 @@ class SystemBridge:
             "robot_ip",
             "action_name",
             "cartesian_action_name",
+            "insert_action_name",
             "relative_cartesian_action_name",
             "cartesian_jog_service_name",
             "joint_action_ready",
             "cartesian_action_ready",
+            "insert_action_ready",
+            "insert_supported_part_names",
             "relative_cartesian_action_ready",
             "cartesian_jog_service_ready",
             "cartesian_jog_ready",
             "cartesian_function_ready",
+            "tcp_force_feedback_ready",
+            "insert_function_ready",
+            "insert_readiness_message",
+            "insert_phase",
+            "insert_insertion_depth_m",
+            "insert_depth_error_m",
+            "insert_lateral_offset_m",
+            "insert_search_radius_m",
+            "insert_search_peck_state",
+            "insert_search_peck_cycle_count",
+            "insert_search_peck_retreat_m",
+            "insert_axial_force_n",
+            "insert_lateral_force_n",
+            "insert_torque_nm",
+            "insert_contact_detected",
+            "insert_tactile_center_valid",
+            "insert_tactile_center_tool0_pose",
+            "insert_tactile_center_depth_m",
+            "insert_tactile_center_confidence",
+            "insert_tactile_center_evidence_sha256",
+            "insert_scheduled_search_radius_m",
+            "insert_explored_search_radius_m",
+            "insert_explored_search_angle_rad",
+            "insert_disengagement_cycle_count",
+            "insert_last_disengagement_reason",
+            "insert_disengagement_withdrawal_m",
+            "insert_disengagement_contact_cleared",
+            "insert_disengagement_force_mode_stop_acknowledged",
+            "insert_recenter_position_error_m",
+            "insert_recenter_command_acknowledged",
+            "insert_disengagement_stationary_confirmed",
+            "insert_retare_baseline_consistent",
+            "actual_tcp_force",
             "cartesian_frame_validation_message",
             "cartesian_frame_position_error_m",
             "cartesian_frame_orientation_error_rad",
+            "cartesian_world_base_ready",
+            "cartesian_world_base_message",
+            "cartesian_world_base_expected",
+            "cartesian_world_base_observed",
+            "cartesian_world_base_position_error_m",
+            "cartesian_world_base_orientation_error_rad",
             "process_id",
             "rtde_receive_connected",
             "rtde_control_connected",
             "rtde_reset_required",
+            "rtde_failure_kind",
+            "motion_kind",
             "point_count",
             "start_delta_rad",
             "start_delta_joint",
@@ -8193,10 +8603,30 @@ class SystemBridge:
             "blocked_reason",
             "final_error_rad",
             "final_error_joint",
+            "peak_axial_force_n",
+            "peak_lateral_force_n",
+            "peak_torque_nm",
+            "insert_MG_hard_caps",
+            "insert_MG_hard_caps_error",
+            "insert_MG_hard_caps_sha256",
+            "insert_exact_part_hard_caps",
+            "insert_exact_part_hard_caps_error",
+            "insert_exact_part_hard_caps_sha256",
             "updated_at",
+            *_MOVE_INSERT_REQUIRED_HARD_CAPS,
         ):
             if key in rtde_status:
                 status[f"rtde_trajectory_{key}"] = rtde_status.get(key)
+        for key in (
+            "cartesian_world_base_ready",
+            "cartesian_world_base_message",
+            "cartesian_world_base_expected",
+            "cartesian_world_base_observed",
+            "cartesian_world_base_position_error_m",
+            "cartesian_world_base_orientation_error_rad",
+        ):
+            if key in rtde_status:
+                status[key] = rtde_status.get(key)
         status["cartesian_jog_ready"] = bool(
             rtde_status.get("cartesian_jog_ready") is True
         )
@@ -8206,6 +8636,19 @@ class SystemBridge:
         status["cartesian_readiness_message"] = str(
             rtde_status.get("cartesian_frame_validation_message") or ""
         )
+        status["insert_action_ready"] = bool(
+            rtde_status.get("insert_action_ready") is True
+        )
+        status["tcp_force_feedback_ready"] = bool(
+            rtde_status.get("tcp_force_feedback_ready") is True
+        )
+        status["insert_function_ready"] = bool(
+            rtde_status.get("insert_function_ready") is True
+        )
+        status["insert_readiness_message"] = str(
+            rtde_status.get("insert_readiness_message") or ""
+        )
+        status["insert_phase"] = str(rtde_status.get("insert_phase") or "")
         return status
 
     def _wait_for_driver_ready(
@@ -8378,6 +8821,9 @@ class SystemBridge:
             "selected_stack": selected_stack,
             "lifecycle_state": lifecycle_state if selected_stack == key else "stopped",
             "lifecycle_generation": lifecycle_generation,
+            "hardware_stack_repair_required": False,
+            "hardware_stack_repair_reason": "",
+            "hardware_stack_operation_blocked_reason": "",
             "last_error": (
                 str(getattr(self, "_hardware_stack_last_error", "") or "")
                 if selected_stack == key
@@ -8385,6 +8831,11 @@ class SystemBridge:
             ),
             "failed_process": (
                 str(getattr(self, "_hardware_stack_failed_process", "") or "")
+                if selected_stack == key
+                else ""
+            ),
+            "rtde_failure_kind": (
+                str(rtde_status.get("rtde_failure_kind") or "")
                 if selected_stack == key
                 else ""
             ),
@@ -9375,6 +9826,15 @@ class SystemBridge:
         with process_start_lock:
             if self.ros2_proc_status(name) == "running":
                 return f"{name} is already running"
+            if (
+                name == "ur5e_calibration_state_publisher"
+                and self._selected_normal_hardware_stack()
+                in {"xarm6", "ur5e", "dual robots"}
+            ):
+                return (
+                    "ur5e_calibration_state_publisher is blocked while the selected "
+                    "Hardware Stack reserves the unprefixed UR5e TF tree"
+                )
             try:
                 getattr(self, "_ros2_process_return_codes", {}).pop(name, None)
                 proc = subprocess.Popen(
@@ -11047,15 +11507,23 @@ class SystemBridge:
         storage_source = self._robot_function_storage_source(target, cfg)
         robot_key = str(robot or "").strip().lower()
         directory = _ROBOT_TAUGHT_FUNCTIONS_DIR / robot_key
-        if not directory.is_dir():
-            return []
         suffix = f"__{storage_source}.json"
         names: list[str] = []
-        for function_dir in directory.iterdir():
-            if not function_dir.is_dir() or function_dir.name.startswith("."):
-                continue
-            if any(function_dir.glob(f"*{suffix}")):
-                names.append(function_dir.name)
+        if directory.is_dir():
+            for function_dir in directory.iterdir():
+                if not function_dir.is_dir() or function_dir.name.startswith("."):
+                    continue
+                if any(function_dir.glob(f"*{suffix}")):
+                    names.append(function_dir.name)
+        for function_name in ("pick_approach", "place_approach"):
+            path = (
+                _ROBOT_TAUGHT_FUNCTIONS_DIR
+                / function_name
+                / f"default__{storage_source}.json"
+            )
+            payload = self._read_json_file(path)
+            if self._robot_function_payload_steps(payload, function_name, robot_key):
+                names.append(function_name)
         return sorted(dict.fromkeys(names))
 
     @classmethod
@@ -11073,8 +11541,8 @@ class SystemBridge:
                 and str(step.id) in {"move_above_part", "descend"}
             ):
                 parameter_source = (
-                    "Computed live by compute_pick_targets unless an optional axis source "
-                    "is saved."
+                    "Computed live by compute_pick_targets, then adjusted only by an "
+                    "optional confirmed robot correction."
                 )
             rows.append(
                 {
@@ -11131,14 +11599,24 @@ class SystemBridge:
     ) -> list[str]:
         if not self.digital_twin_function_location_argument(function_name):
             return ["default"]
+        robot_key = str(robot or "").strip().lower()
+        resource_agent = self._physical_robot_agent(robot_key)
+        capabilities = dict(getattr(resource_agent, "static_capabilities", {}) or {})
+        configured_reachability = [
+            str(value)
+            for value in list(capabilities.get("reachability") or [])
+            if str(value or "").strip()
+        ]
+        if configured_reachability:
+            return configured_reachability
         resource_path = {
             "xarm6": _XARM6_RESOURCE,
             "ur5e": _UR5E_RESOURCE,
-        }.get(str(robot or "").strip().lower())
+        }.get(robot_key)
         if resource_path is None:
             return []
         payload = self.load_config(str(resource_path))
-        robot_block = dict(payload.get(str(robot or "").strip().lower()) or {})
+        robot_block = dict(payload.get(robot_key) or {})
         gazebo_block = dict(robot_block.get("gazebo") or {})
         capabilities = dict(gazebo_block.get("static_capabilities") or {})
         return [
@@ -11158,12 +11636,18 @@ class SystemBridge:
             return []
         return self.product_geometry_slots_for_product()
 
+    def digital_twin_function_held_part(self, robot: str) -> str:
+        """Return the exact `held_part` recorded by one physical RobotAgent."""
+        resource_agent = self._physical_robot_agent(robot)
+        held_part = getattr(resource_agent, "_held_part", None)
+        return "" if held_part in (None, "") else str(held_part)
+
     def digital_twin_target_robots(self, target: str) -> list[str]:
         cfg = self._digital_twin_target(target) or {}
         if self._digital_twin_is_dual_robots(cfg):
             return self._digital_twin_dual_robot_keys(cfg)
         robot = str(cfg.get("robot") or "").strip().lower()
-        return [robot] if robot in {"xarm6", "ur5e"} else []
+        return [robot] if robot else []
 
     @classmethod
     def _robot_function_template_step(
@@ -11575,25 +12059,44 @@ class SystemBridge:
         function_name: str,
         name: str,
         part_name: str,
+        *,
+        robot: str = "",
     ) -> str:
         if cls._robot_function_safe_function_name(function_name) not in {
             "pick_approach",
             "place_approach",
         }:
             return ""
-        expected_name = str(name or "").strip()
-        expected_part_name = str(part_name or "").strip()
-        if str(payload.get("name") or "").strip() != expected_name:
-            location_argument = (
-                "origin_resource_location"
-                if cls._robot_function_safe_function_name(function_name)
-                == "pick_approach"
-                else "destination_location"
-            )
-            return f"{location_argument} mismatch in taught function file"
-        if str(payload.get("part_name") or "").strip() != expected_part_name:
-            return "part_name mismatch in taught function file"
+        _ = name, part_name
+        function_key = cls._robot_function_safe_function_name(function_name)
+        if str(payload.get("function_name") or "").strip() != function_key:
+            return "function_name mismatch in taught function file"
+        robots = payload.get("robots")
+        if not isinstance(robots, dict):
+            return "robots is missing in taught function file"
+        robot_key = str(robot or "").strip().lower()
+        if robot_key and robot_key in robots and not isinstance(robots[robot_key], dict):
+            return f"{robot_key} entry is invalid in taught function file"
         return ""
+
+    @classmethod
+    def _robot_function_payload_steps(
+        cls,
+        payload: dict[str, Any],
+        function_name: str,
+        robot: str,
+    ) -> list[dict[str, Any]]:
+        """Return the exact robot's steps from one taught-function payload."""
+        if cls._robot_function_safe_function_name(function_name) in {
+            "pick_approach",
+            "place_approach",
+        }:
+            robots = dict(payload.get("robots") or {})
+            entry = robots.get(str(robot or "").strip().lower())
+            if not isinstance(entry, dict):
+                return []
+            return [dict(step) for step in list(entry.get("steps") or []) if isinstance(step, dict)]
+        return [dict(step) for step in list(payload.get("steps") or []) if isinstance(step, dict)]
 
     def digital_twin_function_info(
         self,
@@ -11603,12 +12106,14 @@ class SystemBridge:
         name: str,
         part_name: str = "",
     ) -> dict[str, Any]:
-        cfg = self._digital_twin_target(target)
-        if not cfg:
-            return {"success": False, "message": f"unknown digital twin target: {target}"}
-        robot_key = str(robot or "").strip().lower()
-        if robot_key not in {"xarm6", "ur5e"}:
-            return {"success": False, "message": f"unknown robot: {robot}"}
+        cfg, request_error = self._robot_function_validate_request(
+            target,
+            robot,
+            function_name,
+        )
+        if request_error or cfg is None:
+            return {"success": False, "message": request_error}
+        robot_key = str(robot or "")
         function_key = self._robot_function_safe_function_name(function_name)
         if not function_key:
             return {"success": False, "message": "function name is empty"}
@@ -11698,8 +12203,11 @@ class SystemBridge:
                     "computed_position_m": deepcopy(
                         step.get("computed_position_m") or {}
                     ),
+                    "computed_pose": deepcopy(step.get("computed_pose") or {}),
                     "computed_source": str(step.get("computed_source") or ""),
                     "computed_at": step.get("computed_at"),
+                    "invalid_reason": str(step.get("invalid_reason") or ""),
+                    "confirmed": step.get("confirmed") is True,
                 }
             )
         return out
@@ -11720,6 +12228,20 @@ class SystemBridge:
         storage_source = self._robot_function_storage_source(target, cfg)
         robot_key = str(robot or "").strip().lower()
         function_key = self._robot_function_safe_function_name(function_name)
+        if function_key in {"pick_approach", "place_approach"}:
+            path = self._robot_function_path(
+                robot_key,
+                function_key,
+                "default",
+                storage_source,
+                part_name,
+            )
+            payload = self._read_json_file(path)
+            return (
+                ["default"]
+                if self._robot_function_payload_steps(payload, function_key, robot_key)
+                else []
+            )
         part_suffix = (
             f"__{self._robot_function_safe_name(part_name)}"
             if function_key in {"pick_approach", "place_approach"}
@@ -11753,7 +12275,9 @@ class SystemBridge:
         if err or payload is None:
             return []
         out: list[dict[str, Any]] = []
-        for index, step in enumerate(list(payload.get("steps") or [])):
+        for index, step in enumerate(
+            self._robot_function_payload_steps(payload, function_name, robot)
+        ):
             body = self._robot_function_step_waypoint(dict(step))
             waypoint = dict(dict(step).get("waypoint") or {})
             out.append(
@@ -11777,8 +12301,11 @@ class SystemBridge:
                     "computed_position_m": deepcopy(
                         dict(step).get("computed_position_m") or {}
                     ),
+                    "computed_pose": deepcopy(dict(step).get("computed_pose") or {}),
                     "computed_source": str(dict(step).get("computed_source") or ""),
                     "computed_at": dict(step).get("computed_at"),
+                    "invalid_reason": str(dict(step).get("invalid_reason") or ""),
+                    "confirmed": dict(step).get("confirmed") is True,
                 }
             )
         return out
@@ -11847,10 +12374,16 @@ class SystemBridge:
         cfg = self._digital_twin_target(target)
         if not cfg:
             return None, f"unknown digital twin target: {target}"
-        robot_key = str(robot or "").strip().lower()
-        if robot_key not in {"xarm6", "ur5e"}:
-            return None, f"unknown robot: {robot}"
-        if robot_key not in tuple(str(r).strip().lower() for r in (cfg.get("hardware") or ())):
+        robot_token = str(robot or "")
+        robot_key = robot_token
+        if robot_token != robot_token.strip() or robot_token != robot_token.lower():
+            return None, f"{robot_token} is not part of {target}."
+        configured_robots = tuple(
+            str(value).strip().lower()
+            for value in (cfg.get("hardware") or ())
+            if str(value or "").strip()
+        )
+        if not robot_key or robot_key not in configured_robots:
             return None, f"{robot_key} is not part of {target}."
         function_key = self._robot_function_safe_function_name(function_name)
         if not function_key:
@@ -11920,15 +12453,115 @@ class SystemBridge:
                 "waypoint": waypoint if not blocked_reason else {},
             }
         if robot_key != "ur5e":
+            resource_agent = self._physical_robot_agent(robot_key)
+            controller = getattr(resource_agent, "_controller", None)
+            get_current_pose = getattr(controller, "get_current_pose", None)
+            if not callable(get_current_pose):
+                return {
+                    "success": False,
+                    "robot": robot_key,
+                    "hardware_domain_id": hardware_domain_id,
+                    "joint_states_fresh": False,
+                    "world_tool0_ready": False,
+                    "blocked_reason": (
+                        f"The configured {robot_key} controller does not provide "
+                        "current Cartesian pose feedback."
+                    ),
+                }
+            try:
+                pose_result = get_current_pose()
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "robot": robot_key,
+                    "hardware_domain_id": hardware_domain_id,
+                    "joint_states_fresh": False,
+                    "world_tool0_ready": False,
+                    "blocked_reason": (
+                        f"Current Cartesian pose feedback failed for {robot_key}: {exc}"
+                    ),
+                }
+            pose = (
+                dict(pose_result.get("pose") or {})
+                if isinstance(pose_result, dict)
+                else {}
+            )
+            controller_config = dict(
+                getattr(resource_agent, "controller_config", {})
+                or getattr(controller, "controller_config", {})
+                or {}
+            )
+            move_group = dict(controller_config.get("move_group") or {})
+            frame_id = str(
+                getattr(controller, "frame_id", "")
+                or move_group.get("frame_id")
+            ).strip()
+            ee_link = str(
+                getattr(controller, "ee_link", "")
+                or move_group.get("ee_link")
+            ).strip()
+            fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+            pose_ready = bool(
+                isinstance(pose_result, dict)
+                and pose_result.get("success")
+                and frame_id == "world"
+                and ee_link
+                and all(
+                    isinstance(pose.get(field), (int, float))
+                    and not isinstance(pose.get(field), bool)
+                    and math.isfinite(float(pose[field]))
+                    for field in fields
+                )
+            )
+            get_joint_positions = getattr(controller, "get_current_joint_positions", None)
+            try:
+                joint_positions = (
+                    list(get_joint_positions() or [])
+                    if callable(get_joint_positions)
+                    else []
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                joint_positions = []
+            joint_names = list(controller_config.get("arm_joint_names") or [])
+            joint_states_fresh = bool(
+                joint_names
+                and len(joint_positions) == len(joint_names)
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    for value in joint_positions
+                )
+            )
+            blocked_reason = (
+                ""
+                if pose_ready
+                else str(
+                    dict(pose_result or {}).get("message")
+                    or f"TF world -> {ee_link or 'ee_link'} is unavailable."
+                )
+            )
             return {
-                "success": False,
+                "success": pose_ready,
                 "robot": robot_key,
                 "hardware_domain_id": hardware_domain_id,
-                "rtde_receive_connected": False,
-                "joint_states_fresh": False,
-                "world_tool0_ready": False,
-                "rtde_control_connected": False,
-                "blocked_reason": f"unknown robot: {robot_key}",
+                "joint_states_fresh": joint_states_fresh,
+                "world_tool0_ready": pose_ready,
+                "blocked_reason": blocked_reason,
+                "waypoint": (
+                    {
+                        "positions": [float(value) for value in joint_positions],
+                        "joint_names": joint_names,
+                        "source": "hardware",
+                        "pose": {
+                            **{field: float(pose[field]) for field in fields},
+                            "frame_id": frame_id,
+                            "child_frame_id": ee_link,
+                        },
+                    }
+                    if pose_ready
+                    else {}
+                ),
             }
         try:
             self.perception_manager.ensure_ur5e_calibration_monitor(domain_id=hardware_domain_id)
@@ -12278,6 +12911,18 @@ class SystemBridge:
 
     def _ur5e_robot_function_agent_handoff_error(self) -> str:
         """Return why a manual UR5e agent cannot be replaced by full CAIS startup."""
+        demonstration_error = self._insertion_demonstration_blocking_error()
+        if demonstration_error:
+            return (
+                "Cannot start the CAIS system while insertion demonstration custody "
+                f"is active. {demonstration_error}"
+            )
+        pending_review_error = self._move_insert_pending_review_error()
+        if pending_review_error:
+            return (
+                "Cannot start the CAIS system while a supervised move_insert trial "
+                f"requires review. {pending_review_error}"
+            )
         agent = getattr(self, "_ur5e_robot_function_agent", None)
         if bool(getattr(self, "_ur5e_robot_function_state_uncertain", False)):
             return (
@@ -12568,6 +13213,33 @@ class SystemBridge:
             return running_agent
         return getattr(self, "_xarm6_robot_function_agent", None)
 
+    def _physical_robot_agent(self, robot: str) -> Any | None:
+        """Return one configured physical robot agent by its exact robot token."""
+        robot_key = str(robot or "")
+        if robot_key != robot_key.strip() or robot_key != robot_key.lower():
+            return None
+        if robot_key == "ur5e":
+            return self._physical_ur5e_robot_agent()
+        if robot_key == "xarm6":
+            return self._physical_xarm6_robot_agent()
+        return next(
+            (
+                agent
+                for agent in getattr(self, "resource_agents", [])
+                if robot_key
+                in {
+                    str(getattr(agent, "agent_name", "") or "").strip().lower(),
+                    str(getattr(agent, "jid", "") or "")
+                    .split("@", 1)[0]
+                    .strip()
+                    .lower(),
+                }
+                and str(getattr(agent, "execution_mode", "") or "").strip().lower()
+                == "physical"
+            ),
+            None,
+        )
+
     def _get_xarm6_robot_function_agent_lifecycle_lock(self) -> asyncio.Lock:
         """Return the lock serializing manual xarm6 agent creation and disposal."""
         lock = getattr(self, "_xarm6_robot_function_agent_lifecycle_lock", None)
@@ -12783,12 +13455,12 @@ class SystemBridge:
                 "success": False,
                 "message": f"unknown digital twin target: {target_key}",
             }
-        if robot_key not in {"xarm6", "ur5e"}:
-            return {
-                "success": False,
-                "message": f"unknown robot: {robot_key}",
-            }
-        if robot_key not in tuple(str(value) for value in (cfg.get("hardware") or ())):
+        configured_robots = tuple(
+            str(value).strip().lower()
+            for value in (cfg.get("hardware") or ())
+            if str(value or "").strip()
+        )
+        if robot_key not in configured_robots:
             return {
                 "success": False,
                 "message": f"{robot_key} is not part of {target_key}.",
@@ -12804,9 +13476,19 @@ class SystemBridge:
             resource_agent, preparation_error = (
                 await self._ensure_ur5e_robot_function_agent(target_key, robot_key)
             )
-        else:
+        elif robot_key == "xarm6":
             resource_agent, preparation_error = (
                 await self._ensure_xarm6_robot_function_agent(target_key, robot_key)
+            )
+        else:
+            resource_agent = self._physical_robot_agent(robot_key)
+            preparation_error = (
+                ""
+                if resource_agent is not None
+                else (
+                    f"Start the configured physical {robot_key} RobotAgent before "
+                    "Function Execution."
+                )
             )
         if preparation_error:
             return {"success": False, "message": preparation_error}
@@ -12860,9 +13542,12 @@ class SystemBridge:
                 "success": False,
                 "message": f"unknown digital twin target: {target_key}",
             }
-        if robot_key not in {"xarm6", "ur5e"}:
-            return {"success": False, "message": f"unknown robot: {robot_key}"}
-        if robot_key not in tuple(str(value) for value in (cfg.get("hardware") or ())):
+        configured_robots = tuple(
+            str(value).strip().lower()
+            for value in (cfg.get("hardware") or ())
+            if str(value or "").strip()
+        )
+        if robot_key not in configured_robots:
             return {
                 "success": False,
                 "message": f"{robot_key} is not part of {target_key}.",
@@ -12876,9 +13561,18 @@ class SystemBridge:
             resource_agent, preparation_error = (
                 await self._ensure_ur5e_robot_function_agent(target_key, robot_key)
             )
-        else:
+        elif robot_key == "xarm6":
             resource_agent, preparation_error = (
                 await self._ensure_xarm6_robot_function_agent(target_key, robot_key)
+            )
+        else:
+            resource_agent = self._physical_robot_agent(robot_key)
+            preparation_error = (
+                ""
+                if resource_agent is not None
+                else (
+                    f"Start the configured physical {robot_key} RobotAgent before capture."
+                )
             )
         if preparation_error:
             return {"success": False, "message": preparation_error}
@@ -12926,9 +13620,12 @@ class SystemBridge:
         cfg = self._digital_twin_target(target)
         if cfg is None:
             return None, f"unknown digital twin target: {target}"
-        if robot not in {"xarm6", "ur5e"}:
-            return None, f"unknown robot: {robot}"
-        if robot not in tuple(str(value) for value in (cfg.get("hardware") or ())):
+        configured_robots = tuple(
+            str(value).strip().lower()
+            for value in (cfg.get("hardware") or ())
+            if str(value or "").strip()
+        )
+        if robot not in configured_robots:
             return None, f"{robot} is not part of {target}."
         if function_name not in {
             "pick_approach",
@@ -13049,6 +13746,14 @@ class SystemBridge:
         if not self._selected_normal_hardware_stack():
             return ""
         key = str(robot or "").strip().lower()
+        if key not in {"ur5e", "xarm6"}:
+            resource_agent = self._physical_robot_agent(key)
+            controller = getattr(resource_agent, "_controller", None)
+            if controller is None or not callable(
+                getattr(controller, "move_cartesian", None)
+            ):
+                return f"The configured {key} Cartesian controller is unavailable."
+            return ""
         session = getattr(self, "_teleop_smooth_session", None)
         if session is not None:
             return (
@@ -13151,6 +13856,7 @@ class SystemBridge:
         client: Any,
         *,
         action_name: str,
+        timeout_sec: float = 0.2,
     ) -> tuple[bool | None, str]:
         """Probe an initialized controller action client without ROS CLI discovery."""
         if client is None:
@@ -13159,10 +13865,60 @@ class SystemBridge:
         if not callable(wait_for_server):
             return None, ""
         try:
-            ready = bool(wait_for_server(timeout_sec=0.2))
+            ready = bool(wait_for_server(timeout_sec=max(0.0, float(timeout_sec))))
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             return False, f"{action_name}: wait failed ({exc})"
         return ready, "" if ready else f"{action_name} is unavailable"
+
+    def _prepare_ur5e_move_insert_client(
+        self,
+        resource_agent: Any,
+    ) -> tuple[dict[str, Any], str]:
+        """Prepare the optional UR5e move_insert client without commanding motion."""
+        readiness = {
+            "move_insert_action": _UR5E_RTDE_INSERT_ACTION,
+            "move_insert_client_ready": False,
+        }
+        controller = getattr(resource_agent, "_controller", None)
+        if controller is None:
+            return readiness, "The physical ur5e controller is unavailable."
+        configured_action = str(
+            getattr(controller, "_ur5e_hardware_insert_action", "") or ""
+        ).strip()
+        readiness["configured_move_insert_action"] = configured_action
+        if configured_action != _UR5E_RTDE_INSERT_ACTION:
+            return readiness, (
+                "Physical ur5e controller move_insert action is "
+                f"'{configured_action or '<empty>'}'; expected "
+                f"'{_UR5E_RTDE_INSERT_ACTION}'."
+            )
+        ensure_ready = getattr(controller, "_ensure_move_insert_client_ready", None)
+        if not callable(ensure_ready):
+            return readiness, (
+                "Physical ur5e controller does not support move_insert client "
+                "preparation. Restart the CAIS UI after updating the controller."
+            )
+        try:
+            client_ready, client_message = ensure_ready(timeout_sec=2.0)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return readiness, f"UR5e move_insert client preparation failed: {exc}"
+        if client_ready is not True:
+            return readiness, str(
+                client_message
+                or f"{_UR5E_RTDE_INSERT_ACTION} is unavailable"
+            )
+        prepared_ready, prepared_error = self._prepared_action_client_ready(
+            getattr(controller, "_ur5e_hardware_insert_client", None),
+            action_name=_UR5E_RTDE_INSERT_ACTION,
+            timeout_sec=0.0,
+        )
+        if prepared_ready is not True:
+            return readiness, prepared_error or (
+                "Physical ur5e move_insert client was not created by insertion "
+                "readiness. Restart the CAIS UI and retry Assembly readiness."
+            )
+        readiness["move_insert_client_ready"] = True
+        return readiness, ""
 
     def _robot_function_execution_pose_readiness(
         self,
@@ -13175,11 +13931,19 @@ class SystemBridge:
         get_current_pose = getattr(controller, "get_current_pose", None)
         frame_id = str(getattr(controller, "frame_id", "") or "").strip()
         tool_frame = str(getattr(controller, "ee_link", "") or "").strip()
-        expected_tool_frame = "link_eef" if robot == "xarm6" else "tool0"
+        controller_config = dict(
+            getattr(resource_agent, "controller_config", {})
+            or getattr(controller, "controller_config", {})
+            or {}
+        )
+        move_group = dict(controller_config.get("move_group") or {})
+        frame_id = str(frame_id or move_group.get("frame_id") or "").strip()
+        tool_frame = str(tool_frame or move_group.get("ee_link") or "").strip()
+        expected_tool_frame = tool_frame
         if (
             not callable(get_current_pose)
             or frame_id != "world"
-            or tool_frame != expected_tool_frame
+            or not expected_tool_frame
         ):
             return self._robot_function_capture_snapshot(target, robot)
         try:
@@ -13193,6 +13957,27 @@ class SystemBridge:
                 ),
             }
         pose = dict(result.get("pose") or {}) if isinstance(result, dict) else {}
+        tf_stamp_sec: float | None = None
+        if isinstance(result, dict):
+            try:
+                candidate_stamp = float(result.get("tf_stamp_sec"))
+            except (TypeError, ValueError, OverflowError):
+                candidate_stamp = math.nan
+            if math.isfinite(candidate_stamp) and candidate_stamp > 0.0:
+                tf_stamp_sec = candidate_stamp
+        if tf_stamp_sec is None:
+            try:
+                transform = controller._tf_buffer.lookup_transform(  # noqa: SLF001 - prepared-controller TF authority.
+                    "world",
+                    expected_tool_frame,
+                    controller._rclpy.time.Time(),  # noqa: SLF001 - ROS clock paired with controller buffer.
+                )
+                stamp = transform.header.stamp
+                candidate_stamp = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+                if math.isfinite(candidate_stamp) and candidate_stamp > 0.0:
+                    tf_stamp_sec = candidate_stamp
+            except Exception:  # noqa: BLE001 - optional ROS TF stamp boundary.
+                tf_stamp_sec = None
         fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
         world_tool0_ready = bool(
             isinstance(result, dict)
@@ -13207,6 +13992,7 @@ class SystemBridge:
         return {
             "success": world_tool0_ready,
             "world_tool0_ready": world_tool0_ready,
+            "tf_stamp_sec": tf_stamp_sec,
             "blocked_reason": (
                 ""
                 if world_tool0_ready
@@ -13229,6 +14015,99 @@ class SystemBridge:
             ),
         }
 
+    def _move_insert_release_feedback_snapshot(
+        self,
+        resource_agent: Any,
+        *,
+        target: str,
+    ) -> tuple[dict[str, float], str]:
+        """Read fresh stamped TF and RTDE feedback before irreversible release."""
+        pose_readiness = self._robot_function_execution_pose_readiness(
+            target,
+            "ur5e",
+            resource_agent,
+        )
+        if not bool(pose_readiness.get("success")):
+            return {}, str(
+                pose_readiness.get("blocked_reason")
+                or "Fresh world -> tool0 TF is unavailable before release."
+            )
+        try:
+            tf_stamp_sec = float(pose_readiness.get("tf_stamp_sec"))
+        except (TypeError, ValueError, OverflowError):
+            return {}, "world -> tool0 TF has no source header timestamp before release."
+        tf_age_sec = time.time() - tf_stamp_sec
+        if (
+            not math.isfinite(tf_stamp_sec)
+            or tf_stamp_sec <= 0.0
+            or not math.isfinite(tf_age_sec)
+            or tf_age_sec < -0.5
+            or tf_age_sec > 3.0
+        ):
+            return {}, (
+                "world -> tool0 TF is stale before release; its source header "
+                f"age is {tf_age_sec:.3f} seconds."
+            )
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        try:
+            status_age_sec = time.time() - float(status.get("updated_at"))
+            feedback_timestamp_sec = float(
+                status.get("rtde_feedback_timestamp_sec")
+            )
+        except (TypeError, ValueError, OverflowError):
+            return {}, "UR5e RTDE feedback timestamp is unavailable before release."
+        if (
+            not math.isfinite(status_age_sec)
+            or status_age_sec < 0.0
+            or status_age_sec > 3.0
+            or not math.isfinite(feedback_timestamp_sec)
+            or status.get("rtde_receive_connected") is not True
+            or status.get("joint_states_fresh") is not True
+            or status.get("rtde_control_connected") is not True
+        ):
+            return {}, (
+                "UR5e RTDE receive, joint feedback, and control must remain fresh "
+                "immediately before release."
+            )
+        return {
+            "tf_stamp_sec": tf_stamp_sec,
+            "rtde_feedback_timestamp_sec": feedback_timestamp_sec,
+        }, ""
+
+    def _move_insert_release_feedback_advanced(
+        self,
+        resource_agent: Any,
+        previous: dict[str, float],
+        *,
+        target: str,
+        part_name: str,
+        timeout_sec: float = 2.5,
+    ) -> str:
+        """Require both TF and RTDE evidence to advance just before release."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        latest_error = ""
+        while True:
+            current, latest_error = self._move_insert_release_feedback_snapshot(
+                resource_agent,
+                target=target,
+            )
+            if not latest_error and all(
+                float(current.get(field, -math.inf))
+                > float(previous.get(field, math.inf))
+                for field in (
+                    "tf_stamp_sec",
+                    "rtde_feedback_timestamp_sec",
+                )
+            ):
+                return ""
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        return latest_error or (
+            "world -> tool0 TF and UR5e RTDE feedback did not advance immediately "
+            f"before release. Keep {part_name} clamped and retry readiness."
+        )
+
     def _manual_dependent_function_pose_error(
         self,
         target: str,
@@ -13239,30 +14118,156 @@ class SystemBridge:
         motion_readiness: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
         """Require manual close or release to remain at the preceding descend pose."""
+        move_insert_confirmation = bool(
+            robot == "ur5e"
+            and function_name == "place_insert"
+            and _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.get()
+        )
         preceding_function = (
             "pick_approach" if function_name == "pick_grasp" else "place_approach"
         )
-        expected_tool_frame = "link_eef" if robot == "xarm6" else "tool0"
-        expected = dict(
-            dict(task_context.get("resolved_cartesian_positions") or {}).get("descend")
+        preceding_step = "move_insert" if move_insert_confirmation else "descend"
+        preceding_pose_name = (
+            "place_insert.move_insert"
+            if move_insert_confirmation
+            else f"{preceding_function}.descend"
+        )
+        controller = getattr(resource_agent, "_controller", None)
+        controller_config = dict(
+            getattr(resource_agent, "controller_config", {})
+            or getattr(controller, "controller_config", {})
             or {}
         )
+        move_group = dict(controller_config.get("move_group") or {})
+        expected_tool_frame = str(
+            getattr(controller, "ee_link", "")
+            or move_group.get("ee_link")
+            or ("link_eef" if robot == "xarm6" else "tool0")
+        ).strip()
+        expected = dict(
+            dict(task_context.get("resolved_cartesian_positions") or {}).get(
+                preceding_step
+            )
+            or {}
+        )
+        expected_start_readiness: dict[str, Any] = {
+            "expected_start_pose": {},
+            "current_world_tool0_pose": {},
+            "expected_start_delta_m": {},
+            "expected_start_position_error_m": None,
+            "expected_start_rotation_error_rad": None,
+            "expected_start_position_tolerance_m": None,
+            "expected_start_orientation_tolerance_rad": None,
+            "expected_start_tf_timestamp_sec": None,
+            "expected_start_tf_age_sec": None,
+            "expected_start_source": preceding_pose_name,
+            "dispatch_attempted": False,
+        }
         numeric_fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
         try:
             expected_values = {
                 field: float(expected[field]) for field in numeric_fields
             }
         except (KeyError, TypeError, ValueError):
-            return {}, (
-                f"{function_name} requires {preceding_function}.descend to establish a complete "
+            return expected_start_readiness, (
+                f"{function_name} requires {preceding_pose_name} to establish a complete "
                 f"world -> {expected_tool_frame} pose. Run {preceding_function} before "
                 f"{function_name}."
             )
         if not all(math.isfinite(value) for value in expected_values.values()):
-            return {}, (
-                f"{function_name} requires a finite {preceding_function}.descend "
+            return expected_start_readiness, (
+                f"{function_name} requires a finite {preceding_pose_name} "
                 f"world -> {expected_tool_frame} pose. Run {preceding_function} again."
             )
+
+        if robot == "ur5e":
+            position_tolerance_name = (
+                "insert_start_position_tolerance_m"
+                if function_name == "place_insert"
+                else "cartesian_position_tolerance_m"
+            )
+            position_tolerance_fallback = (
+                _UR5E_INSERT_START_POSITION_TOLERANCE_M
+                if function_name == "place_insert"
+                else _UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
+            )
+            try:
+                position_tolerance_m = float(
+                    motion_readiness.get(position_tolerance_name)
+                )
+            except (TypeError, ValueError, OverflowError):
+                position_tolerance_m = math.nan
+            if not math.isfinite(position_tolerance_m) or position_tolerance_m <= 0.0:
+                position_tolerance_m = position_tolerance_fallback
+            orientation_tolerance_name = (
+                "insert_start_orientation_tolerance_rad"
+                if function_name == "place_insert"
+                else "cartesian_orientation_tolerance_rad"
+            )
+            orientation_tolerance_fallback = (
+                _UR5E_INSERT_START_ORIENTATION_TOLERANCE_RAD
+                if function_name == "place_insert"
+                else _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
+            )
+            try:
+                orientation_tolerance_rad = float(
+                    motion_readiness.get(orientation_tolerance_name)
+                )
+            except (TypeError, ValueError, OverflowError):
+                orientation_tolerance_rad = math.nan
+            if (
+                not math.isfinite(orientation_tolerance_rad)
+                or orientation_tolerance_rad <= 0.0
+            ):
+                orientation_tolerance_rad = orientation_tolerance_fallback
+        else:
+            controller = getattr(resource_agent, "_controller", None)
+            try:
+                position_tolerance_m = float(
+                    getattr(
+                        controller,
+                        "_xarm6_cartesian_position_tolerance_m",
+                        0.0,
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                position_tolerance_m = math.nan
+            if not math.isfinite(position_tolerance_m) or position_tolerance_m <= 0.0:
+                position_tolerance_m = (
+                    _XARM6_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
+                )
+            try:
+                orientation_tolerance_rad = float(
+                    getattr(
+                        controller,
+                        "_xarm6_cartesian_orientation_tolerance_rad",
+                        0.0,
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                orientation_tolerance_rad = math.nan
+            if (
+                not math.isfinite(orientation_tolerance_rad)
+                or orientation_tolerance_rad <= 0.0
+            ):
+                orientation_tolerance_rad = (
+                    _XARM6_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
+                )
+
+        expected_start_pose = {
+            **expected_values,
+            "frame_id": "world",
+            "child_frame_id": expected_tool_frame,
+        }
+        expected_start_readiness.update(
+            {
+                "expected_start_pose": expected_start_pose,
+                "expected_start_position_tolerance_m": position_tolerance_m,
+                "expected_start_orientation_tolerance_rad": (
+                    orientation_tolerance_rad
+                ),
+            }
+        )
 
         current_readiness = self._robot_function_execution_pose_readiness(
             target,
@@ -13272,8 +14277,23 @@ class SystemBridge:
         current_details = {
             key: value for key, value in current_readiness.items() if key != "success"
         }
+        try:
+            tf_timestamp_sec = float(current_readiness.get("tf_stamp_sec"))
+        except (TypeError, ValueError, OverflowError):
+            tf_timestamp_sec = math.nan
+        if math.isfinite(tf_timestamp_sec) and tf_timestamp_sec > 0.0:
+            tf_age_sec: float | None = time.time() - tf_timestamp_sec
+            expected_start_readiness.update(
+                {
+                    "expected_start_tf_timestamp_sec": tf_timestamp_sec,
+                    "expected_start_tf_age_sec": tf_age_sec,
+                }
+            )
+        else:
+            tf_timestamp_sec = math.nan
+            tf_age_sec = None
         if not bool(current_readiness.get("success")):
-            return current_details, str(
+            return {**current_details, **expected_start_readiness}, str(
                 current_readiness.get("blocked_reason")
                 or f"TF world -> {expected_tool_frame} is unavailable."
             )
@@ -13284,7 +14304,7 @@ class SystemBridge:
             str(current.get("frame_id") or "").strip() != "world"
             or str(current.get("child_frame_id") or "").strip() != expected_tool_frame
         ):
-            return current_details, (
+            return {**current_details, **expected_start_readiness}, (
                 f"{function_name} current pose must be world -> {expected_tool_frame}."
             )
         try:
@@ -13292,13 +14312,50 @@ class SystemBridge:
                 field: float(current[field]) for field in numeric_fields
             }
         except (KeyError, TypeError, ValueError):
-            return current_details, (
+            return {**current_details, **expected_start_readiness}, (
                 f"{function_name} current world -> {expected_tool_frame} pose is incomplete."
             )
         if not all(math.isfinite(value) for value in current_values.values()):
-            return current_details, (
+            return {**current_details, **expected_start_readiness}, (
                 f"{function_name} current world -> {expected_tool_frame} pose is invalid."
             )
+
+        current_world_tool0_pose = {
+            **current_values,
+            "frame_id": "world",
+            "child_frame_id": expected_tool_frame,
+        }
+        expected_start_delta_m = {
+            field: current_values[field] - expected_values[field]
+            for field in ("x", "y", "z")
+        }
+        expected_start_readiness.update(
+            {
+                "current_world_tool0_pose": current_world_tool0_pose,
+                "expected_start_delta_m": expected_start_delta_m,
+            }
+        )
+
+        if robot == "ur5e" and function_name == "place_insert":
+            if not math.isfinite(tf_timestamp_sec) or tf_timestamp_sec <= 0.0:
+                return {**current_details, **expected_start_readiness}, (
+                    "place_insert is blocked before move_insert dispatch because "
+                    "the fresh current world -> tool0 TF has no source header "
+                    "timestamp or it is invalid. No move_insert goal, force mode, "
+                    "or spiral motion was dispatched."
+                )
+            if (
+                tf_age_sec is None
+                or not math.isfinite(tf_age_sec)
+                or tf_age_sec < -0.5
+                or tf_age_sec > 3.0
+            ):
+                return {**current_details, **expected_start_readiness}, (
+                    "place_insert is blocked before move_insert dispatch because "
+                    "the current world -> tool0 TF source header is not fresh; its "
+                    f"age is {float(tf_age_sec):.3f} seconds. No move_insert goal, "
+                    "force mode, or spiral motion was dispatched."
+                )
 
         expected_quaternion = tuple(
             expected_values[field] for field in ("qx", "qy", "qz", "qw")
@@ -13309,8 +14366,8 @@ class SystemBridge:
         expected_norm = math.sqrt(sum(value * value for value in expected_quaternion))
         current_norm = math.sqrt(sum(value * value for value in current_quaternion))
         if expected_norm <= 1e-12 or current_norm <= 1e-12:
-            return current_details, (
-                f"{function_name} requires valid {preceding_function}.descend and current "
+            return {**current_details, **expected_start_readiness}, (
+                f"{function_name} requires valid {preceding_pose_name} and current "
                 f"world -> {expected_tool_frame} orientations."
             )
         quaternion_dot = abs(
@@ -13330,28 +14387,17 @@ class SystemBridge:
                 for field in ("x", "y", "z")
             )
         )
-        if robot == "ur5e":
-            position_tolerance_m = float(
-                motion_readiness.get("cartesian_position_tolerance_m")
-                or _UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
-            )
-            orientation_tolerance_rad = float(
-                motion_readiness.get("cartesian_orientation_tolerance_rad")
-                or _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
-            )
-        else:
-            controller = getattr(resource_agent, "_controller", None)
-            position_tolerance_m = float(
-                getattr(controller, "_xarm6_cartesian_position_tolerance_m", 0.0)
-                or _XARM6_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
-            )
-            orientation_tolerance_rad = float(
-                getattr(controller, "_xarm6_cartesian_orientation_tolerance_rad", 0.0)
-                or _XARM6_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
-            )
+        expected_start_readiness.update(
+            {
+                "expected_start_position_error_m": translation_error_m,
+                "expected_start_rotation_error_rad": rotation_error_rad,
+            }
+        )
         pose_readiness = {
             **current_details,
+            **expected_start_readiness,
             "manual_preceding_function": preceding_function,
+            "manual_preceding_step": preceding_step,
             "manual_pose_translation_error_m": translation_error_m,
             "manual_pose_rotation_error_rad": rotation_error_rad,
             "manual_pose_position_tolerance_m": position_tolerance_m,
@@ -13361,15 +14407,322 @@ class SystemBridge:
             translation_error_m > position_tolerance_m
             or rotation_error_rad > orientation_tolerance_rad
         ):
+            if robot == "ur5e" and function_name == "place_insert":
+                return pose_readiness, (
+                    "place_insert is blocked before move_insert dispatch because "
+                    f"the current world -> {expected_tool_frame} pose does not match "
+                    f"the retained {preceding_pose_name}; position error "
+                    f"{1000.0 * translation_error_m:.2f} mm (limit "
+                    f"{1000.0 * position_tolerance_m:.2f} mm), rotation error "
+                    f"{math.degrees(rotation_error_rad):.2f} deg (limit "
+                    f"{math.degrees(orientation_tolerance_rad):.2f} deg). No "
+                    "move_insert goal, force mode, or spiral motion was dispatched."
+                )
             return pose_readiness, (
                 f"{function_name} requires the current world -> {expected_tool_frame} pose to "
-                f"remain at {preceding_function}.descend; position error "
+                f"remain at {preceding_pose_name}; position error "
                 f"{1000.0 * translation_error_m:.2f} mm (limit "
                 f"{1000.0 * position_tolerance_m:.2f} mm), rotation error "
                 f"{math.degrees(rotation_error_rad):.2f} deg (limit "
                 f"{math.degrees(orientation_tolerance_rad):.2f} deg)."
             )
         return pose_readiness, ""
+
+    @staticmethod
+    def _physical_ur5e_place_approach_handoff_error(
+        task_context: dict[str, Any],
+        *,
+        part_name: str,
+    ) -> str:
+        """Validate retained pick_grasp custody before place_approach can stage."""
+        from cais_spade_llm.resources.robot.robot_task_runtime import (  # noqa: PLC0415
+            _physical_place_approach_held_part_handoff_error,
+        )
+
+        return _physical_place_approach_held_part_handoff_error(
+            task_context,
+            part_name=part_name,
+        )
+
+    def _physical_ur5e_place_approach_pre_staging_error(
+        self,
+        target: str,
+        resource_agent: Any,
+        *,
+        destination_location: str,
+        part_name: str,
+        motion_readiness: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Fail closed before staging a first or repeated physical place_approach."""
+        current_state = str(
+            getattr(resource_agent, "_current_state", "") or ""
+        ).strip()
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        readiness: dict[str, Any] = {
+            "place_approach_pre_staging_ready": False,
+            "place_approach_start_state": current_state,
+        }
+
+        demonstration_error = self._insertion_demonstration_blocking_error()
+        if demonstration_error:
+            return readiness, demonstration_error
+        pending_review_error = self._move_insert_pending_review_error()
+        if pending_review_error:
+            return readiness, pending_review_error
+
+        handoff_error = self._physical_ur5e_place_approach_handoff_error(
+            task_context,
+            part_name=part_name,
+        )
+        if handoff_error:
+            return readiness, (
+                "place_approach is blocked before "
+                f"{destination_location} staging: {handoff_error}."
+            )
+
+        if current_state == "picked":
+            readiness.update(
+                {
+                    "held_part_handoff_ready": True,
+                    "place_approach_repeat": False,
+                    "place_approach_pre_staging_ready": True,
+                }
+            )
+            return readiness, ""
+        if current_state != "positioned":
+            return readiness, (
+                "place_approach is blocked before "
+                f"{destination_location} staging. A first run requires RobotAgent "
+                "state 'picked'; a repeat requires state 'positioned' at the retained "
+                "place_approach.descend pre-insertion pose. Current state: "
+                f"'{current_state or '<empty>'}'."
+            )
+        if (
+            str(task_context.get("destination_location") or "")
+            != destination_location
+        ):
+            return readiness, (
+                "Repeat place_approach is blocked before "
+                f"{destination_location} staging because the retained place context "
+                "has a different destination_location."
+            )
+
+        retained_results = [
+            dict(value)
+            for value in (
+                task_context.get("move_insert_result"),
+                task_context.get("move_insert_trial_result"),
+            )
+            if isinstance(value, dict)
+        ]
+        if any(result.get("state_uncertain") is True for result in retained_results):
+            return readiness, (
+                "Repeat place_approach is blocked before "
+                f"{destination_location} staging because move_insert acceptance is "
+                "unknown. Keep the part clamped and use the normal Hardware Stack "
+                "inspection and recovery path before commanding motion."
+            )
+        if any(
+            bool(str(result.get("trial_id") or "").strip())
+            and (
+                result.get("motion_settled") is False
+                or result.get("final_tool0_pose_valid") is False
+            )
+            for result in retained_results
+        ):
+            return readiness, (
+                "Repeat place_approach is blocked before "
+                f"{destination_location} staging because the retained move_insert "
+                "result did not prove both stationary settlement and a valid final "
+                "world -> tool0 pose. Keep the part clamped and use the normal "
+                "Hardware Stack inspection and recovery path before commanding motion."
+            )
+
+        settled_move_insert_failure = next(
+            (
+                result
+                for result in retained_results
+                if result.get("success") is False
+                and result.get("motion_settled") is True
+                and result.get("state_uncertain") is False
+                and result.get("final_tool0_pose_valid") is True
+                and result.get("engagement_detected") is False
+                and result.get("seated_detected") is False
+                and bool(str(result.get("trial_id") or "").strip())
+            ),
+            None,
+        )
+        if settled_move_insert_failure is not None:
+            readiness.update(
+                {
+                    "held_part_handoff_ready": True,
+                    "place_approach_repeat": True,
+                    "place_approach_repeat_start": destination_location,
+                    "place_approach_pre_staging_ready": True,
+                    "move_insert_retry_motion_settled": True,
+                }
+            )
+            return readiness, ""
+
+        named_positions = getattr(resource_agent, "named_positions", {})
+        raw_named_position = (
+            named_positions.get(destination_location)
+            if isinstance(named_positions, dict)
+            else None
+        )
+        raw_actual_positions = motion_readiness.get("actual_positions_rad")
+        try:
+            named_position = [float(value) for value in raw_named_position]
+            actual_positions = [float(value) for value in raw_actual_positions]
+            named_position_tolerance_rad = float(
+                motion_readiness.get(
+                    "joint_goal_tolerance_rad",
+                    _UR5E_NAMED_POSITION_TOLERANCE_RAD,
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            named_position = []
+            actual_positions = []
+            named_position_tolerance_rad = math.nan
+        named_position_evidence_ready = bool(
+            len(named_position) == 6
+            and len(actual_positions) == 6
+            and all(math.isfinite(value) for value in named_position)
+            and all(math.isfinite(value) for value in actual_positions)
+            and math.isfinite(named_position_tolerance_rad)
+            and named_position_tolerance_rad > 0.0
+            and motion_readiness.get("joint_states_fresh") is True
+        )
+        if named_position_evidence_ready:
+            named_position_errors = [
+                abs(
+                    math.atan2(
+                        math.sin(actual - expected),
+                        math.cos(actual - expected),
+                    )
+                )
+                for actual, expected in zip(
+                    actual_positions,
+                    named_position,
+                    strict=True,
+                )
+            ]
+            named_position_max_error_rad = max(named_position_errors)
+            readiness.update(
+                {
+                    "place_approach_named_staging_actual_positions_rad": (
+                        actual_positions
+                    ),
+                    "place_approach_named_staging_target_positions_rad": (
+                        named_position
+                    ),
+                    "place_approach_named_staging_max_joint_error_rad": (
+                        named_position_max_error_rad
+                    ),
+                    "place_approach_named_staging_joint_tolerance_rad": (
+                        named_position_tolerance_rad
+                    ),
+                }
+            )
+            if named_position_max_error_rad <= named_position_tolerance_rad:
+                readiness.update(
+                    {
+                        "held_part_handoff_ready": True,
+                        "place_approach_repeat": True,
+                        "place_approach_repeat_start": destination_location,
+                        "place_approach_pre_staging_ready": True,
+                    }
+                )
+                return readiness, ""
+
+        dependent_readiness, dependent_error = (
+            self._manual_dependent_function_pose_error(
+                target,
+                "ur5e",
+                "place_insert",
+                resource_agent,
+                task_context,
+                motion_readiness,
+            )
+        )
+        readiness.update(dependent_readiness)
+        readiness.update(
+            {
+                "held_part_handoff_ready": True,
+                "place_approach_repeat": True,
+            }
+        )
+        fresh_tf_ready = False
+        if not dependent_error or "tf_stamp_sec" in dependent_readiness:
+            try:
+                tf_stamp_sec = float(dependent_readiness.get("tf_stamp_sec"))
+            except (TypeError, ValueError, OverflowError):
+                return readiness, (
+                    "Repeat place_approach is blocked before "
+                    f"{destination_location} staging because world -> tool0 TF "
+                    "has no source header timestamp. Wait for fresh TF feedback, "
+                    "then retry."
+                )
+            tf_age_sec = time.time() - tf_stamp_sec
+            readiness["place_approach_tf_stamp_sec"] = tf_stamp_sec
+            readiness["place_approach_tf_age_sec"] = tf_age_sec
+            if (
+                not math.isfinite(tf_stamp_sec)
+                or tf_stamp_sec <= 0.0
+                or not math.isfinite(tf_age_sec)
+                or tf_age_sec < -0.5
+                or tf_age_sec > 3.0
+            ):
+                return readiness, (
+                    "Repeat place_approach is blocked before "
+                    f"{destination_location} staging because world -> tool0 TF is "
+                    "not fresh; its source header age is "
+                    f"{tf_age_sec:.3f} seconds. Wait for fresh TF feedback, then retry."
+                )
+            fresh_tf_ready = True
+        if dependent_error:
+            may_be_seated = any(
+                result.get("engagement_detected") is True
+                or result.get("seated_detected") is True
+                for result in retained_results
+            )
+            if not may_be_seated and fresh_tf_ready:
+                readiness.update(
+                    {
+                        "place_approach_repeat_start": (
+                            "current_clear_positioned_pose"
+                        ),
+                        "place_approach_pre_staging_ready": True,
+                        "place_approach_repeat_pose_offset_accepted": True,
+                    }
+                )
+                return readiness, ""
+            if may_be_seated:
+                recovery_instruction = (
+                    " The part may still be seated or bound; do not run "
+                    "place_approach or named-position motion from that pose. Use "
+                    "Interactive Teleop Cartesian Step or Smooth Hold to withdraw "
+                    "only along the reverse insertion_axis_world until the retained "
+                    "pre-insertion pose is reached. Then retry Supervised Test "
+                    "move_insert; rerunning place_approach is optional."
+                )
+            else:
+                recovery_instruction = (
+                    f" Use the named-position control to return to "
+                    f"{destination_location}, or use Interactive Teleop Cartesian "
+                    "Step or Smooth Hold only for a small correction back to the "
+                    "retained pre-insertion pose, then retry."
+                )
+            return readiness, (
+                "Repeat place_approach is blocked before "
+                f"{destination_location} staging because the fresh world -> tool0 "
+                "pose does not match the retained place_approach.descend "
+                f"pre-insertion pose or the exact {destination_location} named "
+                f"staging joints.{recovery_instruction} {dependent_error}"
+            )
+        readiness["place_approach_repeat_start"] = "place_approach.descend"
+        readiness["place_approach_pre_staging_ready"] = True
+        return readiness, ""
 
     def _digital_twin_ur5e_motion_readiness(
         self,
@@ -13420,6 +14773,14 @@ class SystemBridge:
                 "cartesian_orientation_tolerance_rad",
                 _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD,
             ),
+            (
+                "insert_start_position_tolerance_m",
+                _UR5E_INSERT_START_POSITION_TOLERANCE_M,
+            ),
+            (
+                "insert_start_orientation_tolerance_rad",
+                _UR5E_INSERT_START_ORIENTATION_TOLERANCE_RAD,
+            ),
         ):
             try:
                 tolerance = float(rtde_status.get(tolerance_name, fallback))
@@ -13430,6 +14791,32 @@ class SystemBridge:
                 if math.isfinite(tolerance) and tolerance > 0.0
                 else fallback
             )
+        try:
+            joint_goal_tolerance_rad = float(
+                rtde_status.get(
+                    "joint_goal_tolerance_rad",
+                    _UR5E_NAMED_POSITION_TOLERANCE_RAD,
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            joint_goal_tolerance_rad = math.nan
+        readiness["joint_goal_tolerance_rad"] = (
+            joint_goal_tolerance_rad
+            if math.isfinite(joint_goal_tolerance_rad)
+            and joint_goal_tolerance_rad > 0.0
+            else _UR5E_NAMED_POSITION_TOLERANCE_RAD
+        )
+        raw_actual_positions = rtde_status.get("actual_positions_rad")
+        try:
+            actual_positions = [float(value) for value in raw_actual_positions]
+        except (TypeError, ValueError, OverflowError):
+            actual_positions = []
+        readiness["actual_positions_rad"] = (
+            actual_positions
+            if len(actual_positions) == 6
+            and all(math.isfinite(value) for value in actual_positions)
+            else []
+        )
         try:
             rtde_status_domain_id = int(rtde_status["ros_domain_id"])
         except (KeyError, TypeError, ValueError):
@@ -13714,6 +15101,40 @@ class SystemBridge:
         return ""
 
     @staticmethod
+    def _configured_named_position_error(resource_agent: Any, pose_name: str) -> str:
+        """Validate one named position against the configured controller joints."""
+        named_positions = getattr(resource_agent, "named_positions", {})
+        raw_position = (
+            named_positions.get(pose_name) if isinstance(named_positions, dict) else None
+        )
+        controller = getattr(resource_agent, "_controller", None)
+        controller_config = dict(
+            getattr(resource_agent, "controller_config", {})
+            or getattr(controller, "controller_config", {})
+            or {}
+        )
+        joint_names = list(controller_config.get("arm_joint_names") or [])
+        expected_count = len(joint_names)
+        if (
+            not isinstance(raw_position, (list, tuple))
+            or not expected_count
+            or len(raw_position) != expected_count
+        ):
+            return (
+                f"Named position '{pose_name}' must contain exactly "
+                f"{expected_count or 'the configured number of'} joint values."
+            )
+        if any(isinstance(value, bool) for value in raw_position):
+            return f"Named position '{pose_name}' contains invalid joint values."
+        try:
+            values = [float(value) for value in raw_position]
+        except (TypeError, ValueError):
+            return f"Named position '{pose_name}' contains invalid joint values."
+        if not all(math.isfinite(value) for value in values):
+            return f"Named position '{pose_name}' contains non-finite joint values."
+        return ""
+
+    @staticmethod
     def _ur5e_return_height_error(resource_agent: Any, function_name: str) -> str:
         """Validate the exact positive relative lift prepared by the preceding function."""
         task_context = getattr(resource_agent, "_task_ctx", {})
@@ -13776,6 +15197,355 @@ class SystemBridge:
             },
         )
         return (str(path) if path is not None else ""), error
+
+    def _operator_confirmed_mg_held_part_handoff(  # noqa: C901, PLR0911, PLR0912
+        self,
+        target: str,
+        resource_agent: Any,
+        *,
+        origin_resource_location: str,
+        part_name: str,
+        product_geometry: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        """Build a trusted exact-part handoff from the confirmed pick recording.
+
+        The RG2 status file is command evidence, not a load sensor. The explicit
+        operator confirmation remains necessary to assert that the selected part is still
+        physically clamped.
+        """
+        exact_part_name = str(part_name or "")
+        readiness: dict[str, Any] = {
+            "operator_confirmed_held_part": True,
+            "operator_held_part": exact_part_name,
+            "held_part_handoff_ready": False,
+            "move_insert_trial_context_ready": False,
+            "move_insert_authorized": False,
+        }
+        origin = str(origin_resource_location or "")
+        if not origin or origin != origin.strip():
+            return {}, readiness, (
+                "operator_confirmed_held_part requires the exact non-empty "
+                f"origin_resource_location used to pick {exact_part_name}."
+            )
+        if exact_part_name not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return {}, readiness, (
+                "operator_confirmed_held_part requires one of the exact supported "
+                f"part_name tokens: {list(_MOVE_INSERT_SUPPORTED_PARTS)}."
+            )
+        reachability = {
+            str(value)
+            for value in list(
+                dict(getattr(resource_agent, "static_capabilities", {}) or {}).get(
+                    "reachability"
+                )
+                or []
+            )
+            if str(value or "")
+        }
+        if reachability and origin not in reachability:
+            return {}, readiness, (
+                f"{origin} is outside ur5e static_capabilities.reachability."
+            )
+
+        from cais_spade_llm.resources.robot.robot_task_runtime import (  # noqa: PLC0415
+            _load_physical_cartesian_overrides,
+        )
+
+        task = self._robot_task_registry()["pick_approach"]
+        overrides, path, recording_error = _load_physical_cartesian_overrides(
+            agent=resource_agent,
+            task=task,
+            args={
+                "origin_resource_location": origin,
+                "part_name": exact_part_name,
+            },
+        )
+        recording_path = Path(path) if path is not None else None
+        readiness["pick_approach_recording_path"] = str(recording_path or "")
+        if recording_error:
+            return {}, readiness, recording_error
+        if recording_path is None or not recording_path.is_file():
+            return {}, readiness, (
+                "operator_confirmed_held_part requires the saved confirmed "
+                "pick_approach.descend hardware recording."
+            )
+        recorded_override = dict(overrides.get("descend") or {})
+        if not recorded_override:
+            return {}, readiness, (
+                "operator_confirmed_held_part requires confirmed "
+                "pick_approach.descend; Save/Replace Pose before adopting "
+                f"{exact_part_name} custody."
+            )
+        payload = self._read_json_file(recording_path)
+        robot_entry = dict(dict(payload.get("robots") or {}).get("ur5e") or {})
+        matching_steps = [
+            dict(step)
+            for step in list(robot_entry.get("steps") or [])
+            if isinstance(step, dict)
+            and str(step.get("step_name") or "").strip() == "descend"
+        ]
+        if len(matching_steps) != 1 or matching_steps[0].get("confirmed") is not True:
+            return {}, readiness, (
+                "operator_confirmed_held_part requires exactly one confirmed "
+                "pick_approach.descend hardware recording."
+            )
+        recorded_step = matching_steps[0]
+        waypoint_pose = dict(dict(recorded_step.get("waypoint") or {}).get("pose") or {})
+        if (
+            str(waypoint_pose.get("frame_id") or "") != "world"
+            or str(waypoint_pose.get("child_frame_id") or "") != "tool0"
+        ):
+            return {}, readiness, (
+                "pick_approach.descend must contain the saved world -> tool0 pose."
+            )
+        pose_fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        try:
+            world_tool0_at_grasp = {
+                field: float(waypoint_pose[field]) for field in pose_fields
+            }
+            recorded_at = float(recorded_step["captured_at"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, readiness, (
+                "pick_approach.descend saved pose or captured_at is incomplete."
+            )
+        relative_reference = dict(recorded_step.get("relative_reference") or {})
+        try:
+            reference_position = {
+                field: float(dict(relative_reference["position_m"])[field])
+                for field in ("x", "y", "z")
+            }
+            reference_captured_at = float(relative_reference["captured_at"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, readiness, (
+                f"pick_approach.descend detected {exact_part_name} reference is incomplete."
+            )
+        if (
+            str(relative_reference.get("kind") or "") != "detected_part"
+            or str(relative_reference.get("frame_id") or "") != "world"
+            or str(relative_reference.get("name") or "") != exact_part_name
+            or not str(relative_reference.get("source") or "").strip()
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    *world_tool0_at_grasp.values(),
+                    *reference_position.values(),
+                    recorded_at,
+                    reference_captured_at,
+                )
+            )
+            or recorded_at <= 0.0
+            or reference_captured_at <= 0.0
+        ):
+            return {}, readiness, (
+                f"pick_approach.descend must retain one finite detected {exact_part_name} reference "
+                "in world."
+            )
+        world_held_part_at_grasp = {
+            **reference_position,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        }
+        tool0_to_held_part = self._robot_function_pose_relative_to_reference(
+            world_tool0_at_grasp,
+            world_held_part_at_grasp,
+        )
+        if len(tool0_to_held_part) != len(pose_fields):
+            return {}, readiness, (
+                "pick_approach.descend could not derive a complete "
+                "tool0 -> held_part_origin transform."
+            )
+
+        geometry = dict(product_geometry or {})
+        model_name = str(geometry.get("model_name") or "")
+        if (
+            str(geometry.get("part_name") or "") != exact_part_name
+            or not model_name
+        ):
+            return {}, readiness, (
+                "operator_confirmed_held_part requires exact "
+                f"{exact_part_name} product geometry with its model_name."
+            )
+
+        current_pose_readiness = self._robot_function_execution_pose_readiness(
+            target,
+            "ur5e",
+            resource_agent,
+        )
+        if not bool(current_pose_readiness.get("success")):
+            return {}, readiness, str(
+                current_pose_readiness.get("blocked_reason")
+                or f"Fresh TF world -> tool0 is unavailable for {exact_part_name} custody adoption."
+            )
+        current_waypoint_pose = dict(
+            dict(current_pose_readiness.get("waypoint") or {}).get("pose") or {}
+        )
+        try:
+            current_world_tool0_pose = {
+                field: float(current_waypoint_pose[field]) for field in pose_fields
+            }
+            current_tf_stamp_sec = float(current_pose_readiness["tf_stamp_sec"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, readiness, (
+                f"{exact_part_name} custody adoption requires a source-stamped complete current "
+                "world -> tool0 pose."
+            )
+        current_tf_age_sec = time.time() - current_tf_stamp_sec
+        if (
+            str(current_waypoint_pose.get("frame_id") or "") != "world"
+            or str(current_waypoint_pose.get("child_frame_id") or "") != "tool0"
+            or not all(math.isfinite(value) for value in current_world_tool0_pose.values())
+            or not math.isfinite(current_tf_age_sec)
+            or current_tf_age_sec < -0.5
+            or current_tf_age_sec > _UR5E_OPERATOR_HELD_PART_EVIDENCE_MAX_AGE_SEC
+        ):
+            return {}, readiness, (
+                f"{exact_part_name} custody adoption requires fresh world -> tool0 TF evidence; "
+                f"source age is {current_tf_age_sec:.3f} seconds."
+            )
+
+        readiness.update(
+            {
+                "operator_held_part_tf_age_sec": current_tf_age_sec,
+                "operator_held_part_clamped_by_operator_confirmation": True,
+            }
+        )
+
+        try:
+            recording_sha256 = sha256_file(recording_path)
+        except OSError as exc:
+            return {}, readiness, f"Could not hash pick_approach recording: {exc}"
+        source = "operator_confirmed_pick_approach_recording"
+        orientation_source = "realsense_roboflow_identity"
+        provenance = {
+            "frame_id": "world",
+            "part_name": exact_part_name,
+            "model_name": model_name,
+            "source": source,
+            "orientation_source": orientation_source,
+            "captured_at": reference_captured_at,
+            "pick_approach_recording_sha256": recording_sha256,
+        }
+        handoff = {
+            "robot": "ur5e",
+            "destination_location": "assembly_board-v1",
+            "part_name": exact_part_name,
+            "model_name": model_name,
+            "origin_resource_location": origin,
+            "frame_id": "world",
+            "tool_frame": "tool0",
+            "part_frame": "held_part_origin",
+            "source": source,
+            "orientation_source": orientation_source,
+            "captured_at": current_tf_stamp_sec,
+            "current_world_tool0_pose": current_world_tool0_pose,
+            "current_tf_stamp_sec": current_tf_stamp_sec,
+            "pick_approach_recording_path": str(recording_path),
+            "pick_approach_recording_sha256": recording_sha256,
+            "pick_approach_recorded_at": recorded_at,
+            "world_tool0_pose_at_grasp": world_tool0_at_grasp,
+            "world_held_part_pose_at_grasp": world_held_part_at_grasp,
+            "tool0_to_held_part": tool0_to_held_part,
+            "origin_pose_provenance": provenance,
+        }
+        readiness.update(
+            {
+                "held_part_handoff_ready": True,
+                "pick_approach_recording_sha256": recording_sha256,
+                "operator_confirmed_held_part_handoff": deepcopy(handoff),
+            }
+        )
+        return handoff, readiness, ""
+
+    @staticmethod
+    def _operator_confirmed_mg_adoption_error(
+        resource_agent: Any,
+        expected_handoff: dict[str, Any],
+    ) -> str:
+        """Verify that place_approach retained the exact adopted custody."""
+        part_name = str(expected_handoff.get("part_name") or "")
+        if part_name not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return "operator-confirmed adoption has an unsupported exact part_name"
+        if str(getattr(resource_agent, "_current_state", "") or "") != "positioned":
+            return (
+                f"operator-confirmed {part_name} adoption did not retain state positioned"
+            )
+        if getattr(resource_agent, "_held_part", None) != part_name:
+            return (
+                f"operator-confirmed {part_name} adoption did not retain held_part "
+                f"'{part_name}'"
+            )
+        if str(getattr(resource_agent, "_gripper_state", "") or "") != "closed":
+            return (
+                f"operator-confirmed {part_name} adoption did not retain "
+                "gripper_state 'closed'"
+            )
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        if task_context.get("part_name") != part_name:
+            return (
+                f"operator-confirmed {part_name} adoption did not retain exact "
+                f"part_name '{part_name}'"
+            )
+        if task_context.get("destination_location") != "assembly_board-v1":
+            return (
+                f"operator-confirmed {part_name} adoption did not retain destination_location "
+                "'assembly_board-v1'"
+            )
+        if task_context.get("origin_resource_location") != expected_handoff.get(
+            "origin_resource_location"
+        ):
+            return (
+                f"operator-confirmed {part_name} adoption changed "
+                "origin_resource_location"
+            )
+        retained_handoff = task_context.get("held_part_handoff")
+        if not isinstance(retained_handoff, dict):
+            return (
+                f"operator-confirmed {part_name} adoption did not retain "
+                "held_part_handoff"
+            )
+        for field in (
+            "part_name",
+            "model_name",
+            "origin_resource_location",
+            "frame_id",
+            "tool_frame",
+            "part_frame",
+            "source",
+            "orientation_source",
+            "pick_approach_recording_sha256",
+        ):
+            if retained_handoff.get(field) != expected_handoff.get(field):
+                return (
+                    f"operator-confirmed {part_name} adoption changed "
+                    f"held_part_handoff.{field}"
+                )
+        pose_fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        for pose_name in (
+            "world_tool0_pose_at_grasp",
+            "world_held_part_pose_at_grasp",
+            "tool0_to_held_part",
+        ):
+            pose = retained_handoff.get(pose_name)
+            if not isinstance(pose, dict):
+                return (
+                    f"operator-confirmed {part_name} adoption did not retain complete "
+                    f"held_part_handoff.{pose_name}"
+                )
+            try:
+                values = [float(pose[field]) for field in pose_fields]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return (
+                    f"operator-confirmed {part_name} adoption did not retain complete "
+                    f"held_part_handoff.{pose_name}"
+                )
+            if not all(math.isfinite(value) for value in values):
+                return (
+                    f"operator-confirmed {part_name} adoption retained non-finite "
+                    f"held_part_handoff.{pose_name}"
+                )
+        return ""
 
     def _digital_twin_assembly_board_v1_accepted_status(
         self,
@@ -13866,13 +15636,34 @@ class SystemBridge:
         origin_resource_location: str,
         destination_location: str,
         part_name: str,
+        *,
+        operator_confirmed_held_part: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Validate every no-motion gate and build exact generated-method arguments."""
+        if not isinstance(operator_confirmed_held_part, bool):
+            return None, {}, {}, (
+                "operator_confirmed_held_part must be an exact boolean."
+            )
+        if operator_confirmed_held_part and not (
+            robot == "ur5e"
+            and function_name == "place_approach"
+            and destination_location == "assembly_board-v1"
+            and part_name in _MOVE_INSERT_SUPPORTED_PARTS
+        ):
+            return None, {}, {}, (
+                "operator_confirmed_held_part is available only for standalone ur5e "
+                "place_approach at assembly_board-v1 with one exact supported part_name."
+            )
         cfg, error = self._digital_twin_robot_function_request_error(
             target,
             robot,
             function_name,
-            origin_resource_location,
+            (
+                ""
+                if operator_confirmed_held_part is True
+                and function_name == "place_approach"
+                else origin_resource_location
+            ),
             destination_location,
             part_name,
         )
@@ -13886,11 +15677,7 @@ class SystemBridge:
         if cartesian_error:
             return None, {}, {}, cartesian_error
 
-        resource_agent = (
-            self._physical_ur5e_robot_agent()
-            if robot == "ur5e"
-            else self._physical_xarm6_robot_agent()
-        )
+        resource_agent = self._physical_robot_agent(robot)
         if resource_agent is None:
             return None, {}, {}, (
                 f"Start the {robot} robot agent in Physical mode before executing motion."
@@ -13898,7 +15685,11 @@ class SystemBridge:
         running_agent = (
             self._running_physical_ur5e_robot_agent()
             if robot == "ur5e"
-            else self._running_physical_xarm6_robot_agent()
+            else (
+                self._running_physical_xarm6_robot_agent()
+                if robot == "xarm6"
+                else resource_agent
+            )
         )
         if resource_agent is running_agent:
             is_alive = getattr(resource_agent, "is_alive", None)
@@ -13907,22 +15698,22 @@ class SystemBridge:
         cached_agent = (
             getattr(self, "_ur5e_robot_function_agent", None)
             if robot == "ur5e"
-            else getattr(self, "_xarm6_robot_function_agent", None)
+            else (
+                getattr(self, "_xarm6_robot_function_agent", None)
+                if robot == "xarm6"
+                else None
+            )
         )
         if resource_agent is not running_agent and resource_agent is not cached_agent:
             return None, {}, {}, (
                 f"The physical {robot} Function Execution runtime is unavailable."
             )
+        uncertain_attribute = {
+            "ur5e": "_ur5e_robot_function_state_uncertain",
+            "xarm6": "_xarm6_robot_function_state_uncertain",
+        }.get(robot)
         state_uncertain = bool(
-            getattr(
-                self,
-                (
-                    "_ur5e_robot_function_state_uncertain"
-                    if robot == "ur5e"
-                    else "_xarm6_robot_function_state_uncertain"
-                ),
-                False,
-            )
+            getattr(self, uncertain_attribute, False) if uncertain_attribute else False
         )
         if state_uncertain and robot == "xarm6" and function_name != "move_home":
             return None, {}, {}, (
@@ -13964,27 +15755,59 @@ class SystemBridge:
         if function_name == "pick_approach":
             if held_part not in (None, ""):
                 return None, {}, {}, f"pick_approach requires an empty {robot} gripper."
-            named_error = (
-                self._ur5e_named_position_error(resource_agent, origin_resource_location)
-                if robot == "ur5e"
-                else self._xarm6_named_position_error(
-                    resource_agent,
-                    origin_resource_location,
-                )
-            )
-            if named_error:
-                return None, {}, {}, named_error
-            if robot == "ur5e" and part_name == "MG":
-                recording_path, recording_error = (
-                    self._digital_twin_pick_approach_recording_error(
+            named_positions = getattr(resource_agent, "named_positions", {})
+            if (
+                isinstance(named_positions, dict)
+                and origin_resource_location in named_positions
+            ):
+                named_error = (
+                    self._ur5e_named_position_error(
                         resource_agent,
                         origin_resource_location,
-                        part_name,
+                    )
+                    if robot == "ur5e"
+                    else (
+                        self._xarm6_named_position_error(
+                            resource_agent,
+                            origin_resource_location,
+                        )
+                        if robot == "xarm6"
+                        else self._configured_named_position_error(
+                            resource_agent,
+                            origin_resource_location,
+                        )
                     )
                 )
-                readiness["physical_position_file"] = recording_path
-                if recording_error:
-                    return None, {}, readiness, recording_error
+                if named_error:
+                    return None, {}, {}, named_error
+                readiness["staging_source"] = "named_position"
+            else:
+                readiness["staging_source"] = "computed_cartesian_target"
+            reachability = {
+                str(value)
+                for value in list(
+                    dict(getattr(resource_agent, "static_capabilities", {}) or {}).get(
+                        "reachability"
+                    )
+                    or []
+                )
+                if str(value or "")
+            }
+            if reachability and origin_resource_location not in reachability:
+                return None, {}, readiness, (
+                    f"{origin_resource_location} is outside {robot} "
+                    "static_capabilities.reachability."
+                )
+            recording_path, recording_error = (
+                self._digital_twin_pick_approach_recording_error(
+                    resource_agent,
+                    origin_resource_location,
+                    part_name,
+                )
+            )
+            readiness["physical_position_file"] = recording_path
+            if recording_error:
+                return None, {}, readiness, recording_error
             call_kwargs = {
                 "origin_resource_location": origin_resource_location,
                 "part_name": part_name,
@@ -14018,24 +15841,90 @@ class SystemBridge:
                 "part_name": part_name,
             }
         elif function_name == "place_approach":
-            if str(held_part or "") != part_name:
-                return None, {}, {}, (
-                    f"place_approach part_name does not match the part held by {robot}."
+            active_pick_context = bool(
+                held_part not in (None, "")
+                or task_context.get("part_name") not in (None, "")
+                or task_context.get("origin_resource_location") not in (None, "")
+            )
+            if operator_confirmed_held_part:
+                if held_part not in (None, ""):
+                    return None, {}, {}, (
+                        "operator_confirmed_held_part cannot replace existing RobotAgent "
+                        f"custody; {robot} already records held_part='{held_part}'."
+                    )
+                if active_pick_context:
+                    return None, {}, {}, (
+                        "operator_confirmed_held_part cannot replace an active pick context. "
+                        "Complete or recover that context first."
+                    )
+                readiness.update(
+                    {
+                        "operator_confirmed_held_part": True,
+                        "operator_held_part": part_name,
+                        "move_insert_authorized": False,
+                    }
                 )
-            if gripper_state != "closed":
+            if active_pick_context and str(held_part or "") != part_name:
+                if held_part in (None, ""):
+                    return None, {}, {}, (
+                        f"place_approach has an active pick context for part_name "
+                        f"'{task_context.get('part_name') or part_name}', but {robot} "
+                        f"held_part is empty. Complete pick_grasp before place_approach."
+                    )
+                return None, {}, {}, (
+                    f"place_approach selected part_name '{part_name}', but {robot} "
+                    f"held_part is '{held_part}'. Select part_name '{held_part}'."
+                )
+            if active_pick_context and gripper_state != "closed":
                 return None, {}, {}, (
                     f"place_approach requires {robot} gripper_state 'closed'."
                 )
-            named_error = (
-                self._ur5e_named_position_error(resource_agent, destination_location)
-                if robot == "ur5e"
-                else self._xarm6_named_position_error(
-                    resource_agent,
-                    destination_location,
-                )
+            readiness["independent_commissioning"] = bool(
+                not active_pick_context and not operator_confirmed_held_part
             )
-            if named_error:
-                return None, {}, {}, named_error
+            named_positions = getattr(resource_agent, "named_positions", {})
+            if (
+                isinstance(named_positions, dict)
+                and destination_location in named_positions
+            ):
+                named_error = (
+                    self._ur5e_named_position_error(
+                        resource_agent,
+                        destination_location,
+                    )
+                    if robot == "ur5e"
+                    else (
+                        self._xarm6_named_position_error(
+                            resource_agent,
+                            destination_location,
+                        )
+                        if robot == "xarm6"
+                        else self._configured_named_position_error(
+                            resource_agent,
+                            destination_location,
+                        )
+                    )
+                )
+                if named_error:
+                    return None, {}, {}, named_error
+                readiness["staging_source"] = "named_position"
+            else:
+                readiness["staging_source"] = "computed_cartesian_target"
+            reachability = {
+                str(value)
+                for value in list(
+                    dict(getattr(resource_agent, "static_capabilities", {}) or {}).get(
+                        "reachability"
+                    )
+                    or []
+                )
+                if str(value or "")
+            }
+            if reachability and destination_location not in reachability:
+                return None, {}, readiness, (
+                    f"{destination_location} is outside {robot} "
+                    "static_capabilities.reachability."
+                )
             if destination_location == "assembly_board-v1":
                 board_status, board_error = (
                     self._digital_twin_assembly_board_v1_accepted_status(
@@ -14061,19 +15950,47 @@ class SystemBridge:
                 "part_name": part_name,
             }
         elif function_name == "place_insert":
-            if str(held_part or "") != part_name:
-                return None, {}, {}, (
-                    f"place_insert part_name does not match the part held by {robot}."
+            independent_commissioning = held_part in (None, "")
+            readiness["independent_commissioning"] = independent_commissioning
+            if independent_commissioning and destination_location == "assembly_board-v1":
+                return None, {}, readiness, (
+                    "place_insert at assembly_board-v1 requires a held part and the "
+                    "positioned context from pick_grasp and place_approach. Empty-held "
+                    "release-and-lift commissioning is blocked for assembly insertion."
                 )
-            if gripper_state != "closed":
+            if independent_commissioning:
+                try:
+                    current_z = float(
+                        dict(getattr(resource_agent, "_position", {}) or {})["z"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return None, {}, readiness, (
+                        "Independent place_insert requires a finite current position.z "
+                        "for the 0.08 m retreat."
+                    )
+                if not math.isfinite(current_z):
+                    return None, {}, readiness, (
+                        "Independent place_insert requires a finite current position.z "
+                        "for the 0.08 m retreat."
+                    )
+            if not independent_commissioning and str(held_part or "") != part_name:
+                return None, {}, {}, (
+                    f"place_insert selected part_name '{part_name}', but {robot} "
+                    f"held_part is '{held_part}'. Select part_name '{held_part}'."
+                )
+            if not independent_commissioning and gripper_state != "closed":
                 return None, {}, {}, (
                     f"place_insert requires {robot} gripper_state 'closed'."
                 )
-            if str(task_context.get("destination_location") or "") != destination_location:
+            if (
+                not independent_commissioning
+                and str(task_context.get("destination_location") or "")
+                != destination_location
+            ):
                 return None, {}, {}, (
                     "place_insert destination_location does not match the active place context."
                 )
-            if destination_location == "assembly_board-v1":
+            if not independent_commissioning and destination_location == "assembly_board-v1":
                 board_status, board_error = (
                     self._digital_twin_assembly_board_v1_accepted_status(robot)
                 )
@@ -14087,9 +16004,13 @@ class SystemBridge:
                 )
                 if board_lock_error:
                     return None, {}, readiness, board_lock_error
-            lift_error = self._ur5e_return_height_error(resource_agent, function_name)
-            if lift_error:
-                return None, {}, {}, lift_error
+            if not independent_commissioning:
+                lift_error = self._ur5e_return_height_error(
+                    resource_agent,
+                    function_name,
+                )
+                if lift_error:
+                    return None, {}, {}, lift_error
             call_kwargs = {
                 "destination_location": destination_location,
                 "part_name": part_name,
@@ -14100,7 +16021,11 @@ class SystemBridge:
             named_error = (
                 self._ur5e_named_position_error(resource_agent, "home")
                 if robot == "ur5e"
-                else self._xarm6_named_position_error(resource_agent, "home")
+                else (
+                    self._xarm6_named_position_error(resource_agent, "home")
+                    if robot == "xarm6"
+                    else self._configured_named_position_error(resource_agent, "home")
+                )
             )
             if named_error:
                 return None, {}, {}, named_error
@@ -14111,17 +16036,65 @@ class SystemBridge:
                 cfg,
                 resource_agent,
             )
-        else:
+        elif robot == "xarm6":
             motion_readiness, motion_error = self._digital_twin_xarm6_motion_readiness(
                 target,
                 cfg,
                 resource_agent,
             )
+        else:
+            controller = getattr(resource_agent, "_controller", None)
+            is_usable = getattr(controller, "is_usable", None)
+            controller_ready = controller is not None and (
+                not callable(is_usable) or bool(is_usable())
+            )
+            motion_readiness = {"controller_ready": controller_ready}
+            motion_error = (
+                ""
+                if controller_ready
+                else f"The physical {robot} controller is not ready."
+            )
         readiness.update(motion_readiness)
         if motion_error:
             return None, {}, readiness, motion_error
 
-        if function_name in {"pick_grasp", "place_insert"}:
+        if (
+            robot == "ur5e"
+            and function_name == "place_approach"
+            and destination_location == "assembly_board-v1"
+        ):
+            hard_cap_readiness, hard_cap_error = (
+                self._move_insert_preinsert_hard_caps_readiness(part_name)
+            )
+            readiness.update(hard_cap_readiness)
+            if hard_cap_error:
+                readiness["move_insert_hard_caps_error"] = hard_cap_error
+                if _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.get():
+                    return None, {}, readiness, hard_cap_error
+
+        if (
+            robot == "ur5e"
+            and function_name == "place_approach"
+            and destination_location == "assembly_board-v1"
+            and not bool(readiness.get("independent_commissioning"))
+            and not operator_confirmed_held_part
+        ):
+            pre_staging_readiness, pre_staging_error = (
+                self._physical_ur5e_place_approach_pre_staging_error(
+                    target,
+                    resource_agent,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    motion_readiness=motion_readiness,
+                )
+            )
+            readiness.update(pre_staging_readiness)
+            if pre_staging_error:
+                return None, {}, readiness, pre_staging_error
+
+        if function_name in {"pick_grasp", "place_insert"} and not bool(
+            readiness.get("independent_commissioning")
+        ):
             dependent_pose_readiness, dependent_pose_error = (
                 self._manual_dependent_function_pose_error(
                     target,
@@ -14145,9 +16118,29 @@ class SystemBridge:
                         resource_agent,
                     )
                 )
-            else:
+            elif robot == "xarm6":
                 gripper_readiness, gripper_error = (
                     self._digital_twin_xarm6_gripper_readiness(resource_agent)
+                )
+            else:
+                controller = getattr(resource_agent, "_controller", None)
+                gripper_config = dict(
+                    getattr(resource_agent, "gripper_config", {})
+                    or getattr(controller, "gripper_config", {})
+                    or {}
+                )
+                controller_config = dict(
+                    getattr(resource_agent, "controller_config", {})
+                    or getattr(controller, "controller_config", {})
+                    or {}
+                )
+                configured_gripper = dict(controller_config.get("gripper") or {})
+                gripper_ready = bool(gripper_config or configured_gripper)
+                gripper_readiness = {"gripper_config_ready": gripper_ready}
+                gripper_error = (
+                    ""
+                    if gripper_ready
+                    else f"The physical {robot} gripper configuration is unavailable."
                 )
             readiness.update(gripper_readiness)
             if gripper_error:
@@ -14173,9 +16166,28 @@ class SystemBridge:
                 )
             if robot == "ur5e":
                 perception_ready, perception_message = self.physical_perception_ready()
-            else:
+            elif robot == "xarm6":
                 perception_ready, perception_message = (
                     self._physical_perception_ready_for_xarm6()
+                )
+            else:
+                controller = getattr(resource_agent, "_controller", None)
+                controller_config = dict(
+                    getattr(resource_agent, "controller_config", {})
+                    or getattr(controller, "controller_config", {})
+                    or {}
+                )
+                services = dict(controller_config.get("services") or {})
+                perception_ready = bool(
+                    callable(getattr(controller, "detect_parts", None))
+                    or services.get("detect_all")
+                    or getattr(resource_agent, "perception", None)
+                    or getattr(resource_agent, "vision", None)
+                )
+                perception_message = (
+                    ""
+                    if perception_ready
+                    else f"Physical perception is unavailable for {robot}."
                 )
             if not perception_ready:
                 return None, {}, readiness, perception_message
@@ -14202,6 +16214,19 @@ class SystemBridge:
             if not product_geometry:
                 return None, {}, readiness, (
                     f"No product geometry is configured for part_name '{part_name}'."
+                )
+            if (
+                robot == "ur5e"
+                and function_name == "place_approach"
+                and destination_location == "assembly_board-v1"
+                and readiness.get("move_insert_live_hard_caps")
+            ):
+                product_geometry = deepcopy(product_geometry)
+                product_geometry["move_insert_hard_caps"] = deepcopy(
+                    readiness.get("move_insert_live_hard_caps") or {}
+                )
+                product_geometry["move_insert_hard_caps_sha256"] = str(
+                    readiness.get("move_insert_hard_caps_sha256") or ""
                 )
             if robot == "ur5e" and function_name == "pick_approach" and part_name == "MG":
                 controller = getattr(resource_agent, "_controller", None)
@@ -14259,6 +16284,23 @@ class SystemBridge:
             call_kwargs["product_geometry"] = deepcopy(product_geometry)
             readiness["selected_product"] = selected_product
 
+            if operator_confirmed_held_part:
+                handoff, handoff_readiness, handoff_error = (
+                    self._operator_confirmed_mg_held_part_handoff(
+                        target,
+                        resource_agent,
+                        origin_resource_location=origin_resource_location,
+                        part_name=part_name,
+                        product_geometry=product_geometry,
+                    )
+                )
+                readiness.update(handoff_readiness)
+                if handoff_error:
+                    return None, {}, readiness, handoff_error
+                readiness["operator_confirmed_held_part_handoff"] = deepcopy(
+                    handoff
+                )
+
         return resource_agent, call_kwargs, readiness, ""
 
     async def _digital_twin_robot_function_execution_preflight_async(
@@ -14269,13 +16311,20 @@ class SystemBridge:
         origin_resource_location: str,
         destination_location: str,
         part_name: str,
+        *,
+        operator_confirmed_held_part: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Prepare the selected physical runtime through no-motion preflight."""
         cfg, request_error = self._digital_twin_robot_function_request_error(
             target,
             robot,
             function_name,
-            origin_resource_location,
+            (
+                ""
+                if operator_confirmed_held_part is True
+                and function_name == "place_approach"
+                else origin_resource_location
+            ),
             destination_location,
             part_name,
         )
@@ -14288,6 +16337,25 @@ class SystemBridge:
         if target_error:
             return None, {}, {}, target_error
 
+        if robot not in {"ur5e", "xarm6"}:
+            return await self._digital_twin_robot_function_execution_preflight_prepared_async(
+                target,
+                robot,
+                function_name,
+                origin_resource_location,
+                destination_location,
+                part_name,
+                **(
+                    {
+                        "operator_confirmed_held_part": (
+                            operator_confirmed_held_part
+                        )
+                    }
+                    if operator_confirmed_held_part is not False
+                    else {}
+                ),
+            )
+
         lifecycle_lock = (
             self._get_ur5e_robot_function_agent_lifecycle_lock()
             if robot == "ur5e"
@@ -14295,6 +16363,56 @@ class SystemBridge:
         )
         async with lifecycle_lock:
             if robot == "ur5e":
+                if bool(
+                    getattr(
+                        self,
+                        "_ur5e_move_insert_profile_reload_required",
+                        False,
+                    )
+                ):
+                    cached_agent = getattr(
+                        self,
+                        "_ur5e_robot_function_agent",
+                        None,
+                    )
+                    cached_motion_lock = getattr(
+                        cached_agent,
+                        "_robot_motion_lock",
+                        None,
+                    )
+                    safely_reloadable = bool(
+                        cached_agent is None
+                        or (
+                            str(
+                                getattr(cached_agent, "_current_state", "")
+                                or ""
+                            )
+                            == "idle"
+                            and getattr(cached_agent, "_held_part", None)
+                            in (None, "")
+                            and str(
+                                getattr(cached_agent, "_gripper_state", "")
+                                or ""
+                            )
+                            == "open"
+                            and not dict(
+                                getattr(cached_agent, "_task_ctx", {}) or {}
+                            )
+                            and not (
+                                cached_motion_lock is not None
+                                and cached_motion_lock.locked()
+                            )
+                        )
+                    )
+                    if safely_reloadable:
+                        await self._dispose_ur5e_robot_function_agent()
+                        self._ur5e_move_insert_profile_reload_required = False
+                    elif function_name != "move_home":
+                        return None, {}, {}, (
+                            "The confirmed move_insert profile is waiting for a safe "
+                            "ur5e RobotAgent reload. Complete move_home with the retained "
+                            "agent before starting another Robot Function or Assembly."
+                        )
                 _agent, preparation_error = (
                     await self._ensure_ur5e_robot_function_agent_locked(target, robot)
                 )
@@ -14311,6 +16429,15 @@ class SystemBridge:
                 origin_resource_location,
                 destination_location,
                 part_name,
+                **(
+                    {
+                        "operator_confirmed_held_part": (
+                            operator_confirmed_held_part
+                        )
+                    }
+                    if operator_confirmed_held_part is not False
+                    else {}
+                ),
             )
 
     async def _digital_twin_robot_function_execution_preflight_prepared_async(
@@ -14321,15 +16448,43 @@ class SystemBridge:
         origin_resource_location: str,
         destination_location: str,
         part_name: str,
+        *,
+        operator_confirmed_held_part: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Run blocking ROS readiness probes without blocking the NiceGUI event loop."""
         result: tuple[Any | None, dict[str, Any], dict[str, Any], str] | None = None
         error: Exception | None = None
         finished = threading.Event()
         abandoned = threading.Event()
+        assembly_context = _ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT.get()
+        move_insert_preflight_required = (
+            _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.get()
+        )
+        move_insert_confirmation_preflight = (
+            _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.get()
+        )
+        assembly_requires_move_insert = bool(
+            robot == "ur5e"
+            and (
+                move_insert_preflight_required
+                or (
+                    assembly_context is not None
+                    and assembly_context.get("bridge") is self
+                    and function_name == "pick_approach"
+                )
+            )
+        )
 
         def _worker() -> None:
             nonlocal result, error
+            move_insert_token = _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.set(
+                move_insert_preflight_required
+            )
+            confirmation_token = (
+                _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.set(
+                    move_insert_confirmation_preflight
+                )
+            )
             try:
                 with self._ur5e_robot_function_preflight_lock:
                     result = self._digital_twin_robot_function_execution_preflight(
@@ -14339,10 +16494,56 @@ class SystemBridge:
                         origin_resource_location,
                         destination_location,
                         part_name,
+                        **(
+                            {
+                                "operator_confirmed_held_part": (
+                                    operator_confirmed_held_part
+                                )
+                            }
+                            if operator_confirmed_held_part is not False
+                            else {}
+                        ),
                     )
+                    if result is not None:
+                        resource_agent, call_kwargs, readiness, preflight_error = result
+                        insertion_function = bool(
+                            assembly_context is None
+                            and robot == "ur5e"
+                            and destination_location == "assembly_board-v1"
+                            and function_name in {"place_approach", "place_insert"}
+                            and not bool(readiness.get("independent_commissioning"))
+                            and (
+                                function_name == "place_insert"
+                                or str(
+                                    readiness.get("move_insert_profile_state") or ""
+                                )
+                                in {"ready", "trial_ready"}
+                            )
+                        )
+                        if (
+                            not preflight_error
+                            and resource_agent is not None
+                            and (assembly_requires_move_insert or insertion_function)
+                        ):
+                            insert_readiness, insert_error = (
+                                self._prepare_ur5e_move_insert_client(resource_agent)
+                            )
+                            readiness = {**readiness, **insert_readiness}
+                            result = (
+                                resource_agent,
+                                call_kwargs,
+                                readiness,
+                                insert_error,
+                            )
             except Exception as exc:  # noqa: BLE001 - transport failure to the UI loop.
                 error = exc
             finally:
+                _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.reset(
+                    confirmation_token
+                )
+                _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.reset(
+                    move_insert_token
+                )
                 finished.set()
                 if abandoned.is_set():
                     if error is None:
@@ -14391,9 +16592,10 @@ class SystemBridge:
         origin_resource_location: str = "",
         destination_location: str = "",
         part_name: str = "",
+        operator_confirmed_held_part: bool = False,
     ) -> dict[str, Any]:
-        """Report target-specific no-motion readiness for one exact UR5e function."""
-        _agent, _call_kwargs, readiness, error = (
+        """Report target-specific no-motion readiness for one configured robot function."""
+        resource_agent, _call_kwargs, readiness, error = (
             await self._digital_twin_robot_function_execution_preflight_async(
                 target,
                 robot,
@@ -14401,9 +16603,34 @@ class SystemBridge:
                 origin_resource_location,
                 destination_location,
                 part_name,
+                **(
+                    {
+                        "operator_confirmed_held_part": (
+                            operator_confirmed_held_part
+                        )
+                    }
+                    if operator_confirmed_held_part is not False
+                    else {}
+                ),
             )
         )
         ready = not error
+        if ready and resource_agent is not None:
+            move_insert_readiness, move_insert_error = (
+                self._digital_twin_robot_function_move_insert_readiness(
+                    target,
+                    robot,
+                    function_name,
+                    destination_location,
+                    part_name,
+                    resource_agent,
+                    readiness,
+                )
+            )
+            readiness.update(move_insert_readiness)
+            if move_insert_error:
+                error = move_insert_error
+                ready = False
         ready_message = error or f"{function_name} is ready for operator confirmation."
         if ready and function_name == "pick_approach" and part_name == "MG":
             ready_message = (
@@ -14414,6 +16641,42 @@ class SystemBridge:
             ready_message = (
                 "pick_grasp is ready to close the stock RG2 on the STL-grounded smooth "
                 "raised hub and lift without another descent."
+            )
+        elif ready and function_name == "place_approach" and readiness.get(
+            "operator_confirmed_held_part"
+        ):
+            ready_message = (
+                f"place_approach is ready to adopt and transport operator-confirmed "
+                f"{part_name} using the confirmed pick_approach.descend handoff. The "
+                f"checkbox is the custody assertion that {part_name} is physically clamped; "
+                "no RG2 command-position or load-sensing evidence is required."
+            )
+            if readiness.get("move_insert_trial_context_ready") is False:
+                ready_message += (
+                    " place_approach does not require move_insert. Supervised Test "
+                    "move_insert remains separately blocked until its protected recipe "
+                    "and calibration are ready. Assembly remains strict."
+                )
+            else:
+                ready_message += (
+                    " Successful completion retains custody for Supervised Test "
+                    "move_insert. Assembly remains strict."
+                )
+        elif ready and function_name == "place_approach" and readiness.get(
+            "independent_commissioning"
+        ):
+            ready_message = (
+                "place_approach is ready for independent operator confirmation with "
+                f"{robot} held_part empty; this tests the freshly computed target and "
+                "optional confirmed robot correction without a part."
+            )
+        elif ready and function_name == "place_insert" and readiness.get(
+            "independent_commissioning"
+        ):
+            ready_message = (
+                "place_insert is ready for independent operator confirmation with "
+                f"{robot} held_part empty; it will open the empty gripper and retreat "
+                "0.08 m without advancing the pick/place sequence."
             )
         return {
             "success": ready,
@@ -14426,6 +16689,12424 @@ class SystemBridge:
             "part_name": part_name,
             "message": ready_message,
             **readiness,
+        }
+
+    @staticmethod
+    def _move_insert_profile_helpers() -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
+        """Load the shared move_insert resolver, hash, and timeout helpers."""
+        from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (  # noqa: PLC0415 - keep ROS-adjacent controller imports lazy.
+            derive_move_insert_timeout_sec,
+            move_insert_profile_sha256,
+            resolve_move_insert_profile,
+        )
+
+        return (
+            resolve_move_insert_profile,
+            move_insert_profile_sha256,
+            derive_move_insert_timeout_sec,
+        )
+
+    @staticmethod
+    def _move_insert_boundary_helper() -> Callable[..., tuple[dict[str, Any], str]]:
+        """Load the exact place_approach to place_insert boundary validator."""
+        from cais_spade_llm.resources.robot.robot_task_runtime import (  # noqa: PLC0415 - keep ROS-adjacent runtime imports lazy.
+            _validated_move_insert_boundary,
+        )
+
+        return _validated_move_insert_boundary
+
+    def _get_move_insert_profile_edit_lock(self) -> threading.Lock:
+        """Return the lock serializing move_insert profile file edits."""
+        lock = getattr(self, "_move_insert_profile_edit_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._move_insert_profile_edit_lock = lock
+        return lock
+
+    def _get_robot_function_execution_lock(self) -> threading.Lock:
+        """Return the lock shared by physical motion, startup, and profile edits."""
+        lock = getattr(self, "_ur5e_robot_function_execution_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._ur5e_robot_function_execution_lock = lock
+        return lock
+
+    def _get_robot_function_preflight_lock(self) -> threading.Lock:
+        """Return the lock serializing physical Robot Function preflight."""
+        lock = getattr(self, "_ur5e_robot_function_preflight_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._ur5e_robot_function_preflight_lock = lock
+        return lock
+
+    @staticmethod
+    def _move_insert_request_base(
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Return the stable public fields for one move_insert settings request."""
+        return {
+            "success": False,
+            "target": target,
+            "robot": robot,
+            "execution_mode": "physical",
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "adjustable_fields": {},
+            "shared": {},
+            "override": {},
+            "override_metadata": {},
+            "effective": {},
+            "profile_sha256": "",
+            "profile_state": "invalid",
+            "validated": False,
+            "editable": False,
+            "derived_timeout_sec": None,
+            "hard_caps": {},
+            "hard_caps_sha256": "",
+            "live": {},
+        }
+
+    def _digital_twin_move_insert_request_error(
+        self,
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+    ) -> str:
+        """Validate exact public tokens accepted by the UR5e move_insert settings API."""
+        _cfg, error = self._digital_twin_robot_function_request_error(
+            target,
+            robot,
+            "place_insert",
+            "",
+            destination_location,
+            part_name,
+        )
+        if error:
+            return error
+        if robot != "ur5e":
+            return "move_insert settings are available only for the exact robot ur5e."
+        if destination_location != "assembly_board-v1":
+            return (
+                "move_insert settings require the exact destination_location "
+                "assembly_board-v1."
+            )
+        return ""
+
+    def _digital_twin_move_insert_edit_lifecycle_error(self) -> str:
+        """Return why move_insert settings cannot be changed now."""
+        demonstration_error = self._insertion_demonstration_blocking_error()
+        if demonstration_error:
+            return demonstration_error
+        pending_review_error = self._move_insert_pending_review_error(
+            allow_terminal_recovery=True,
+        )
+        if pending_review_error:
+            return pending_review_error
+        if bool(getattr(self, "_starting", False)):
+            return "Wait for CAIS system startup to finish before changing move_insert settings."
+        if bool(getattr(self, "_stopping", False)):
+            return "Wait for CAIS system shutdown to finish before changing move_insert settings."
+        if bool(getattr(self, "system_running", False)):
+            return "Stop the CAIS system before changing move_insert settings."
+        return ""
+
+    def _digital_twin_move_insert_edit_busy_error(self) -> str:
+        """Return why direct UR5e control prevents a profile edit."""
+        reset_lock = getattr(self, "_ur5e_rtde_reset_lock", None)
+        if reset_lock is not None and reset_lock.locked():
+            return "Wait for Reset UR5e RTDE to finish before changing move_insert settings."
+        smooth_session = getattr(self, "_teleop_smooth_session", None)
+        if (
+            isinstance(smooth_session, dict)
+            and str(smooth_session.get("robot") or "") == "ur5e"
+        ):
+            return "Release ur5e Cartesian Smooth Hold before changing move_insert settings."
+        cartesian_modes = getattr(self, "_teleop_cartesian_modes", {})
+        if (
+            isinstance(cartesian_modes, dict)
+            and str(cartesian_modes.get("ur5e") or "off") != "off"
+        ):
+            return "Turn off ur5e Cartesian mode before changing move_insert settings."
+        rtde_status = dict(self._ur5e_rtde_trajectory_status() or {})
+        rtde_state = str(rtde_status.get("state") or "").strip().lower()
+        if rtde_state in {"checking", "executing"}:
+            motion_kind = str(rtde_status.get("motion_kind") or "motion").strip()
+            return (
+                f"UR5e RTDE {motion_kind or 'motion'} is {rtde_state}; wait before "
+                "changing move_insert settings."
+            )
+        return ""
+
+    def _digital_twin_move_insert_cached_agent_error(self) -> str:
+        """Require a safely reloadable cached UR5e RobotAgent before an edit."""
+        if bool(getattr(self, "_ur5e_robot_function_state_uncertain", False)):
+            return (
+                "Cannot change move_insert settings while the manual ur5e physical "
+                "state is uncertain. Inspect and recover the robot first."
+            )
+        agent = getattr(self, "_ur5e_robot_function_agent", None)
+        if agent is None:
+            return ""
+        current_state = str(getattr(agent, "_current_state", "") or "").strip()
+        held_part = getattr(agent, "_held_part", None)
+        gripper_state = str(
+            getattr(agent, "_gripper_state", "") or ""
+        ).strip()
+        task_context = dict(getattr(agent, "_task_ctx", {}) or {})
+        if (
+            current_state == "idle"
+            and held_part in (None, "")
+            and gripper_state == "open"
+            and not task_context
+        ):
+            return ""
+        return (
+            "Cannot change move_insert settings while the cached manual ur5e "
+            f"RobotAgent is in state '{current_state or '<empty>'}' with gripper_state "
+            f"'{gripper_state or '<empty>'}'. Complete move_home with an empty gripper "
+            "first."
+        )
+
+    @staticmethod
+    def _move_insert_profile_from_resource(
+        resource: dict[str, Any],
+        robot: str = "ur5e",
+    ) -> tuple[dict[str, Any], str]:
+        """Return one exact robot real.controller.parts_tuning.move_insert object."""
+        if robot not in {"ur5e", "xarm6"}:
+            return {}, f"Unrecognized exact move_insert robot: {robot or '<empty>'}."
+        filename = "robot_ur5e.json" if robot == "ur5e" else "robot_xarm6.json"
+        robot_resource = resource.get(robot)
+        if not isinstance(robot_resource, dict):
+            return {}, f"{filename} is missing the {robot} object"
+        real = robot_resource.get("real")
+        if not isinstance(real, dict):
+            return {}, f"{filename} is missing {robot}.real"
+        controller = real.get("controller")
+        if not isinstance(controller, dict):
+            return {}, f"{filename} is missing {robot}.real.controller"
+        parts_tuning = controller.get("parts_tuning")
+        if not isinstance(parts_tuning, dict):
+            return {}, (
+                f"{filename} is missing {robot}.real.controller.parts_tuning"
+            )
+        profile = parts_tuning.get("move_insert")
+        if not isinstance(profile, dict):
+            return {}, (
+                f"{filename} is missing "
+                f"{robot}.real.controller.parts_tuning.move_insert"
+            )
+        return profile, ""
+
+    @staticmethod
+    def _move_insert_parts_tuning_from_resource(
+        resource: dict[str, Any],
+        robot: str = "ur5e",
+    ) -> dict[str, Any]:
+        if robot not in {"ur5e", "xarm6"}:
+            return {}
+        robot_resource = dict(resource.get(robot) or {})
+        real = dict(robot_resource.get("real") or {})
+        controller = dict(real.get("controller") or {})
+        return dict(controller.get("parts_tuning") or {})
+
+    @staticmethod
+    def _move_insert_resource_snapshot(
+        robot: str = "ur5e",
+    ) -> tuple[dict[str, Any], str, str]:
+        """Read one exact robot resource and its matching whole-file digest."""
+        if robot == "ur5e":
+            path = _UR5E_RESOURCE
+        elif robot == "xarm6":
+            path = _XARM6_RESOURCE
+        else:
+            return {}, "", f"Unrecognized exact move_insert robot: {robot or '<empty>'}."
+        try:
+            text = path.read_text(encoding="utf-8")
+            loaded = json.loads(text)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return {}, "", f"Could not read {path.name}: {exc}"
+        if not isinstance(loaded, dict):
+            return {}, "", f"{path.name} must contain a JSON object"
+        return dict(loaded), sha256_text(text), ""
+
+    @staticmethod
+    def _atomic_write_move_insert_resource(
+        resource: dict[str, Any],
+        robot: str = "ur5e",
+    ) -> None:
+        """Atomically replace one exact robot resource file."""
+        if robot == "ur5e":
+            path = _UR5E_RESOURCE
+        elif robot == "xarm6":
+            path = _XARM6_RESOURCE
+        else:
+            raise ValueError(
+                f"Unrecognized exact move_insert robot: {robot or '<empty>'}."
+            )
+        temporary_path: Path | None = None
+        original_mode = path.stat().st_mode & 0o777
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.tmp.",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                json.dump(resource, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary_path, original_mode)
+            os.replace(temporary_path, path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                with suppress(OSError):
+                    temporary_path.unlink()
+
+    @staticmethod
+    def _move_insert_hard_caps(
+        part_name: str = "",
+    ) -> tuple[dict[str, float | None], str]:
+        """Read shared caps plus only the selected exact-part YAML overlay."""
+        config = ros2_processes.load_hardware_arms_config(_PROJECT_ROOT)
+        caps: dict[str, float | None] = {}
+        invalid: list[str] = []
+        for cap_name in _MOVE_INSERT_REQUIRED_HARD_CAPS:
+            raw_value = ros2_processes.hardware_arms_value(
+                config,
+                ("ur5e", "rtde", cap_name),
+                None,
+            )
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                value = math.nan
+            allow_zero = cap_name == "insert_max_spiral_radius_m"
+            if (
+                isinstance(raw_value, bool)
+                or not math.isfinite(value)
+                or (value < 0.0 if allow_zero else value <= 0.0)
+            ):
+                caps[cap_name] = None
+                invalid.append(cap_name)
+            else:
+                caps[cap_name] = value
+        exact_part_overlay_present = False
+        if part_name in _MOVE_INSERT_SUPPORTED_PARTS:
+            missing_overlay = object()
+            raw_overlay = ros2_processes.hardware_arms_value(
+                config,
+                ("ur5e", "rtde", part_name),
+                missing_overlay,
+            )
+            exact_part_overlay_present = raw_overlay is not missing_overlay
+            if exact_part_overlay_present and not isinstance(raw_overlay, Mapping):
+                return caps, f"Exact {part_name} insertion hard caps are invalid."
+            if isinstance(raw_overlay, Mapping):
+                overlay = dict(raw_overlay)
+                recognized_cap_names = dict.fromkeys(
+                    (
+                        *_MOVE_INSERT_REQUIRED_HARD_CAPS,
+                        *_MOVE_INSERT_MG_TACTILE_POLICY_CAPS,
+                    )
+                )
+                for cap_name in recognized_cap_names:
+                    if cap_name not in overlay:
+                        continue
+                    raw_value = overlay[cap_name]
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError, OverflowError):
+                        value = math.nan
+                    allow_zero = cap_name == "insert_max_spiral_radius_m"
+                    if (
+                        isinstance(raw_value, bool)
+                        or not math.isfinite(value)
+                        or (value < 0.0 if allow_zero else value <= 0.0)
+                    ):
+                        caps[cap_name] = None
+                        if cap_name not in invalid:
+                            invalid.append(cap_name)
+                    else:
+                        caps[cap_name] = value
+                advanced_fields_present = [
+                    name in overlay
+                    for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+                ]
+                if any(advanced_fields_present) and not all(
+                    advanced_fields_present
+                ):
+                    for cap_name, present in zip(
+                        _MOVE_INSERT_MG_TACTILE_POLICY_CAPS,
+                        advanced_fields_present,
+                        strict=True,
+                    ):
+                        if not present:
+                            caps[cap_name] = None
+                            if cap_name not in invalid:
+                                invalid.append(cap_name)
+        if invalid:
+            return caps, (
+                f"Insertion hard caps for {part_name or 'shared'} are missing or invalid: "
+                + ", ".join(invalid)
+            )
+        ratios = (
+            "insert_relief_axial_force_ratio",
+            "insert_relief_reverse_force_ratio",
+            "insert_relief_clear_hysteresis_ratio",
+            "insert_relief_search_force_ratio",
+            "insert_relief_search_speed_ratio",
+        )
+        invalid_ratios = [
+            name for name in ratios if float(caps[name]) >= 1.0
+        ]
+        if invalid_ratios:
+            return caps, (
+                "Insertion relief ratios must be less than 1: "
+                + ", ".join(invalid_ratios)
+            )
+        if float(caps["insert_max_relief_cycles"]) != 3.0:
+            return caps, (
+                "insert_max_relief_cycles must equal the protected policy value 3"
+            )
+        advanced_policy_present = all(
+            caps.get(name) is not None
+            for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+        )
+        if exact_part_overlay_present and advanced_policy_present:
+            if not float(caps["insert_max_disengagement_cycles"]).is_integer():
+                return caps, (
+                    "insert_max_disengagement_cycles must be a positive whole number"
+                )
+            if float(caps["insert_max_contact_search_radius_m"]) < float(
+                caps["insert_max_spiral_radius_m"]
+            ):
+                return caps, (
+                    "insert_max_contact_search_radius_m must be at least "
+                    "insert_max_spiral_radius_m"
+                )
+            if float(caps["insert_search_peck_retreat_m"]) >= float(
+                caps["insert_max_travel_m"]
+            ):
+                return caps, (
+                    "insert_search_peck_retreat_m must be below insert_max_travel_m"
+                )
+            if float(caps["insert_search_peck_interval_sec"]) >= float(
+                caps["insert_max_timeout_sec"]
+            ):
+                return caps, (
+                    "insert_search_peck_interval_sec must be below insert_max_timeout_sec"
+                )
+        if float(caps["insert_relief_backoff_step_m"]) > float(
+            caps["insert_max_relief_retreat_m"]
+        ):
+            return caps, (
+                "insert_relief_backoff_step_m exceeds insert_max_relief_retreat_m"
+            )
+        for dwell_name in (
+            "insert_relief_unload_dwell_sec",
+            "insert_relief_clear_dwell_sec",
+        ):
+            if float(caps[dwell_name]) >= float(
+                caps["insert_relief_timeout_sec"]
+            ):
+                return caps, (
+                    f"{dwell_name} must be below insert_relief_timeout_sec"
+                )
+        if float(caps["insert_soft_filter_window_sec"]) > float(
+            caps["insert_soft_overload_hold_sec"]
+        ):
+            return caps, (
+                "insert_soft_filter_window_sec exceeds "
+                "insert_soft_overload_hold_sec"
+            )
+        return caps, ""
+
+    @staticmethod
+    def _move_insert_hard_caps_sha256(caps: dict[str, Any]) -> str:
+        """Hash the exact protected caps bound to one learned recipe."""
+        return SystemBridge._move_insert_canonical_sha256(
+            {
+                cap_name: float(value)
+                for cap_name, value in sorted(caps.items())
+                if value is not None
+            }
+        )
+
+    @staticmethod
+    def _move_insert_learning_policy(
+        caps: dict[str, Any],
+        part_name: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        """Build the exact commissioned learning and overload-relief policy."""
+        try:
+            policy = {
+                "learning_policy_version": _MOVE_INSERT_LEARNING_POLICY_VERSION,
+                "axial_force_sign_convention": "compression_negative_dot",
+                "force_filter": "time_window_median",
+                "contact_hold_sec": _MOVE_INSERT_CONTACT_HOLD_SEC,
+                "torque_reference": "active_tcp",
+                "limit_policy": "reject_not_clip",
+                "relief_sequence": "unload_then_bounded_micro_backoff",
+                "hard_limit_policy": "immediate_stop",
+                "demonstration_speed_policy": "diagnostic_only",
+                "rebound_policy": (
+                    "final_saved_depth_within_tolerance_of_post_contact_maximum"
+                ),
+                "force_depth_profile_points": (
+                    _MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS
+                ),
+                "axial_soft_overload_policy": (
+                    "learned_and_profile_exceedance_with_stalled_progress_"
+                    "guarded_below_hard_cap"
+                ),
+                "engagement_policy": (
+                    "sustained_axial_progress_within_force_depth_profile"
+                ),
+                "seating_policy": (
+                    "target_depth_stationary_stable_force_within_force_depth_profile"
+                ),
+                "force_uncertainty_floor_n": (
+                    _MOVE_INSERT_FORCE_UNCERTAINTY_FLOOR_N
+                ),
+                "torque_uncertainty_floor_nm": (
+                    _MOVE_INSERT_TORQUE_UNCERTAINTY_FLOOR_NM
+                ),
+                **{
+                    name: float(caps[name])
+                    for name in _MOVE_INSERT_RELIEF_POLICY_CAPS
+                },
+            }
+            if all(
+                caps.get(name) is not None
+                for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+            ):
+                policy.update(
+                    {
+                        "tactile_center_policy": (
+                            "deepest_stable_progress_then_lowest_normalized_lateral_load"
+                        ),
+                        "expanded_search_policy": (
+                            "local_then_staged_3mm_5mm_10mm_low_preload"
+                        ),
+                        "cocked_recovery_sequence": (
+                            "unload_then_exact_pre_insert_withdrawal_recenter_retare_retry"
+                        ),
+                        "disengagement_lateral_clearance_policy": (
+                            "search_boundary_plus_start_position_tolerance"
+                        ),
+                        "search_peck_policy": (
+                            "stalled_spiral_bounded_axial_unload_then_low_preload_recontact"
+                        ),
+                        **{
+                            name: float(caps[name])
+                            for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+                        },
+                    }
+                )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return {}, f"Insertion relief policy is incomplete: {exc}"
+        return policy, ""
+
+    @staticmethod
+    def _move_insert_learning_policy_sha256(
+        policy: dict[str, Any],
+    ) -> str:
+        """Hash the exact commissioned learning and overload-relief policy."""
+        return SystemBridge._move_insert_canonical_sha256(policy)
+
+    def _move_insert_settings_details(
+        self,
+        resource: dict[str, Any],
+        part_name: str,
+        *,
+        robot: str = "ur5e",
+        require_qualification: bool = True,
+    ) -> dict[str, Any]:
+        """Resolve one selected profile and its offline hard-cap validation."""
+        base: dict[str, Any] = {
+            "adjustable_fields": {},
+            "shared": {},
+            "override": {},
+            "override_metadata": {},
+            "effective": {},
+            "profile_sha256": "",
+            "profile_state": "invalid",
+            "validated": False,
+            "derived_timeout_sec": None,
+            "hard_caps": {},
+        }
+        profile, profile_error = self._move_insert_profile_from_resource(
+            resource,
+            robot,
+        )
+        if profile_error:
+            return {**base, "profile_state": "incomplete", "message": profile_error}
+
+        resolve_profile, profile_hash, derive_timeout = (
+            self._move_insert_profile_helpers()
+        )
+        selected_hash, hash_error = profile_hash(profile, part_name)
+        base["profile_sha256"] = selected_hash
+        raw_overrides = profile.get("part_overrides")
+        selected_override = (
+            dict(raw_overrides.get(part_name) or {})
+            if isinstance(raw_overrides, dict)
+            and isinstance(raw_overrides.get(part_name), dict)
+            else {}
+        )
+        base["shared"] = {
+            field: deepcopy(value)
+            for field, value in profile.items()
+            if field != "part_overrides"
+        }
+        base["override"] = {
+            field: deepcopy(selected_override[field])
+            for field in _MOVE_INSERT_OVERRIDE_FIELDS
+            if field in selected_override
+        }
+        base["override_metadata"] = {
+            field: deepcopy(selected_override[field])
+            for field in _MOVE_INSERT_OVERRIDE_METADATA_FIELDS
+            if field in selected_override
+        }
+
+        caps, caps_error = self._move_insert_hard_caps(part_name)
+        base["hard_caps"] = caps
+        base["adjustable_fields"] = {
+            "insertion_force_n": {
+                "minimum": 0.0,
+                "exclusive_minimum": True,
+                "maximum": caps.get("insert_max_insertion_force_n"),
+                "unit": "N",
+            },
+            "spiral_radius_m": {
+                "minimum": 0.0,
+                "exclusive_minimum": False,
+                "maximum": caps.get("insert_max_spiral_radius_m"),
+                "unit": "m",
+            },
+        }
+        if hash_error:
+            return {**base, "message": hash_error}
+
+        parts_tuning = self._move_insert_parts_tuning_from_resource(resource, robot)
+        try:
+            resolved = dict(
+                resolve_profile(
+                    parts_tuning,
+                    part_name,
+                    require_qualification=require_qualification,
+                )
+            )
+        except TypeError:
+            # Compatibility with an installed controller package from before the
+            # supervised-trial resolver flag. This local snapshot never authorizes
+            # normal execution or writes validated_parts.
+            if require_qualification:
+                resolved = dict(resolve_profile(parts_tuning, part_name))
+            else:
+                trial_tuning = deepcopy(parts_tuning)
+                trial_profile = dict(trial_tuning.get("move_insert") or {})
+                validated_parts = list(trial_profile.get("validated_parts") or [])
+                if part_name not in validated_parts:
+                    validated_parts.append(part_name)
+                trial_profile["validated_parts"] = validated_parts
+                trial_tuning["move_insert"] = trial_profile
+                resolved = dict(resolve_profile(trial_tuning, part_name))
+        if not bool(resolved.get("success")):
+            message = str(resolved.get("message") or "move_insert profile is invalid")
+            state = "invalid"
+            if part_name in _MOVE_INSERT_UNSUPPORTED_PARTS or part_name not in (
+                *_MOVE_INSERT_SUPPORTED_PARTS,
+                *_MOVE_INSERT_UNSUPPORTED_PARTS,
+            ):
+                state = "unsupported"
+            elif "not commissioned" in message:
+                state = "not_commissioned"
+            elif "missing" in message:
+                state = "incomplete"
+            return {**base, "profile_state": state, "message": message}
+
+        effective = {
+            "part_name": str(resolved.get("part_name") or part_name),
+            "calibration_id": str(resolved.get("calibration_id") or ""),
+            "shared_calibration_id": str(
+                resolved.get("shared_calibration_id") or ""
+            ),
+            "override_calibration_id": resolved.get("override_calibration_id"),
+            **{
+                field: float(resolved[field])
+                for field in _MOVE_INSERT_EFFECTIVE_FIELDS
+            },
+        }
+        effective["demonstration_recipe"] = deepcopy(
+            dict(resolved.get("demonstration_recipe") or {})
+        )
+        if require_qualification:
+            effective["qualification"] = deepcopy(
+                dict(resolved.get("qualification") or {})
+            )
+        base["effective"] = effective
+        if caps_error:
+            return {**base, "profile_state": "incomplete", "message": caps_error}
+        base["hard_caps_sha256"] = self._move_insert_hard_caps_sha256(caps)
+
+        demonstration_recipe = dict(effective.get("demonstration_recipe") or {})
+        if demonstration_recipe:
+            expected_caps_sha256 = self._move_insert_hard_caps_sha256(caps)
+            if (
+                demonstration_recipe.get("hard_caps") != caps
+                or demonstration_recipe.get("hard_caps_sha256")
+                != expected_caps_sha256
+            ):
+                return {
+                    **base,
+                    "profile_state": "invalid",
+                    "message": (
+                        "The learned move_insert recipe was recorded under different "
+                        "protected hard caps. Use Reanalyze Saved Recording under "
+                        f"the installed exact {part_name} ceilings. Another manual demonstration "
+                        "is unnecessary when the preserved trace remains compatible."
+                    ),
+                }
+            effective["force_depth_profile"] = deepcopy(
+                demonstration_recipe.get("force_depth_profile") or {}
+            )
+            effective["hard_caps_sha256"] = expected_caps_sha256
+            expected_policy, policy_error = self._move_insert_learning_policy(
+                caps,
+                part_name,
+            )
+            expected_policy_sha256 = (
+                self._move_insert_learning_policy_sha256(expected_policy)
+                if not policy_error
+                else ""
+            )
+            if (
+                policy_error
+                or demonstration_recipe.get("learning_policy")
+                != expected_policy
+                or demonstration_recipe.get("learning_policy_sha256")
+                != expected_policy_sha256
+            ):
+                return {
+                    **base,
+                    "profile_state": "invalid",
+                    "message": (
+                        "The learned move_insert recipe was recorded under a "
+                        "different protected learning or overload-relief policy. "
+                        "Use Reanalyze Saved Recording. Another manual demonstration "
+                        "is unnecessary when the preserved trace remains compatible."
+                    ),
+                }
+
+        strict_soft_limit_fields = {
+            "max_axial_force_n",
+            "max_lateral_force_n",
+            "max_torque_nm",
+        }
+        exceeded = []
+        for field, cap_name in _MOVE_INSERT_HARD_CAPS.items():
+            value = float(effective[field])
+            cap = float(caps[cap_name])
+            violates_cap = (
+                value >= cap
+                if field in strict_soft_limit_fields
+                else value > cap
+            )
+            if violates_cap:
+                relation = (
+                    "must remain strictly below"
+                    if field in strict_soft_limit_fields
+                    else "exceeds"
+                )
+                exceeded.append(
+                    f"{field}={value:.9g} {relation} "
+                    f"{cap_name}={cap:.9g}"
+                )
+        if exceeded:
+            return {
+                **base,
+                "profile_state": "invalid",
+                "message": "move_insert profile exceeds certified hard caps: " + "; ".join(exceeded),
+            }
+
+        derived_timeout_sec, timeout_error = derive_timeout(
+            {"x": 0.0, "y": 0.0, "z": 0.0},
+            {"x": 0.0, "y": 0.0, "z": effective["pre_insert_offset_m"]},
+            {"x": 0.0, "y": 0.0, "z": 1.0},
+            effective,
+            part_name=part_name,
+            insert_max_timeout_sec=caps["insert_max_timeout_sec"],
+        )
+        if timeout_error:
+            return {**base, "message": timeout_error}
+        base["derived_timeout_sec"] = float(derived_timeout_sec)
+        timeout_cap = float(caps["insert_max_timeout_sec"])
+        if derived_timeout_sec > timeout_cap:
+            return {
+                **base,
+                "message": (
+                    f"derived move_insert timeout {derived_timeout_sec:.9g}s exceeds "
+                    f"insert_max_timeout_sec={timeout_cap:.9g}s"
+                ),
+            }
+        return {
+            **base,
+            "validated": True,
+            "profile_state": "ready" if require_qualification else "trial_ready",
+            "message": f"move_insert profile is ready for {part_name}.",
+        }
+
+    def _digital_twin_move_insert_trial_settings(
+        self,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Resolve the protected recipe without treating it as production-qualified."""
+        resource, _source_sha256, read_error = self._move_insert_resource_snapshot(
+            "ur5e"
+        )
+        if read_error:
+            return {
+                "success": False,
+                "validated": False,
+                "profile_state": "incomplete",
+                "message": read_error,
+            }
+        details = self._move_insert_settings_details(
+            resource,
+            part_name,
+            require_qualification=False,
+        )
+        return {"success": True, **details}
+
+    def _move_insert_preinsert_hard_caps_readiness(
+        self,
+        part_name: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        """Verify the live hard caps needed before physical pre-insertion motion."""
+        selected_part_name = str(part_name or "")
+        preinsert_cap_names = (
+            "insert_max_travel_m",
+            "insert_start_position_tolerance_m",
+            "insert_start_orientation_tolerance_rad",
+            "insert_max_timeout_sec",
+        )
+        offline_caps, caps_error = self._move_insert_hard_caps(selected_part_name)
+        readiness: dict[str, Any] = {
+            "move_insert_hard_caps": {},
+            "move_insert_live_hard_caps": {},
+            "move_insert_hard_caps_sha256": "",
+        }
+        if caps_error:
+            return readiness, caps_error
+
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        try:
+            status_age_sec = time.time() - float(status.get("updated_at"))
+        except (TypeError, ValueError, OverflowError):
+            status_age_sec = math.inf
+        readiness["move_insert_status_age_sec"] = status_age_sec
+        if (
+            not math.isfinite(status_age_sec)
+            or status_age_sec < -0.5
+            or status_age_sec > 3.0
+        ):
+            return readiness, (
+                "UR5e move_insert hard-cap status is not fresh before "
+                "place_approach. Click Repair Hardware Stack and retry."
+            )
+
+        live_cap_source = status
+        status_caps_sha256 = ""
+        advanced_policy_present = bool(
+            selected_part_name
+            and all(
+                offline_caps.get(name) is not None
+                for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+            )
+        )
+        if advanced_policy_present:
+            exact_part_caps = dict(
+                status.get("insert_exact_part_hard_caps") or {}
+            )
+            exact_part_caps_errors = dict(
+                status.get("insert_exact_part_hard_caps_error") or {}
+            )
+            exact_part_caps_sha256 = dict(
+                status.get("insert_exact_part_hard_caps_sha256") or {}
+            )
+            if selected_part_name in exact_part_caps:
+                exact_error = str(
+                    exact_part_caps_errors.get(selected_part_name) or ""
+                )
+                if exact_error:
+                    return readiness, (
+                        f"UR5e move_insert live exact {selected_part_name} hard caps "
+                        f"are invalid: {exact_error}"
+                    )
+                live_cap_source = dict(
+                    exact_part_caps.get(selected_part_name) or {}
+                )
+                status_caps_sha256 = str(
+                    exact_part_caps_sha256.get(selected_part_name) or ""
+                )
+            elif selected_part_name == "MG":
+                mg_caps_error = str(
+                    status.get("insert_MG_hard_caps_error") or ""
+                )
+                if mg_caps_error:
+                    return readiness, (
+                        "UR5e move_insert live exact MG hard caps are invalid: "
+                        f"{mg_caps_error}"
+                    )
+                live_cap_source = dict(status.get("insert_MG_hard_caps") or {})
+                status_caps_sha256 = str(
+                    status.get("insert_MG_hard_caps_sha256") or ""
+                )
+            else:
+                return readiness, (
+                    "UR5e move_insert live exact-part hard caps are missing for "
+                    f"{selected_part_name}."
+                )
+
+        cap_names = (
+            (
+                *_MOVE_INSERT_REQUIRED_HARD_CAPS,
+                *_MOVE_INSERT_MG_TACTILE_POLICY_CAPS,
+            )
+            if selected_part_name and advanced_policy_present
+            else (
+                _MOVE_INSERT_REQUIRED_HARD_CAPS
+                if selected_part_name
+                else preinsert_cap_names
+            )
+        )
+        verified_caps: dict[str, float] = {}
+        for cap_name in cap_names:
+            raw_live_value = live_cap_source.get(cap_name)
+            try:
+                live_value = float(raw_live_value)
+                offline_value = float(offline_caps[cap_name])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return readiness, (
+                    f"UR5e move_insert live hard cap {cap_name} is missing or invalid."
+                )
+            if (
+                isinstance(raw_live_value, bool)
+                or not math.isfinite(live_value)
+                or live_value <= 0.0
+                or not math.isclose(
+                    live_value,
+                    offline_value,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            ):
+                return readiness, (
+                    f"UR5e move_insert live {cap_name}={raw_live_value!r} does not "
+                    f"match Hardware Stack YAML {offline_value:.9g}."
+                )
+            verified_caps[cap_name] = live_value
+        verified_caps_sha256 = self._move_insert_hard_caps_sha256(
+            verified_caps
+        )
+        if status_caps_sha256 and status_caps_sha256 != verified_caps_sha256:
+            return readiness, (
+                f"UR5e move_insert live exact {selected_part_name} "
+                "hard_caps_sha256 does not match the verified cap values."
+            )
+        readiness.update(
+            {
+                "move_insert_hard_caps": deepcopy(verified_caps),
+                "move_insert_live_hard_caps": verified_caps,
+                "move_insert_hard_caps_sha256": verified_caps_sha256,
+            }
+        )
+        return readiness, ""
+
+    def _digital_twin_move_insert_live_readiness(  # noqa: C901 - explicit live safety gates.
+        self,
+        settings: dict[str, Any],
+        resource_agent: Any | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Verify live RTDE insertion authority agrees with the offline profile caps."""
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        readiness = {
+            "move_insert_action": _UR5E_RTDE_INSERT_ACTION,
+            "insert_action_ready": False,
+            "tcp_force_feedback_ready": False,
+            "insert_function_ready": False,
+            "move_insert_client_ready": False,
+            "move_insert_live_hard_caps": {},
+        }
+        if not bool(settings.get("validated")):
+            return readiness, str(
+                settings.get("message") or "move_insert profile is not validated"
+            )
+        try:
+            status_age_sec = time.time() - float(status.get("updated_at"))
+        except (TypeError, ValueError, OverflowError):
+            status_age_sec = math.inf
+        readiness["move_insert_status_age_sec"] = status_age_sec
+        if status_age_sec < 0.0 or status_age_sec > 3.0:
+            return readiness, (
+                "UR5e move_insert status is stale. Click Repair Hardware Stack "
+                "before Run Assembly."
+            )
+        live_action = str(status.get("insert_action_name") or "").strip()
+        readiness["move_insert_status_action"] = live_action
+        if live_action != _UR5E_RTDE_INSERT_ACTION:
+            return readiness, (
+                "UR5e move_insert status reports the wrong action: "
+                f"{live_action or '<empty>'}; expected {_UR5E_RTDE_INSERT_ACTION}."
+            )
+
+        readiness["insert_action_ready"] = status.get("insert_action_ready") is True
+        readiness["tcp_force_feedback_ready"] = (
+            status.get("tcp_force_feedback_ready") is True
+        )
+        readiness["insert_function_ready"] = (
+            status.get("insert_function_ready") is True
+        )
+        if not readiness["insert_action_ready"]:
+            return readiness, "UR5e move_insert action type is unavailable."
+        if not readiness["tcp_force_feedback_ready"]:
+            detail = str(status.get("insert_readiness_message") or "").strip()
+            return readiness, detail or "UR5e TCP force feedback is not ready for move_insert."
+        if not readiness["insert_function_ready"]:
+            detail = str(status.get("insert_readiness_message") or "").strip()
+            return readiness, detail or "UR5e move_insert interface is not ready."
+
+        offline_caps = dict(settings.get("hard_caps") or {})
+        selected_part_name = str(
+            dict(settings.get("effective") or {}).get("part_name") or ""
+        )
+        hardware_config = ros2_processes.load_hardware_arms_config(
+            _PROJECT_ROOT
+        )
+        missing_exact_overlay = object()
+        exact_overlay_required = (
+            selected_part_name in _MOVE_INSERT_SUPPORTED_PARTS
+            and ros2_processes.hardware_arms_value(
+                hardware_config,
+                ("ur5e", "rtde", selected_part_name),
+                missing_exact_overlay,
+            )
+            is not missing_exact_overlay
+        )
+        advanced_policy_present = all(
+            offline_caps.get(name) is not None
+            for name in _MOVE_INSERT_MG_TACTILE_POLICY_CAPS
+        )
+        exact_part_caps = dict(status.get("insert_exact_part_hard_caps") or {})
+        exact_part_caps_errors = dict(
+            status.get("insert_exact_part_hard_caps_error") or {}
+        )
+        exact_part_caps_sha256 = dict(
+            status.get("insert_exact_part_hard_caps_sha256") or {}
+        )
+        live_cap_source = status
+        status_caps_sha256 = ""
+        if exact_overlay_required:
+            if selected_part_name in exact_part_caps:
+                exact_error = str(
+                    exact_part_caps_errors.get(selected_part_name) or ""
+                )
+                if exact_error:
+                    return readiness, (
+                        f"UR5e move_insert live exact {selected_part_name} hard caps "
+                        f"are invalid: {exact_error}"
+                    )
+                live_cap_source = dict(
+                    exact_part_caps.get(selected_part_name) or {}
+                )
+                status_caps_sha256 = str(
+                    exact_part_caps_sha256.get(selected_part_name) or ""
+                )
+            elif selected_part_name == "MG":
+                mg_caps_error = str(
+                    status.get("insert_MG_hard_caps_error") or ""
+                )
+                if mg_caps_error:
+                    return readiness, (
+                        "UR5e move_insert live exact MG hard caps are invalid: "
+                        f"{mg_caps_error}"
+                    )
+                live_cap_source = dict(status.get("insert_MG_hard_caps") or {})
+                status_caps_sha256 = str(
+                    status.get("insert_MG_hard_caps_sha256") or ""
+                )
+            else:
+                return readiness, (
+                    "UR5e move_insert live exact-part hard caps are missing for "
+                    f"{selected_part_name}; shared top-level caps cannot verify an "
+                    "exact override."
+                )
+        live_caps: dict[str, float] = {}
+        live_cap_names = (
+            (
+                *_MOVE_INSERT_REQUIRED_HARD_CAPS,
+                *_MOVE_INSERT_MG_TACTILE_POLICY_CAPS,
+            )
+            if advanced_policy_present
+            else _MOVE_INSERT_REQUIRED_HARD_CAPS
+        )
+        for cap_name in live_cap_names:
+            raw_live_value = live_cap_source.get(cap_name)
+            try:
+                live_value = float(raw_live_value)
+                offline_value = float(offline_caps[cap_name])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return readiness, (
+                    f"UR5e move_insert live hard cap {cap_name} is missing or invalid."
+                )
+            if (
+                isinstance(raw_live_value, bool)
+                or not math.isfinite(live_value)
+                or not math.isclose(
+                    live_value,
+                    offline_value,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            ):
+                return readiness, (
+                    f"UR5e move_insert live {cap_name}={raw_live_value!r} does not "
+                    f"match Hardware Stack YAML {offline_value:.9g}."
+                )
+            live_caps[cap_name] = live_value
+        readiness["move_insert_live_hard_caps"] = live_caps
+        live_caps_sha256 = self._move_insert_hard_caps_sha256(live_caps)
+        expected_caps_sha256 = str(settings.get("hard_caps_sha256") or "")
+        if (
+            live_caps_sha256 != expected_caps_sha256
+            or (exact_overlay_required and status_caps_sha256 != expected_caps_sha256)
+        ):
+            return readiness, (
+                "UR5e move_insert exact hard_caps_sha256 does not match the "
+                f"installed {selected_part_name} Hardware Stack configuration."
+            )
+        readiness["move_insert_hard_caps_sha256"] = live_caps_sha256
+
+        derived_timeout = settings.get("derived_timeout_sec")
+        try:
+            derived_timeout_sec = float(derived_timeout)
+        except (TypeError, ValueError, OverflowError):
+            return readiness, "move_insert derived timeout is missing or invalid."
+        if (
+            not math.isfinite(derived_timeout_sec)
+            or derived_timeout_sec <= 0.0
+            or derived_timeout_sec > live_caps["insert_max_timeout_sec"]
+        ):
+            return readiness, (
+                f"move_insert derived timeout {derived_timeout!r} exceeds the live "
+                "insert_max_timeout_sec hard cap."
+            )
+        readiness["move_insert_derived_timeout_sec"] = derived_timeout_sec
+
+        controller = getattr(resource_agent, "_controller", None)
+        if controller is not None:
+            configured_action = str(
+                getattr(controller, "_ur5e_hardware_insert_action", "") or ""
+            ).strip()
+            readiness["configured_move_insert_action"] = configured_action
+            if configured_action != _UR5E_RTDE_INSERT_ACTION:
+                return readiness, (
+                    "Physical ur5e controller move_insert action is "
+                    f"'{configured_action or '<empty>'}'; expected "
+                    f"'{_UR5E_RTDE_INSERT_ACTION}'."
+                )
+            client_ready, client_error = self._prepared_action_client_ready(
+                getattr(controller, "_ur5e_hardware_insert_client", None),
+                action_name=_UR5E_RTDE_INSERT_ACTION,
+                timeout_sec=0.0,
+            )
+            if client_ready is not True:
+                return readiness, client_error or (
+                    "Physical ur5e move_insert client is unavailable. Run Assembly "
+                    "readiness again before motion."
+                )
+            readiness["move_insert_client_ready"] = client_ready is True
+        return readiness, ""
+
+    def _move_insert_status_view(self) -> dict[str, Any]:
+        """Return live insertion readiness and hard caps without making them authoritative offline."""
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        try:
+            age_sec = time.time() - float(status.get("updated_at"))
+        except (TypeError, ValueError, OverflowError):
+            age_sec = math.inf
+        return {
+            "status_age_sec": age_sec,
+            "insert_action_name": str(status.get("insert_action_name") or ""),
+            "insert_action_ready": status.get("insert_action_ready") is True,
+            "tcp_force_feedback_ready": status.get("tcp_force_feedback_ready") is True,
+            "insert_function_ready": status.get("insert_function_ready") is True,
+            "insert_readiness_message": str(
+                status.get("insert_readiness_message") or ""
+            ),
+            "hard_caps": {
+                cap_name: deepcopy(status.get(cap_name))
+                for cap_name in _MOVE_INSERT_REQUIRED_HARD_CAPS
+            },
+        }
+
+    def _digital_twin_robot_function_move_insert_readiness(
+        self,
+        target: str,
+        robot: str,
+        function_name: str,
+        destination_location: str,
+        part_name: str,
+        resource_agent: Any,
+        readiness: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Validate the profile snapshot required by place_insert or Assembly."""
+        if (
+            function_name == "place_approach"
+            and not _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.get()
+        ):
+            return {}, ""
+        if (
+            robot != "ur5e"
+            or destination_location != "assembly_board-v1"
+            or function_name not in {"place_approach", "place_insert"}
+            or bool(readiness.get("independent_commissioning"))
+        ):
+            return {}, ""
+        settings = self.digital_twin_move_insert_settings(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if not bool(settings.get("validated")):
+            settings = self._digital_twin_move_insert_trial_settings(part_name)
+        result = {
+            "move_insert_profile_sha256": str(
+                settings.get("profile_sha256") or ""
+            ),
+            "move_insert_effective": deepcopy(settings.get("effective") or {}),
+            "move_insert_profile_state": str(
+                settings.get("profile_state") or "invalid"
+            ),
+            "move_insert_derived_timeout_sec": settings.get(
+                "derived_timeout_sec"
+            ),
+            "move_insert_hard_caps": deepcopy(settings.get("hard_caps") or {}),
+            "move_insert_hard_caps_sha256": str(
+                settings.get("hard_caps_sha256") or ""
+            ),
+        }
+        if not bool(settings.get("validated")):
+            return result, str(
+                settings.get("message") or "move_insert profile is not validated"
+            )
+        if function_name == "place_approach":
+            return result, ""
+        live_readiness, live_error = self._digital_twin_move_insert_live_readiness(
+            settings,
+            resource_agent,
+        )
+        result.update(live_readiness)
+        return result, live_error
+
+    def digital_twin_move_insert_settings(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Return the selected UR5e move_insert profile and certified tuning bounds."""
+        base = self._move_insert_request_base(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        request_error = self._digital_twin_move_insert_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        resource, _source_sha256, read_error = self._move_insert_resource_snapshot(
+            robot
+        )
+        if read_error:
+            return {**base, "profile_state": "incomplete", "message": read_error}
+        details = self._move_insert_settings_details(
+            resource,
+            part_name,
+            robot=robot,
+        )
+        suspension_error = self._move_insert_suspension_error(part_name)
+        if suspension_error:
+            details = {
+                **details,
+                "validated": False,
+                "profile_state": "suspended",
+                "message": suspension_error,
+            }
+        lifecycle_error = self._digital_twin_move_insert_edit_lifecycle_error()
+        execution_lock = self._get_robot_function_execution_lock()
+        preflight_lock = self._get_robot_function_preflight_lock()
+        profile_lock = self._get_move_insert_profile_edit_lock()
+        edit_error = lifecycle_error
+        if not edit_error and execution_lock.locked():
+            edit_error = (
+                "Physical robot motion is active; wait before changing "
+                "move_insert settings."
+            )
+        if not edit_error and preflight_lock.locked():
+            edit_error = (
+                "Physical Robot Function preflight is active; wait before changing "
+                "move_insert settings."
+            )
+        if not edit_error:
+            edit_error = self._digital_twin_move_insert_edit_busy_error()
+        if not edit_error:
+            edit_error = self._digital_twin_move_insert_cached_agent_error()
+        if not edit_error and profile_lock.locked():
+            edit_error = "A move_insert settings update is already active."
+        editable = bool(details.get("validated")) and not edit_error
+        return {
+            **base,
+            **details,
+            "success": True,
+            "editable": editable,
+            "edit_message": edit_error or str(details.get("message") or ""),
+            "live": self._move_insert_status_view(),
+        }
+
+    @staticmethod
+    def _validated_move_insert_override(
+        override: Any,
+        hard_caps: dict[str, Any],
+    ) -> tuple[dict[str, float], str]:
+        """Validate the complete intended sparse two-field override replacement."""
+        if not isinstance(override, dict):
+            return {}, "move_insert override must be an object"
+        unknown = sorted(set(override) - set(_MOVE_INSERT_OVERRIDE_FIELDS))
+        if unknown:
+            return {}, f"move_insert override contains unsupported fields: {unknown}"
+        if not override:
+            return {}, "Use Clear Override to remove the complete move_insert override."
+        validated: dict[str, float] = {}
+        for field, raw_value in override.items():
+            if isinstance(raw_value, bool):
+                return {}, f"move_insert override {field} must be a finite number"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                return {}, f"move_insert override {field} must be a finite number"
+            if not math.isfinite(value):
+                return {}, f"move_insert override {field} must be a finite number"
+            if field == "insertion_force_n" and value <= 0.0:
+                return {}, "move_insert override insertion_force_n must be greater than 0 N"
+            if field == "spiral_radius_m" and value < 0.0:
+                return {}, "move_insert override spiral_radius_m must be at least 0 m"
+            cap_name = _MOVE_INSERT_HARD_CAPS[field]
+            cap = hard_caps.get(cap_name)
+            if cap is None or value > float(cap):
+                return {}, (
+                    f"move_insert override {field}={value:.9g} exceeds or lacks "
+                    f"the certified {cap_name} hard cap"
+                )
+            validated[field] = value
+        return validated, ""
+
+    @staticmethod
+    def _move_insert_override_structure_error(override: dict[str, Any]) -> str:
+        """Validate one selected stored override before deleting it."""
+        allowed_fields = {
+            *_MOVE_INSERT_OVERRIDE_FIELDS,
+            *_MOVE_INSERT_OVERRIDE_METADATA_FIELDS,
+        }
+        unknown = sorted(set(override) - allowed_fields)
+        if unknown:
+            return f"move_insert stored override contains unsupported fields: {unknown}"
+        missing_metadata = sorted(
+            set(_MOVE_INSERT_OVERRIDE_METADATA_FIELDS) - set(override)
+        )
+        if missing_metadata:
+            return (
+                "move_insert stored override is missing server-owned metadata: "
+                f"{missing_metadata}"
+            )
+        calibration_id = override.get("calibration_id")
+        if (
+            not isinstance(calibration_id, str)
+            or not calibration_id
+            or calibration_id != calibration_id.strip()
+        ):
+            return "move_insert stored override calibration_id is missing or is not exact"
+        generation = override.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            return "move_insert stored override generation must be a positive integer"
+        updated_at_text = override.get("updated_at")
+        try:
+            updated_at = datetime.fromisoformat(
+                str(updated_at_text).replace("Z", "+00:00")
+            )
+        except ValueError:
+            updated_at = None
+        if (
+            updated_at is None
+            or updated_at.tzinfo is None
+            or updated_at.utcoffset() != timezone.utc.utcoffset(updated_at)
+        ):
+            return "move_insert stored override updated_at must be a UTC ISO-8601 timestamp"
+        stored_hash = override.get("profile_sha256")
+        try:
+            valid_hash = (
+                isinstance(stored_hash, str)
+                and len(stored_hash) == 64
+                and int(stored_hash, 16) >= 0
+            )
+        except ValueError:
+            valid_hash = False
+        if not valid_hash:
+            return "move_insert stored override profile_sha256 is invalid"
+        for field in _MOVE_INSERT_OVERRIDE_FIELDS:
+            if field not in override:
+                continue
+            raw_value = override[field]
+            if isinstance(raw_value, bool):
+                return f"move_insert stored override {field} must be finite"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                return f"move_insert stored override {field} must be finite"
+            if not math.isfinite(value):
+                return f"move_insert stored override {field} must be finite"
+        return ""
+
+    def _patch_move_insert_override(  # noqa: C901, PLR0912 - explicit CAS and validation gates.
+        self,
+        *,
+        part_name: str,
+        expected_profile_sha256: str,
+        replacement: dict[str, float] | None,
+    ) -> dict[str, Any]:
+        """Patch one exact part override after selected-profile and whole-file CAS checks."""
+        resource, source_sha256, read_error = self._move_insert_resource_snapshot()
+        if read_error:
+            return {"success": False, "message": read_error}
+        profile, profile_error = self._move_insert_profile_from_resource(resource)
+        if profile_error:
+            return {"success": False, "message": profile_error}
+        _resolve_profile, profile_hash, _derive_timeout = (
+            self._move_insert_profile_helpers()
+        )
+        current_profile_sha256, hash_error = profile_hash(profile, part_name)
+        if hash_error:
+            return {"success": False, "message": hash_error}
+        if expected_profile_sha256 != current_profile_sha256:
+            return {
+                "success": False,
+                "message": (
+                    "move_insert profile changed after this form was loaded. "
+                    "Reload the settings before saving."
+                ),
+                "profile_sha256": current_profile_sha256,
+            }
+
+        candidate = deepcopy(resource)
+        candidate_profile, candidate_profile_error = (
+            self._move_insert_profile_from_resource(candidate)
+        )
+        if candidate_profile_error:
+            return {"success": False, "message": candidate_profile_error}
+        raw_overrides = candidate_profile.get("part_overrides")
+        if not isinstance(raw_overrides, dict):
+            return {
+                "success": False,
+                "message": "move_insert part_overrides must be an object",
+            }
+        overrides = deepcopy(raw_overrides)
+        existing = overrides.get(part_name)
+        if replacement is None:
+            if isinstance(existing, dict):
+                structure_error = self._move_insert_override_structure_error(
+                    existing
+                )
+                if structure_error:
+                    return {"success": False, "message": structure_error}
+            changed = part_name in overrides
+            overrides.pop(part_name, None)
+            calibration_id = ""
+            generation = 0
+        else:
+            previous_generation = (
+                existing.get("generation")
+                if isinstance(existing, dict)
+                else 0
+            )
+            if isinstance(previous_generation, bool) or not isinstance(
+                previous_generation,
+                int,
+            ):
+                previous_generation = 0
+            generation = max(0, previous_generation) + 1
+            calibration_id = (
+                f"move_insert-{part_name}-g{generation}-{uuid4().hex[:12]}"
+            )
+            new_override: dict[str, Any] = {
+                "calibration_id": calibration_id,
+                "generation": generation,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                **replacement,
+            }
+            overrides[part_name] = new_override
+            candidate_profile["part_overrides"] = overrides
+            selected_hash, selected_hash_error = profile_hash(
+                candidate_profile,
+                part_name,
+            )
+            if selected_hash_error:
+                return {"success": False, "message": selected_hash_error}
+            new_override["profile_sha256"] = selected_hash
+            overrides[part_name] = new_override
+            changed = True
+        candidate_profile["part_overrides"] = overrides
+        qualification_invalidated = False
+        if changed:
+            qualifications = candidate_profile.get("qualifications")
+            if isinstance(qualifications, dict) and part_name in qualifications:
+                qualifications = deepcopy(qualifications)
+                qualifications.pop(part_name, None)
+                candidate_profile["qualifications"] = qualifications
+                qualification_invalidated = True
+            validated_parts = candidate_profile.get("validated_parts")
+            if isinstance(validated_parts, list) and part_name in validated_parts:
+                candidate_profile["validated_parts"] = [
+                    value for value in validated_parts if value != part_name
+                ]
+                qualification_invalidated = True
+
+        if replacement is None:
+            candidate_profile_sha256, candidate_hash_error = profile_hash(
+                candidate_profile,
+                part_name,
+            )
+            if candidate_hash_error:
+                return {"success": False, "message": candidate_hash_error}
+            candidate_details = {
+                "profile_sha256": candidate_profile_sha256,
+                "effective": {},
+                "override": {},
+            }
+        else:
+            candidate_details = self._move_insert_settings_details(
+                candidate,
+                part_name,
+                require_qualification=False,
+            )
+            if not bool(candidate_details.get("validated")):
+                return {
+                    "success": False,
+                    "message": str(
+                        candidate_details.get("message")
+                        or "move_insert override would produce an invalid profile"
+                    ),
+                    "profile_sha256": str(
+                        candidate_details.get("profile_sha256") or ""
+                    ),
+                }
+        if not changed:
+            return {
+                "success": True,
+                "changed": False,
+                "calibration_id": calibration_id,
+                "generation": generation,
+                "profile_sha256": str(candidate_details["profile_sha256"]),
+                "qualification_invalidated": False,
+                "effective": deepcopy(candidate_details.get("effective") or {}),
+                "override": deepcopy(candidate_details.get("override") or {}),
+            }
+        try:
+            current_source_sha256 = sha256_file(_UR5E_RESOURCE)
+        except OSError as exc:
+            return {"success": False, "message": f"Could not recheck robot_ur5e.json: {exc}"}
+        if current_source_sha256 != source_sha256:
+            return {
+                "success": False,
+                "message": (
+                    "robot_ur5e.json changed during the move_insert update. "
+                    "No override was written; reload the settings."
+                ),
+            }
+        try:
+            self._atomic_write_move_insert_resource(candidate)
+        except OSError as exc:
+            return {"success": False, "message": f"Could not save robot_ur5e.json: {exc}"}
+        return {
+            "success": True,
+            "changed": True,
+            "calibration_id": calibration_id,
+            "generation": generation,
+            "profile_sha256": str(candidate_details["profile_sha256"]),
+            "qualification_invalidated": qualification_invalidated,
+            "effective": deepcopy(candidate_details.get("effective") or {}),
+            "override": deepcopy(candidate_details.get("override") or {}),
+        }
+
+    def digital_twin_save_move_insert_override(  # noqa: C901 - explicit edit safety gates.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        override: dict[str, Any],
+        expected_profile_sha256: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically replace one selected part's sparse move_insert override."""
+        base = self._move_insert_request_base(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if confirmed is not True:
+            return {
+                **base,
+                "message": "Explicit operator confirmation is required to save move_insert settings.",
+            }
+        request_error = self._digital_twin_move_insert_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        if expected_profile_sha256 != str(expected_profile_sha256).strip():
+            return {**base, "message": "expected_profile_sha256 must be an exact hash token"}
+        lifecycle_error = self._digital_twin_move_insert_edit_lifecycle_error()
+        if lifecycle_error:
+            return {**base, "message": lifecycle_error}
+        busy_error = self._digital_twin_move_insert_edit_busy_error()
+        if busy_error:
+            return {**base, "message": busy_error}
+        cached_agent_error = self._digital_twin_move_insert_cached_agent_error()
+        if cached_agent_error:
+            return {**base, "message": cached_agent_error}
+
+        caps, caps_error = self._move_insert_hard_caps(part_name)
+        if caps_error:
+            return {**base, "hard_caps": caps, "message": caps_error}
+        replacement, override_error = self._validated_move_insert_override(
+            override,
+            caps,
+        )
+        if override_error:
+            return {**base, "hard_caps": caps, "message": override_error}
+
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+                "active_function": active,
+            }
+        preflight_lock = self._get_robot_function_preflight_lock()
+        if not preflight_lock.acquire(blocking=False):
+            execution_lock.release()
+            return {
+                **base,
+                "message": (
+                    "Physical Robot Function preflight is active; wait before changing "
+                    "move_insert settings."
+                ),
+            }
+        patch_result: dict[str, Any]
+        try:
+            lifecycle_error = self._digital_twin_move_insert_edit_lifecycle_error()
+            if lifecycle_error:
+                return {**base, "message": lifecycle_error}
+            busy_error = self._digital_twin_move_insert_edit_busy_error()
+            if busy_error:
+                return {**base, "message": busy_error}
+            cached_agent_error = self._digital_twin_move_insert_cached_agent_error()
+            if cached_agent_error:
+                return {**base, "message": cached_agent_error}
+            with self._get_move_insert_profile_edit_lock():
+                patch_result = self._patch_move_insert_override(
+                    part_name=part_name,
+                    expected_profile_sha256=expected_profile_sha256,
+                    replacement=replacement,
+                )
+            if bool(patch_result.get("success")) and bool(
+                patch_result.get("changed")
+            ):
+                self._ur5e_move_insert_profile_reload_required = True
+        finally:
+            preflight_lock.release()
+            execution_lock.release()
+        if not bool(patch_result.get("success")):
+            return {**base, **patch_result}
+        settings = self.digital_twin_move_insert_settings(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        return {
+            **settings,
+            **patch_result,
+            "message": f"Saved move_insert override for {part_name}.",
+        }
+
+    def digital_twin_clear_move_insert_override(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        expected_profile_sha256: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically remove one exact part's complete move_insert override."""
+        base = self._move_insert_request_base(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if confirmed is not True:
+            return {
+                **base,
+                "message": "Explicit operator confirmation is required to clear move_insert settings.",
+            }
+        request_error = self._digital_twin_move_insert_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        if expected_profile_sha256 != str(expected_profile_sha256).strip():
+            return {**base, "message": "expected_profile_sha256 must be an exact hash token"}
+        lifecycle_error = self._digital_twin_move_insert_edit_lifecycle_error()
+        if lifecycle_error:
+            return {**base, "message": lifecycle_error}
+        busy_error = self._digital_twin_move_insert_edit_busy_error()
+        if busy_error:
+            return {**base, "message": busy_error}
+        cached_agent_error = self._digital_twin_move_insert_cached_agent_error()
+        if cached_agent_error:
+            return {**base, "message": cached_agent_error}
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+                "active_function": active,
+            }
+        preflight_lock = self._get_robot_function_preflight_lock()
+        if not preflight_lock.acquire(blocking=False):
+            execution_lock.release()
+            return {
+                **base,
+                "message": (
+                    "Physical Robot Function preflight is active; wait before changing "
+                    "move_insert settings."
+                ),
+            }
+        patch_result: dict[str, Any]
+        try:
+            lifecycle_error = self._digital_twin_move_insert_edit_lifecycle_error()
+            if lifecycle_error:
+                return {**base, "message": lifecycle_error}
+            busy_error = self._digital_twin_move_insert_edit_busy_error()
+            if busy_error:
+                return {**base, "message": busy_error}
+            cached_agent_error = self._digital_twin_move_insert_cached_agent_error()
+            if cached_agent_error:
+                return {**base, "message": cached_agent_error}
+            with self._get_move_insert_profile_edit_lock():
+                patch_result = self._patch_move_insert_override(
+                    part_name=part_name,
+                    expected_profile_sha256=expected_profile_sha256,
+                    replacement=None,
+                )
+            if bool(patch_result.get("success")) and bool(
+                patch_result.get("changed")
+            ):
+                self._ur5e_move_insert_profile_reload_required = True
+        finally:
+            preflight_lock.release()
+            execution_lock.release()
+        if not bool(patch_result.get("success")):
+            return {**base, **patch_result}
+        settings = self.digital_twin_move_insert_settings(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        return {
+            **settings,
+            **patch_result,
+            "message": (
+                f"Cleared move_insert override for {part_name}."
+                if patch_result.get("changed")
+                else f"No move_insert override was saved for {part_name}."
+            ),
+        }
+
+    def _get_move_insert_trial_lock(self) -> threading.RLock:
+        """Return the lock protecting supervised insertion trial metadata."""
+        lock = getattr(self, "_move_insert_trial_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._move_insert_trial_lock = lock
+        return lock
+
+    def _get_insertion_demonstration_lock(self) -> threading.RLock:
+        """Return the lock protecting one passive insertion recording."""
+        lock = getattr(self, "_insertion_demonstration_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._insertion_demonstration_lock = lock
+        return lock
+
+    def _ur5e_hardware_state_uncertainty_path(self) -> Path:
+        """Return the application-owned durable UR5e uncertainty marker."""
+        root = Path(getattr(self, "_hardware_state_dir", _HARDWARE_STATE_DIR))
+        return root / "ur5e_uncertainty.json"
+
+    def _read_ur5e_hardware_state_uncertainty(
+        self,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Read generic UR5e uncertainty independently of task artifacts."""
+        path = self._ur5e_hardware_state_uncertainty_path()
+        if not path.exists():
+            return None, ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return None, f"Could not read durable UR5e hardware state: {exc}"
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None, "Durable UR5e hardware state has an unsupported format."
+        uncertainty = payload.get("uncertainty")
+        if uncertainty is None:
+            return None, ""
+        if not isinstance(uncertainty, dict):
+            return None, "Durable UR5e hardware state is malformed."
+        if (
+            uncertainty.get("robot") != "ur5e"
+            or not isinstance(uncertainty.get("reason"), str)
+            or not str(uncertainty.get("reason") or "").strip()
+            or not isinstance(uncertainty.get("recorded_at"), str)
+            or not str(uncertainty.get("recorded_at") or "").strip()
+        ):
+            return None, "Durable UR5e hardware state is malformed."
+        return dict(uncertainty), ""
+
+    def _write_ur5e_hardware_state_uncertainty(
+        self,
+        *,
+        reason: str,
+        source: str,
+        source_id: str,
+    ) -> str:
+        """Persist a no-motion UR5e recovery requirement outside task state."""
+        exact_reason = str(reason or "").strip()
+        if not exact_reason:
+            return "UR5e hardware-state uncertainty requires an exact reason."
+        path = self._ur5e_hardware_state_uncertainty_path()
+        uncertainty = {
+            "robot": "ur5e",
+            "reason": exact_reason,
+            "source": str(source or ""),
+            "source_id": str(source_id or ""),
+            "recorded_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(
+                path,
+                {"version": 1, "uncertainty": uncertainty},
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return f"Could not persist durable UR5e hardware state: {exc}"
+        self._ur5e_robot_function_state_uncertain = True
+        self._ur5e_robot_function_state_uncertain_reason = exact_reason
+        self._ur5e_cartesian_jog_state_uncertain = True
+        self._ur5e_cartesian_jog_state_uncertain_reason = exact_reason
+        return ""
+
+    def _clear_ur5e_hardware_state_uncertainty(self) -> str:
+        """Clear the durable marker after generic stationary stack validation."""
+        path = self._ur5e_hardware_state_uncertainty_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(path, {"version": 1, "uncertainty": None})
+        except (OSError, TypeError, ValueError) as exc:
+            return f"Could not clear durable UR5e hardware state: {exc}"
+        return ""
+
+    def _insertion_demonstration_pending_path(self) -> Path:
+        root = Path(
+            getattr(
+                self,
+                "_insertion_demonstrations_dir",
+                _INSERTION_DEMONSTRATIONS_DIR,
+            )
+        )
+        return root / "pending_recording.json"
+
+    def _insertion_demonstration_directory(self, recording_id: str) -> Path:
+        root = Path(
+            getattr(
+                self,
+                "_insertion_demonstrations_dir",
+                _INSERTION_DEMONSTRATIONS_DIR,
+            )
+        )
+        return root / recording_id
+
+    def digital_twin_quarantine_legacy_move_insert_recording(
+        self,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Quarantine the exact unsafe legacy MG recipe and its diagnostic bundle."""
+        metadata = dict(_LEGACY_MG_INSERTION_DEMONSTRATION)
+        recording_id = str(metadata["recording_id"])
+        part_name = str(metadata["part_name"])
+        if confirmed is not True:
+            return {
+                "success": False,
+                **metadata,
+                "message": (
+                    "Explicit confirmation is required for the exact legacy MG "
+                    "insertion-recording quarantine migration."
+                ),
+            }
+        current = self._current_insertion_demonstration()
+        if current is not None and bool(current.get("active")):
+            return {
+                "success": False,
+                **metadata,
+                "message": "Cancel Recording before running the quarantine migration.",
+            }
+        pending = self._read_insertion_demonstration_pending()
+        if pending is not None and str(pending.get("recording_id") or "") not in {
+            "",
+            recording_id,
+        }:
+            return {
+                "success": False,
+                **metadata,
+                "message": (
+                    "A different insertion demonstration owns durable recording "
+                    "custody; quarantine was not changed."
+                ),
+            }
+        pending_trial = self._move_insert_pending_review()
+        move_insert_effective = dict(
+            (pending_trial or {}).get("move_insert_effective") or {}
+        )
+        demonstration_recipe = dict(
+            move_insert_effective.get("demonstration_recipe") or {}
+        )
+        exact_terminal_legacy_trial = bool(
+            pending_trial is not None
+            and str(pending_trial.get("target") or "") == "ur5e only"
+            and str(pending_trial.get("robot") or "") == "ur5e"
+            and str(pending_trial.get("destination_location") or "")
+            == "assembly_board-v1"
+            and str(pending_trial.get("part_name") or "") == part_name
+            and str(pending_trial.get("trial_id") or "")
+            == str(metadata["trial_id"])
+            and str(pending_trial.get("profile_sha256") or "")
+            == str(metadata["profile_sha256"])
+            and str(move_insert_effective.get("calibration_id") or "")
+            == str(metadata["calibration_id"])
+            and str(demonstration_recipe.get("recording_id") or "")
+            == recording_id
+            and str(demonstration_recipe.get("demonstration_sha256") or "")
+            == str(metadata["demonstration_sha256"])
+            and not bool(pending_trial.get("active"))
+            and not bool(pending_trial.get("completion_motion_active"))
+            and not bool(pending_trial.get("review_required"))
+            and not bool(pending_trial.get("recovery_required"))
+            and bool(
+                pending_trial.get("hardware_stack_repair_required")
+                or pending_trial.get("normal_repair_required")
+            )
+            and pending_trial.get("part_clamped") is True
+            and not bool(pending_trial.get("released"))
+            and not bool(pending_trial.get("lifted"))
+            and not bool(pending_trial.get("completion_eligible"))
+            and not bool(pending_trial.get("qualified"))
+            and pending_trial.get("failure_recorded") is True
+        )
+        if pending_trial is not None and not exact_terminal_legacy_trial:
+            return {
+                "success": False,
+                **metadata,
+                "message": (
+                    "A supervised move_insert result still owns durable custody; "
+                    "quarantine was not changed."
+                ),
+            }
+        root = Path(
+            getattr(
+                self,
+                "_insertion_demonstrations_dir",
+                _INSERTION_DEMONSTRATIONS_DIR,
+            )
+        )
+        source_directory = root / recording_id
+        quarantine_directory = root / ".quarantine" / recording_id
+        if source_directory.is_dir() and quarantine_directory.exists():
+            return {
+                "success": False,
+                **metadata,
+                "message": (
+                    "Both source and quarantine diagnostic directories exist; "
+                    "no artifact or recipe was changed."
+                ),
+            }
+        artifact_directory = (
+            source_directory
+            if source_directory.is_dir()
+            else quarantine_directory
+        )
+        trace_path = artifact_directory / "trace.jsonl"
+        if not artifact_directory.is_dir() or not trace_path.is_file():
+            return {
+                "success": False,
+                **metadata,
+                "message": (
+                    "The exact legacy MG diagnostic trace was not found; "
+                    "quarantine was not changed."
+                ),
+            }
+        try:
+            verified_trace_sha256 = sha256_file(trace_path)
+        except OSError as exc:
+            return {
+                "success": False,
+                **metadata,
+                "message": f"Could not verify the legacy MG trace: {exc}",
+            }
+        if verified_trace_sha256 != metadata["demonstration_sha256"]:
+            return {
+                "success": False,
+                **metadata,
+                "verified_trace_sha256": verified_trace_sha256,
+                "message": (
+                    "The legacy MG trace SHA-256 does not match the exact "
+                    "demonstration; no artifact or recipe was changed."
+                ),
+            }
+        resource, source_sha256, read_error = self._move_insert_resource_snapshot()
+        if read_error:
+            return {"success": False, **metadata, "message": read_error}
+        profile, profile_error = self._move_insert_profile_from_resource(resource)
+        if profile_error:
+            return {"success": False, **metadata, "message": profile_error}
+        recipes = dict(profile.get("demonstration_recipes") or {})
+        raw_recipe = recipes.get(part_name)
+        if raw_recipe is not None:
+            recipe = dict(raw_recipe) if isinstance(raw_recipe, dict) else {}
+            if (
+                recipe.get("recording_id") != recording_id
+                or recipe.get("demonstration_sha256")
+                != metadata["demonstration_sha256"]
+            ):
+                return {
+                    "success": False,
+                    **metadata,
+                    "message": (
+                        "The configured MG recipe is not the exact legacy artifact; "
+                        "quarantine was not changed."
+                    ),
+                }
+            recipes.pop(part_name, None)
+            profile["demonstration_recipes"] = recipes
+        profile["validated_parts"] = [
+            token
+            for token in list(profile.get("validated_parts") or [])
+            if token != part_name
+        ]
+        qualifications = dict(profile.get("qualifications") or {})
+        qualifications.pop(part_name, None)
+        profile["qualifications"] = qualifications
+        if raw_recipe is not None:
+            try:
+                if sha256_file(_UR5E_RESOURCE) != source_sha256:
+                    return {
+                        "success": False,
+                        **metadata,
+                        "message": (
+                            "robot_ur5e.json changed during quarantine migration."
+                        ),
+                    }
+                self._atomic_write_move_insert_resource(resource)
+            except OSError as exc:
+                return {
+                    "success": False,
+                    **metadata,
+                    "message": f"Could not remove the legacy MG recipe: {exc}",
+                }
+
+        try:
+            if source_directory.is_dir():
+                quarantine_directory.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source_directory), str(quarantine_directory))
+            if not quarantine_directory.is_dir():
+                return {
+                    "success": False,
+                    **metadata,
+                    "message": (
+                        "Legacy MG recipe authority was removed, but its expected "
+                        "diagnostic directory was not found for quarantine."
+                    ),
+                }
+            quarantine_record = {
+                "version": 1,
+                **metadata,
+                "original_path": str(source_directory),
+                "quarantine_path": str(quarantine_directory),
+                "quarantined_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "recipe_present": False,
+                "qualification_present": False,
+                "validated_part_present": False,
+                "trace_rewritten": False,
+                "verified_trace_sha256": verified_trace_sha256,
+            }
+            atomic_json_write(
+                quarantine_directory / "quarantine.json",
+                quarantine_record,
+            )
+            temporary_bundle = quarantine_directory / ".diagnostic_bundle.tmp.zip"
+            with zipfile.ZipFile(
+                temporary_bundle,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for filename in (
+                    "summary.json",
+                    "trace.jsonl",
+                    "analysis.json",
+                    "quarantine.json",
+                ):
+                    candidate = quarantine_directory / filename
+                    if candidate.is_file():
+                        archive.write(candidate, arcname=filename)
+            os.replace(
+                temporary_bundle,
+                quarantine_directory / "diagnostic_bundle.zip",
+            )
+        except (OSError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+            return {
+                "success": False,
+                **metadata,
+                "quarantine_path": str(quarantine_directory),
+                "message": f"Could not finish legacy MG diagnostic quarantine: {exc}",
+            }
+        pending_error = self._write_insertion_demonstration_pending(None)
+        if pending_error:
+            return {
+                "success": False,
+                **metadata,
+                "quarantine_path": str(quarantine_directory),
+                "message": pending_error,
+            }
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = None
+        return {
+            "success": True,
+            **metadata,
+            "terminal_repair_preserved": exact_terminal_legacy_trial,
+            "quarantine_path": str(quarantine_directory),
+            "download_path": str(
+                quarantine_directory / "diagnostic_bundle.zip"
+            ),
+            "message": (
+                "Quarantined the exact legacy MG insertion recording. Its trace "
+                "was not rewritten; no recipe, validated part, or qualification "
+                "remains. The terminal supervised move_insert Repair Hardware "
+                "Stack latch was not changed."
+                if exact_terminal_legacy_trial
+                else (
+                    "Quarantined the exact legacy MG insertion recording. Its trace "
+                    "was not rewritten; no recipe, validated part, or qualification "
+                    "remains."
+                )
+            ),
+        }
+
+    def _saved_insertion_demonstration(
+        self,
+        part_name: str,
+    ) -> dict[str, Any] | None:
+        """Return one exact persisted learned recording without granting motion."""
+        resource, _source_sha256, read_error = self._move_insert_resource_snapshot()
+        if read_error:
+            return None
+        profile, profile_error = self._move_insert_profile_from_resource(resource)
+        if profile_error:
+            return None
+        recipes = profile.get("demonstration_recipes")
+        recipe = (
+            dict(recipes.get(part_name) or {})
+            if isinstance(recipes, dict)
+            and isinstance(recipes.get(part_name), dict)
+            else {}
+        )
+        recording_id = str(recipe.get("recording_id") or "")
+        if (
+            str(recipe.get("robot") or "") != "ur5e"
+            or str(recipe.get("part_name") or "") != part_name
+            or not recording_id
+        ):
+            return None
+        directory = self._insertion_demonstration_directory(recording_id)
+        summary_path = directory / "summary.json"
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            summary = {}
+        if (
+            not isinstance(summary, dict)
+            or str(summary.get("recording_id") or "") != recording_id
+            or str(summary.get("robot") or "") != "ur5e"
+            or str(summary.get("part_name") or "") != part_name
+        ):
+            return None
+        return {
+            **summary,
+            "success": True,
+            "ready": False,
+            "active": False,
+            "state": "recording_saved_return_to_pre_insertion",
+            "recording_id": recording_id,
+            "part_name": part_name,
+            "candidate_recipe": recipe,
+            "download_path": str(directory / "diagnostic_bundle.zip"),
+            "message": (
+                "Recording saved — return to pre-insertion. Supervised Test "
+                "move_insert will recheck the learned recipe and current pose."
+            ),
+        }
+
+    def _reconcile_saved_insertion_demonstration_task_context(
+        self,
+        resource_agent: Any,
+        *,
+        destination_location: str,
+        part_name: str,
+        settings: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Adopt one exact saved recipe into its retained no-motion task context."""
+        if (
+            str(getattr(resource_agent, "_current_state", "") or "")
+            != "positioned"
+            or str(getattr(resource_agent, "_held_part", "") or "")
+            != part_name
+            or str(getattr(resource_agent, "_gripper_state", "") or "")
+            != "closed"
+        ):
+            return False, ""
+        task_context = deepcopy(
+            dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        )
+        if (
+            str(task_context.get("part_name") or "") != part_name
+            or str(task_context.get("destination_location") or "")
+            != destination_location
+        ):
+            return False, ""
+        effective = dict(settings.get("effective") or {})
+        recipe = dict(effective.get("demonstration_recipe") or {})
+        recording_id = str(recipe.get("recording_id") or "")
+        demonstration_sha256 = str(
+            recipe.get("demonstration_sha256") or ""
+        )
+        if (
+            not recording_id
+            or str(recipe.get("robot") or "") != "ur5e"
+            or str(recipe.get("part_name") or "") != part_name
+            or Path(recording_id).name != recording_id
+            or recording_id.startswith(".")
+            or len(demonstration_sha256) != 64
+        ):
+            return False, ""
+
+        current_context, context_error = self._insertion_demonstration_context(
+            resource_agent,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if context_error:
+            return False, context_error
+        expected_context_sha256 = str(recipe.get("context_sha256") or "")
+        if (
+            not expected_context_sha256
+            or str(current_context.get("board_calibration_id") or "")
+            != str(recipe.get("board_calibration_id") or "")
+            or str(
+                dict(current_context.get("held_part_handoff") or {}).get(
+                    "tool_frame"
+                )
+                or ""
+            )
+            != str(recipe.get("tool_frame") or "")
+        ):
+            return False, (
+                "The saved insertion recording does not match the retained "
+                "assembly_board-v1 calibration identity."
+            )
+
+        directory = self._insertion_demonstration_directory(recording_id)
+        summary = self._read_json_file(directory / "summary.json")
+        summary_context = dict(summary.get("context") or {})
+        summary_identity = {
+            "robot": str(summary_context.get("robot") or ""),
+            "destination_location": str(
+                summary_context.get("destination_location") or ""
+            ),
+            "part_name": str(summary_context.get("part_name") or ""),
+            "starting_pose": deepcopy(
+                summary_context.get("starting_pose") or {}
+            ),
+            "assembly_board_v1_aruco": deepcopy(
+                summary_context.get("assembly_board_v1_aruco") or {}
+            ),
+            "held_part_handoff": deepcopy(
+                summary_context.get("held_part_handoff") or {}
+            ),
+        }
+        if (
+            str(summary.get("recording_id") or "") != recording_id
+            or str(summary.get("robot") or "") != "ur5e"
+            or str(summary.get("destination_location") or "")
+            != destination_location
+            or str(summary.get("part_name") or "") != part_name
+            or self._move_insert_canonical_sha256(summary_identity)
+            != expected_context_sha256
+            or str(summary.get("context_sha256") or "")
+            != expected_context_sha256
+            or str(summary.get("place_approach_recording_sha256") or "")
+            != str(recipe.get("place_approach_recording_sha256") or "")
+        ):
+            return False, (
+                "The saved insertion recording identity does not match the "
+                "current supervised move_insert recipe."
+            )
+        controller_result = dict(summary.get("controller_result") or {})
+        if str(controller_result.get("trace_sha256") or "") != demonstration_sha256:
+            return False, (
+                "The saved insertion recording trace identity does not match the "
+                "current supervised move_insert recipe."
+            )
+        try:
+            if sha256_file(directory / "trace.jsonl") != demonstration_sha256:
+                return False, (
+                    "The saved insertion recording trace changed after recipe "
+                    "learning."
+                )
+        except OSError as exc:
+            return False, f"Could not verify the saved insertion trace: {exc}"
+
+        start_pose, start_error = self._insertion_demonstration_pose(
+            current_context.get("starting_pose"),
+            label="retained place_approach.descend pre-insertion pose",
+        )
+        seated_event = dict(summary.get("seated_event") or {})
+        if start_error:
+            return False, start_error
+        if self._move_insert_canonical_sha256(
+            seated_event.get("aruco_to_seated_held_part") or {}
+        ) != self._move_insert_canonical_sha256(
+            recipe.get("aruco_to_seated_held_part") or {}
+        ):
+            return False, (
+                "The saved seated held-part pose does not match the current "
+                "supervised move_insert recipe."
+            )
+        try:
+            product_geometry = self._robot_function_product_geometry_for_part(
+                part_name
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return False, (
+                f"Could not load move_insert product geometry for {part_name}: "
+                f"{exc}"
+            )
+        compute_geometry = self._move_insert_geometry_helper()
+        geometry_result = dict(
+            compute_geometry(
+                part_name=part_name,
+                product_geometry=product_geometry,
+                assembly_board_v1_aruco={
+                    "pose": deepcopy(current_context.get("aruco_pose") or {})
+                },
+                held_part_handoff=deepcopy(
+                    current_context.get("held_part_handoff") or {}
+                ),
+                move_insert_profile=effective,
+                move_insert_profile_sha256=str(
+                    settings.get("profile_sha256") or ""
+                ),
+            )
+            or {}
+        )
+        if not bool(geometry_result.get("success")):
+            return False, str(
+                geometry_result.get("message")
+                or "Could not reconstruct the learned insertion geometry."
+            )
+        profile_sha256 = str(settings.get("profile_sha256") or "")
+        hard_caps_sha256 = str(settings.get("hard_caps_sha256") or "")
+        boundary_targets = {
+            **geometry_result,
+            "move_insert_profile": {
+                **effective,
+                "profile_sha256": profile_sha256,
+            },
+            "move_insert_profile_sha256": profile_sha256,
+            "move_insert_hard_caps_sha256": hard_caps_sha256,
+        }
+        validate_boundary = self._move_insert_boundary_helper()
+        boundary, boundary_error = validate_boundary(
+            start_pose=start_pose,
+            targets=boundary_targets,
+            raw_hard_caps=deepcopy(settings.get("hard_caps") or {}),
+        )
+        if boundary_error:
+            return False, (
+                f"The saved recipe does not satisfy the retained place_approach "
+                f"boundary: {boundary_error}"
+            )
+        task_context.update(
+            {
+                "move_insert_mode": "force_limited_trial",
+                "move_insert_profile": {
+                    **effective,
+                    "profile_sha256": profile_sha256,
+                },
+                "move_insert_profile_sha256": profile_sha256,
+                "move_insert_hard_caps": deepcopy(
+                    boundary["move_insert_hard_caps"]
+                ),
+                "move_insert_hard_caps_sha256": str(
+                    boundary["move_insert_hard_caps_sha256"]
+                ),
+                "pre_insert_pose": deepcopy(boundary["pre_insert_pose"]),
+                "insert_pose": deepcopy(boundary["insert_pose"]),
+                "insertion_axis_world": deepcopy(
+                    boundary["insertion_axis_world"]
+                ),
+                "move_insert_timeout_sec": float(
+                    boundary["move_insert_timeout_sec"]
+                ),
+                "move_insert_boundary_metrics": {
+                    field: float(boundary[field])
+                    for field in (
+                        "insertion_depth_m",
+                        "insertion_travel_m",
+                        "lateral_error_m",
+                        "orientation_error_rad",
+                        "learned_start_position_error_m",
+                        "learned_start_orientation_error_rad",
+                    )
+                },
+                "move_insert_boundary_ready": True,
+                "move_insert_boundary_error": "",
+                "insertion_demonstration_recording_id": recording_id,
+                "insertion_demonstration_sha256": demonstration_sha256,
+            }
+        )
+        resource_agent._task_ctx = task_context
+        return True, ""
+
+    def _preserved_insertion_demonstration_review(
+        self,
+        *,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+        recording_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the newest exact preserved review recording without motion."""
+        resource, _source_sha256, read_error = self._move_insert_resource_snapshot()
+        if read_error:
+            return None
+        profile, profile_error = self._move_insert_profile_from_resource(resource)
+        if profile_error:
+            return None
+        recipes = dict(profile.get("demonstration_recipes") or {})
+        if part_name in recipes:
+            return None
+        root = Path(
+            getattr(
+                self,
+                "_insertion_demonstrations_dir",
+                _INSERTION_DEMONSTRATIONS_DIR,
+            )
+        )
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        if not root.is_dir():
+            return None
+        for directory in root.iterdir():
+            if (
+                not directory.is_dir()
+                or directory.name.startswith(".")
+                or Path(directory.name).name != directory.name
+                or (recording_id and directory.name != recording_id)
+            ):
+                continue
+            summary = self._read_json_file(directory / "summary.json")
+            if (
+                str(summary.get("recording_id") or "") != directory.name
+                or str(summary.get("robot") or "") != robot
+                or str(summary.get("destination_location") or "")
+                != destination_location
+                or str(summary.get("part_name") or "") != part_name
+                or not (directory / "trace.jsonl").is_file()
+                or not (directory / "analysis.json").is_file()
+            ):
+                continue
+            analysis = self._read_json_file(directory / "analysis.json")
+            hard_cap_review_required = bool(
+                analysis.get("hard_cap_review_required") is True
+            )
+            rejection_reason = str(analysis.get("rejection_reason") or "")
+            reanalyze_available = bool(
+                analysis.get("accepted") is False and rejection_reason
+            )
+            if not hard_cap_review_required and not reanalyze_available:
+                continue
+            try:
+                modified_ns = directory.stat().st_mtime_ns
+            except OSError:
+                continue
+            if hard_cap_review_required:
+                preserved = {
+                    **summary,
+                    "success": True,
+                    "ready": False,
+                    "active": False,
+                    "state": "recording_saved_mg_hard_cap_review_required",
+                    "review_required": True,
+                    "hard_cap_review_required": True,
+                    "recording_id": directory.name,
+                    "analysis": analysis,
+                    "analysis_path": str(directory / "analysis.json"),
+                    "trace_path": str(directory / "trace.jsonl"),
+                    "download_path": str(directory / "diagnostic_bundle.zip"),
+                    "message": (
+                        f"Recording saved — {part_name} hard-cap review required. "
+                        f"Reanalyze Saved Recording after the exact {part_name} ceilings "
+                        "have been independently reviewed and installed."
+                    ),
+                }
+            else:
+                preserved = {
+                    **summary,
+                    "success": True,
+                    "ready": True,
+                    "active": False,
+                    "state": "not_recorded",
+                    "review_required": False,
+                    "hard_cap_review_required": False,
+                    "reanalyze_available": True,
+                    "recording_id": directory.name,
+                    "analysis": analysis,
+                    "analysis_path": str(directory / "analysis.json"),
+                    "trace_path": str(directory / "trace.jsonl"),
+                    "download_path": str(directory / "diagnostic_bundle.zip"),
+                    "message": (
+                        "A rejected recording is available for Reanalyze Saved "
+                        "Recording without motion. Start Recording is also available."
+                    ),
+                }
+            candidates.append(
+                (
+                    modified_ns,
+                    preserved,
+                )
+            )
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def digital_twin_reanalyze_insertion_recording(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Reanalyze one exact preserved trace without commanding robot motion."""
+        request_error = self._insertion_demonstration_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {"success": False, "message": request_error}
+        preserved = self._preserved_insertion_demonstration_review(
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            recording_id=recording_id,
+        )
+        if (
+            preserved is None
+            or str(preserved.get("recording_id") or "") != recording_id
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "No exact preserved review recording is available for "
+                    "Reanalyze Saved Recording."
+                ),
+            }
+        directory = self._insertion_demonstration_directory(recording_id)
+        trace_path = directory / "trace.jsonl"
+        analysis_path = directory / "analysis.json"
+        summary_path = directory / "summary.json"
+        try:
+            original_hashes = {
+                "trace_sha256": sha256_file(trace_path),
+                "analysis_sha256": sha256_file(analysis_path),
+                "summary_sha256": sha256_file(summary_path),
+            }
+        except OSError as exc:
+            return {
+                "success": False,
+                "message": f"Could not verify the preserved recording: {exc}",
+            }
+        original_analysis = self._read_json_file(analysis_path)
+        expected_trace_sha256 = str(
+            original_analysis.get("trace_sha256")
+            or dict(preserved.get("controller_result") or {}).get("trace_sha256")
+            or ""
+        )
+        if original_hashes["trace_sha256"] != expected_trace_sha256:
+            return {
+                "success": False,
+                "message": (
+                    "The preserved trace hash does not match its immutable "
+                    "analysis; no recipe was written."
+                ),
+            }
+        controller_result = dict(preserved.get("controller_result") or {})
+        controller_result.update(
+            {
+                "trace_path": str(trace_path),
+                "trace_sha256": original_hashes["trace_sha256"],
+            }
+        )
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "message": "Physical robot motion or readiness is already active.",
+            }
+        try:
+            analyzed, analysis_error = self._write_insertion_demonstration_bundle(
+                dict(preserved),
+                controller_result,
+                reanalyze_saved_recording=True,
+            )
+            if analysis_error:
+                return {"success": False, "message": analysis_error}
+            analysis = dict(analyzed.get("analysis") or {})
+            analysis["source_analysis_sha256"] = original_hashes[
+                "analysis_sha256"
+            ]
+            analysis["source_summary_sha256"] = original_hashes[
+                "summary_sha256"
+            ]
+            analysis["source_trace_sha256"] = original_hashes["trace_sha256"]
+            reanalysis_path = directory / "analysis_v3.json"
+            try:
+                atomic_json_write(reanalysis_path, analysis)
+            except (OSError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "message": f"Could not save the version-3 analysis: {exc}",
+                }
+            if bool(analysis.get("hard_cap_review_required")):
+                return {
+                    **preserved,
+                    "success": True,
+                    "ready": False,
+                    "state": "recording_saved_mg_hard_cap_review_required",
+                    "hard_cap_review_required": True,
+                    "analysis": analysis,
+                    "reanalysis_path": str(reanalysis_path),
+                    "minimum_required_hard_caps": deepcopy(
+                        analysis.get("minimum_required_hard_caps") or {}
+                    ),
+                    "message": (
+                        f"Recording saved — {part_name} hard-cap review required. The "
+                        "version-3 report was created without motion; no candidate "
+                        "recipe or qualification was written."
+                    ),
+                }
+            if not bool(analysis.get("accepted")):
+                return {
+                    **preserved,
+                    "success": False,
+                    "analysis": analysis,
+                    "reanalysis_path": str(reanalysis_path),
+                    "message": (
+                        "Reanalysis did not install a recipe: "
+                        f"{str(analysis.get('rejection_reason') or 'invalid evidence')}"
+                    ),
+                }
+            candidate_recipe = dict(analyzed.get("candidate_recipe") or {})
+            for source_path, expected_sha256 in (
+                (trace_path, original_hashes["trace_sha256"]),
+                (analysis_path, original_hashes["analysis_sha256"]),
+                (summary_path, original_hashes["summary_sha256"]),
+            ):
+                if sha256_file(source_path) != expected_sha256:
+                    return {
+                        **preserved,
+                        "success": False,
+                        "message": (
+                            "A preserved source artifact changed during reanalysis; "
+                            "no candidate recipe was written."
+                        ),
+                    }
+            with self._get_move_insert_profile_edit_lock():
+                settings, recipe_error = self._patch_insertion_demonstration_recipe(
+                    part_name=part_name,
+                    candidate_recipe=candidate_recipe,
+                )
+            if recipe_error:
+                return {
+                    **preserved,
+                    "success": False,
+                    "analysis": analysis,
+                    "reanalysis_path": str(reanalysis_path),
+                    "message": recipe_error,
+                }
+            agent = self._physical_ur5e_robot_agent()
+            if agent is not None:
+                self._reconcile_saved_insertion_demonstration_task_context(
+                    agent,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    settings=settings,
+                )
+            return {
+                **preserved,
+                "success": True,
+                "ready": True,
+                "state": "recording_saved_return_to_pre_insertion",
+                "hard_cap_review_required": False,
+                "candidate_recipe": candidate_recipe,
+                "candidate_profile_sha256": str(
+                    settings.get("profile_sha256") or ""
+                ),
+                "analysis": analysis,
+                "reanalysis_path": str(reanalysis_path),
+                "message": (
+                    "Saved Recording reanalyzed — return to pre-insertion for "
+                    "Supervised Test move_insert. The recorded jog is never replayed."
+                ),
+            }
+        finally:
+            execution_lock.release()
+
+    def _read_insertion_demonstration_pending(self) -> dict[str, Any] | None:
+        path = self._insertion_demonstration_pending_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return {
+                "recording_id": "insertion-demonstration-pending-state-error",
+                "robot": "ur5e",
+                "destination_location": "assembly_board-v1",
+                "part_name": "",
+                "state": "recording_complete_review_required",
+                "active": False,
+                "recovery_required": True,
+                "message": f"Insertion demonstration custody is unreadable: {exc}",
+            }
+        pending = payload.get("pending") if isinstance(payload, dict) else None
+        if pending is None:
+            return None
+        if not isinstance(pending, dict):
+            return {
+                "recording_id": "insertion-demonstration-pending-state-error",
+                "robot": "ur5e",
+                "destination_location": "assembly_board-v1",
+                "part_name": "",
+                "state": "recording_complete_review_required",
+                "active": False,
+                "recovery_required": True,
+                "message": "Insertion demonstration custody is malformed.",
+            }
+        if pending.get("robot") != "ur5e":
+            return {
+                "recording_id": "insertion-demonstration-pending-state-error",
+                "robot": "ur5e",
+                "destination_location": "assembly_board-v1",
+                "part_name": "",
+                "state": "recording_complete_review_required",
+                "active": False,
+                "recovery_required": True,
+                "message": (
+                    "Insertion demonstration custody belongs to a different exact "
+                    "robot; no UR5e recording artifact was loaded."
+                ),
+            }
+        return dict(pending)
+
+    def _write_insertion_demonstration_pending(
+        self,
+        pending: dict[str, Any] | None,
+    ) -> str:
+        path = self._insertion_demonstration_pending_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(path, {"version": 1, "pending": pending})
+        except (OSError, TypeError, ValueError) as exc:
+            return f"Could not persist insertion demonstration custody: {exc}"
+        return ""
+
+    def _current_insertion_demonstration(self) -> dict[str, Any] | None:
+        with self._get_insertion_demonstration_lock():
+            current = getattr(self, "_insertion_demonstration", None)
+            if isinstance(current, dict):
+                return deepcopy(current)
+            recovered = self._read_insertion_demonstration_pending()
+            if recovered is None:
+                return None
+            reason = str(
+                recovered.get("message")
+                or (
+                    "The UI restarted before insertion recording settlement was "
+                    "confirmed."
+                )
+            )
+            passive_baseline = bool(
+                recovered.get("active")
+                and recovered.get("state") == "recording_baseline"
+                and reason.startswith("Recording stationary force baseline.")
+            )
+            if passive_baseline:
+                pending_error = self._write_insertion_demonstration_pending(None)
+                if pending_error:
+                    retained = {
+                        **recovered,
+                        "success": False,
+                        "message": pending_error,
+                    }
+                    self._insertion_demonstration = deepcopy(retained)
+                    return retained
+                self._insertion_demonstration = None
+                return None
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = reason
+            self._ur5e_cartesian_jog_state_uncertain = True
+            self._ur5e_cartesian_jog_state_uncertain_reason = reason
+            uncertainty_error = self._write_ur5e_hardware_state_uncertainty(
+                reason=reason,
+                source="insertion_demonstration",
+                source_id=str(recovered.get("recording_id") or ""),
+            )
+            if uncertainty_error:
+                retained = {
+                    **recovered,
+                    "success": False,
+                    "active": False,
+                    "recovery_required": True,
+                    "message": f"{reason} {uncertainty_error}",
+                }
+                self._insertion_demonstration = deepcopy(retained)
+                return retained
+            pending_error = self._write_insertion_demonstration_pending(None)
+            if pending_error:
+                retained = {
+                    **recovered,
+                    "success": False,
+                    "active": False,
+                    "recovery_required": True,
+                    "message": f"{reason} {pending_error}",
+                }
+                self._insertion_demonstration = deepcopy(retained)
+                return retained
+            self._insertion_demonstration = None
+            return None
+
+    def _insertion_demonstration_blocking_error(
+        self,
+        *,
+        allow_ur5e_cartesian_jog: bool = False,
+    ) -> str:
+        recording = self._current_insertion_demonstration()
+        if recording is None:
+            return ""
+        if (
+            allow_ur5e_cartesian_jog
+            and bool(recording.get("active"))
+            and not bool(recording.get("recovery_required"))
+        ):
+            agent = self._physical_ur5e_robot_agent()
+            controller = (
+                getattr(agent, "_controller", None)
+                if agent is not None
+                else None
+            )
+            status_fn = getattr(controller, "insertion_demonstration_status", None)
+            status = dict(status_fn() or {}) if callable(status_fn) else {}
+            if (
+                bool(status.get("active"))
+                and bool(status.get("baseline_valid"))
+                and str(status.get("phase") or "") == "recording_insertion"
+            ):
+                return ""
+            return (
+                "Insertion demonstration is recording the stationary force baseline. "
+                "Keep UR5e still until Recording insertion appears."
+            )
+        recording_id = str(recording.get("recording_id") or "<unknown>")
+        part_name = str(recording.get("part_name") or "<unknown>")
+        if bool(recording.get("recovery_required")):
+            return (
+                f"Insertion demonstration {recording_id} for {part_name} requires "
+                "inspected physical recovery. New motion and lifecycle changes remain blocked."
+            )
+        if not bool(recording.get("active")):
+            return ""
+        return (
+            f"Insertion demonstration {recording_id} for {part_name} is active. "
+            "Only matching UR5e Cartesian jog is permitted until Save Recording "
+            "or Cancel Recording."
+        )
+
+    @staticmethod
+    def _insertion_demonstration_request_error(
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+    ) -> str:
+        tokens = (target, robot, destination_location, part_name)
+        if any(value != str(value).strip() for value in tokens):
+            return "Insertion demonstration selections must be exact tokens."
+        if target not in {"ur5e only", "dual robots"}:
+            return "Insertion demonstration requires a physical target containing ur5e."
+        if robot != "ur5e":
+            return (
+                "Physical xarm6 insertion demonstration remains blocked until the "
+                "UFactory six-axis force/torque path and serialized insertion action "
+                "are commissioned."
+            )
+        if destination_location != "assembly_board-v1":
+            return "Insertion demonstration requires assembly_board-v1."
+        if part_name in _MOVE_INSERT_UNSUPPORTED_PARTS:
+            return (
+                f"Insertion demonstration for {part_name} remains blocked until "
+                "angular alignment is implemented."
+            )
+        if part_name not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return f"Unrecognized insertion demonstration part_name: {part_name or '<empty>'}."
+        return ""
+
+    @staticmethod
+    def _insertion_demonstration_pose(
+        raw_pose: Any,
+        *,
+        label: str,
+    ) -> tuple[dict[str, float], str]:
+        if not isinstance(raw_pose, dict):
+            return {}, f"{label} is missing."
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        try:
+            pose = {field: float(raw_pose[field]) for field in fields}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, f"{label} must contain finite x, y, z, qx, qy, qz, and qw."
+        if not all(math.isfinite(value) for value in pose.values()):
+            return {}, f"{label} must be finite."
+        quaternion_norm = math.sqrt(
+            sum(pose[field] ** 2 for field in ("qx", "qy", "qz", "qw"))
+        )
+        if quaternion_norm <= 1e-12:
+            return {}, f"{label} quaternion is invalid."
+        for field in ("qx", "qy", "qz", "qw"):
+            pose[field] /= quaternion_norm
+        return pose, ""
+
+    def _insertion_demonstration_context(
+        self,
+        resource_agent: Any,
+        *,
+        destination_location: str,
+        part_name: str,
+    ) -> tuple[dict[str, Any], str]:
+        if str(getattr(resource_agent, "_current_state", "") or "") != "positioned":
+            return {}, "Run place_approach before Start Recording."
+        if str(getattr(resource_agent, "_held_part", "") or "") != part_name:
+            return {}, f"The retained held_part is not exact {part_name}."
+        if str(getattr(resource_agent, "_gripper_state", "") or "") != "closed":
+            return {}, "The retained UR5e gripper state is not closed."
+        task_context = deepcopy(dict(getattr(resource_agent, "_task_ctx", {}) or {}))
+        if str(task_context.get("destination_location") or "") != destination_location:
+            return {}, "place_approach did not retain assembly_board-v1 context."
+        if str(task_context.get("part_name") or part_name) != part_name:
+            return {}, "place_approach retained a different exact part_name."
+        held_part_handoff = dict(task_context.get("held_part_handoff") or {})
+        tool0_held, handoff_error = self._insertion_demonstration_pose(
+            held_part_handoff.get("tool0_to_held_part"),
+            label="held_part_handoff.tool0_to_held_part",
+        )
+        if handoff_error:
+            return {}, handoff_error
+        frozen_board = dict(task_context.get("assembly_board_v1_aruco") or {})
+        aruco_pose, aruco_error = self._insertion_demonstration_pose(
+            frozen_board.get("pose"),
+            label="frozen assembly_board-v1 ArUco pose",
+        )
+        if aruco_error:
+            return {}, aruco_error
+        try:
+            board_generation = int(
+                frozen_board.get("generation")
+                or task_context.get("assembly_board_v1_aruco_generation")
+            )
+        except (TypeError, ValueError, OverflowError):
+            board_generation = 0
+        calibration_id = str(frozen_board.get("calibration_id") or "")
+        if board_generation < 1 or not calibration_id:
+            return {}, "place_approach did not retain board generation and calibration identity."
+        resolved = dict(task_context.get("resolved_cartesian_positions") or {})
+        start_pose, start_error = self._insertion_demonstration_pose(
+            resolved.get("descend"),
+            label="place_approach.descend pre-insertion pose",
+        )
+        if start_error:
+            return {}, start_error
+        identity = {
+            "robot": "ur5e",
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "starting_pose": start_pose,
+            "assembly_board_v1_aruco": frozen_board,
+            "held_part_handoff": held_part_handoff,
+        }
+        return {
+            **identity,
+            "tool0_to_held_part": tool0_held,
+            "aruco_pose": aruco_pose,
+            "board_generation": board_generation,
+            "board_calibration_id": calibration_id,
+            "context_sha256": self._move_insert_canonical_sha256(identity),
+        }, ""
+
+    def digital_twin_insertion_demonstration_readiness(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Return no-motion readiness independent of the move_insert recipe."""
+        base = {
+            "success": False,
+            "ready": False,
+            "target": target,
+            "robot": robot,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "recording_id": "",
+            "state": "not_recorded",
+            "active": False,
+            "seated_captured": False,
+            "review_required": False,
+        }
+        request_error = self._insertion_demonstration_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        current = self._current_insertion_demonstration()
+        if current is not None:
+            if all(
+                current.get(field) == expected
+                for field, expected in (
+                    ("robot", robot),
+                    ("destination_location", destination_location),
+                    ("part_name", part_name),
+                )
+            ):
+                return {**base, **current}
+            return {
+                **base,
+                "message": self._insertion_demonstration_blocking_error(),
+            }
+        saved = self._saved_insertion_demonstration(part_name)
+        if saved is not None:
+            return {**base, **saved}
+        preserved_review = self._preserved_insertion_demonstration_review(
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if preserved_review is not None:
+            return {**base, **preserved_review}
+        if bool(getattr(self, "_starting", False)) or bool(
+            getattr(self, "_stopping", False)
+        ) or bool(getattr(self, "system_running", False)):
+            return {
+                **base,
+                "message": "Stop CAIS startup or execution before Start Recording.",
+            }
+        if self._move_insert_pending_review_error():
+            return {**base, "message": self._move_insert_pending_review_error()}
+        resource_agent = self._physical_ur5e_robot_agent()
+        if resource_agent is None:
+            return {**base, "message": "Run place_approach in this CAIS UI first."}
+        context, context_error = self._insertion_demonstration_context(
+            resource_agent,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if context_error:
+            return {**base, "message": context_error}
+        pose_readiness = self._robot_function_execution_pose_readiness(
+            target,
+            "ur5e",
+            resource_agent,
+        )
+        if not bool(pose_readiness.get("success")):
+            return {
+                **base,
+                "message": str(
+                    pose_readiness.get("blocked_reason")
+                    or "Fresh world -> tool0 is unavailable."
+                ),
+            }
+        controller = getattr(resource_agent, "_controller", None)
+        ensure_ready = getattr(
+            controller,
+            "_ensure_insertion_demonstration_client_ready",
+            None,
+        )
+        if not callable(ensure_ready):
+            return {
+                **base,
+                "message": "Restart the CAIS UI after installing the insertion demonstration action.",
+            }
+        try:
+            action_ready, action_message = ensure_ready(timeout_sec=2.0)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return {**base, "message": f"Insertion recording readiness failed: {exc}"}
+        if action_ready is not True:
+            return {**base, "message": str(action_message or "recording action unavailable")}
+        return {
+            **base,
+            "success": True,
+            "ready": True,
+            "state": "not_recorded",
+            "context_sha256": str(context["context_sha256"]),
+            "message": (
+                f"Ready to record a manual insertion demonstration for {part_name}. "
+                "The protected move_insert recipe is not required for recording."
+            ),
+        }
+
+    def digital_twin_start_insertion_recording(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Start passive recording and enable only matching UR5e Cartesian jog."""
+        readiness = self.digital_twin_insertion_demonstration_readiness(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if confirmed is not True:
+            return {**readiness, "success": False, "ready": False, "message": "Explicit operator confirmation is required for Start Recording."}
+        if not bool(readiness.get("ready")):
+            return readiness
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {**readiness, "success": False, "ready": False, "message": "Physical robot motion or readiness is already active."}
+        try:
+            resource_agent = self._physical_ur5e_robot_agent()
+            if resource_agent is None:
+                return {**readiness, "success": False, "ready": False, "message": "The retained UR5e RobotAgent is unavailable."}
+            context, context_error = self._insertion_demonstration_context(
+                resource_agent,
+                destination_location=destination_location,
+                part_name=part_name,
+            )
+            if context_error:
+                return {**readiness, "success": False, "ready": False, "message": context_error}
+            controller = getattr(resource_agent, "_controller", None)
+            start = getattr(controller, "start_insertion_demonstration", None)
+            if not callable(start):
+                return {**readiness, "success": False, "ready": False, "message": "UR5e insertion demonstration recording is unavailable."}
+            recording_id = f"insertion-demonstration-{int(time.time() * 1000)}-{uuid4().hex[:8]}"
+            result = dict(
+                start(
+                    recording_id=recording_id,
+                    part_name=part_name,
+                    destination_location=destination_location,
+                    context_sha256=str(context["context_sha256"]),
+                    expected_start_tool0_pose=dict(context["starting_pose"]),
+                    max_duration_sec=300.0,
+                )
+                or {}
+            )
+            if not bool(result.get("active")):
+                return {
+                    **readiness,
+                    **result,
+                    "success": False,
+                    "ready": False,
+                    "recording_id": recording_id,
+                }
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            place_approach_recording_path = (
+                _ROBOT_TAUGHT_FUNCTIONS_DIR
+                / "place_approach"
+                / "default__hardware.json"
+            )
+            try:
+                place_approach_recording_sha256 = (
+                    sha256_file(place_approach_recording_path)
+                    if place_approach_recording_path.is_file()
+                    else sha256_text(
+                        "place_approach/default__hardware.json:missing"
+                    )
+                )
+            except OSError as exc:
+                stop = getattr(controller, "stop_insertion_demonstration", None)
+                if callable(stop):
+                    stop(timeout_sec=12.0)
+                return {
+                    **readiness,
+                    "success": False,
+                    "ready": False,
+                    "message": f"Could not hash the place_approach recording: {exc}",
+                }
+            recording = {
+                "success": True,
+                "ready": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "recording_id": recording_id,
+                "state": "recording_baseline",
+                "active": True,
+                "seated_captured": False,
+                "review_required": False,
+                "recovery_required": False,
+                "started_at": now,
+                "message": "Recording stationary force baseline. Keep UR5e still until Recording insertion appears.",
+                "context": context,
+                "context_sha256": str(context["context_sha256"]),
+                "place_approach_recording_sha256": (
+                    place_approach_recording_sha256
+                ),
+                "controller_status": result,
+            }
+            persistence_error = self._write_insertion_demonstration_pending(recording)
+            if persistence_error:
+                stop = getattr(controller, "stop_insertion_demonstration", None)
+                if callable(stop):
+                    stop(timeout_sec=10.0)
+                return {**recording, "success": False, "active": False, "recovery_required": True, "message": persistence_error}
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = deepcopy(recording)
+            status_fn = getattr(controller, "insertion_demonstration_status", None)
+            deadline = time.monotonic() + 5.0
+            while callable(status_fn) and time.monotonic() < deadline:
+                controller_status = dict(status_fn() or {})
+                if (
+                    bool(controller_status.get("active"))
+                    and bool(controller_status.get("baseline_valid"))
+                    and str(controller_status.get("phase") or "")
+                    == "recording_insertion"
+                ):
+                    recording = {
+                        **recording,
+                        "state": "recording_insertion",
+                        "controller_status": controller_status,
+                        "message": (
+                            "Recording insertion — Cartesian jog ready. Use only "
+                            "matching UR5e Cartesian Step or Smooth Hold."
+                        ),
+                    }
+                    persistence_error = self._write_insertion_demonstration_pending(
+                        recording
+                    )
+                    if persistence_error:
+                        return {
+                            **recording,
+                            "success": False,
+                            "message": persistence_error,
+                        }
+                    with self._get_insertion_demonstration_lock():
+                        self._insertion_demonstration = deepcopy(recording)
+                    return recording
+                if controller_status and not bool(controller_status.get("active", True)):
+                    break
+                time.sleep(0.05)
+            stop = getattr(controller, "stop_insertion_demonstration", None)
+            stopped = dict(stop(timeout_sec=12.0) or {}) if callable(stop) else {}
+            self._write_insertion_demonstration_pending(None)
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = None
+            return {
+                **readiness,
+                **stopped,
+                "success": False,
+                "ready": True,
+                "active": False,
+                "state": "not_recorded",
+                "recording_id": "",
+                "message": (
+                    "Start Recording could not establish the stationary force "
+                    "baseline. No recording was saved."
+                ),
+            }
+        finally:
+            execution_lock.release()
+
+    def _discard_cancelled_insertion_recording(
+        self,
+        recording: dict[str, Any],
+        controller_result: dict[str, Any],
+        *,
+        operator_note: str = "",
+    ) -> dict[str, Any]:
+        """Discard one settled temporary recording without creating recovery custody."""
+        recording_id = str(recording.get("recording_id") or "")
+        if recording_id and Path(recording_id).name == recording_id:
+            trace_paths = {
+                _INSERTION_DEMONSTRATION_TRACE_ROOT / f"{recording_id}.jsonl"
+            }
+            reported_trace = Path(str(controller_result.get("trace_path") or ""))
+            if reported_trace.name == f"{recording_id}.jsonl":
+                trace_paths.add(reported_trace)
+            trace_root = _INSERTION_DEMONSTRATION_TRACE_ROOT.resolve(strict=False)
+            for raw_trace_path in trace_paths:
+                try:
+                    resolved_trace_path = raw_trace_path.resolve(strict=False)
+                    resolved_trace_path.relative_to(trace_root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                with suppress(OSError):
+                    resolved_trace_path.unlink()
+        persistence_error = self._write_insertion_demonstration_pending(None)
+        if persistence_error:
+            return {
+                **recording,
+                "success": False,
+                "active": False,
+                "state": "cancelling",
+                "message": persistence_error,
+            }
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = None
+        return {
+            "success": True,
+            "ready": True,
+            "active": False,
+            "state": "not_recorded",
+            "recording_id": "",
+            "robot": str(recording.get("robot") or "ur5e"),
+            "destination_location": str(
+                recording.get("destination_location") or "assembly_board-v1"
+            ),
+            "part_name": str(recording.get("part_name") or ""),
+            "cancelled": True,
+            "operator_note": str(operator_note or recording.get("operator_note") or ""),
+            "recovery_required": False,
+            "message": "Recording cancelled. No recording or candidate recipe was saved.",
+        }
+
+    def _finish_uncertain_insertion_recording_cancel(
+        self,
+        recording: dict[str, Any],
+        controller_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Hand terminal uncertainty back to the normal UR5e readiness path."""
+        message = str(
+            controller_result.get("message")
+            or "UR5e recorder settlement could not be proven after Cancel Recording."
+        )
+        self._ur5e_robot_function_state_uncertain = True
+        self._ur5e_robot_function_state_uncertain_reason = message
+        self._ur5e_cartesian_jog_state_uncertain = True
+        persistence_error = self._write_insertion_demonstration_pending(None)
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = None
+        return {
+            **recording,
+            "success": False,
+            "ready": False,
+            "active": False,
+            "state": "not_recorded",
+            "recording_id": "",
+            "review_required": False,
+            "recovery_required": False,
+            "controller_result": controller_result,
+            "message": (
+                f"{message} Use the normal Hardware Stack readiness/repair path."
+                + (f" {persistence_error}" if persistence_error else "")
+            ),
+        }
+
+    def digital_twin_insertion_recording_status(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str = "",
+    ) -> dict[str, Any]:
+        """Return recording progress and finish a requested recorder cancellation."""
+        error = self._insertion_demonstration_request_error(
+            target, robot, destination_location, part_name
+        )
+        if error:
+            return {"success": False, "ready": False, "active": False, "state": "not_recorded", "message": error}
+        recording = self._current_insertion_demonstration()
+        if recording is None:
+            return self.digital_twin_insertion_demonstration_readiness(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+            )
+        if recording_id and recording_id != str(recording.get("recording_id") or ""):
+            return {"success": False, "ready": False, "active": False, "state": "not_recorded", "message": "recording_id does not match the active insertion demonstration."}
+        if bool(recording.get("active")):
+            agent = self._physical_ur5e_robot_agent()
+            controller = getattr(agent, "_controller", None) if agent is not None else None
+            status_fn = getattr(controller, "insertion_demonstration_status", None)
+            if callable(status_fn):
+                controller_status = dict(status_fn() or {})
+                if str(recording.get("state") or "") == "cancelling":
+                    if bool(controller_status.get("active")):
+                        stop = getattr(
+                            controller,
+                            "stop_insertion_demonstration",
+                            None,
+                        )
+                        if callable(stop):
+                            controller_status = dict(stop(timeout_sec=1.0) or {})
+                    if (
+                        not bool(controller_status.get("active"))
+                        and bool(controller_status.get("motion_settled"))
+                    ):
+                        return self._discard_cancelled_insertion_recording(
+                            recording,
+                            controller_status,
+                        )
+                    if (
+                        not bool(controller_status.get("active", True))
+                        and controller_status.get("motion_settled") is False
+                    ):
+                        return self._finish_uncertain_insertion_recording_cancel(
+                            recording,
+                            controller_status,
+                        )
+                    recording = {
+                        **recording,
+                        "controller_status": controller_status,
+                        "message": (
+                            "Cancelling. Waiting automatically for stationary "
+                            "recorder settlement."
+                        ),
+                    }
+                    with self._get_insertion_demonstration_lock():
+                        self._insertion_demonstration = deepcopy(recording)
+                    return deepcopy(recording)
+                phase = str(controller_status.get("phase") or "")
+                state = (
+                    "recording_insertion"
+                    if phase == "recording_insertion"
+                    else "recording_baseline"
+                )
+                recording = {
+                    **recording,
+                    "state": state,
+                    "controller_status": controller_status,
+                    "cartesian_jog_blocker": str(
+                        getattr(
+                            self,
+                            "_insertion_demonstration_cartesian_blocker",
+                            "",
+                        )
+                        or ""
+                    ),
+                    "message": (
+                        str(
+                            getattr(
+                                self,
+                                "_insertion_demonstration_cartesian_blocker",
+                                "",
+                            )
+                            or ""
+                        )
+                        or (
+                            "Recording insertion — Cartesian jog ready. Use only matching "
+                            "UR5e Cartesian Step or Smooth Hold."
+                        )
+                        if state == "recording_insertion"
+                        else "Recording stationary force baseline. Keep UR5e still."
+                    ),
+                }
+                if state == "recording_insertion" and hasattr(self, "robot_env"):
+                    jog_readiness = self._teleop_preflight("ur5e", "cartesian")
+                    blocker = str(jog_readiness.get("warning") or "")
+                    recording["cartesian_jog_ready"] = bool(
+                        jog_readiness.get("ready") and not blocker
+                    )
+                    recording["cartesian_jog_blocker"] = blocker
+                    if blocker:
+                        recording["message"] = blocker
+                with self._get_insertion_demonstration_lock():
+                    self._insertion_demonstration = deepcopy(recording)
+        return deepcopy(recording)
+
+    def digital_twin_save_insertion_recording(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Capture seated evidence, stop recording, and persist one learned recipe."""
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(timeout=3.0):
+            return {
+                **(self._current_insertion_demonstration() or {}),
+                "success": False,
+                "active": True,
+                "recording_id": recording_id,
+                "message": "Release the active Cartesian jog before Save Recording.",
+            }
+        try:
+            captured = self._digital_twin_capture_seated_locked(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                recording_id=recording_id,
+            )
+            if not bool(captured.get("success")):
+                return captured
+            agent = self._physical_ur5e_robot_agent()
+            controller = (
+                getattr(agent, "_controller", None)
+                if agent is not None
+                else None
+            )
+            stop = getattr(controller, "stop_insertion_demonstration", None)
+            if not callable(stop):
+                return {
+                    **captured,
+                    "success": False,
+                    "message": "UR5e insertion recorder cannot be stopped safely.",
+                }
+            result = dict(stop(timeout_sec=12.0) or {})
+            if bool(result.get("active")) or not bool(result.get("motion_settled")):
+                cancelling = {
+                    **captured,
+                    "success": False,
+                    "active": bool(result.get("active", True)),
+                    "state": "saving_recording",
+                    "controller_result": result,
+                    "message": str(
+                        result.get("message")
+                        or "Saving Recording is waiting for stationary settlement."
+                    ),
+                }
+                self._write_insertion_demonstration_pending(cancelling)
+                with self._get_insertion_demonstration_lock():
+                    self._insertion_demonstration = deepcopy(cancelling)
+                return cancelling
+            completed = {
+                **captured,
+                "success": True,
+                "ready": False,
+                "active": False,
+                "state": "saving_recording",
+                "review_required": False,
+                "recovery_required": False,
+                "controller_result": result,
+                "finished_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "message": "Saving learned insertion recording.",
+            }
+            completed, bundle_error = self._write_insertion_demonstration_bundle(
+                completed,
+                result,
+            )
+            if bundle_error:
+                failed = {
+                    **completed,
+                    "success": False,
+                    "ready": True,
+                    "active": False,
+                    "state": "not_recorded",
+                    "review_required": False,
+                    "recovery_required": False,
+                    "part_clamped": True,
+                    "message": (
+                        f"Recording was not saved: {bundle_error} The stopped "
+                        "server trace was left intact for diagnosis; no candidate "
+                        "recipe or qualification was written."
+                    ),
+                }
+                persistence_error = self._write_insertion_demonstration_pending(
+                    None
+                )
+                if persistence_error:
+                    failed["ready"] = False
+                    failed["message"] += f" {persistence_error}"
+                with self._get_insertion_demonstration_lock():
+                    self._insertion_demonstration = deepcopy(failed)
+                return failed
+            if completed.get("recording_accepted") is not True:
+                persistence_error = self._write_insertion_demonstration_pending(
+                    None
+                )
+                if persistence_error:
+                    return {
+                        **completed,
+                        "ready": False,
+                        "message": (
+                            f"{str(completed.get('message') or '').strip()} "
+                            f"{persistence_error}"
+                        ).strip(),
+                    }
+                with self._get_insertion_demonstration_lock():
+                    self._insertion_demonstration = deepcopy(completed)
+                return completed
+            candidate_recipe = dict(completed.get("candidate_recipe") or {})
+            with self._get_move_insert_profile_edit_lock():
+                settings, recipe_error = self._patch_insertion_demonstration_recipe(
+                    part_name=part_name,
+                    candidate_recipe=candidate_recipe,
+                )
+            if recipe_error:
+                return {
+                    **completed,
+                    "success": False,
+                    "state": "recording_complete_review_required",
+                    "message": recipe_error,
+                }
+            suspension_error = self._clear_move_insert_suspension(part_name)
+            if suspension_error:
+                return {
+                    **completed,
+                    "success": False,
+                    "state": "recording_complete_review_required",
+                    "message": (
+                        "The recording was saved, but its previous supervised "
+                        f"suspension could not be cleared: {suspension_error}"
+                    ),
+                }
+            if agent is None:
+                return {
+                    **completed,
+                    "success": False,
+                    "state": "recording_complete_review_required",
+                    "message": "The retained UR5e RobotAgent was lost before recipe binding.",
+                }
+            effective = dict(settings.get("effective") or {})
+            profile_sha256 = str(settings.get("profile_sha256") or "")
+            context = dict(completed.get("context") or {})
+            seated_event = dict(completed.get("seated_event") or {})
+            start_pose = dict(context.get("starting_pose") or {})
+            insert_pose = dict(seated_event.get("world_tool0_pose") or {})
+            insertion_axis = dict(seated_event.get("insertion_axis_world") or {})
+            _resolve, _profile_hash, derive_timeout = self._move_insert_profile_helpers()
+            timeout_sec, timeout_error = derive_timeout(
+                start_pose,
+                insert_pose,
+                insertion_axis,
+                effective,
+            )
+            if timeout_error:
+                return {
+                    **completed,
+                    "success": False,
+                    "state": "recording_complete_review_required",
+                    "message": timeout_error,
+                }
+            task_context = deepcopy(dict(getattr(agent, "_task_ctx", {}) or {}))
+            task_context.update(
+                {
+                    "move_insert_mode": "force_limited_trial",
+                    "move_insert_profile": {
+                        **effective,
+                        "profile_sha256": profile_sha256,
+                    },
+                    "move_insert_profile_sha256": profile_sha256,
+                    "move_insert_hard_caps_sha256": str(
+                        settings.get("hard_caps_sha256") or ""
+                    ),
+                    "pre_insert_pose": start_pose,
+                    "insert_pose": insert_pose,
+                    "insertion_axis_world": insertion_axis,
+                    "move_insert_timeout_sec": float(timeout_sec),
+                    "insertion_demonstration_recording_id": recording_id,
+                    "insertion_demonstration_sha256": str(
+                        candidate_recipe.get("demonstration_sha256") or ""
+                    ),
+                }
+            )
+            agent._task_ctx = task_context
+            saved = {
+                **completed,
+                "success": True,
+                "ready": True,
+                "active": False,
+                "state": "recording_saved_return_to_pre_insertion",
+                "candidate_profile_sha256": profile_sha256,
+                "message": (
+                    "Recording saved — return to pre-insertion. The learned recipe "
+                    "uses live force feedback and never replays the jog trace."
+                ),
+            }
+            persistence_error = self._write_insertion_demonstration_pending(None)
+            if persistence_error:
+                return {**saved, "success": False, "message": persistence_error}
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = deepcopy(saved)
+            return saved
+        finally:
+            execution_lock.release()
+
+    def digital_twin_capture_seated(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Serialize the stationary seated dwell against Cartesian jog commands."""
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                **(self._current_insertion_demonstration() or {}),
+                "success": False,
+                "active": True,
+                "recording_id": recording_id,
+                "message": "Release the active Cartesian jog before Capture Seated.",
+            }
+        try:
+            return self._digital_twin_capture_seated_locked(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                recording_id=recording_id,
+            )
+        finally:
+            execution_lock.release()
+
+    def _digital_twin_capture_seated_locked(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Capture one stationary seated event without stopping the recorder."""
+        recording = self.digital_twin_insertion_recording_status(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            recording_id=recording_id,
+        )
+        if not bool(recording.get("active")):
+            return {**recording, "success": False, "message": "No matching insertion recording is active."}
+        if bool(recording.get("seated_captured")):
+            return {**recording, "success": False, "message": "Capture Seated was already completed for this recording."}
+        first = dict(recording.get("controller_status") or {})
+        if not bool(first.get("baseline_valid")) or str(first.get("phase") or "") != "recording_insertion":
+            return {**recording, "success": False, "message": "Wait for the stationary force baseline before Capture Seated."}
+        time.sleep(0.40)
+        second = self.digital_twin_insertion_recording_status(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            recording_id=recording_id,
+        )
+        second_status = dict(second.get("controller_status") or {})
+        try:
+            first_count = int(first["sample_count"])
+            second_count = int(second_status["sample_count"])
+            speed = [float(value) for value in second_status["actual_tcp_speed"]]
+            raw_force = [float(value) for value in second_status["actual_tcp_force"]]
+            force_bias = [float(value) for value in second_status["force_bias"]]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {**second, "success": False, "message": "Complete fresh pose, speed, and wrench feedback is required for Capture Seated."}
+        if second_count <= first_count or len(speed) != 6 or len(raw_force) != 6 or len(force_bias) != 6:
+            return {**second, "success": False, "message": "UR5e feedback did not advance during the seated dwell."}
+        linear_speed_m_s = math.sqrt(sum(value * value for value in speed[:3]))
+        angular_speed_rad_s = math.sqrt(sum(value * value for value in speed[3:]))
+        if linear_speed_m_s > 0.001 or angular_speed_rad_s > 0.02:
+            return {**second, "success": False, "message": "UR5e must remain stationary during Capture Seated."}
+        seated_tool, pose_error = self._insertion_demonstration_pose(
+            second_status.get("actual_tool0_pose"),
+            label="seated world -> tool0 pose",
+        )
+        if pose_error:
+            return {**second, "success": False, "message": pose_error}
+        context = dict(recording.get("context") or {})
+        world_held = self._robot_function_pose_from_reference(
+            seated_tool,
+            dict(context.get("tool0_to_held_part") or {}),
+        )
+        aruco_held = self._robot_function_pose_relative_to_reference(
+            dict(context.get("aruco_pose") or {}),
+            world_held,
+        )
+        if not world_held or not aruco_held:
+            return {**second, "success": False, "message": "Could not compute ArUco -> seated held-part pose."}
+        start_pose = dict(context.get("starting_pose") or {})
+        delta = [seated_tool[field] - float(start_pose[field]) for field in ("x", "y", "z")]
+        travel_m = math.sqrt(sum(value * value for value in delta))
+        if travel_m <= 1e-6:
+            return {**second, "success": False, "message": "Capture Seated requires measurable insertion travel from the pre-insertion pose."}
+        axis = {field: value / travel_m for field, value in zip(("x", "y", "z"), delta, strict=True)}
+        seated_event = {
+            "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "sample_count": second_count,
+            "world_tool0_pose": seated_tool,
+            "world_held_part_pose": world_held,
+            "aruco_to_seated_held_part": aruco_held,
+            "insertion_axis_world": axis,
+            "insertion_travel_m": travel_m,
+            "actual_tcp_force": raw_force,
+            "force_bias": force_bias,
+            "tared_tcp_force": [value - bias for value, bias in zip(raw_force, force_bias, strict=True)],
+            "actual_tcp_speed": speed,
+            "stationary_dwell_sec": 0.40,
+        }
+        updated = {
+            **second,
+            "success": True,
+            "state": "seated_captured",
+            "seated_captured": True,
+            "seated_event": seated_event,
+            "message": "Seated captured. Jog back to the pre-insertion pose, then Stop Recording.",
+        }
+        persistence_error = self._write_insertion_demonstration_pending(updated)
+        if persistence_error:
+            return {**updated, "success": False, "recovery_required": True, "message": persistence_error}
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = deepcopy(updated)
+        return updated
+
+    @staticmethod
+    def _insertion_demonstration_pose_error(
+        expected: dict[str, Any],
+        actual: dict[str, Any],
+    ) -> tuple[float, float]:
+        position_error_m = math.sqrt(
+            sum(
+                (float(actual[field]) - float(expected[field])) ** 2
+                for field in ("x", "y", "z")
+            )
+        )
+        expected_quaternion = [
+            float(expected[field]) for field in ("qx", "qy", "qz", "qw")
+        ]
+        actual_quaternion = [
+            float(actual[field]) for field in ("qx", "qy", "qz", "qw")
+        ]
+        expected_norm = math.sqrt(sum(value * value for value in expected_quaternion))
+        actual_norm = math.sqrt(sum(value * value for value in actual_quaternion))
+        if expected_norm <= 1e-12 or actual_norm <= 1e-12:
+            return position_error_m, math.inf
+        quaternion_dot = abs(
+            sum(
+                left * right
+                for left, right in zip(
+                    (value / expected_norm for value in expected_quaternion),
+                    (value / actual_norm for value in actual_quaternion),
+                    strict=True,
+                )
+            )
+        )
+        return position_error_m, 2.0 * math.acos(
+            min(1.0, max(0.0, quaternion_dot))
+        )
+
+    def _insertion_demonstration_return_error(
+        self,
+        recording: dict[str, Any],
+    ) -> tuple[dict[str, float], str]:
+        status = dict(recording.get("controller_status") or {})
+        actual, pose_error = self._insertion_demonstration_pose(
+            status.get("actual_tool0_pose"),
+            label="current world -> tool0 pose",
+        )
+        if pose_error:
+            return {}, pose_error
+        expected = dict(dict(recording.get("context") or {}).get("starting_pose") or {})
+        try:
+            speed = [float(value) for value in status["actual_tcp_speed"]]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, "Fresh six-axis TCP speed is unavailable."
+        if len(speed) != 6 or not all(math.isfinite(value) for value in speed):
+            return {}, "Fresh six-axis TCP speed is invalid."
+        position_error_m, orientation_error_rad = (
+            self._insertion_demonstration_pose_error(expected, actual)
+        )
+        linear_speed_m_s = math.sqrt(sum(value * value for value in speed[:3]))
+        angular_speed_rad_s = math.sqrt(sum(value * value for value in speed[3:]))
+        evidence = {
+            "position_error_m": position_error_m,
+            "orientation_error_rad": orientation_error_rad,
+            "linear_speed_m_s": linear_speed_m_s,
+            "angular_speed_rad_s": angular_speed_rad_s,
+        }
+        if (
+            position_error_m > _UR5E_MANUAL_DEPENDENT_POSITION_TOLERANCE_M
+            or orientation_error_rad
+            > _UR5E_MANUAL_DEPENDENT_ORIENTATION_TOLERANCE_RAD
+        ):
+            return evidence, (
+                "Jog back to the recorded pre-insertion pose before Stop Recording. "
+                f"Current errors are {position_error_m * 1000.0:.2f} mm and "
+                f"{math.degrees(orientation_error_rad):.2f} deg."
+            )
+        if linear_speed_m_s > 0.001 or angular_speed_rad_s > 0.02:
+            return evidence, "Release Cartesian jog and wait for UR5e to become stationary."
+        return evidence, ""
+
+    def _write_insertion_demonstration_bundle(
+        self,
+        recording: dict[str, Any],
+        controller_result: dict[str, Any],
+        *,
+        reanalyze_saved_recording: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        recording_id = str(recording.get("recording_id") or "")
+        if not recording_id or Path(recording_id).name != recording_id:
+            return recording, "Insertion demonstration recording_id is invalid."
+        raw_trace_path = Path(str(controller_result.get("trace_path") or ""))
+        try:
+            resolved_trace = raw_trace_path.resolve(strict=True)
+            if reanalyze_saved_recording:
+                expected_saved_trace = (
+                    self._insertion_demonstration_directory(recording_id)
+                    / "trace.jsonl"
+                ).resolve(strict=True)
+                if resolved_trace != expected_saved_trace:
+                    raise ValueError("saved trace identity does not match")
+            else:
+                trace_root = _INSERTION_DEMONSTRATION_TRACE_ROOT.resolve(
+                    strict=False
+                )
+                resolved_trace.relative_to(trace_root)
+        except (OSError, RuntimeError, ValueError):
+            source_label = (
+                "preserved recording directory"
+                if reanalyze_saved_recording
+                else "RTDE trace root"
+            )
+            return recording, (
+                "Insertion demonstration trace path is outside the exact "
+                f"{source_label}."
+            )
+        expected_trace_name = (
+            "trace.jsonl"
+            if reanalyze_saved_recording
+            else f"{recording_id}.jsonl"
+        )
+        if resolved_trace.name != expected_trace_name:
+            return recording, "Insertion demonstration trace filename does not match recording_id."
+        expected_trace_sha256 = str(controller_result.get("trace_sha256") or "")
+        try:
+            actual_trace_sha256 = sha256_file(resolved_trace)
+        except OSError as exc:
+            return recording, f"Could not hash insertion demonstration trace: {exc}"
+        if expected_trace_sha256 != actual_trace_sha256:
+            return recording, "Insertion demonstration trace SHA-256 does not match the RTDE result."
+
+        samples: list[dict[str, Any]] = []
+        try:
+            with resolved_trace.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    row = json.loads(line)
+                    if not isinstance(row, dict):
+                        raise ValueError("trace row is not an object")
+                    samples.append(row)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return recording, f"Could not read insertion demonstration trace: {exc}"
+        if not samples:
+            return recording, "Insertion demonstration trace contains no samples."
+        seated_event = dict(recording.get("seated_event") or {})
+        try:
+            seated_sample_count = int(seated_event["sample_count"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return recording, "Capture Seated evidence is missing from the recording."
+        insertion_samples = [
+            sample
+            for sample in samples
+            if int(sample.get("sample_index", -1)) < seated_sample_count
+        ]
+        withdrawal_samples = [
+            sample
+            for sample in samples
+            if int(sample.get("sample_index", -1)) >= seated_sample_count
+        ]
+        if not insertion_samples:
+            return recording, "Trace does not contain a start-to-save insertion segment."
+
+        force_bias = [float(value) for value in controller_result.get("force_bias") or []]
+        if len(force_bias) != 6:
+            return recording, "RTDE stationary force baseline is incomplete."
+        tared_wrenches: list[list[float]] = []
+        for sample in insertion_samples:
+            try:
+                raw_wrench = [float(value) for value in sample["actual_tcp_force"]]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return recording, "Trace contains incomplete six-axis wrench data."
+            if len(raw_wrench) != 6:
+                return recording, "Trace contains incomplete six-axis wrench data."
+            tared_wrenches.append(
+                [
+                    value - bias
+                    for value, bias in zip(raw_wrench, force_bias, strict=True)
+                ]
+            )
+        force_norms = [
+            math.sqrt(sum(value * value for value in wrench[:3]))
+            for wrench in tared_wrenches
+        ]
+        try:
+            torque_norms = [
+                self._insertion_demonstration_active_tcp_torque_norm(
+                    sample,
+                    wrench,
+                )
+                for sample, wrench in zip(
+                    insertion_samples,
+                    tared_wrenches,
+                    strict=True,
+                )
+            ]
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return (
+                recording,
+                "Trace is missing the active-TCP torque reference required by "
+                f"the protected insertion policy: {exc}",
+            )
+        tool_flange_torque_norms = [
+            math.sqrt(sum(value * value for value in wrench[3:]))
+            for wrench in tared_wrenches
+        ]
+        try:
+            insertion_axis_payload = dict(seated_event["insertion_axis_world"])
+            insertion_axis_world = [
+                float(insertion_axis_payload[key]) for key in ("x", "y", "z")
+            ]
+            world_base_pose = dict(insertion_samples[0]["world_base_pose"])
+            world_base_quaternion = [
+                float(world_base_pose[key]) for key in ("qx", "qy", "qz", "qw")
+            ]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return recording, "Trace is missing the insertion-axis frame evidence."
+        if len(insertion_axis_world) != 3 or not all(
+            math.isfinite(value)
+            for value in (*insertion_axis_world, *world_base_quaternion)
+        ):
+            return recording, "Trace contains invalid insertion-axis frame evidence."
+        axis_norm = math.sqrt(sum(value * value for value in insertion_axis_world))
+        quaternion_norm = math.sqrt(
+            sum(value * value for value in world_base_quaternion)
+        )
+        if axis_norm <= 1e-9 or quaternion_norm <= 1e-9:
+            return recording, "Trace contains degenerate insertion-axis frame evidence."
+        axis_world = [value / axis_norm for value in insertion_axis_world]
+        qx, qy, qz, qw = (
+            value / quaternion_norm for value in world_base_quaternion
+        )
+        inverse_vector = (-qx, -qy, -qz)
+        first_cross = (
+            inverse_vector[1] * axis_world[2]
+            - inverse_vector[2] * axis_world[1],
+            inverse_vector[2] * axis_world[0]
+            - inverse_vector[0] * axis_world[2],
+            inverse_vector[0] * axis_world[1]
+            - inverse_vector[1] * axis_world[0],
+        )
+        second_cross = (
+            inverse_vector[1] * first_cross[2]
+            - inverse_vector[2] * first_cross[1],
+            inverse_vector[2] * first_cross[0]
+            - inverse_vector[0] * first_cross[2],
+            inverse_vector[0] * first_cross[1]
+            - inverse_vector[1] * first_cross[0],
+        )
+        insertion_axis_base = [
+            axis_world[index]
+            + 2.0 * qw * first_cross[index]
+            + 2.0 * second_cross[index]
+            for index in range(3)
+        ]
+        axial_forces = [
+            sum(
+                wrench[index] * insertion_axis_base[index]
+                for index in range(3)
+            )
+            for wrench in tared_wrenches
+        ]
+        lateral_forces = [
+            math.sqrt(
+                sum(
+                    (
+                        wrench[index]
+                        - axial_force * insertion_axis_base[index]
+                    )
+                    ** 2
+                    for index in range(3)
+                )
+            )
+            for wrench, axial_force in zip(
+                tared_wrenches,
+                axial_forces,
+                strict=True,
+            )
+        ]
+        candidate_recipe, candidate_error = self._learn_insertion_demonstration_recipe(
+            recording=recording,
+            controller_result=controller_result,
+            trace_sha256=actual_trace_sha256,
+            insertion_samples=insertion_samples,
+            axial_forces=axial_forces,
+            lateral_forces=lateral_forces,
+            torque_norms=torque_norms,
+            tool_flange_torque_norms=tool_flange_torque_norms,
+        )
+        hard_cap_review_required = bool(
+            candidate_recipe.get("hard_cap_review_required")
+        )
+        review_evidence = (
+            deepcopy(candidate_recipe) if hard_cap_review_required else {}
+        )
+        if hard_cap_review_required:
+            candidate_recipe = {}
+        analysis_caps, analysis_caps_error = self._move_insert_hard_caps(
+            str(recording.get("part_name") or "")
+        )
+        analysis_policy, analysis_policy_error = (
+            self._move_insert_learning_policy(
+                analysis_caps,
+                str(recording.get("part_name") or ""),
+            )
+            if not analysis_caps_error
+            else ({}, analysis_caps_error)
+        )
+        analysis = {
+            "version": 3,
+            "accepted": not bool(candidate_error) and not hard_cap_review_required,
+            "hard_cap_review_required": hard_cap_review_required,
+            "rejection_reason": candidate_error,
+            "recording_id": recording_id,
+            "part_name": str(recording.get("part_name") or ""),
+            "destination_location": str(recording.get("destination_location") or ""),
+            "context_sha256": str(recording.get("context_sha256") or ""),
+            "trace_sha256": actual_trace_sha256,
+            "sample_count": len(samples),
+            "insertion_sample_count": len(insertion_samples),
+            "withdrawal_sample_count": len(withdrawal_samples),
+            "baseline_force_span_n": float(
+                controller_result.get("baseline_force_span_n") or 0.0
+            ),
+            "baseline_torque_span_nm": float(
+                controller_result.get("baseline_torque_span_nm") or 0.0
+            ),
+            "maximum_tared_force_norm_n": max(force_norms),
+            "maximum_tared_torque_norm_nm": max(torque_norms),
+            "maximum_tared_tool_flange_torque_norm_nm": max(
+                tool_flange_torque_norms
+            ),
+            "tared_axial_force_min_n": min(axial_forces),
+            "tared_axial_force_max_n": max(axial_forces),
+            "maximum_tared_lateral_force_n": max(lateral_forces),
+            "insertion_axis_world": axis_world,
+            "insertion_axis_base": insertion_axis_base,
+            "tared_wrench_min": [
+                min(wrench[index] for wrench in tared_wrenches)
+                for index in range(6)
+            ],
+            "tared_wrench_max": [
+                max(wrench[index] for wrench in tared_wrenches)
+                for index in range(6)
+            ],
+            "seated_event": seated_event,
+            "candidate_recipe": candidate_recipe,
+            "review_evidence": review_evidence,
+            "minimum_required_hard_caps": deepcopy(
+                review_evidence.get("minimum_required_hard_caps") or {}
+            ),
+            "learning_policy": deepcopy(analysis_policy),
+            "learning_policy_sha256": (
+                self._move_insert_learning_policy_sha256(analysis_policy)
+                if not analysis_policy_error
+                else ""
+            ),
+            "hard_caps": deepcopy(analysis_caps),
+            "hard_caps_error": str(
+                review_evidence.get("hard_caps_error")
+                or analysis_caps_error
+            ),
+            "candidate_detection_values_only": False,
+            "trajectory_replay_authorized": False,
+            "automatic_move_insert_qualified": False,
+            "supervised_test_required": True,
+        }
+        directory = self._insertion_demonstration_directory(recording_id)
+        bundle_recording = dict(recording)
+        if hard_cap_review_required:
+            bundle_recording.update(
+                {
+                    "success": True,
+                    "ready": False,
+                    "active": False,
+                    "state": "recording_saved_mg_hard_cap_review_required",
+                    "review_required": True,
+                    "recovery_required": False,
+                    "recording_accepted": False,
+                    "recording_rejection_reason": "",
+                    "hard_cap_review_required": True,
+                    "part_clamped": True,
+                    "message": (
+                        f"Recording saved — {str(recording.get('part_name') or '')} "
+                        "hard-cap review required. The "
+                        "bundle contains the observed loads and minimum required "
+                        "ceilings. No candidate recipe or qualification was written."
+                    ),
+                }
+            )
+        elif candidate_error:
+            bundle_recording.update(
+                {
+                    "success": False,
+                    "ready": True,
+                    "active": False,
+                    "state": "not_recorded",
+                    "review_required": False,
+                    "recovery_required": False,
+                    "recording_accepted": False,
+                    "recording_rejection_reason": candidate_error,
+                    "reanalyze_available": True,
+                    "part_clamped": True,
+                    "message": (
+                        f"Recording rejected: {candidate_error} Diagnostics were "
+                        "saved; no candidate recipe or qualification was written. "
+                        "The part remains clamped. Start Recording and Reanalyze "
+                        "Saved Recording are available."
+                    ),
+                }
+            )
+        else:
+            bundle_recording["recording_accepted"] = True
+            bundle_recording["recording_rejection_reason"] = ""
+        summary = {
+            **bundle_recording,
+            "controller_result": controller_result,
+            "diagnostic_directory": str(directory),
+            "analysis_path": str(directory / "analysis.json"),
+            "trace_path": str(directory / "trace.jsonl"),
+            "diagnostic_bundle_path": str(directory / "diagnostic_bundle.zip"),
+        }
+        if reanalyze_saved_recording:
+            return {
+                **summary,
+                "analysis": analysis,
+                "candidate_recipe": candidate_recipe,
+                "download_path": str(directory / "diagnostic_bundle.zip"),
+            }, ""
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary_trace = directory / f".{recording_id}.trace.tmp"
+            shutil.copyfile(resolved_trace, temporary_trace)
+            os.replace(temporary_trace, directory / "trace.jsonl")
+            atomic_json_write(directory / "analysis.json", analysis)
+            atomic_json_write(directory / "summary.json", self._move_insert_json_safe(summary))
+            temporary_bundle = directory / ".diagnostic_bundle.tmp.zip"
+            with zipfile.ZipFile(
+                temporary_bundle,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                archive.write(directory / "summary.json", arcname="summary.json")
+                archive.write(directory / "trace.jsonl", arcname="trace.jsonl")
+                archive.write(directory / "analysis.json", arcname="analysis.json")
+            os.replace(temporary_bundle, directory / "diagnostic_bundle.zip")
+        except (OSError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+            return recording, f"Could not persist insertion demonstration bundle: {exc}"
+        return {
+            **summary,
+            "analysis": analysis,
+            "candidate_recipe": candidate_recipe,
+            "download_path": str(directory / "diagnostic_bundle.zip"),
+        }, ""
+
+    @staticmethod
+    def _insertion_demonstration_rolling_median(
+        values: list[float],
+        timestamps: list[float],
+        *,
+        window_sec: float,
+    ) -> list[float]:
+        """Apply the protected time-based force filter used for learning."""
+        filtered: list[float] = []
+        window_start = 0
+        for index, timestamp in enumerate(timestamps):
+            while (
+                window_start < index
+                and timestamp - timestamps[window_start]
+                > window_sec
+            ):
+                window_start += 1
+            filtered.append(
+                float(statistics.median(values[window_start : index + 1]))
+            )
+        return filtered
+
+    @staticmethod
+    def _insertion_demonstration_percentile(
+        values: list[float],
+        fraction: float,
+    ) -> float:
+        """Return one deterministic linearly interpolated percentile."""
+        ordered = sorted(float(value) for value in values)
+        if not ordered:
+            raise ValueError("percentile requires at least one value")
+        position = min(1.0, max(0.0, fraction)) * (len(ordered) - 1)
+        lower = int(math.floor(position))
+        upper = int(math.ceil(position))
+        if lower == upper:
+            return ordered[lower]
+        weight = position - lower
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+    @staticmethod
+    def _insertion_demonstration_world_vector_to_base(
+        vector_world: tuple[float, float, float],
+        world_base_quaternion: dict[str, float],
+    ) -> tuple[float, float, float]:
+        """Rotate one world-frame vector into the frozen base frame."""
+        qx = -float(world_base_quaternion["qx"])
+        qy = -float(world_base_quaternion["qy"])
+        qz = -float(world_base_quaternion["qz"])
+        qw = float(world_base_quaternion["qw"])
+        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if not math.isfinite(norm) or norm <= 1e-12:
+            raise ValueError("world -> base quaternion is invalid")
+        qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+        tx = 2.0 * (qy * vector_world[2] - qz * vector_world[1])
+        ty = 2.0 * (qz * vector_world[0] - qx * vector_world[2])
+        tz = 2.0 * (qx * vector_world[1] - qy * vector_world[0])
+        return (
+            vector_world[0] + qw * tx + qy * tz - qz * ty,
+            vector_world[1] + qw * ty + qz * tx - qx * tz,
+            vector_world[2] + qw * tz + qx * ty - qy * tx,
+        )
+
+    @staticmethod
+    def _insertion_demonstration_active_tcp_torque_norm(
+        sample: dict[str, Any],
+        tared_wrench: list[float],
+    ) -> float:
+        """Match the RTDE insert server's active-TCP torque reference."""
+        def finite_values(values: Any, *, label: str) -> tuple[float, ...]:
+            if not isinstance(values, (list, tuple)) or any(
+                isinstance(value, bool) for value in values
+            ):
+                raise ValueError(f"{label} is invalid")
+            try:
+                converted = tuple(float(value) for value in values)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{label} is invalid") from exc
+            if not all(math.isfinite(value) for value in converted):
+                raise ValueError(f"{label} is invalid")
+            return converted
+
+        def normalized(
+            quaternion: tuple[float, float, float, float],
+        ) -> tuple[float, float, float, float]:
+            norm = math.sqrt(sum(value * value for value in quaternion))
+            if not math.isfinite(norm) or norm <= 1e-12:
+                raise ValueError("insertion demonstration quaternion is invalid")
+            return tuple(value / norm for value in quaternion)
+
+        def multiply(
+            left: tuple[float, float, float, float],
+            right: tuple[float, float, float, float],
+        ) -> tuple[float, float, float, float]:
+            lx, ly, lz, lw = left
+            rx, ry, rz, rw = right
+            return (
+                lw * rx + lx * rw + ly * rz - lz * ry,
+                lw * ry - lx * rz + ly * rw + lz * rx,
+                lw * rz + lx * ry - ly * rx + lz * rw,
+                lw * rw - lx * rx - ly * ry - lz * rz,
+            )
+
+        raw_actual_base_tcp = sample.get("actual_base_tcp_pose")
+        if isinstance(raw_actual_base_tcp, Mapping):
+            try:
+                raw_base_tcp_q = [
+                    raw_actual_base_tcp[field]
+                    for field in ("qx", "qy", "qz", "qw")
+                ]
+            except KeyError as exc:
+                raise ValueError(
+                    "insertion demonstration base -> TCP pose is invalid"
+                ) from exc
+            base_tcp_q = finite_values(
+                raw_base_tcp_q,
+                label="insertion demonstration base -> TCP pose",
+            )
+        else:
+            actual_base_tcp = finite_values(
+                raw_actual_base_tcp,
+                label="insertion demonstration base -> TCP pose",
+            )
+            if len(actual_base_tcp) != 6:
+                raise ValueError(
+                    "insertion demonstration base -> TCP pose must contain "
+                    "six RTDE pose values"
+                )
+            rx, ry, rz = actual_base_tcp[3:]
+            rotation_angle = math.sqrt(rx * rx + ry * ry + rz * rz)
+            if rotation_angle <= 1e-12:
+                base_tcp_q = (0.0, 0.0, 0.0, 1.0)
+            else:
+                quaternion_scale = math.sin(rotation_angle / 2.0) / rotation_angle
+                base_tcp_q = (
+                    rx * quaternion_scale,
+                    ry * quaternion_scale,
+                    rz * quaternion_scale,
+                    math.cos(rotation_angle / 2.0),
+                )
+
+        raw_tool0_tcp = sample.get("tool0_tcp_pose")
+        if not isinstance(raw_tool0_tcp, Mapping):
+            raise ValueError("insertion demonstration tool0 -> TCP pose is invalid")
+        try:
+            raw_tool0_tcp_q = [
+                raw_tool0_tcp[field]
+                for field in ("qx", "qy", "qz", "qw")
+            ]
+            raw_tool0_tcp_translation = [
+                raw_tool0_tcp[field] for field in ("x", "y", "z")
+            ]
+        except KeyError as exc:
+            raise ValueError(
+                "insertion demonstration tool0 -> TCP pose is invalid"
+            ) from exc
+        tool0_tcp_q = finite_values(
+            raw_tool0_tcp_q,
+            label="insertion demonstration tool0 -> TCP pose",
+        )
+        tool0_tcp_translation = finite_values(
+            raw_tool0_tcp_translation,
+            label="insertion demonstration tool0 -> TCP pose",
+        )
+
+        base_tcp_q = normalized(base_tcp_q)
+        tool0_tcp_q = normalized(tool0_tcp_q)
+        base_tool0_q = normalized(
+            multiply(
+                base_tcp_q,
+                (-tool0_tcp_q[0], -tool0_tcp_q[1], -tool0_tcp_q[2], tool0_tcp_q[3]),
+            )
+        )
+        qx, qy, qz, qw = base_tool0_q
+        tx = 2.0 * (
+            qy * tool0_tcp_translation[2] - qz * tool0_tcp_translation[1]
+        )
+        ty = 2.0 * (
+            qz * tool0_tcp_translation[0] - qx * tool0_tcp_translation[2]
+        )
+        tz = 2.0 * (
+            qx * tool0_tcp_translation[1] - qy * tool0_tcp_translation[0]
+        )
+        offset_base = (
+            tool0_tcp_translation[0] + qw * tx + qy * tz - qz * ty,
+            tool0_tcp_translation[1] + qw * ty + qz * tx - qx * tz,
+            tool0_tcp_translation[2] + qw * tz + qx * ty - qy * tx,
+        )
+        wrench = finite_values(
+            tared_wrench,
+            label="insertion demonstration tared wrench",
+        )
+        if len(wrench) != 6:
+            raise ValueError(
+                "insertion demonstration tared wrench must contain six values"
+            )
+        force = wrench[:3]
+        offset_moment = (
+            offset_base[1] * force[2] - offset_base[2] * force[1],
+            offset_base[2] * force[0] - offset_base[0] * force[2],
+            offset_base[0] * force[1] - offset_base[1] * force[0],
+        )
+        active_tcp_torque = tuple(
+            wrench[index + 3] - offset_moment[index]
+            for index in range(3)
+        )
+        if not all(math.isfinite(value) for value in active_tcp_torque):
+            raise ValueError("insertion demonstration torque is invalid")
+        return math.sqrt(sum(value * value for value in active_tcp_torque))
+
+    def _learn_insertion_demonstration_recipe(  # noqa: C901, PLR0912, PLR0915 - explicit fail-closed evidence gates.
+        self,
+        *,
+        recording: dict[str, Any],
+        controller_result: dict[str, Any],
+        trace_sha256: str,
+        insertion_samples: list[dict[str, Any]],
+        axial_forces: list[float],
+        lateral_forces: list[float],
+        torque_norms: list[float],
+        tool_flange_torque_norms: list[float],
+    ) -> tuple[dict[str, Any], str]:
+        """Derive one versioned exact-part recipe without replaying the trace."""
+        seated_event = dict(recording.get("seated_event") or {})
+        context = dict(recording.get("context") or {})
+        try:
+            travel_m = float(seated_event["insertion_travel_m"])
+            baseline_force_span_n = max(
+                0.0,
+                float(controller_result.get("baseline_force_span_n") or 0.0),
+            )
+            baseline_torque_span_nm = max(
+                0.0,
+                float(controller_result.get("baseline_torque_span_nm") or 0.0),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, "The demonstration is missing finite travel or force-baseline evidence."
+        if not math.isfinite(travel_m) or travel_m <= 0.001:
+            return {}, "The demonstrated insertion travel must exceed 1 mm."
+        caps, caps_error = self._move_insert_hard_caps(
+            str(recording.get("part_name") or "")
+        )
+        part_name = str(recording.get("part_name") or "")
+        mg_hard_cap_fields = (
+            "insert_max_insertion_force_n",
+            "insert_max_axial_force_n",
+            "insert_max_lateral_force_n",
+            "insert_max_torque_nm",
+            "insert_max_tool_flange_torque_nm",
+        )
+        _shared_caps, shared_caps_error = self._move_insert_hard_caps()
+        missing_cap_fields = {
+            field_name
+            for field_name, value in caps.items()
+            if value is None
+        }
+        shared_load_cap_review_available = bool(
+            shared_caps_error
+            and missing_cap_fields
+            and missing_cap_fields.issubset(set(mg_hard_cap_fields))
+        )
+        mg_hard_cap_review_required = bool(
+            part_name in _MOVE_INSERT_SUPPORTED_PARTS
+            and caps_error
+            and (not shared_caps_error or shared_load_cap_review_available)
+        )
+        if caps_error and not mg_hard_cap_review_required:
+            return {}, caps_error
+        analysis_caps = dict(caps)
+        if mg_hard_cap_review_required:
+            for field_name in mg_hard_cap_fields:
+                if analysis_caps.get(field_name) is None:
+                    analysis_caps[field_name] = math.inf
+            if not shared_caps_error:
+                for field_name, shared_value in _shared_caps.items():
+                    if (
+                        field_name not in mg_hard_cap_fields
+                        and analysis_caps.get(field_name) is None
+                        and shared_value is not None
+                    ):
+                        analysis_caps[field_name] = shared_value
+        hard_cap_review_fields: set[str] = set()
+        hard_cap_review_reasons: list[str] = []
+        if mg_hard_cap_review_required and caps_error:
+            hard_cap_review_reasons.append(caps_error)
+        if not (
+            len(insertion_samples)
+            == len(axial_forces)
+            == len(lateral_forces)
+            == len(torque_norms)
+            == len(tool_flange_torque_norms)
+        ):
+            return {}, "The demonstration wrench trace is not synchronized."
+        if not insertion_samples or not all(
+            math.isfinite(float(value))
+            for value in (
+                *axial_forces,
+                *lateral_forces,
+                *torque_norms,
+                *tool_flange_torque_norms,
+            )
+        ):
+            return {}, "The demonstration has invalid force or torque evidence."
+
+        timestamps: list[float] = []
+        for sample in insertion_samples:
+            try:
+                timestamp = float(sample["rtde_timestamp_sec"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {}, "The demonstration is missing advancing RTDE timestamps."
+            if not math.isfinite(timestamp) or (
+                timestamps and timestamp <= timestamps[-1]
+            ):
+                return {}, "The demonstration RTDE timestamps did not advance strictly."
+            timestamps.append(timestamp)
+
+        baseline_indices = [
+            index
+            for index, sample in enumerate(insertion_samples)
+            if str(sample.get("phase") or "") == "recording_baseline"
+        ]
+        insertion_indices = [
+            index
+            for index, sample in enumerate(insertion_samples)
+            if str(sample.get("phase") or "") == "recording_insertion"
+        ]
+        if not baseline_indices or not insertion_indices:
+            return {}, "The recording is missing separate baseline and insertion evidence."
+
+        absolute_axial = [abs(float(value)) for value in axial_forces]
+        compressive_axial = [max(0.0, -float(value)) for value in axial_forces]
+        filtered_absolute_axial = [0.0] * len(insertion_samples)
+        filtered_compression = [0.0] * len(insertion_samples)
+        filtered_lateral = [0.0] * len(insertion_samples)
+        filtered_torque = [0.0] * len(insertion_samples)
+        filtered_tool_flange_torque = [0.0] * len(insertion_samples)
+        filter_window_sec = float(analysis_caps["insert_soft_filter_window_sec"])
+        for phase_indices in (baseline_indices, insertion_indices):
+            phase_timestamps = [timestamps[index] for index in phase_indices]
+            for raw_values, filtered_values in (
+                (absolute_axial, filtered_absolute_axial),
+                (compressive_axial, filtered_compression),
+                (lateral_forces, filtered_lateral),
+                (torque_norms, filtered_torque),
+                (tool_flange_torque_norms, filtered_tool_flange_torque),
+            ):
+                phase_filtered = self._insertion_demonstration_rolling_median(
+                    [float(raw_values[index]) for index in phase_indices],
+                    phase_timestamps,
+                    window_sec=filter_window_sec,
+                )
+                for index, filtered_value in zip(
+                    phase_indices,
+                    phase_filtered,
+                    strict=True,
+                ):
+                    filtered_values[index] = filtered_value
+
+        for label, values, cap_name, unit in (
+            ("axial force", absolute_axial, "insert_max_axial_force_n", "N"),
+            ("lateral force", lateral_forces, "insert_max_lateral_force_n", "N"),
+            ("torque", torque_norms, "insert_max_torque_nm", "Nm"),
+            (
+                "tool-flange torque",
+                tool_flange_torque_norms,
+                "insert_max_tool_flange_torque_nm",
+                "Nm",
+            ),
+        ):
+            observed = max(float(values[index]) for index in insertion_indices)
+            hard_cap = float(analysis_caps[cap_name])
+            if observed >= hard_cap:
+                hard_cap_review_fields.add(cap_name)
+                hard_cap_review_reasons.append(
+                    f"The recording is unsafe: demonstrated {label} {observed:.3f} "
+                    f"{unit} reached the protected {hard_cap:.3f} {unit} hard cap. "
+                    "The value was rejected, not clipped."
+                )
+
+        baseline_axial_envelope_n = max(
+            filtered_absolute_axial[index] for index in baseline_indices
+        )
+        baseline_force_uncertainty_n = max(
+            _MOVE_INSERT_FORCE_UNCERTAINTY_FLOOR_N,
+            baseline_force_span_n * 3.0,
+            baseline_axial_envelope_n,
+        )
+        baseline_torque_uncertainty_nm = max(
+            _MOVE_INSERT_TORQUE_UNCERTAINTY_FLOOR_NM,
+            baseline_torque_span_nm * 3.0,
+            max(filtered_torque[index] for index in baseline_indices),
+        )
+        contact_force_delta_n = (
+            baseline_axial_envelope_n + baseline_force_uncertainty_n
+        )
+        if contact_force_delta_n >= float(
+            analysis_caps["insert_max_contact_force_delta_n"]
+        ):
+            return {}, (
+                "The stationary force baseline is too uncertain for protected "
+                "contact detection."
+            )
+
+        contact_index: int | None = None
+        contact_candidate_index: int | None = None
+        for index in insertion_indices:
+            if filtered_compression[index] >= contact_force_delta_n:
+                if contact_candidate_index is None:
+                    contact_candidate_index = index
+                if (
+                    timestamps[index] - timestamps[contact_candidate_index]
+                    >= _MOVE_INSERT_CONTACT_HOLD_SEC
+                ):
+                    contact_index = contact_candidate_index
+                    break
+            else:
+                contact_candidate_index = None
+        if contact_index is None:
+            return {}, (
+                "The recording did not contain a sustained compressive force change "
+                "above the stationary baseline. Repeat the insertion and Save "
+                "Recording while seated."
+            )
+
+        start_pose = dict(context.get("starting_pose") or {})
+        axis_world_payload = dict(seated_event.get("insertion_axis_world") or {})
+        try:
+            start_position = tuple(float(start_pose[field]) for field in ("x", "y", "z"))
+            axis_world = tuple(
+                float(axis_world_payload[field]) for field in ("x", "y", "z")
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, "The demonstration is missing its insertion geometry."
+        axis_norm = math.sqrt(sum(value * value for value in axis_world))
+        if not math.isfinite(axis_norm) or axis_norm <= 1e-12:
+            return {}, "The demonstrated insertion axis is invalid."
+        axis_world = tuple(value / axis_norm for value in axis_world)
+
+        depths: list[float] = []
+        post_contact_depths: list[float] = []
+        seated_depth_tolerance_m = max(0.0005, travel_m * 0.05)
+        if seated_depth_tolerance_m > float(
+            analysis_caps["insert_max_seated_depth_tolerance_m"]
+        ):
+            return {}, "The demonstrated seated depth tolerance exceeds its hard cap."
+        for index, sample in enumerate(insertion_samples):
+            try:
+                pose = {
+                    field: float(dict(sample["world_tool0_pose"])[field])
+                    for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                }
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {}, "The demonstration trace contains an invalid world -> tool0 pose."
+            delta = tuple(
+                pose[field] - start_position[position_index]
+                for position_index, field in enumerate(("x", "y", "z"))
+            )
+            depth = sum(delta[position_index] * axis_world[position_index] for position_index in range(3))
+            lateral_offset = math.sqrt(
+                sum(
+                    (delta[position_index] - depth * axis_world[position_index]) ** 2
+                    for position_index in range(3)
+                )
+            )
+            translation = math.sqrt(sum(value * value for value in delta))
+            _position_error, orientation_error = self._insertion_demonstration_pose_error(
+                start_pose,
+                pose,
+            )
+            if translation > float(analysis_caps["insert_max_travel_m"]):
+                return {}, "The demonstrated insertion travel exceeded its hard cap."
+            if depth < -float(analysis_caps["insert_start_position_tolerance_m"]):
+                return {}, "The demonstrated insertion moved opposite its insertion axis."
+            if lateral_offset > float(analysis_caps["insert_start_position_tolerance_m"]):
+                return {}, "The demonstrated insertion had excessive lateral drift."
+            if orientation_error > float(
+                analysis_caps["insert_start_orientation_tolerance_rad"]
+            ):
+                return {}, "The demonstrated insertion changed tool orientation excessively."
+            depths.append(depth)
+            if index >= contact_index:
+                post_contact_depths.append(depth)
+        if max(post_contact_depths) - depths[-1] > seated_depth_tolerance_m:
+            return {}, "The demonstrated insertion rebounded before Save Recording."
+        if abs(depths[-1] - travel_m) > seated_depth_tolerance_m:
+            return {}, "The demonstrated trace does not reconstruct the captured seated travel."
+
+        speed_observation_timestamps: list[float] = []
+        speed_observations: list[float] = []
+        speed_candidates: list[float] = []
+        advancing_force_candidates: list[float] = []
+        for index in insertion_indices:
+            if index < contact_index:
+                continue
+            axial_speed_m_s = 0.0
+            try:
+                tcp_speed = [
+                    float(value)
+                    for value in insertion_samples[index]["actual_tcp_speed"]
+                ]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                tcp_speed = []
+            if len(tcp_speed) == 6:
+                world_base_pose = dict(insertion_samples[index].get("world_base_pose") or {})
+                try:
+                    base_quaternion = {
+                        field: float(world_base_pose[field])
+                        for field in ("qx", "qy", "qz", "qw")
+                    }
+                    axis_base = self._insertion_demonstration_world_vector_to_base(
+                        axis_world,
+                        base_quaternion,
+                    )
+                    axial_speed_m_s = sum(
+                        tcp_speed[position_index] * axis_base[position_index]
+                        for position_index in range(3)
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    axial_speed_m_s = 0.0
+            if axial_speed_m_s <= 1e-5 and index > 0:
+                elapsed = timestamps[index] - timestamps[index - 1]
+                if elapsed > 0.0:
+                    axial_speed_m_s = max(
+                        0.0,
+                        (depths[index] - depths[index - 1]) / elapsed,
+                    )
+            speed_observation_timestamps.append(timestamps[index])
+            speed_observations.append(axial_speed_m_s)
+            if (
+                str(insertion_samples[index].get("active_motion_kind") or "")
+                in {"relative_cartesian", "cartesian_jog"}
+                and axial_speed_m_s > 1e-5
+            ):
+                speed_candidates.append(axial_speed_m_s)
+                advancing_force_candidates.append(filtered_compression[index])
+        if not speed_candidates or not advancing_force_candidates:
+            return {}, "The recording contains no accepted advancing Cartesian insertion motion."
+
+        filtered_speed_observations = self._insertion_demonstration_rolling_median(
+            speed_observations,
+            speed_observation_timestamps,
+            window_sec=filter_window_sec,
+        )
+        speed_limit_m_s = float(analysis_caps["insert_max_contact_speed_m_s"])
+        observed_advancing_speed_m_s = float(statistics.median(speed_candidates))
+        observed_peak_filtered_advancing_speed_m_s = max(
+            0.0,
+            max(filtered_speed_observations),
+        )
+        contact_speed_m_s = speed_limit_m_s
+        insertion_force_n = self._insertion_demonstration_percentile(
+            advancing_force_candidates,
+            0.75,
+        )
+
+        successful_indices = [
+            index for index in insertion_indices if index >= contact_index
+        ]
+        observed_axial_n = max(
+            filtered_absolute_axial[index] for index in successful_indices
+        )
+        observed_lateral_n = max(
+            filtered_lateral[index] for index in successful_indices
+        )
+        observed_torque_nm = max(
+            filtered_torque[index] for index in successful_indices
+        )
+        observed_tool_flange_torque_nm = max(
+            filtered_tool_flange_torque[index]
+            for index in successful_indices
+        )
+        observed_raw_axial_force_n = max(
+            absolute_axial[index] for index in successful_indices
+        )
+        observed_raw_lateral_force_n = max(
+            lateral_forces[index] for index in successful_indices
+        )
+        observed_raw_torque_nm = max(
+            torque_norms[index] for index in successful_indices
+        )
+        observed_raw_tool_flange_torque_nm = max(
+            tool_flange_torque_norms[index] for index in successful_indices
+        )
+        seated_index = insertion_indices[-1]
+        seated_filtered_axial_force_n = filtered_compression[seated_index]
+        seated_filtered_lateral_force_n = filtered_lateral[seated_index]
+        seated_filtered_torque_nm = filtered_torque[seated_index]
+        seated_filtered_tool_flange_torque_nm = (
+            filtered_tool_flange_torque[seated_index]
+        )
+        contact_depth_m = depths[contact_index]
+        profile_depth_m = travel_m - contact_depth_m
+        if profile_depth_m <= seated_depth_tolerance_m:
+            return {}, (
+                "The recording does not contain enough contact-to-seated travel "
+                "for a force-depth profile."
+            )
+        force_depth_profile = {
+            "depth_fraction": [
+                point_index / (_MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS - 1)
+                for point_index in range(_MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS)
+            ],
+            "axial_upper_n": [],
+            "lateral_upper_n": [],
+            "torque_upper_nm": [],
+        }
+        profile_half_window = 1.0 / (
+            _MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS - 1
+        )
+        normalized_depths = {
+            index: min(
+                1.0,
+                max(0.0, (depths[index] - contact_depth_m) / profile_depth_m),
+            )
+            for index in successful_indices
+        }
+        for profile_fraction in force_depth_profile["depth_fraction"]:
+            profile_indices = [
+                index
+                for index in successful_indices
+                if abs(normalized_depths[index] - profile_fraction)
+                <= profile_half_window
+            ]
+            if len(profile_indices) < _MOVE_INSERT_FORCE_DEPTH_MINIMUM_SAMPLES:
+                profile_indices = sorted(
+                    successful_indices,
+                    key=lambda index: (
+                        abs(normalized_depths[index] - profile_fraction),
+                        index,
+                    ),
+                )[:_MOVE_INSERT_FORCE_DEPTH_MINIMUM_SAMPLES]
+            if len(profile_indices) < _MOVE_INSERT_FORCE_DEPTH_MINIMUM_SAMPLES:
+                return {}, (
+                    "The recording contains too few synchronized samples for "
+                    "the 16-point force-depth profile."
+                )
+            force_depth_profile["axial_upper_n"].append(
+                max(
+                    filtered_compression[index] for index in profile_indices
+                )
+                + (2.0 * baseline_force_uncertainty_n)
+            )
+            force_depth_profile["lateral_upper_n"].append(
+                max(
+                    filtered_lateral[index] for index in profile_indices
+                )
+                + (2.0 * baseline_force_uncertainty_n)
+            )
+            force_depth_profile["torque_upper_nm"].append(
+                max(
+                    filtered_torque[index] for index in profile_indices
+                )
+                + (2.0 * baseline_torque_uncertainty_nm)
+            )
+        max_axial_force_n = observed_axial_n + (2.0 * baseline_force_uncertainty_n)
+        max_lateral_force_n = observed_lateral_n + (
+            2.0 * baseline_force_uncertainty_n
+        )
+        max_torque_nm = observed_torque_nm + (
+            2.0 * baseline_torque_uncertainty_nm
+        )
+        for profile_field, uncertainty, cap_name, label, unit in (
+            (
+                "axial_upper_n",
+                baseline_force_uncertainty_n,
+                "insert_max_axial_force_n",
+                "axial force",
+                "N",
+            ),
+            (
+                "lateral_upper_n",
+                baseline_force_uncertainty_n,
+                "insert_max_lateral_force_n",
+                "lateral force",
+                "N",
+            ),
+            (
+                "torque_upper_nm",
+                baseline_torque_uncertainty_nm,
+                "insert_max_torque_nm",
+                "torque",
+                "Nm",
+            ),
+        ):
+            hard_cap = float(analysis_caps[cap_name])
+            if any(
+                float(upper) + uncertainty >= hard_cap
+                for upper in force_depth_profile[profile_field]
+            ):
+                hard_cap_review_fields.add(cap_name)
+                hard_cap_review_reasons.append(
+                    f"The demonstrated 16-bin {label} envelope cannot retain one "
+                    f"additional uncertainty reserve below the {hard_cap:.3f} {unit} "
+                    "hard cap. The value was rejected, not clipped."
+                )
+        for label, soft_limit, uncertainty, cap_name, unit in (
+            (
+                "axial force",
+                max_axial_force_n,
+                baseline_force_uncertainty_n,
+                "insert_max_axial_force_n",
+                "N",
+            ),
+            (
+                "lateral force",
+                max_lateral_force_n,
+                baseline_force_uncertainty_n,
+                "insert_max_lateral_force_n",
+                "N",
+            ),
+            (
+                "torque",
+                max_torque_nm,
+                baseline_torque_uncertainty_nm,
+                "insert_max_torque_nm",
+                "Nm",
+            ),
+        ):
+            hard_cap = float(analysis_caps[cap_name])
+            if soft_limit + uncertainty >= hard_cap:
+                hard_cap_review_fields.add(cap_name)
+                hard_cap_review_reasons.append(
+                    f"The demonstrated {label} envelope cannot retain a measured "
+                    f"uncertainty reserve below the {hard_cap:.3f} {unit} hard cap. "
+                    "The value was rejected, not clipped."
+                )
+        force_depth_profile_sha256 = self._move_insert_canonical_sha256(
+            force_depth_profile
+        )
+        if (
+            insertion_force_n <= contact_force_delta_n
+            or insertion_force_n >= max_axial_force_n
+        ):
+            return {}, "The demonstrated axial-force envelope is too narrow for a bounded recipe."
+        insertion_force_hard_cap = float(
+            analysis_caps["insert_max_insertion_force_n"]
+        )
+        if insertion_force_n >= insertion_force_hard_cap:
+            hard_cap_review_fields.add("insert_max_insertion_force_n")
+            hard_cap_review_reasons.append(
+                "The demonstrated insertion-force envelope reached the protected "
+                f"{insertion_force_hard_cap:.3f} N hard cap. The value was rejected, "
+                "not clipped."
+            )
+
+        mg_hard_cap_review_required = bool(
+            mg_hard_cap_review_required or hard_cap_review_fields
+        )
+        if mg_hard_cap_review_required:
+            force_uncertainty_reserve_n = baseline_force_uncertainty_n * 3.0
+            torque_uncertainty_reserve_nm = baseline_torque_uncertainty_nm * 3.0
+            return {
+                "hard_cap_review_required": True,
+                "hard_caps_error": " ".join(hard_cap_review_reasons),
+                "hard_cap_review_fields": sorted(hard_cap_review_fields),
+                "minimum_required_hard_caps": {
+                    "insert_max_insertion_force_n": math.nextafter(
+                        insertion_force_n + force_uncertainty_reserve_n,
+                        math.inf,
+                    ),
+                    "insert_max_axial_force_n": math.nextafter(
+                        max(absolute_axial[index] for index in insertion_indices)
+                        + force_uncertainty_reserve_n,
+                        math.inf,
+                    ),
+                    "insert_max_lateral_force_n": math.nextafter(
+                        max(lateral_forces[index] for index in insertion_indices)
+                        + force_uncertainty_reserve_n,
+                        math.inf,
+                    ),
+                    "insert_max_torque_nm": math.nextafter(
+                        max(torque_norms[index] for index in insertion_indices)
+                        + torque_uncertainty_reserve_nm,
+                        math.inf,
+                    ),
+                    "insert_max_tool_flange_torque_nm": math.nextafter(
+                        max(
+                            tool_flange_torque_norms[index]
+                            for index in insertion_indices
+                        )
+                        + torque_uncertainty_reserve_nm,
+                        math.inf,
+                    ),
+                },
+                "force_depth_profile": force_depth_profile,
+                "force_depth_profile_sha256": force_depth_profile_sha256,
+                "baseline_force_uncertainty_n": baseline_force_uncertainty_n,
+                "baseline_torque_uncertainty_nm": baseline_torque_uncertainty_nm,
+                "observed_filtered_axial_force_n": observed_axial_n,
+                "observed_filtered_lateral_force_n": observed_lateral_n,
+                "observed_filtered_torque_nm": observed_torque_nm,
+                "observed_tool_flange_torque_nm": observed_tool_flange_torque_nm,
+                "observed_raw_axial_force_n": observed_raw_axial_force_n,
+                "observed_raw_lateral_force_n": observed_raw_lateral_force_n,
+                "observed_raw_torque_nm": observed_raw_torque_nm,
+                "observed_raw_tool_flange_torque_nm": (
+                    observed_raw_tool_flange_torque_nm
+                ),
+                "observed_advancing_speed_m_s": observed_advancing_speed_m_s,
+                "observed_peak_filtered_advancing_speed_m_s": (
+                    observed_peak_filtered_advancing_speed_m_s
+                ),
+                "insertion_force_n": insertion_force_n,
+            }, ""
+
+        contact_fraction = min(0.9, max(0.0, contact_index / len(insertion_samples)))
+        engagement_progress_m = max(
+            0.001,
+            min(
+                travel_m * max(0.2, (1.0 - contact_fraction) * 0.4),
+                travel_m * 0.75,
+            ),
+        )
+        if engagement_progress_m > float(
+            analysis_caps["insert_max_engagement_progress_m"]
+        ):
+            return {}, "The learned engagement progress exceeds its protected hard cap."
+        protected_radius_m = min(
+            0.0015,
+            float(analysis_caps["insert_max_spiral_radius_m"]),
+        )
+        protected_pitch_m = min(
+            0.0005,
+            float(analysis_caps["insert_max_spiral_pitch_m"]),
+        )
+        protected_spiral_speed_m_s = min(
+            0.002,
+            contact_speed_m_s,
+            float(analysis_caps["insert_max_spiral_speed_m_s"]),
+        )
+        protected_spiral_acceleration_m_s2 = min(
+            0.02,
+            float(analysis_caps["insert_max_spiral_acceleration_m_s2"]),
+        )
+        context_sha256 = str(recording.get("context_sha256") or "")
+        recording_sha256 = str(
+            recording.get("place_approach_recording_sha256") or ""
+        )
+        if not recording_sha256:
+            return {}, "The place_approach recording identity is missing."
+        tool_frame = str(
+            dict(context.get("held_part_handoff") or {}).get("tool_frame") or ""
+        ).strip()
+        if not tool_frame:
+            return {}, "The insertion demonstration tool_frame identity is missing."
+        aruco_pose = dict(context.get("aruco_pose") or {})
+        try:
+            qx = -float(aruco_pose["qx"])
+            qy = -float(aruco_pose["qy"])
+            qz = -float(aruco_pose["qz"])
+            qw = float(aruco_pose["qw"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, "The demonstration is missing its ArUco-relative insertion axis."
+        tx = 2.0 * (qy * axis_world[2] - qz * axis_world[1])
+        ty = 2.0 * (qz * axis_world[0] - qx * axis_world[2])
+        tz = 2.0 * (qx * axis_world[1] - qy * axis_world[0])
+        aruco_axis = {
+            "x": axis_world[0] + qw * tx + qy * tz - qz * ty,
+            "y": axis_world[1] + qw * ty + qz * tx - qx * tz,
+            "z": axis_world[2] + qw * tz + qx * ty - qy * tx,
+        }
+        hard_caps_sha256 = self._move_insert_hard_caps_sha256(caps)
+        learning_policy, learning_policy_error = (
+            self._move_insert_learning_policy(
+                caps,
+                str(recording.get("part_name") or ""),
+            )
+        )
+        if learning_policy_error:
+            return {}, learning_policy_error
+        recipe = {
+            "recipe_version": _MOVE_INSERT_DEMONSTRATION_RECIPE_VERSION,
+            "learning_policy_version": _MOVE_INSERT_LEARNING_POLICY_VERSION,
+            "learning_policy_sha256": (
+                self._move_insert_learning_policy_sha256(learning_policy)
+            ),
+            "learning_policy": learning_policy,
+            "hard_caps": deepcopy(caps),
+            "hard_caps_sha256": hard_caps_sha256,
+            "force_depth_profile": force_depth_profile,
+            "force_depth_profile_sha256": force_depth_profile_sha256,
+            "baseline_force_uncertainty_n": baseline_force_uncertainty_n,
+            "baseline_torque_uncertainty_nm": baseline_torque_uncertainty_nm,
+            "observed_filtered_axial_force_n": observed_axial_n,
+            "observed_filtered_lateral_force_n": observed_lateral_n,
+            "observed_filtered_torque_nm": observed_torque_nm,
+            "observed_tool_flange_torque_nm": (
+                observed_tool_flange_torque_nm
+            ),
+            "observed_raw_axial_force_n": observed_raw_axial_force_n,
+            "observed_raw_lateral_force_n": observed_raw_lateral_force_n,
+            "observed_raw_torque_nm": observed_raw_torque_nm,
+            "observed_raw_tool_flange_torque_nm": (
+                observed_raw_tool_flange_torque_nm
+            ),
+            "observed_advancing_speed_m_s": observed_advancing_speed_m_s,
+            "observed_peak_filtered_advancing_speed_m_s": (
+                observed_peak_filtered_advancing_speed_m_s
+            ),
+            "seated_filtered_axial_force_n": (
+                seated_filtered_axial_force_n
+            ),
+            "seated_filtered_lateral_force_n": (
+                seated_filtered_lateral_force_n
+            ),
+            "seated_filtered_torque_nm": seated_filtered_torque_nm,
+            "seated_filtered_tool_flange_torque_nm": (
+                seated_filtered_tool_flange_torque_nm
+            ),
+            "calibration_id": f"insertion-demonstration-{trace_sha256[:16]}",
+            "recording_id": str(recording.get("recording_id") or ""),
+            "demonstration_sha256": trace_sha256,
+            "updated_at": str(
+                recording.get("finished_at")
+                or seated_event.get("captured_at")
+                or ""
+            ),
+            "robot": "ur5e",
+            "destination_location": "assembly_board-v1",
+            "part_name": str(recording.get("part_name") or ""),
+            "tool_frame": tool_frame,
+            "context_sha256": context_sha256,
+            "place_approach_recording_sha256": recording_sha256,
+            "board_calibration_id": str(context.get("board_calibration_id") or ""),
+            "board_generation": int(context.get("board_generation") or 0),
+            "aruco_to_seated_held_part": deepcopy(
+                seated_event.get("aruco_to_seated_held_part") or {}
+            ),
+            "aruco_insertion_axis": aruco_axis,
+            "pre_insert_offset_m": travel_m,
+            "contact_speed_m_s": contact_speed_m_s,
+            "contact_force_delta_n": contact_force_delta_n,
+            "engagement_progress_m": engagement_progress_m,
+            "insertion_force_n": insertion_force_n,
+            "spiral_radius_m": protected_radius_m,
+            "spiral_pitch_m": protected_pitch_m,
+            "spiral_speed_m_s": protected_spiral_speed_m_s,
+            "spiral_acceleration_m_s2": protected_spiral_acceleration_m_s2,
+            "max_axial_force_n": max_axial_force_n,
+            "max_lateral_force_n": max_lateral_force_n,
+            "max_torque_nm": max_torque_nm,
+            "tilt_tolerance_rad": min(
+                math.radians(2.0),
+                float(analysis_caps["insert_max_tilt_tolerance_rad"]),
+            ),
+            "seated_depth_tolerance_m": seated_depth_tolerance_m,
+            "settle_time_sec": min(
+                0.5,
+                float(analysis_caps["insert_max_settle_time_sec"]),
+            ),
+        }
+        if not context_sha256 or len(context_sha256) != 64:
+            return {}, "The frozen insertion demonstration context hash is invalid."
+        evidence_payload = {
+            field_name: recipe[field_name]
+            for field_name in (
+                "recipe_version",
+                "learning_policy_version",
+                "learning_policy_sha256",
+                "demonstration_sha256",
+                "hard_caps_sha256",
+                "baseline_force_uncertainty_n",
+                "baseline_torque_uncertainty_nm",
+                "observed_filtered_axial_force_n",
+                "observed_filtered_lateral_force_n",
+                "observed_filtered_torque_nm",
+                "observed_tool_flange_torque_nm",
+                "observed_raw_axial_force_n",
+                "observed_raw_lateral_force_n",
+                "observed_raw_torque_nm",
+                "observed_raw_tool_flange_torque_nm",
+                "observed_advancing_speed_m_s",
+                "observed_peak_filtered_advancing_speed_m_s",
+                "seated_filtered_axial_force_n",
+                "seated_filtered_lateral_force_n",
+                "seated_filtered_torque_nm",
+                "seated_filtered_tool_flange_torque_nm",
+                "force_depth_profile_sha256",
+            )
+        }
+        recipe["learning_evidence_sha256"] = self._move_insert_canonical_sha256(
+            evidence_payload
+        )
+        return recipe, ""
+
+    def _patch_insertion_demonstration_recipe(
+        self,
+        *,
+        part_name: str,
+        candidate_recipe: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Atomically replace only one exact demonstrated recipe."""
+        resource, source_sha256, read_error = self._move_insert_resource_snapshot()
+        if read_error:
+            return {}, read_error
+        profile, profile_error = self._move_insert_profile_from_resource(resource)
+        if profile_error:
+            return {}, profile_error
+        recipes = dict(profile.get("demonstration_recipes") or {})
+        recipes[part_name] = deepcopy(candidate_recipe)
+        profile["demonstration_recipes"] = recipes
+        validated_parts = list(profile.get("validated_parts") or [])
+        profile["validated_parts"] = [
+            token for token in validated_parts if token != part_name
+        ]
+        qualifications = dict(profile.get("qualifications") or {})
+        qualifications.pop(part_name, None)
+        profile["qualifications"] = qualifications
+        details = self._move_insert_settings_details(
+            resource,
+            part_name,
+            require_qualification=False,
+        )
+        if not bool(details.get("validated")):
+            return {}, str(
+                details.get("message") or "The learned move_insert recipe is invalid."
+            )
+        try:
+            if sha256_file(_UR5E_RESOURCE) != source_sha256:
+                return {}, "robot_ur5e.json changed while saving the insertion recording."
+            self._atomic_write_move_insert_resource(resource)
+        except OSError as exc:
+            return {}, f"Could not persist the learned insertion recipe: {exc}"
+        return details, ""
+
+    def digital_twin_stop_insertion_recording(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Serialize final return validation against Cartesian jog commands."""
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(timeout=3.0):
+            return {
+                **(self._current_insertion_demonstration() or {}),
+                "success": False,
+                "active": True,
+                "recording_id": recording_id,
+                "message": "Release the active Cartesian jog before Stop Recording.",
+            }
+        try:
+            return self._digital_twin_stop_insertion_recording_locked(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                recording_id=recording_id,
+            )
+        finally:
+            execution_lock.release()
+
+    def _digital_twin_stop_insertion_recording_locked(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+    ) -> dict[str, Any]:
+        """Stop a complete demonstration only after return to pre-insertion."""
+        recording = self.digital_twin_insertion_recording_status(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            recording_id=recording_id,
+        )
+        if not bool(recording.get("active")):
+            return {**recording, "success": False, "message": "No matching insertion recording is active."}
+        if not bool(recording.get("seated_captured")):
+            return {**recording, "success": False, "message": "Use Capture Seated before Stop Recording."}
+        return_evidence, return_error = self._insertion_demonstration_return_error(recording)
+        if return_error:
+            return {**recording, "success": False, "return_evidence": return_evidence, "message": return_error}
+        agent = self._physical_ur5e_robot_agent()
+        controller = getattr(agent, "_controller", None) if agent is not None else None
+        stop = getattr(controller, "stop_insertion_demonstration", None)
+        if not callable(stop):
+            return {**recording, "success": False, "recovery_required": True, "message": "UR5e insertion recorder cannot be stopped safely."}
+        result = dict(stop(timeout_sec=12.0) or {})
+        if not bool(result.get("motion_settled")):
+            failed = {
+                **recording,
+                "success": False,
+                "active": bool(result.get("active")),
+                "state": "recording_complete_review_required",
+                "recovery_required": True,
+                "controller_result": result,
+                "message": str(result.get("message") or "Recording stop did not prove stationary settlement."),
+            }
+            self._write_insertion_demonstration_pending(failed)
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = deepcopy(failed)
+            return failed
+        completed = {
+            **recording,
+            "success": True,
+            "ready": True,
+            "active": False,
+            "state": "recording_complete_review_required",
+            "returned_to_pre_insertion": True,
+            "return_evidence": return_evidence,
+            "review_required": True,
+            "recovery_required": False,
+            "controller_result": result,
+            "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message": (
+                "Recording complete — review required. The jog trace will not be "
+                "replayed and automatic move_insert is still blocked."
+            ),
+        }
+        completed, bundle_error = self._write_insertion_demonstration_bundle(
+            completed,
+            result,
+        )
+        if bundle_error:
+            completed = {
+                **completed,
+                "success": False,
+                "review_required": False,
+                "recovery_required": True,
+                "message": bundle_error,
+            }
+            self._write_insertion_demonstration_pending(completed)
+        else:
+            self._write_insertion_demonstration_pending(None)
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = deepcopy(completed)
+        return completed
+
+    def digital_twin_cancel_insertion_recording(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Stop Smooth Hold, then serialize cancellation against all other motion."""
+        smooth = getattr(self, "_teleop_smooth_session", None)
+        if isinstance(smooth, dict) and smooth.get("robot") == "ur5e":
+            self.teleop_cartesian_smooth(
+                "ur5e",
+                str(smooth.get("axis") or "z"),
+                0.0,
+                "stop",
+            )
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(timeout=15.0):
+            cancelling = {
+                **(self._current_insertion_demonstration() or {}),
+                "success": False,
+                "active": True,
+                "state": "cancelling",
+                "recording_id": recording_id,
+                "review_required": False,
+                "recovery_required": False,
+                "cancelled": True,
+                "operator_note": str(note or ""),
+                "message": (
+                    "Cancelling. Waiting automatically for the active Cartesian "
+                    "jog and recorder to settle."
+                ),
+            }
+            self._write_insertion_demonstration_pending(cancelling)
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = deepcopy(cancelling)
+            return cancelling
+        try:
+            return self._digital_twin_cancel_insertion_recording_locked(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                recording_id=recording_id,
+                note=note,
+            )
+        finally:
+            execution_lock.release()
+
+    def _digital_twin_cancel_insertion_recording_locked(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Cancel recording, discard its temporary trace, and clear custody."""
+        recording = self.digital_twin_insertion_recording_status(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            recording_id=recording_id,
+        )
+        if not bool(recording.get("active")):
+            return {**recording, "success": False, "message": "No matching insertion recording is active."}
+        smooth = getattr(self, "_teleop_smooth_session", None)
+        if isinstance(smooth, dict) and smooth.get("robot") == "ur5e":
+            self.teleop_cartesian_smooth(
+                "ur5e",
+                str(smooth.get("axis") or "z"),
+                0.0,
+                "stop",
+            )
+        agent = self._physical_ur5e_robot_agent()
+        controller = getattr(agent, "_controller", None) if agent is not None else None
+        stop = getattr(controller, "stop_insertion_demonstration", None)
+        result = dict(stop(timeout_sec=12.0) or {}) if callable(stop) else {}
+        settled = bool(result.get("motion_settled")) and not bool(
+            result.get("active")
+        )
+        if settled:
+            return self._discard_cancelled_insertion_recording(
+                recording,
+                result,
+                operator_note=note,
+            )
+        if not bool(result.get("active", True)):
+            return self._finish_uncertain_insertion_recording_cancel(
+                recording,
+                result,
+            )
+        cancelled = {
+            **recording,
+            "success": False,
+            "active": True,
+            "state": "cancelling",
+            "review_required": False,
+            "recovery_required": False,
+            "cancelled": True,
+            "operator_note": str(note or ""),
+            "controller_result": result,
+            "message": (
+                "Cancelling. Waiting automatically for stationary recorder settlement."
+            ),
+        }
+        persistence_error = self._write_insertion_demonstration_pending(cancelled)
+        if persistence_error:
+            cancelled["message"] += f" {persistence_error}"
+        with self._get_insertion_demonstration_lock():
+            self._insertion_demonstration = deepcopy(cancelled)
+        return cancelled
+
+    def digital_twin_delete_insertion_recording(  # noqa: C901, PLR0912, PLR0915 - exact no-motion deletion transaction.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Permanently delete exact recording authority without robot motion."""
+        request_error = self._insertion_demonstration_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {"success": False, "message": request_error}
+        if confirmed is not True:
+            return {
+                "success": False,
+                "message": "Explicit confirmation is required to Delete Previous Recording.",
+            }
+        with self._get_insertion_demonstration_lock():
+            process_recording = getattr(self, "_insertion_demonstration", None)
+            process_recording = (
+                deepcopy(process_recording)
+                if isinstance(process_recording, dict)
+                else None
+            )
+        durable_recording = self._read_insertion_demonstration_pending()
+        recording_states = [
+            recording
+            for recording in (process_recording, durable_recording)
+            if isinstance(recording, dict)
+        ]
+        active_recording = next(
+            (recording for recording in recording_states if recording.get("active")),
+            None,
+        )
+        rtde_status = dict(self._ur5e_rtde_trajectory_status() or {})
+        try:
+            rtde_status_age_sec = time.time() - float(rtde_status.get("updated_at"))
+        except (TypeError, ValueError, OverflowError):
+            rtde_status_age_sec = math.inf
+        rtde_process_name = "hardware_ur5e_rtde_trajectory_server"
+        rtde_server_running = self.ros2_proc_status(rtde_process_name) == "running"
+        tracked_rtde_process = dict(getattr(self, "_ros2_procs", {}) or {}).get(
+            rtde_process_name
+        )
+        try:
+            tracked_rtde_process_id = int(tracked_rtde_process.pid)
+            status_rtde_process_id = int(rtde_status.get("process_id"))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            tracked_rtde_process_id = 0
+            status_rtde_process_id = -1
+        rtde_server_ready = bool(
+            rtde_server_running
+            and 0.0 <= rtde_status_age_sec <= 3.0
+            and tracked_rtde_process_id > 0
+            and status_rtde_process_id == tracked_rtde_process_id
+        )
+        if rtde_server_running and not rtde_server_ready:
+            return {
+                "success": False,
+                "message": (
+                    "Delete Previous Recording is waiting for fresh, tracked UR5e "
+                    "RTDE server status before changing insertion artifacts."
+                ),
+            }
+        rtde_recording_active = bool(
+            rtde_server_ready
+            and rtde_status.get("insertion_demonstration_active") is True
+        )
+        rtde_insert_active = bool(
+            rtde_server_ready
+            and str(rtde_status.get("state") or "").strip().lower()
+            in {"checking", "executing"}
+            and (
+                str(rtde_status.get("trial_id") or "")
+                or str(rtde_status.get("insert_phase") or "")
+            )
+        )
+        if active_recording is not None or rtde_recording_active:
+            return {
+                **dict(active_recording or {}),
+                "success": False,
+                "message": "Cancel Recording before deleting the previous recording.",
+            }
+        if rtde_insert_active:
+            return {
+                "success": False,
+                "message": (
+                    "Wait for the active supervised move_insert action to reach "
+                    "terminal settlement before deleting the previous recording."
+                ),
+            }
+        requested_selection = (target, robot, destination_location, part_name)
+        recovery_recording = next(
+            (
+                recording
+                for recording in recording_states
+                if bool(recording.get("recovery_required"))
+            ),
+            None,
+        )
+        if recovery_recording is not None and tuple(
+            str(recovery_recording.get(field) or "")
+            for field in (
+                "target",
+                "robot",
+                "destination_location",
+                "part_name",
+            )
+        ) != requested_selection:
+            return {
+                "success": False,
+                "message": (
+                    "A different insertion demonstration retains recovery custody; "
+                    "no artifact was changed."
+                ),
+            }
+        exact_recording_states = [
+            recording
+            for recording in recording_states
+            if tuple(
+                str(recording.get(field) or "")
+                for field in (
+                    "target",
+                    "robot",
+                    "destination_location",
+                    "part_name",
+                )
+            )
+            == requested_selection
+        ]
+        current = exact_recording_states[0] if exact_recording_states else None
+        pending_trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if pending_trial is not None and (
+            bool(pending_trial.get("active"))
+            or bool(pending_trial.get("completion_motion_active"))
+            or bool(pending_trial.get("review_required"))
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "Delete Previous Recording is blocked while a supervised "
+                    "move_insert result is pending."
+                ),
+            }
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "message": "Physical robot motion or readiness is already active.",
+            }
+        try:
+            resource, source_sha256, read_error = self._move_insert_resource_snapshot()
+            if read_error:
+                return {"success": False, "message": read_error}
+            profile, profile_error = self._move_insert_profile_from_resource(resource)
+            if profile_error:
+                return {"success": False, "message": profile_error}
+            recipes = dict(profile.get("demonstration_recipes") or {})
+            previous = dict(recipes.get(part_name) or {})
+            recording_ids = {
+                recording_id
+                for recording_id in (
+                    str(previous.get("recording_id") or ""),
+                    str(dict(current or {}).get("recording_id") or ""),
+                    str(
+                        dict(
+                            dict(
+                                dict(pending_trial or {}).get(
+                                    "move_insert_effective"
+                                )
+                                or {}
+                            ).get("demonstration_recipe")
+                            or {}
+                        ).get("recording_id")
+                        or ""
+                    ),
+                )
+                if recording_id
+            }
+            recording_ids.update(
+                str(recording.get("recording_id") or "")
+                for recording in exact_recording_states
+                if str(recording.get("recording_id") or "")
+            )
+            if len(recording_ids) > 1:
+                return {
+                    "success": False,
+                    "message": (
+                        "Insertion recording authority changed across the exact "
+                        "recipe and pending trial; no artifact was changed."
+                    ),
+                }
+            if any(
+                Path(recording_id).name != recording_id
+                for recording_id in recording_ids
+            ):
+                return {
+                    "success": False,
+                    "message": "The exact insertion recording identity is unsafe.",
+                }
+
+            trial_candidates: dict[str, dict[str, Any]] = {}
+            if pending_trial is not None:
+                pending_trial_id = str(pending_trial.get("trial_id") or "")
+                if pending_trial_id:
+                    trial_candidates[pending_trial_id] = dict(pending_trial)
+            trials_root = Path(
+                getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR)
+            )
+            durable_trial_candidates: dict[str, dict[str, Any]] = {}
+            if trials_root.is_dir():
+                for directory in trials_root.iterdir():
+                    if (
+                        not directory.is_dir()
+                        or directory.name.startswith(".")
+                        or Path(directory.name).name != directory.name
+                    ):
+                        continue
+                    summary = self._read_json_file(directory / "summary.json")
+                    if self._move_insert_trial_selection_key(
+                        str(summary.get("target") or ""),
+                        str(summary.get("robot") or ""),
+                        str(summary.get("destination_location") or ""),
+                        str(summary.get("part_name") or ""),
+                    ) != self._move_insert_trial_selection_key(
+                        target,
+                        robot,
+                        destination_location,
+                        part_name,
+                    ):
+                        continue
+                    trial_id = str(summary.get("trial_id") or "")
+                    if trial_id != directory.name:
+                        return {
+                            "success": False,
+                            "message": (
+                                "A stored move_insert trial does not match its exact "
+                                "trial_id; no recording artifact was changed."
+                            ),
+                        }
+                    durable_trial_candidates[trial_id] = summary
+                    trial_recording_id = str(
+                        dict(
+                            dict(summary.get("move_insert_effective") or {}).get(
+                                "demonstration_recipe"
+                            )
+                            or {}
+                        ).get("recording_id")
+                        or ""
+                    )
+                    if (
+                        trial_recording_id
+                        and Path(trial_recording_id).name != trial_recording_id
+                    ):
+                        return {
+                            "success": False,
+                            "message": (
+                                "A stored move_insert trial has an unsafe exact "
+                                "recording_id; no artifact was changed."
+                            ),
+                        }
+
+            demonstration_root = Path(
+                getattr(
+                    self,
+                    "_insertion_demonstrations_dir",
+                    _INSERTION_DEMONSTRATIONS_DIR,
+                )
+            )
+            orphan_recording_ids: set[str] = set()
+            if demonstration_root.is_dir():
+                for directory in demonstration_root.iterdir():
+                    if (
+                        not directory.is_dir()
+                        or directory.name.startswith(".")
+                        or Path(directory.name).name != directory.name
+                    ):
+                        continue
+                    summary = self._read_json_file(directory / "summary.json")
+                    if (
+                        str(summary.get("robot") or "") == robot
+                        and str(summary.get("destination_location") or "")
+                        == destination_location
+                        and str(summary.get("part_name") or "") == part_name
+                        and str(summary.get("recording_id") or "")
+                        == directory.name
+                    ):
+                        orphan_recording_ids.add(directory.name)
+            if not recording_ids and len(orphan_recording_ids) > 1:
+                return {
+                    "success": False,
+                    "message": (
+                        "More than one orphan insertion recording exists for the "
+                        "exact selection; no artifact was changed."
+                    ),
+                }
+            if not recording_ids:
+                recording_ids.update(orphan_recording_ids)
+            if not recording_ids:
+                durable_recording_ids = {
+                    str(
+                        dict(
+                            dict(trial.get("move_insert_effective") or {}).get(
+                                "demonstration_recipe"
+                            )
+                            or {}
+                        ).get("recording_id")
+                        or ""
+                    )
+                    for trial in durable_trial_candidates.values()
+                }
+                durable_recording_ids.discard("")
+                if len(durable_recording_ids) > 1:
+                    return {
+                        "success": False,
+                        "message": (
+                            "More than one orphan move_insert trial exists for the "
+                            "exact selection; no artifact was changed."
+                        ),
+                    }
+                recording_ids.update(durable_recording_ids)
+
+            for trial_id, trial in durable_trial_candidates.items():
+                trial_recording_id = str(
+                    dict(
+                        dict(trial.get("move_insert_effective") or {}).get(
+                            "demonstration_recipe"
+                        )
+                        or {}
+                    ).get("recording_id")
+                    or ""
+                )
+                if trial_recording_id in recording_ids or (
+                    not trial_recording_id and len(durable_trial_candidates) == 1
+                ):
+                    trial_candidates[trial_id] = trial
+
+            for trial in trial_candidates.values():
+                if (
+                    bool(trial.get("active"))
+                    or bool(trial.get("completion_motion_active"))
+                    or bool(trial.get("review_required"))
+                ):
+                    return {
+                        "success": False,
+                        "message": (
+                            "Delete Previous Recording is blocked while a supervised "
+                            "move_insert result is pending."
+                        ),
+                    }
+
+            uncertainty_sources = [
+                trial
+                for trial in trial_candidates.values()
+                if bool(
+                    trial.get("hardware_stack_repair_required")
+                    or trial.get("normal_repair_required")
+                    or trial.get("recovery_required")
+                )
+            ]
+            if current is not None and bool(current.get("recovery_required")):
+                uncertainty_sources.append(dict(current))
+            if uncertainty_sources:
+                uncertainty = uncertainty_sources[0]
+                uncertainty_reason = str(
+                    uncertainty.get("hardware_stack_repair_reason")
+                    or uncertainty.get("message")
+                    or "UR5e physical state requires fresh stationary validation."
+                )
+                uncertainty_source_id = str(
+                    uncertainty.get("trial_id")
+                    or uncertainty.get("recording_id")
+                    or ""
+                )
+                uncertainty_error = self._write_ur5e_hardware_state_uncertainty(
+                    reason=uncertainty_reason,
+                    source="move_insert",
+                    source_id=uncertainty_source_id,
+                )
+                if uncertainty_error:
+                    return {"success": False, "message": uncertainty_error}
+
+            resource_changed = bool(
+                part_name in recipes
+                or part_name in list(profile.get("validated_parts") or [])
+                or part_name in dict(profile.get("qualifications") or {})
+            )
+            recipes.pop(part_name, None)
+            profile["demonstration_recipes"] = recipes
+            profile["validated_parts"] = [
+                token
+                for token in list(profile.get("validated_parts") or [])
+                if token != part_name
+            ]
+            qualifications = dict(profile.get("qualifications") or {})
+            qualifications.pop(part_name, None)
+            profile["qualifications"] = qualifications
+            if resource_changed:
+                try:
+                    if sha256_file(_UR5E_RESOURCE) != source_sha256:
+                        return {
+                            "success": False,
+                            "message": (
+                                "robot_ur5e.json changed while deleting the recording."
+                            ),
+                        }
+                    self._atomic_write_move_insert_resource(resource)
+                except OSError as exc:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"Could not delete the learned insertion recipe: {exc}"
+                        ),
+                    }
+
+            suspension_error = self._clear_move_insert_suspension(part_name)
+            if suspension_error:
+                return {
+                    "success": False,
+                    "message": (
+                        "The recipe authority was removed, but its exact "
+                        f"suspension could not be cleared: {suspension_error}"
+                    ),
+                }
+
+            trashed_recording_paths: list[str] = []
+            trashed_trial_paths: list[str] = []
+            try:
+                for recording_id in sorted(recording_ids):
+                    source_directory = self._insertion_demonstration_directory(
+                        recording_id
+                    )
+                    if not source_directory.is_dir():
+                        continue
+                    if source_directory.is_symlink():
+                        raise OSError(
+                            "insertion demonstration directory is a symbolic link"
+                        )
+                    trashed_recording_paths.append(str(source_directory))
+                    shutil.rmtree(source_directory)
+                for trial_id in sorted(trial_candidates):
+                    source_directory = self._move_insert_trial_directory(trial_id)
+                    if not source_directory.is_dir():
+                        continue
+                    if source_directory.is_symlink():
+                        raise OSError("move_insert trial directory is a symbolic link")
+                    trashed_trial_paths.append(str(source_directory))
+                    shutil.rmtree(source_directory)
+            except OSError as exc:
+                return {
+                    "success": False,
+                    "message": (
+                        "Insertion authority was revoked, but an exact diagnostic "
+                        f"artifact could not be permanently deleted: {exc}"
+                    ),
+                }
+
+            demonstration_pending_error = (
+                self._write_insertion_demonstration_pending(None)
+            )
+            if demonstration_pending_error:
+                return {"success": False, "message": demonstration_pending_error}
+            pending_review, pending_review_read_error = (
+                self._read_move_insert_pending_review()
+            )
+            if pending_review_read_error:
+                return {"success": False, "message": pending_review_read_error}
+            if pending_review is not None and self._move_insert_trial_selection_key(
+                str(pending_review.get("target") or ""),
+                str(pending_review.get("robot") or ""),
+                str(pending_review.get("destination_location") or ""),
+                str(pending_review.get("part_name") or ""),
+            ) == self._move_insert_trial_selection_key(
+                target,
+                robot,
+                destination_location,
+                part_name,
+            ):
+                pending_review_error = self._write_move_insert_pending_review(None)
+                if pending_review_error:
+                    return {"success": False, "message": pending_review_error}
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = None
+            with self._get_move_insert_trial_lock():
+                trials, last_by_selection = self._move_insert_trial_stores()
+                for trial_id in trial_candidates:
+                    trials.pop(trial_id, None)
+                selection_key = self._move_insert_trial_selection_key(
+                    target,
+                    robot,
+                    destination_location,
+                    part_name,
+                )
+                last_by_selection.pop(selection_key, None)
+            trashed_path = (
+                trashed_recording_paths[0]
+                if trashed_recording_paths
+                else (
+                    trashed_trial_paths[0]
+                    if trashed_trial_paths
+                    else ""
+                )
+            )
+            return {
+                "success": True,
+                "ready": True,
+                "active": False,
+                "state": "not_recorded",
+                "recording_id": "",
+                "part_name": part_name,
+                "trashed_path": trashed_path,
+                "trashed_recording_paths": trashed_recording_paths,
+                "trashed_trial_paths": trashed_trial_paths,
+                "resource_changed": resource_changed,
+                "permanently_deleted": True,
+                "message": (
+                    f"Deleted the previous insertion recording for {part_name}. "
+                    "Its exact recipe, qualification, trial state, and suspension "
+                    "were permanently deleted and cannot be recovered. "
+                    "No motion was commanded."
+                ),
+            }
+        finally:
+            execution_lock.release()
+
+    def digital_twin_confirm_insertion_demonstration_recovery(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        recording_id: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Clear durable demonstration custody after inspected no-motion recovery."""
+        request_error = self._insertion_demonstration_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        recording = self._current_insertion_demonstration() or {}
+        if request_error:
+            return {**recording, "success": False, "message": request_error}
+        if (
+            recording_id != str(recording.get("recording_id") or "")
+            or not bool(recording.get("recovery_required"))
+            or bool(recording.get("active"))
+        ):
+            return {
+                **recording,
+                "success": False,
+                "message": (
+                    "Confirm Physical Recovery is available only for the exact "
+                    "inactive insertion demonstration with durable recovery custody."
+                ),
+            }
+        if confirmed is not True:
+            return {
+                **recording,
+                "success": False,
+                "message": (
+                    "Explicit operator confirmation is required that the selected "
+                    "part is secured or removed, the gripper is safe, and UR5e is "
+                    "stationary."
+                ),
+            }
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                **recording,
+                "success": False,
+                "message": "Physical robot motion or control is active.",
+            }
+        try:
+            current = self._current_insertion_demonstration() or {}
+            if (
+                recording_id != str(current.get("recording_id") or "")
+                or not bool(current.get("recovery_required"))
+                or bool(current.get("active"))
+            ):
+                return {
+                    **current,
+                    "success": False,
+                    "message": "Insertion demonstration recovery custody changed.",
+                }
+            status = dict(self._ur5e_rtde_trajectory_status() or {})
+            if bool(status.get("insertion_demonstration_active")):
+                return {
+                    **current,
+                    "success": False,
+                    "message": "The UR5e insertion recorder is still active.",
+                }
+            agent = self._physical_ur5e_robot_agent()
+            recovery_evidence, recovery_error = (
+                self._move_insert_physical_recovery_readiness(target, agent)
+            )
+            if recovery_error:
+                return {
+                    **current,
+                    "success": False,
+                    "message": recovery_error,
+                }
+            persistence_error = self._write_insertion_demonstration_pending(None)
+            if persistence_error:
+                return {
+                    **current,
+                    "success": False,
+                    "message": persistence_error,
+                }
+            with self._get_insertion_demonstration_lock():
+                self._insertion_demonstration = None
+            return {
+                "success": True,
+                "ready": False,
+                "active": False,
+                "state": "not_recorded",
+                "recovery_required": False,
+                "recording_id": recording_id,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "recovery_evidence": recovery_evidence,
+                "message": (
+                    "Physical recovery confirmed without motion. The recording did "
+                    "not qualify automatic move_insert."
+                ),
+            }
+        finally:
+            execution_lock.release()
+
+    def _move_insert_suspensions_path(self) -> Path:
+        """Return the application-owned durable suspension record path."""
+        root = Path(getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR))
+        return root / "suspensions.json"
+
+    def _move_insert_pending_review_path(self) -> Path:
+        """Return the durable supervised-trial pending-review marker path."""
+        root = Path(getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR))
+        return root / "pending_review.json"
+
+    def _read_move_insert_pending_review(
+        self,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Read the exact durable pending-review marker fail closed."""
+        path = self._move_insert_pending_review_path()
+        if not path.exists():
+            return None, ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return None, f"Could not read move_insert pending-review state: {exc}"
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None, "move_insert pending-review state has an unsupported format"
+        pending = payload.get("pending")
+        if pending is None:
+            return None, ""
+        if not isinstance(pending, dict):
+            return None, "move_insert pending-review state is malformed"
+        trial_id = str(pending.get("trial_id") or "")
+        if (
+            pending.get("target") not in {"ur5e only", "dual robots"}
+            or pending.get("robot") != "ur5e"
+            or pending.get("destination_location") != "assembly_board-v1"
+            or pending.get("part_name") not in _MOVE_INSERT_SUPPORTED_PARTS
+            or not trial_id.startswith("move-insert-")
+            or Path(trial_id).name != trial_id
+            or not str(pending.get("reason") or "").strip()
+            or not str(pending.get("updated_at") or "").strip()
+            or (
+                "review_required" in pending
+                and not isinstance(pending.get("review_required"), bool)
+            )
+            or (
+                "recovery_required" in pending
+                and not isinstance(pending.get("recovery_required"), bool)
+            )
+            or (
+                "hardware_stack_repair_required" in pending
+                and not isinstance(
+                    pending.get("hardware_stack_repair_required"), bool
+                )
+            )
+        ):
+            return None, "move_insert pending-review state contains a malformed record"
+        return dict(pending), ""
+
+    def _write_move_insert_pending_review(
+        self,
+        pending: dict[str, Any] | None,
+    ) -> str:
+        """Atomically persist or clear the exact pending-review marker."""
+        path = self._move_insert_pending_review_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(path, {"version": 1, "pending": pending})
+        except (OSError, TypeError, ValueError) as exc:
+            return f"Could not save move_insert pending-review state: {exc}"
+        return ""
+
+    def _sync_move_insert_pending_review(self, trial: dict[str, Any]) -> str:
+        """Persist pending custody without clearing a different exact trial."""
+        current, read_error = self._read_move_insert_pending_review()
+        if read_error:
+            return read_error
+        trial_id = str(trial.get("trial_id") or "")
+        review_required = bool(trial.get("review_required"))
+        recovery_required = bool(trial.get("recovery_required"))
+        hardware_stack_repair_required = bool(
+            trial.get("hardware_stack_repair_required")
+            or trial.get("normal_repair_required")
+        )
+        if (
+            review_required
+            or recovery_required
+            or hardware_stack_repair_required
+        ):
+            return self._write_move_insert_pending_review(
+                {
+                    "target": str(trial.get("target") or ""),
+                    "robot": str(trial.get("robot") or ""),
+                    "destination_location": str(
+                        trial.get("destination_location") or ""
+                    ),
+                    "part_name": str(trial.get("part_name") or ""),
+                    "trial_id": trial_id,
+                    "review_required": review_required,
+                    "recovery_required": recovery_required,
+                    "hardware_stack_repair_required": (
+                        hardware_stack_repair_required
+                    ),
+                    "reason": str(
+                        trial.get("message")
+                        or (
+                            "Recovered supervised move_insert custody requires "
+                            "inspected physical recovery."
+                            if recovery_required
+                            else "Supervised move_insert requires operator review."
+                        )
+                    ),
+                    "updated_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                }
+            )
+        if current is None or str(current.get("trial_id") or "") == trial_id:
+            return self._write_move_insert_pending_review(None)
+        return ""
+
+    def _reconcile_recovered_move_insert_trial(  # noqa: C901 - explicit restart custody gates.
+        self,
+        trial: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reconcile restart custody with exact server terminal evidence."""
+        trial_id = str(trial.get("trial_id") or "")
+        part_name = str(trial.get("part_name") or "")
+        profile_sha256 = str(trial.get("profile_sha256") or "")
+        try:
+            started_at = float(trial.get("started_at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            started_at = 0.0
+
+        def matching(status: dict[str, Any]) -> bool:
+            if str(status.get("motion_kind") or "") != "insert":
+                return False
+            if str(status.get("part_name") or "") != part_name:
+                return False
+            status_trial_id = str(status.get("trial_id") or "")
+            if status_trial_id != trial_id and not (
+                not status_trial_id
+                and trial_id == _LEGACY_MOVE_INSERT_PENDING_TRIAL_ID
+            ):
+                return False
+            status_profile = str(status.get("profile_sha256") or "")
+            if profile_sha256 and status_profile != profile_sha256:
+                return False
+            calibration_id = str(
+                dict(trial.get("move_insert_effective") or {}).get(
+                    "calibration_id"
+                )
+                or ""
+            )
+            if calibration_id and str(status.get("calibration_id") or "") != (
+                calibration_id
+            ):
+                return False
+            try:
+                updated_at = float(status.get("updated_at") or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            return updated_at >= started_at
+
+        statuses = [
+            dict(self._ur5e_rtde_trajectory_status() or {}),
+            dict(
+                self._read_json_file(
+                    _UR5E_RTDE_TRAJECTORY_LAST_TERMINAL_STATUS
+                )
+                or {}
+            ),
+        ]
+        matching_statuses = [status for status in statuses if matching(status)]
+        active_status = next(
+            (
+                status
+                for status in matching_statuses
+                if str(status.get("state") or "").lower()
+                in {"checking", "executing"}
+            ),
+            None,
+        )
+        if active_status is not None:
+            return {
+                **trial,
+                "success": False,
+                "ready": False,
+                "active": True,
+                "completion_motion_active": False,
+                "review_required": True,
+                "recovery_required": False,
+                "normal_repair_required": False,
+                "part_clamped": True,
+                "qualified": False,
+                "durable_recovered": True,
+                "controller_status": deepcopy(active_status),
+                "message": (
+                    f"Recovered supervised move_insert {trial_id}; the exact "
+                    "server action is still settling. Keep the part clamped and "
+                    "wait for terminal status."
+                ),
+            }
+
+        terminal_statuses = [
+            status
+            for status in matching_statuses
+            if str(status.get("state") or "").lower()
+            not in {"checking", "executing"}
+        ]
+        terminal_status = (
+            max(
+                terminal_statuses,
+                key=lambda status: float(status.get("updated_at") or 0.0),
+            )
+            if terminal_statuses
+            else {}
+        )
+        terminal_reason = str(
+            terminal_status.get("blocked_reason")
+            or terminal_status.get("message")
+            or trial.get("message")
+            or "The UI restarted before supervised move_insert settlement was recorded."
+        )
+        terminal_motion_settled = bool(
+            terminal_status.get("motion_settled") is True
+            or terminal_status.get("insert_motion_settled") is True
+        )
+        terminal_state_uncertain = bool(
+            terminal_status.get("state_uncertain") is True
+            or terminal_status.get("rtde_reset_required") is True
+        )
+        try:
+            terminal_disengagement_cycle_count = int(
+                terminal_status.get("insert_disengagement_cycle_count")
+                or terminal_status.get("disengagement_cycle_count")
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            terminal_disengagement_cycle_count = 0
+        recovery_required = bool(
+            trial.get("recovery_required")
+            or (
+                terminal_disengagement_cycle_count > 0
+                and terminal_status.get("insert_disengagement_contact_cleared")
+                is not True
+                and terminal_status.get("disengagement_contact_cleared") is not True
+                and terminal_motion_settled
+                and not terminal_state_uncertain
+            )
+        )
+        normal_repair_required = bool(
+            not terminal_status
+            or terminal_state_uncertain
+            or not terminal_motion_settled
+        )
+        message = (
+            f"Recovered supervised move_insert {trial_id} as a terminal failure: "
+            f"{terminal_reason} The part remains clamped; Confirm Completion is "
+            "blocked."
+        )
+        if recovery_required:
+            message += (
+                " Protected disengagement ended before contact was proven clear; "
+                "complete operator-controlled physical recovery and then use Confirm "
+                "Physical Recovery."
+            )
+        if normal_repair_required:
+            message += " Use Repair Hardware Stack before further Cartesian motion."
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = terminal_reason
+        suspension_error = self._suspend_move_insert_qualification(part_name)
+        if suspension_error:
+            message += (
+                " Automatic qualification remains latched fail-closed, but its "
+                f"resource update reported: {suspension_error}"
+            )
+        move_insert_result = (
+            {
+                key: deepcopy(value)
+                for key, value in terminal_status.items()
+                if key.startswith("insert_")
+                or key.startswith("server_trace_")
+                or key
+                in {
+                    "trial_id",
+                    "state_uncertain",
+                    "motion_settled",
+                    "rtde_reset_required",
+                }
+            }
+            if terminal_status
+            else deepcopy(dict(trial.get("move_insert_result") or {}))
+        )
+        updated = {
+            **trial,
+            "success": False,
+            "ready": False,
+            "active": False,
+            "completion_motion_active": False,
+            "review_required": False,
+            "recovery_required": recovery_required,
+            "normal_repair_required": normal_repair_required,
+            "hardware_stack_repair_required": normal_repair_required,
+            "hardware_stack_repair_reason": (
+                terminal_reason if normal_repair_required else ""
+            ),
+            "part_clamped": True,
+            "released": False,
+            "lifted": False,
+            "automatic_checks_passed": False,
+            "completion_eligible": False,
+            "qualified": False,
+            "failure_recorded": True,
+            "durable_recovered": True,
+            "motion_settled": terminal_motion_settled,
+            "status": "failed",
+            "controller_status": (
+                deepcopy(terminal_status)
+                if terminal_status
+                else deepcopy(dict(trial.get("controller_status") or {}))
+            ),
+            "result": (
+                deepcopy(terminal_status)
+                if terminal_status
+                else deepcopy(dict(trial.get("result") or {}))
+            ),
+            "move_insert_result": move_insert_result,
+            "qualification_suspension_error": suspension_error,
+            "finished_at": float(terminal_status.get("updated_at") or time.time()),
+            "message": message,
+        }
+        persisted, diagnostic_error = self._write_move_insert_trial_diagnostics(
+            updated
+        )
+        if diagnostic_error:
+            persisted = {
+                **updated,
+                "diagnostic_error": diagnostic_error,
+                "message": f"{message} Diagnostics error: {diagnostic_error}.",
+            }
+        pending_error = self._sync_move_insert_pending_review(persisted)
+        if pending_error:
+            persisted["pending_review_persistence_error"] = pending_error
+            persisted["message"] += f" {pending_error}"
+        return persisted
+
+    def _load_latest_move_insert_contact_recovery_trial(
+        self,
+    ) -> dict[str, Any] | None:
+        """Restore a legacy auto-cleared latch from the newest exact trial only."""
+        root = Path(getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR))
+        if not root.is_dir():
+            return None
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for directory in root.iterdir():
+            if (
+                not directory.is_dir()
+                or directory.name.startswith(".")
+                or Path(directory.name).name != directory.name
+            ):
+                continue
+            summary = self._read_json_file(directory / "summary.json")
+            trial_id = str(summary.get("trial_id") or "")
+            if (
+                trial_id != directory.name
+                or not trial_id.startswith("move-insert-")
+                or summary.get("target") not in {"ur5e only", "dual robots"}
+                or summary.get("robot") != "ur5e"
+                or summary.get("destination_location") != "assembly_board-v1"
+                or summary.get("part_name") not in _MOVE_INSERT_SUPPORTED_PARTS
+            ):
+                continue
+            try:
+                order = float(
+                    summary.get("confirmed_at")
+                    or summary.get("finished_at")
+                    or summary.get("updated_at")
+                    or summary.get("started_at")
+                    or directory.stat().st_mtime
+                )
+            except (OSError, TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(order):
+                continue
+            candidates.append((order, summary))
+        if not candidates:
+            return None
+
+        _order, summary = max(candidates, key=lambda item: item[0])
+        result = dict(summary.get("result") or {})
+        move_insert_result = dict(summary.get("move_insert_result") or {})
+        nested_move_insert_result = dict(result.get("move_insert_result") or {})
+        controller_status = dict(summary.get("controller_status") or {})
+        evidence_sources = (
+            summary,
+            result,
+            move_insert_result,
+            nested_move_insert_result,
+            controller_status,
+        )
+        disengagement_cycle_count = 0
+        for evidence in evidence_sources:
+            for field_name in (
+                "disengagement_cycle_count",
+                "insert_disengagement_cycle_count",
+            ):
+                try:
+                    disengagement_cycle_count = max(
+                        disengagement_cycle_count,
+                        int(evidence.get(field_name) or 0),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        contact_clear_flags = [
+            evidence.get(field_name)
+            for evidence in evidence_sources
+            for field_name in (
+                "disengagement_contact_cleared",
+                "insert_disengagement_contact_cleared",
+            )
+            if field_name in evidence
+        ]
+        contact_cleared = bool(contact_clear_flags) and all(
+            value is True for value in contact_clear_flags
+        )
+        motion_settled = any(
+            evidence.get(field_name) is True
+            for evidence in evidence_sources
+            for field_name in (
+                "motion_settled",
+                "insert_motion_settled",
+            )
+        )
+        if (
+            not self._move_insert_terminal_trial(summary)
+            or summary.get("active") is True
+            or summary.get("completion_motion_active") is True
+            or summary.get("part_clamped") is not True
+            or summary.get("released") is not False
+            or summary.get("lifted") is not False
+            or summary.get("qualified") is not False
+            or not motion_settled
+            or disengagement_cycle_count <= 0
+            or contact_cleared
+            or bool(str(summary.get("recovery_confirmed_at") or "").strip())
+        ):
+            return None
+
+        trial_id = str(summary["trial_id"])
+        original_message = str(summary.get("message") or "").strip()
+        recovery_message = (
+            f"{original_message} Restart recovery restored recovery_required for exact "
+            f"supervised move_insert trial {trial_id}: protected disengagement ran "
+            "without contact-cleared evidence. Keep the part clamped and complete "
+            "approved manual recovery before Confirm Physical Recovery."
+        ).strip()
+        updated = {
+            **summary,
+            "success": False,
+            "ready": False,
+            "active": False,
+            "completion_motion_active": False,
+            "recovery_required": True,
+            "part_clamped": True,
+            "automatic_checks_passed": False,
+            "completion_eligible": False,
+            "qualified": False,
+            "released": False,
+            "lifted": False,
+            "motion_settled": True,
+            "durable_recovered": True,
+            "message": recovery_message,
+        }
+        persisted, diagnostic_error = self._write_move_insert_trial_diagnostics(updated)
+        if diagnostic_error:
+            persisted = {
+                **updated,
+                "diagnostic_error": diagnostic_error,
+                "message": (
+                    f"{recovery_message} Diagnostics error: {diagnostic_error}."
+                ),
+            }
+        pending_error = self._sync_move_insert_pending_review(persisted)
+        if pending_error:
+            persisted["pending_review_persistence_error"] = pending_error
+            persisted["message"] = (
+                f"{str(persisted.get('message') or '').strip()} Durable recovery "
+                f"custody could not be saved: {pending_error}."
+            )
+        return persisted
+
+    def _load_move_insert_pending_trial(self) -> dict[str, Any] | None:
+        """Recover a restart-safe no-motion view of pending supervised custody."""
+        pending, read_error = self._read_move_insert_pending_review()
+        if read_error:
+            return {
+                "success": False,
+                "ready": False,
+                "target": "dual robots",
+                "robot": "ur5e",
+                "destination_location": "assembly_board-v1",
+                "part_name": "MG",
+                "trial_id": "move-insert-trial-pending-state-error",
+                "active": False,
+                "completion_motion_active": False,
+                "review_required": True,
+                "recovery_required": True,
+                "completion_eligible": False,
+                "qualified": False,
+                "durable_recovered": True,
+                "message": (
+                    "Durable supervised move_insert custody is unreadable. New "
+                    f"motion remains blocked: {read_error}"
+                ),
+            }
+        if pending is None:
+            return self._load_latest_move_insert_contact_recovery_trial()
+        trial_id = str(pending["trial_id"])
+        summary_path = self._move_insert_trial_directory(trial_id) / "summary.json"
+        summary: dict[str, Any] = {}
+        summary_error = ""
+        try:
+            raw_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if isinstance(raw_summary, dict):
+                summary = raw_summary
+            else:
+                summary_error = "summary.json is not an object"
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            summary_error = str(exc)
+        hardware_stack_repair_required = bool(
+            pending.get("hardware_stack_repair_required")
+        )
+        recovered = {
+            **summary,
+            **pending,
+            "success": False,
+            "ready": False,
+            "active": False,
+            "completion_motion_active": False,
+            "review_required": bool(pending.get("review_required")),
+            "recovery_required": bool(pending.get("recovery_required")),
+            "normal_repair_required": hardware_stack_repair_required,
+            "hardware_stack_repair_required": (
+                hardware_stack_repair_required
+            ),
+            "automatic_checks_passed": False,
+            "completion_eligible": False,
+            "qualified": False,
+            "failure_recorded": bool(summary.get("failure_recorded")),
+            "durable_recovered": True,
+            "_revision": 0,
+            "diagnostic_directory": str(summary_path.parent),
+            "diagnostic_bundle_path": str(
+                summary_path.parent / "diagnostic_bundle.zip"
+            ),
+            "message": str(summary.get("message") or pending.get("reason") or ""),
+        }
+        if summary_error:
+            recovered["message"] = (
+                f"{str(recovered.get('message') or '').strip()} Trial diagnostics "
+                f"could not be restored: {summary_error}."
+            ).strip()
+        if bool(recovered.get("recovery_required")):
+            recovered.update(
+                {
+                    "success": False,
+                    "ready": False,
+                    "automatic_checks_passed": False,
+                    "completion_eligible": False,
+                    "qualified": False,
+                }
+            )
+            if hardware_stack_repair_required:
+                self._ur5e_robot_function_state_uncertain = True
+                self._ur5e_robot_function_state_uncertain_reason = str(
+                    recovered.get("message")
+                    or "A terminal supervised move_insert trial requires Repair Hardware Stack."
+                )
+            return recovered
+        if hardware_stack_repair_required:
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = str(
+                recovered.get("message")
+                or "A terminal supervised move_insert trial requires Repair Hardware Stack."
+            )
+            return recovered
+        return self._reconcile_recovered_move_insert_trial(recovered)
+
+    def _read_move_insert_suspensions(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], str]:
+        """Read exact-part durable suspensions without accepting malformed data."""
+        path = self._move_insert_suspensions_path()
+        if not path.exists():
+            return {}, ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            return {}, f"Could not read move_insert suspension state: {exc}"
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return {}, "move_insert suspension state has an unsupported format"
+        raw_suspensions = payload.get("suspensions")
+        if not isinstance(raw_suspensions, dict):
+            return {}, "move_insert suspension state is missing suspensions"
+        suspensions: dict[str, dict[str, Any]] = {}
+        for exact_part_name, raw_record in raw_suspensions.items():
+            if (
+                not isinstance(exact_part_name, str)
+                or not exact_part_name
+                or exact_part_name != exact_part_name.strip()
+                or not isinstance(raw_record, dict)
+            ):
+                return {}, "move_insert suspension state contains a malformed record"
+            record = dict(raw_record)
+            if (
+                record.get("robot") != "ur5e"
+                or record.get("destination_location") != "assembly_board-v1"
+                or record.get("part_name") != exact_part_name
+                or not isinstance(record.get("reason"), str)
+                or not str(record.get("reason") or "").strip()
+                or not isinstance(record.get("suspended_at"), str)
+                or not str(record.get("suspended_at") or "").strip()
+            ):
+                return {}, "move_insert suspension state contains a malformed record"
+            suspensions[exact_part_name] = record
+        return suspensions, ""
+
+    def _write_move_insert_suspensions(
+        self,
+        suspensions: dict[str, dict[str, Any]],
+    ) -> str:
+        """Atomically persist all exact-part suspension records."""
+        path = self._move_insert_suspensions_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json_write(
+                path,
+                {"version": 1, "suspensions": suspensions},
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return f"Could not save move_insert suspension state: {exc}"
+        return ""
+
+    def _move_insert_suspension_error(self, part_name: str) -> str:
+        """Do not block automatic insertion after an earlier failed insertion."""
+        return ""
+
+    def _latch_move_insert_suspension(self, part_name: str, reason: str) -> str:
+        """Do not create a post-failure automatic insertion suspension."""
+        return ""
+
+    def _clear_move_insert_suspension(self, part_name: str) -> str:
+        """Clear one suspension after confirmed evidence is persisted."""
+        with self._get_move_insert_trial_lock():
+            durable, read_error = self._read_move_insert_suspensions()
+            if read_error:
+                return read_error
+            if part_name in durable:
+                durable.pop(part_name, None)
+                write_error = self._write_move_insert_suspensions(durable)
+                if write_error:
+                    return write_error
+            process_suspensions = getattr(
+                self,
+                "_move_insert_suspended_parts",
+                None,
+            )
+            if isinstance(process_suspensions, dict):
+                process_suspensions.pop(part_name, None)
+            return ""
+
+    def _move_insert_trial_stores(
+        self,
+    ) -> tuple[
+        dict[str, dict[str, Any]],
+        dict[tuple[str, str, str, str], str],
+    ]:
+        """Return lazily initialized in-memory supervised trial stores."""
+        trials = getattr(self, "_move_insert_trials", None)
+        if not isinstance(trials, dict):
+            trials = {}
+            self._move_insert_trials = trials
+        last_by_selection = getattr(
+            self,
+            "_move_insert_last_trial_by_selection",
+            None,
+        )
+        if not isinstance(last_by_selection, dict):
+            last_by_selection = {}
+            self._move_insert_last_trial_by_selection = last_by_selection
+        return trials, last_by_selection
+
+    @staticmethod
+    def _move_insert_trial_selection_key(
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+    ) -> tuple[str, str, str, str]:
+        """Return the exact fixed-symbol key for one supervised selection."""
+        return target, robot, destination_location, part_name
+
+    @staticmethod
+    def _move_insert_json_safe(value: Any) -> Any:
+        """Return a deterministic JSON-safe diagnostic representation."""
+        if value is None or isinstance(value, (bool, int, str)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): SystemBridge._move_insert_json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [SystemBridge._move_insert_json_safe(item) for item in value]
+        return repr(value)
+
+    @staticmethod
+    def _move_insert_canonical_sha256(value: Any) -> str:
+        """Hash one JSON-safe insertion identity without accepting NaN or Inf."""
+        serialized = json.dumps(
+            SystemBridge._move_insert_json_safe(value),
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return sha256_text(serialized)
+
+    @staticmethod
+    def _move_insert_qualification_policy() -> dict[str, Any]:
+        """Return the protected supervised qualification policy."""
+        return {
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "required_consecutive_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "failure_resets_confirmed_trials": True,
+            "recovered_soft_overload_may_count": True,
+            "hard_limit_may_count": False,
+            "identity_fields": list(_MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS),
+        }
+
+    @classmethod
+    def _move_insert_qualification_policy_sha256(cls) -> str:
+        """Hash the protected supervised qualification policy."""
+        return cls._move_insert_canonical_sha256(
+            cls._move_insert_qualification_policy()
+        )
+
+    @classmethod
+    def _move_insert_qualification_identity(
+        cls,
+        *,
+        identities: Mapping[str, Any],
+        move_insert_effective: Mapping[str, Any],
+    ) -> tuple[dict[str, str], str, str]:
+        """Build and hash the exact identities shared by confirmed trials."""
+        recipe = dict(move_insert_effective.get("demonstration_recipe") or {})
+        payload = {
+            "robot": str(identities.get("robot") or ""),
+            "tool_frame": str(identities.get("tool_frame") or ""),
+            "destination_location": str(
+                identities.get("destination_location") or ""
+            ),
+            "part_name": str(identities.get("part_name") or ""),
+            "profile_sha256": str(identities.get("profile_sha256") or ""),
+            "hard_caps_sha256": str(identities.get("hard_caps_sha256") or ""),
+            "place_approach_recording_sha256": str(
+                identities.get("place_approach_recording_sha256") or ""
+            ),
+            "board_calibration_id": str(
+                identities.get("board_calibration_id") or ""
+            ),
+            "board_geometry_sha256": str(
+                identities.get("board_geometry_sha256") or ""
+            ),
+            "recording_id": str(recipe.get("recording_id") or ""),
+            "demonstration_sha256": str(
+                recipe.get("demonstration_sha256") or ""
+            ),
+        }
+        missing = [field for field, value in payload.items() if not value]
+        if missing:
+            return payload, "", (
+                "move_insert qualification identity is incomplete: "
+                f"{missing}"
+            )
+        digest_fields = (
+            "profile_sha256",
+            "hard_caps_sha256",
+            "place_approach_recording_sha256",
+            "board_geometry_sha256",
+            "demonstration_sha256",
+        )
+        invalid_digests: list[str] = []
+        for field_name in digest_fields:
+            value = payload[field_name]
+            try:
+                valid = len(value) == 64 and int(value, 16) >= 0
+            except ValueError:
+                valid = False
+            if not valid:
+                invalid_digests.append(field_name)
+        if invalid_digests:
+            return payload, "", (
+                "move_insert qualification identity has invalid SHA-256 fields: "
+                f"{invalid_digests}"
+            )
+        return payload, cls._move_insert_canonical_sha256(payload), ""
+
+    @staticmethod
+    def _move_insert_confirmed_trial(summary: Mapping[str, Any]) -> bool:
+        """Return whether one durable summary is confirmed qualification evidence."""
+        move_insert_result = dict(summary.get("move_insert_result") or {})
+        digests = (
+            str(summary.get("move_insert_result_sha256") or ""),
+            str(summary.get("server_trace_copied_sha256") or ""),
+        )
+        try:
+            digests_valid = all(
+                len(value) == 64 and int(value, 16) >= 0 for value in digests
+            )
+        except ValueError:
+            digests_valid = False
+        return bool(
+            summary.get("confirmation_counted") is True
+            and summary.get("success") is True
+            and summary.get("automatic_checks_passed") is True
+            and summary.get("completion_motion_completed") is True
+            and summary.get("released") is True
+            and summary.get("lifted") is True
+            and summary.get("failure_recorded") is not True
+            and summary.get("cancelled") is not True
+            and summary.get("normal_repair_required") is not True
+            and summary.get("hardware_stack_repair_required") is not True
+            and move_insert_result.get("hard_limit_detected") is not True
+            and not str(summary.get("hard_limit_reason") or "")
+            and not str(summary.get("diagnostic_error") or "")
+            and not str(summary.get("pending_review_persistence_error") or "")
+            and digests_valid
+        )
+
+    @staticmethod
+    def _move_insert_terminal_trial(summary: Mapping[str, Any]) -> bool:
+        """Return whether one summary terminates a consecutive confirmation streak."""
+        if summary.get("dispatch_attempted") is False:
+            return False
+        return bool(
+            summary.get("active") is not True
+            and summary.get("completion_motion_active") is not True
+            and (
+                summary.get("failure_recorded") is True
+                or summary.get("cancelled") is True
+                or summary.get("normal_repair_required") is True
+                or summary.get("hardware_stack_repair_required") is True
+                or summary.get("automatic_checks_passed") is False
+                or bool(summary.get("completion_result"))
+                or bool(summary.get("finished_at"))
+            )
+        )
+
+    def _move_insert_confirmed_trial_streak(
+        self,
+        *,
+        qualification_identity_sha256: str,
+    ) -> list[dict[str, Any]]:
+        """Reconstruct the current consecutive streak from durable trial summaries."""
+        policy_sha256 = self._move_insert_qualification_policy_sha256()
+        root = Path(getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR))
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        if not root.is_dir():
+            return []
+        for directory in root.iterdir():
+            if (
+                not directory.is_dir()
+                or directory.name.startswith(".")
+                or Path(directory.name).name != directory.name
+            ):
+                continue
+            summary = self._read_json_file(directory / "summary.json")
+            if (
+                str(summary.get("trial_id") or "") != directory.name
+                or str(summary.get("robot") or "") != "ur5e"
+                or str(
+                    dict(summary.get("qualification_identity") or {}).get(
+                        "robot"
+                    )
+                    or ""
+                )
+                != "ur5e"
+                or str(summary.get("qualification_identity_sha256") or "")
+                != qualification_identity_sha256
+                or str(summary.get("qualification_policy_sha256") or "")
+                != policy_sha256
+                or summary.get("qualification_policy_version")
+                != _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ):
+                continue
+            try:
+                order = float(
+                    summary.get("confirmed_at")
+                    or summary.get("finished_at")
+                    or summary.get("updated_at")
+                    or summary.get("started_at")
+                    or 0.0
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            candidates.append((order, summary))
+        streak: list[dict[str, Any]] = []
+        for _order, summary in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if self._move_insert_confirmed_trial(summary):
+                streak.append(summary)
+                if len(streak) >= _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS:
+                    break
+                continue
+            if self._move_insert_terminal_trial(summary):
+                break
+        streak.reverse()
+        return streak
+
+    @classmethod
+    def _move_insert_qualification_evidence_sha256(
+        cls,
+        *,
+        qualification_identity: Mapping[str, Any],
+        trial_ids: list[str],
+        result_sha256s: list[str],
+        trace_sha256s: list[str],
+    ) -> str:
+        """Hash the complete confirmed-trial qualification evidence."""
+        return cls._move_insert_canonical_sha256(
+            {
+                "qualification_policy_sha256": (
+                    cls._move_insert_qualification_policy_sha256()
+                ),
+                "qualification_identity": dict(qualification_identity),
+                "confirmed_trial_ids": list(trial_ids),
+                "confirmed_trial_result_sha256s": list(result_sha256s),
+                "confirmed_trial_trace_sha256s": list(trace_sha256s),
+            }
+        )
+
+    def _move_insert_trial_request_error(
+        self,
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+    ) -> str:
+        """Validate one exact supported supervised move_insert selection."""
+        request_error = self._digital_twin_move_insert_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return request_error
+        if part_name in _MOVE_INSERT_UNSUPPORTED_PARTS:
+            return (
+                f"move_insert for {part_name} remains blocked until angular "
+                "alignment is implemented."
+            )
+        if part_name not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return f"Unrecognized move_insert part_name: {part_name or '<empty>'}."
+        return ""
+
+    def _move_insert_pending_review(self) -> dict[str, Any] | None:
+        """Return the one trial that still requires operator review, if any."""
+        with self._get_move_insert_trial_lock():
+            trials, _last_by_selection = self._move_insert_trial_stores()
+            pending = next(
+                (
+                    deepcopy(trial)
+                    for trial in trials.values()
+                    if bool(trial.get("review_required"))
+                    or bool(trial.get("recovery_required"))
+                    or bool(trial.get("hardware_stack_repair_required"))
+                    or bool(trial.get("normal_repair_required"))
+                ),
+                None,
+            )
+            if pending is not None:
+                return pending
+            recovered = self._load_move_insert_pending_trial()
+            if recovered is None:
+                return None
+            trial_id = str(recovered.get("trial_id") or "")
+            key = self._move_insert_trial_selection_key(
+                str(recovered.get("target") or ""),
+                str(recovered.get("robot") or ""),
+                str(recovered.get("destination_location") or ""),
+                str(recovered.get("part_name") or ""),
+            )
+            trials[trial_id] = deepcopy(recovered)
+            _last_by_selection[key] = trial_id
+            return recovered
+
+    def _move_insert_pending_review_error(
+        self,
+        *,
+        allow_terminal_recovery: bool = False,
+    ) -> str:
+        """Return why physical operations must wait for trial review."""
+        trial = self._move_insert_pending_review()
+        if trial is None:
+            return ""
+        trial_id = str(trial.get("trial_id") or "<unknown>")
+        part_name = str(trial.get("part_name") or "<unknown>")
+        recovery_required = bool(trial.get("recovery_required"))
+        hardware_stack_repair_required = bool(
+            trial.get("hardware_stack_repair_required")
+        )
+        normal_repair_required = bool(trial.get("normal_repair_required"))
+        if recovery_required and not allow_terminal_recovery:
+            return (
+                f"Recovered supervised move_insert custody {trial_id} for "
+                f"{part_name} requires inspected physical recovery. UR5e motion "
+                "and release_part remain blocked. Hardware Stack Stop, Repair, "
+                "read-only state checks, and move_insert settings remain available. "
+                "Confirm Physical Recovery commands no robot motion and does not "
+                "require live RTDE feedback."
+            )
+        if (
+            (hardware_stack_repair_required or normal_repair_required)
+            and not allow_terminal_recovery
+        ):
+            return (
+                f"Terminal supervised move_insert {trial_id} for {part_name} "
+                "requires Repair Hardware Stack, or a validated Hardware Stack "
+                "Start after UI restart, before further physical motion. The part "
+                "remains clamped. After fresh stationary RTDE and Cartesian "
+                "readiness are proven, Cartesian jog will be available; move_home "
+                "is not required."
+            )
+        if bool(trial.get("active")):
+            return (
+                f"Supervised Test move_insert {trial_id} for {part_name} is still "
+                "settling. Wait for it to become terminal."
+            )
+        if bool(trial.get("completion_motion_active")):
+            return (
+                f"Confirm Completion for supervised move_insert {trial_id} is "
+                "releasing and lifting. Wait for terminal settlement."
+            )
+        if bool(trial.get("review_required")):
+            return (
+                f"Supervised Test move_insert {trial_id} for {part_name} awaits "
+                "Confirm Completion. Delete Previous Recording only when the "
+                "demonstration must be relearned."
+            )
+        return ""
+
+    def _clear_move_insert_repair_gate_after_hardware_stack(
+        self,
+        *,
+        hardware_stack: str,
+        generation: int,
+    ) -> str:
+        """Clear one terminal trial repair gate after validated UR5e restart."""
+        trial = self._move_insert_pending_review()
+        if trial is None or str(trial.get("robot") or "") != "ur5e":
+            return ""
+        if not bool(
+            trial.get("hardware_stack_repair_required")
+            or trial.get("normal_repair_required")
+        ):
+            return ""
+        if bool(trial.get("active")) or bool(
+            trial.get("completion_motion_active")
+        ):
+            return "Terminal supervised move_insert motion is still active."
+        if trial.get("part_clamped") is not True or bool(
+            trial.get("released") or trial.get("lifted")
+        ):
+            return (
+                "Terminal supervised move_insert custody is not the retained "
+                "clamped-part state."
+            )
+
+        stationary = dict(
+            getattr(self, "_hardware_stack_stationary_results", {}).get("ur5e")
+            or {}
+        )
+        readiness = dict(
+            self._hardware_cartesian_readiness_states().get("ur5e") or {}
+        )
+        if (
+            int(stationary.get("generation", -1)) != generation
+            or stationary.get("stationary_ready") is not True
+        ):
+            return (
+                "Terminal supervised move_insert repair lacks current-generation "
+                "stationary UR5e feedback."
+            )
+        if (
+            int(readiness.get("generation", -1)) != generation
+            or readiness.get("cartesian_jog_ready") is not True
+            or readiness.get("cartesian_function_ready") is not True
+        ):
+            return (
+                "Terminal supervised move_insert repair lacks current-generation "
+                "Cartesian readiness."
+            )
+
+        validated_processes = dict(
+            getattr(self, "_hardware_stack_validated_process_pids", {}) or {}
+        )
+        required_processes = self._hardware_stack_for_robot(hardware_stack) or ()
+        repair_processes = {
+            process_name: int(validated_processes[process_name])
+            for process_name in required_processes
+            if process_name in validated_processes
+        }
+        if len(repair_processes) != len(required_processes) or any(
+            process_id <= 0 for process_id in repair_processes.values()
+        ):
+            return (
+                "Terminal supervised move_insert repair lacks exact Hardware Stack "
+                "process ownership evidence."
+            )
+
+        trial_id = str(trial.get("trial_id") or "<unknown>")
+        part_name = str(trial.get("part_name") or "<unknown>")
+        repair_evidence = {
+            "hardware_stack": hardware_stack,
+            "hardware_stack_generation": generation,
+            "validated_process_pids": repair_processes,
+            "stationary_feedback": deepcopy(stationary),
+            "cartesian_readiness": deepcopy(readiness),
+            "terminal_normal_repair_required": bool(
+                trial.get("normal_repair_required")
+            ),
+            "terminal_hardware_stack_repair_required": bool(
+                trial.get("hardware_stack_repair_required")
+            ),
+            "terminal_hardware_stack_repair_reason": str(
+                trial.get("hardware_stack_repair_reason") or trial.get("message") or ""
+            ),
+            "repaired_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        result = dict(trial.get("result") or {})
+        repaired = self._store_move_insert_trial(
+            {
+                **trial,
+                "normal_repair_required": False,
+                "hardware_stack_repair_required": False,
+                "hardware_stack_repair_reason": "",
+                "repair_evidence": repair_evidence,
+                "result": {**result, "repair_evidence": repair_evidence},
+                "diagnostic_error": "",
+                "pending_review_persistence_error": "",
+                "message": (
+                    f"Repair Hardware Stack completed for terminal supervised "
+                    f"move_insert {trial_id} for {part_name}. The part remains "
+                    "clamped; recovery_required remains latched for Confirm Physical "
+                    "Recovery, and Cartesian jog remains blocked."
+                    if trial.get("recovery_required") is True
+                    else (
+                        f"Repair Hardware Stack completed for terminal supervised "
+                        f"move_insert {trial_id} for {part_name}. The part remains "
+                        "clamped; Cartesian jog is available for manual withdrawal."
+                    )
+                ),
+            }
+        )
+        persistence_error = str(
+            repaired.get("diagnostic_error")
+            or repaired.get("pending_review_persistence_error")
+            or ""
+        )
+        if persistence_error or bool(
+            repaired.get("normal_repair_required")
+            or repaired.get("hardware_stack_repair_required")
+        ):
+            failure_message = (
+                "Hardware Stack feedback recovered, but the terminal supervised "
+                "move_insert repair gate could not be cleared durably"
+            )
+            if persistence_error:
+                failure_message = f"{failure_message}: {persistence_error}"
+            self._store_move_insert_trial(
+                {
+                    **repaired,
+                    "normal_repair_required": True,
+                    "hardware_stack_repair_required": True,
+                    "hardware_stack_repair_reason": failure_message,
+                    "message": failure_message,
+                }
+            )
+            return failure_message
+        return ""
+
+    @staticmethod
+    def _move_insert_result_from_task_result(
+        result: Any,
+        resource_agent: Any | None = None,
+    ) -> dict[str, Any]:
+        """Extract the controller move_insert result from compatible runtime shapes."""
+        payload = dict(result) if isinstance(result, dict) else {}
+        candidates: list[Any] = [
+            payload.get("move_insert_result"),
+            dict(payload.get("observations") or {}).get("move_insert_result"),
+            dict(
+                dict(payload.get("failure_context") or {}).get("observations")
+                or {}
+            ).get("move_insert_result"),
+        ]
+        if resource_agent is not None:
+            candidates.append(
+                dict(getattr(resource_agent, "_task_ctx", {}) or {}).get(
+                    "move_insert_result"
+                )
+            )
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return deepcopy(candidate)
+        return {}
+
+    def _move_insert_current_identities(
+        self,
+        resource_agent: Any,
+        *,
+        destination_location: str,
+        part_name: str,
+        settings: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Capture the exact recipe, recording, board, and task identities."""
+        recording_path, recording_error = (
+            self._digital_twin_place_approach_recording_error(
+                resource_agent,
+                destination_location,
+                part_name,
+            )
+        )
+        if recording_error:
+            return {}, recording_error
+        path = Path(recording_path) if recording_path else None
+        try:
+            recording_sha256 = (
+                sha256_file(path)
+                if path is not None and path.is_file()
+                else sha256_text("place_approach/default__hardware.json:missing")
+            )
+        except OSError as exc:
+            return {}, f"Could not hash the place_approach recording: {exc}"
+
+        try:
+            product_geometry = self._robot_function_product_geometry_for_part(
+                part_name
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {}, f"Could not load move_insert geometry for {part_name}: {exc}"
+        if not isinstance(product_geometry, dict) or not product_geometry:
+            return {}, f"No move_insert geometry is configured for {part_name}."
+
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        held_part_handoff = dict(task_context.get("held_part_handoff") or {})
+        frozen_board = dict(task_context.get("assembly_board_v1_aruco") or {})
+        board_status, board_error = self._digital_twin_assembly_board_v1_accepted_status(
+            "ur5e"
+        )
+        if board_error:
+            return {}, board_error
+        board_calibration_id = str(
+            frozen_board.get("calibration_id")
+            or board_status.get("accepted_calibration_id")
+            or ""
+        ).strip()
+        accepted_calibration_id = str(
+            board_status.get("accepted_calibration_id") or board_calibration_id
+        ).strip()
+        if (
+            not board_calibration_id
+            or accepted_calibration_id != board_calibration_id
+        ):
+            return {}, (
+                "move_insert board calibration identity changed after place_approach."
+            )
+        try:
+            frozen_board_generation = int(frozen_board["generation"])
+            retained_board_generation = int(
+                task_context["assembly_board_v1_aruco_generation"]
+            )
+            accepted_board_generation = int(
+                board_status["accepted_generation"]
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}, "move_insert board generation is missing or invalid."
+        if min(
+            frozen_board_generation,
+            retained_board_generation,
+            accepted_board_generation,
+        ) < 1:
+            return {}, "move_insert board generation is missing or invalid."
+        if retained_board_generation != frozen_board_generation:
+            return {}, (
+                "move_insert retained board generation changed after place_approach."
+            )
+        if accepted_board_generation != frozen_board_generation:
+            return {}, (
+                "move_insert accepted board generation changed after place_approach. "
+                "Run place_approach again before move_insert dispatch."
+            )
+        board_generation = frozen_board_generation
+
+        context_identity = {
+            "destination_location": task_context.get("destination_location"),
+            "part_name": task_context.get("part_name", part_name),
+            "held_part_handoff": task_context.get("held_part_handoff"),
+            "place_approach_descend": dict(
+                task_context.get("resolved_cartesian_positions") or {}
+            ).get("descend"),
+            "insert_pose": task_context.get("insert_pose"),
+            "insertion_axis_world": task_context.get("insertion_axis_world"),
+            "move_insert_profile_sha256": task_context.get(
+                "move_insert_profile_sha256"
+            ),
+            "move_insert_profile": task_context.get("move_insert_profile"),
+            "move_insert_hard_caps_sha256": task_context.get(
+                "move_insert_hard_caps_sha256"
+            ),
+            "assembly_board_v1_aruco": frozen_board,
+        }
+        demonstration_recipe = dict(
+            dict(settings.get("effective") or {}).get(
+                "demonstration_recipe"
+            )
+            or {}
+        )
+        return {
+            "robot": "ur5e",
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "tool_frame": str(held_part_handoff.get("tool_frame") or ""),
+            "profile_sha256": str(settings.get("profile_sha256") or ""),
+            "hard_caps_sha256": str(
+                settings.get("hard_caps_sha256") or ""
+            ),
+            "place_approach_recording_path": str(path or ""),
+            "place_approach_recording_sha256": recording_sha256,
+            "board_calibration_id": board_calibration_id,
+            "board_generation": board_generation,
+            "board_geometry_sha256": self._move_insert_canonical_sha256(
+                product_geometry
+            ),
+            "recording_id": str(
+                demonstration_recipe.get("recording_id") or ""
+            ),
+            "demonstration_sha256": str(
+                demonstration_recipe.get("demonstration_sha256") or ""
+            ),
+            "task_context_sha256": self._move_insert_canonical_sha256(
+                context_identity
+            ),
+            "resource_agent_identity": id(resource_agent),
+        }, ""
+
+    @staticmethod
+    def _move_insert_qualification_from_resource(
+        resource: dict[str, Any],
+        part_name: str,
+        robot: str = "ur5e",
+    ) -> tuple[dict[str, Any], bool]:
+        """Read one exact qualification and validated_parts membership."""
+        profile, _profile_error = SystemBridge._move_insert_profile_from_resource(
+            resource,
+            robot,
+        )
+        qualifications = profile.get("qualifications")
+        qualification = (
+            dict(qualifications.get(part_name) or {})
+            if isinstance(qualifications, dict)
+            and isinstance(qualifications.get(part_name), dict)
+            else {}
+        )
+        validated_parts = profile.get("validated_parts")
+        validated = isinstance(validated_parts, list) and part_name in validated_parts
+        return qualification, validated
+
+    def _move_insert_qualification_view(
+        self,
+        *,
+        part_name: str,
+        identities: dict[str, Any] | None = None,
+        robot: str = "ur5e",
+    ) -> dict[str, Any]:
+        """Return whether the persisted exact-part qualification is still current."""
+        resource, _source_sha256, read_error = self._move_insert_resource_snapshot(
+            robot
+        )
+        if read_error:
+            return {
+                "qualified": False,
+                "qualification": {},
+                "qualification_error": read_error,
+            }
+        qualification, validated = self._move_insert_qualification_from_resource(
+            resource,
+            part_name,
+            robot,
+        )
+        required_identity_fields = (
+            "robot",
+            "tool_frame",
+            "destination_location",
+            "part_name",
+            "profile_sha256",
+            "hard_caps_sha256",
+            "place_approach_recording_sha256",
+            "board_calibration_id",
+            "board_geometry_sha256",
+            "recording_id",
+            "demonstration_sha256",
+        )
+        mismatch_fields: list[str] = []
+        if identities is not None:
+            mismatch_fields = [
+                field
+                for field in required_identity_fields
+                if qualification.get(field) != identities.get(field)
+            ]
+        policy_mismatch_fields: list[str] = []
+        expected_policy_values = {
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "qualification_policy_sha256": (
+                self._move_insert_qualification_policy_sha256()
+            ),
+            "required_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "confirmed_trial_count": _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS,
+        }
+        if qualification:
+            policy_mismatch_fields = [
+                field_name
+                for field_name, expected_value in expected_policy_values.items()
+                if qualification.get(field_name) != expected_value
+            ]
+            trial_ids = qualification.get("confirmed_trial_ids")
+            result_sha256s = qualification.get(
+                "confirmed_trial_result_sha256s"
+            )
+            trace_sha256s = qualification.get(
+                "confirmed_trial_trace_sha256s"
+            )
+            exact_trial_ids = bool(
+                isinstance(trial_ids, list)
+                and all(isinstance(value, str) and value for value in trial_ids)
+            )
+            evidence_digests = (
+                list(result_sha256s)
+                if isinstance(result_sha256s, list)
+                else []
+            ) + (
+                list(trace_sha256s)
+                if isinstance(trace_sha256s, list)
+                else []
+            )
+            try:
+                evidence_digests_valid = all(
+                    isinstance(value, str)
+                    and len(value) == 64
+                    and int(value, 16) >= 0
+                    for value in evidence_digests
+                )
+            except ValueError:
+                evidence_digests_valid = False
+            evidence_lists_valid = bool(
+                exact_trial_ids
+                and isinstance(result_sha256s, list)
+                and isinstance(trace_sha256s, list)
+                and len(trial_ids) == _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                and len(result_sha256s) == _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                and len(trace_sha256s) == _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                and len(set(trial_ids)) == _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                and qualification.get("trial_id") == trial_ids[-1]
+                and evidence_digests_valid
+            )
+            if not evidence_lists_valid:
+                policy_mismatch_fields.append("confirmed_trial_evidence")
+            elif identities is not None:
+                expected_evidence_sha256 = (
+                    self._move_insert_qualification_evidence_sha256(
+                        qualification_identity={
+                            field_name: qualification.get(field_name)
+                            for field_name in (
+                                _MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS
+                            )
+                        },
+                        trial_ids=[str(value) for value in trial_ids],
+                        result_sha256s=[
+                            str(value) for value in result_sha256s
+                        ],
+                        trace_sha256s=[
+                            str(value) for value in trace_sha256s
+                        ],
+                    )
+                )
+                if (
+                    qualification.get("qualification_evidence_sha256")
+                    != expected_evidence_sha256
+                ):
+                    policy_mismatch_fields.append(
+                        "qualification_evidence_sha256"
+                    )
+        qualified = bool(
+            validated
+            and qualification
+            and identities is not None
+            and not mismatch_fields
+            and not policy_mismatch_fields
+        )
+        suspension_error = self._move_insert_suspension_error(part_name)
+        if suspension_error:
+            qualified = False
+        message = ""
+        if suspension_error:
+            message = suspension_error
+        elif qualification and not validated:
+            message = (
+                f"move_insert qualification for {part_name} is not authorized in "
+                "validated_parts."
+            )
+        elif qualification and (mismatch_fields or policy_mismatch_fields):
+            message = (
+                f"move_insert qualification for {part_name} is stale: "
+                + ", ".join(mismatch_fields + policy_mismatch_fields)
+            )
+        elif qualified:
+            message = f"move_insert is confirmed for {part_name}."
+        else:
+            message = f"move_insert is not confirmed for {part_name}."
+        return {
+            "qualified": qualified,
+            "qualification": deepcopy(qualification),
+            "qualification_mismatch_fields": (
+                mismatch_fields + policy_mismatch_fields
+            ),
+            "qualification_error": message,
+        }
+
+    def _patch_move_insert_qualification(
+        self,
+        *,
+        part_name: str,
+        expected_profile_sha256: str,
+        qualification: dict[str, Any] | None,
+        robot: str = "ur5e",
+    ) -> dict[str, Any]:
+        """Atomically authorize or suspend one exact part after operator review."""
+        resource, source_sha256, read_error = self._move_insert_resource_snapshot(
+            robot
+        )
+        if read_error:
+            return {"success": False, "message": read_error}
+        profile, profile_error = self._move_insert_profile_from_resource(
+            resource,
+            robot,
+        )
+        if profile_error:
+            return {"success": False, "message": profile_error}
+        _resolver, profile_hash, _derive_timeout = self._move_insert_profile_helpers()
+        current_profile_sha256, hash_error = profile_hash(profile, part_name)
+        if hash_error:
+            return {"success": False, "message": hash_error}
+        if current_profile_sha256 != expected_profile_sha256:
+            return {
+                "success": False,
+                "message": (
+                    "move_insert profile changed after the supervised trial. "
+                    "Run place_approach and Supervised Test move_insert again."
+                ),
+            }
+
+        candidate = deepcopy(resource)
+        candidate_tuning = self._move_insert_parts_tuning_from_resource(
+            candidate,
+            robot,
+        )
+        candidate_profile = dict(candidate_tuning.get("move_insert") or {})
+        validated_parts = list(candidate_profile.get("validated_parts") or [])
+        qualifications = dict(candidate_profile.get("qualifications") or {})
+        changed = False
+        if qualification is None:
+            if part_name in validated_parts:
+                validated_parts = [
+                    value for value in validated_parts if value != part_name
+                ]
+                changed = True
+            if part_name in qualifications:
+                qualifications.pop(part_name, None)
+                changed = True
+        else:
+            if part_name not in validated_parts:
+                validated_parts.append(part_name)
+                changed = True
+            if qualifications.get(part_name) != qualification:
+                qualifications[part_name] = deepcopy(qualification)
+                changed = True
+        candidate_profile["validated_parts"] = validated_parts
+        candidate_profile["qualifications"] = qualifications
+
+        controller = dict(
+            dict(dict(candidate.get(robot) or {}).get("real") or {}).get(
+                "controller"
+            )
+            or {}
+        )
+        parts_tuning = dict(controller.get("parts_tuning") or {})
+        parts_tuning["move_insert"] = candidate_profile
+        controller["parts_tuning"] = parts_tuning
+        real = dict(dict(candidate.get(robot) or {}).get("real") or {})
+        real["controller"] = controller
+        robot_resource = dict(candidate.get(robot) or {})
+        robot_resource["real"] = real
+        candidate[robot] = robot_resource
+
+        if not changed:
+            return {
+                "success": True,
+                "changed": False,
+                "profile_sha256": current_profile_sha256,
+            }
+        _latest, latest_sha256, latest_error = self._move_insert_resource_snapshot(
+            robot
+        )
+        if latest_error:
+            return {"success": False, "message": latest_error}
+        if latest_sha256 != source_sha256:
+            return {
+                "success": False,
+                "message": (
+                    f"robot_{robot}.json changed during qualification persistence. "
+                    "No qualification was written."
+                ),
+            }
+        try:
+            if robot == "ur5e":
+                self._atomic_write_move_insert_resource(candidate)
+            else:
+                self._atomic_write_move_insert_resource(candidate, robot)
+        except (OSError, ValueError) as exc:
+            return {
+                "success": False,
+                "message": f"Could not save move_insert qualification: {exc}",
+            }
+        return {
+            "success": True,
+            "changed": True,
+            "profile_sha256": current_profile_sha256,
+        }
+
+    def _suspend_move_insert_qualification(self, part_name: str) -> str:
+        """Keep automatic insertion authorization after a dispatched failure."""
+        return ""
+
+    @staticmethod
+    def _move_insert_trial_state(trial: dict[str, Any]) -> str:
+        """Return one exact operator-facing supervised state."""
+        try:
+            confirmed_trial_count = int(
+                trial.get("confirmed_trial_count", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            confirmed_trial_count = 0
+        if trial.get("qualified") is True:
+            return "confirmed"
+        if trial.get("failure_recorded") is True:
+            return "failure_recorded"
+        if trial.get("active") is True:
+            return "testing"
+        if trial.get("completion_eligible") is True:
+            return "awaiting_visual_confirmation"
+        if (
+            trial.get("confirmation_counted") is True
+            and confirmed_trial_count > 0
+        ):
+            return "confirmation_progress"
+        if trial.get("ready") is True and not trial.get("review_required"):
+            return "ready_to_test"
+        return "not_confirmed"
+
+    @staticmethod
+    def _move_insert_depth_diagnostics(
+        trial: dict[str, Any],
+        move_insert_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Describe terminal insertion depth against the selected seated tolerance."""
+
+        def finite_float(value: Any) -> float | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
+        effective = dict(trial.get("move_insert_effective") or {})
+        seated_depth_tolerance_m = finite_float(
+            effective.get("seated_depth_tolerance_m")
+        )
+        final_insertion_depth_m = finite_float(
+            move_insert_result.get("final_insertion_depth_m")
+        )
+        if final_insertion_depth_m is None:
+            final_insertion_depth_m = finite_float(
+                trial.get("final_insertion_depth_m")
+            )
+        final_depth_error_m = finite_float(
+            move_insert_result.get("final_depth_error_m")
+        )
+        if final_depth_error_m is None:
+            final_depth_error_m = finite_float(trial.get("final_depth_error_m"))
+        if (
+            seated_depth_tolerance_m is None
+            or seated_depth_tolerance_m <= 0.0
+            or final_insertion_depth_m is None
+            or final_depth_error_m is None
+        ):
+            return {}
+
+        observed_depths = [max(0.0, final_insertion_depth_m)]
+        persisted_maximum = finite_float(
+            move_insert_result.get("max_insertion_depth_m")
+        )
+        if persisted_maximum is None:
+            persisted_maximum = finite_float(trial.get("max_insertion_depth_m"))
+        if persisted_maximum is not None:
+            observed_depths.append(max(0.0, persisted_maximum))
+        feedback_trace = move_insert_result.get("feedback_trace")
+        if isinstance(feedback_trace, list):
+            for sample in feedback_trace:
+                if not isinstance(sample, dict):
+                    continue
+                insertion_depth_m = finite_float(sample.get("insertion_depth_m"))
+                if insertion_depth_m is not None:
+                    observed_depths.append(max(0.0, insertion_depth_m))
+
+        max_insertion_depth_m = max(observed_depths)
+        target_insertion_depth_m = (
+            final_insertion_depth_m + final_depth_error_m
+        )
+        if target_insertion_depth_m <= 0.0:
+            return {}
+        required_seated_depth_m = max(
+            0.0,
+            target_insertion_depth_m - seated_depth_tolerance_m,
+        )
+        max_insertion_depth_shortfall_m = max(
+            0.0,
+            required_seated_depth_m - max_insertion_depth_m,
+        )
+        final_insertion_depth_shortfall_m = max(
+            0.0,
+            final_depth_error_m - seated_depth_tolerance_m,
+        )
+        max_depth_outside = bool(max_insertion_depth_shortfall_m > 0.0)
+        final_depth_outside = bool(final_insertion_depth_shortfall_m > 0.0)
+        outside_seated_tolerance = bool(
+            max_depth_outside or final_depth_outside
+        )
+        diagnostic = ""
+        if outside_seated_tolerance:
+            diagnostic = (
+                "Insertion depth evidence was outside the seated tolerance: "
+                f"maximum observed {max_insertion_depth_m * 1000.0:.3f} mm; "
+                f"final observed {final_insertion_depth_m * 1000.0:.3f} mm; "
+                f"required at least {required_seated_depth_m * 1000.0:.3f} mm "
+                f"(target {target_insertion_depth_m * 1000.0:.3f} mm with "
+                f"{seated_depth_tolerance_m * 1000.0:.3f} mm seated tolerance)."
+            )
+        return {
+            "insertion_depth_outside_seated_tolerance": (
+                outside_seated_tolerance
+            ),
+            "max_insertion_depth_outside_seated_tolerance": (
+                max_depth_outside
+            ),
+            "final_insertion_depth_outside_seated_tolerance": (
+                final_depth_outside
+            ),
+            "max_insertion_depth_m": max_insertion_depth_m,
+            "final_insertion_depth_m": final_insertion_depth_m,
+            "final_depth_error_m": final_depth_error_m,
+            "target_insertion_depth_m": target_insertion_depth_m,
+            "required_seated_depth_m": required_seated_depth_m,
+            "seated_depth_tolerance_m": seated_depth_tolerance_m,
+            "max_insertion_depth_shortfall_m": (
+                max_insertion_depth_shortfall_m
+            ),
+            "final_insertion_depth_shortfall_m": (
+                final_insertion_depth_shortfall_m
+            ),
+            "insertion_depth_diagnostic": diagnostic,
+        }
+
+    def _move_insert_trial_view(self, trial: dict[str, Any]) -> dict[str, Any]:
+        """Return the stable public projection of one supervised trial."""
+        state = self._move_insert_trial_state(trial)
+        result = dict(trial.get("result") or {})
+        move_insert_result = dict(trial.get("move_insert_result") or {})
+        controller_status = dict(trial.get("controller_status") or {})
+        depth_diagnostics = self._move_insert_depth_diagnostics(
+            trial,
+            move_insert_result,
+        )
+        message = str(trial.get("message") or "")
+        depth_diagnostic = str(
+            depth_diagnostics.get("insertion_depth_diagnostic") or ""
+        )
+        if depth_diagnostic and depth_diagnostic not in message:
+            message = f"{message} {depth_diagnostic}".strip()
+        try:
+            qualification_policy_version = int(
+                trial.get("qualification_policy_version", 0) or 0
+            )
+            required_confirmed_trials = int(
+                trial.get("required_confirmed_trials", 0) or 0
+            )
+            confirmed_trial_count = int(
+                trial.get("confirmed_trial_count", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            qualification_policy_version = 0
+            required_confirmed_trials = 0
+            confirmed_trial_count = 0
+        if bool(trial.get("active")):
+            controller_status.update(
+                dict(self._ur5e_rtde_trajectory_status() or {})
+            )
+
+        def evidence_value(*field_names: str, default: Any = "") -> Any:
+            for evidence in (
+                move_insert_result,
+                result,
+                controller_status,
+                trial,
+            ):
+                for field_name in field_names:
+                    if field_name in evidence and evidence[field_name] not in (
+                        None,
+                        "",
+                    ):
+                        return evidence[field_name]
+            return default
+
+        insert_phase = str(
+            evidence_value("insert_phase", "phase", default="") or ""
+        )
+        try:
+            relief_cycle_count = int(
+                evidence_value(
+                    "relief_cycle_count",
+                    "insert_relief_cycle_count",
+                    default=0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            relief_cycle_count = 0
+        try:
+            disengagement_cycle_count = int(
+                evidence_value(
+                    "disengagement_cycle_count",
+                    "insert_disengagement_cycle_count",
+                    default=0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            disengagement_cycle_count = 0
+        hard_limit_reason = str(
+            evidence_value(
+                "hard_limit_reason",
+                "limit_trigger_reason",
+                "blocked_reason",
+                default="",
+            )
+            or ""
+        )
+        last_soft_overload_reason = str(
+            evidence_value(
+                "last_soft_overload_reason",
+                "soft_overload_reason",
+                "insert_soft_overload_reason",
+                default="",
+            )
+            or ""
+        )
+        hardware_stack_repair_required = (
+            bool(trial.get("hardware_stack_repair_required"))
+            if "hardware_stack_repair_required" in trial
+            else bool(
+                trial.get("normal_repair_required")
+                or evidence_value(
+                    "hardware_stack_repair_required",
+                    "rtde_reset_required",
+                    default=False,
+                )
+            )
+        )
+        return {
+            "success": bool(trial.get("success")),
+            "ready": bool(trial.get("ready")),
+            "target": str(trial.get("target") or ""),
+            "robot": str(trial.get("robot") or ""),
+            "destination_location": str(
+                trial.get("destination_location") or ""
+            ),
+            "part_name": str(trial.get("part_name") or ""),
+            "trial_id": str(trial.get("trial_id") or ""),
+            "state": state,
+            "qualification_state": state,
+            "qualified": bool(trial.get("qualified")),
+            "qualification": deepcopy(trial.get("qualification") or {}),
+            "qualification_policy_version": qualification_policy_version,
+            "qualification_policy_sha256": str(
+                trial.get("qualification_policy_sha256") or ""
+            ),
+            "required_confirmed_trials": required_confirmed_trials,
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": [
+                str(value) for value in trial.get("confirmed_trial_ids") or []
+            ],
+            "qualification_identity_sha256": str(
+                trial.get("qualification_identity_sha256") or ""
+            ),
+            "active": bool(trial.get("active")),
+            "completion_motion_active": bool(
+                trial.get("completion_motion_active")
+            ),
+            "durable_recovered": bool(trial.get("durable_recovered")),
+            "review_required": bool(trial.get("review_required")),
+            "recovery_required": bool(trial.get("recovery_required")),
+            "normal_repair_required": bool(
+                trial.get("normal_repair_required")
+            ),
+            "hardware_stack_repair_required": (
+                hardware_stack_repair_required
+            ),
+            "part_clamped": bool(trial.get("part_clamped", True)),
+            "recovery_confirmed_at": str(
+                trial.get("recovery_confirmed_at") or ""
+            ),
+            "recovery_evidence": deepcopy(
+                trial.get("recovery_evidence") or {}
+            ),
+            "automatic_checks_passed": bool(
+                trial.get("automatic_checks_passed")
+            ),
+            "engagement_detected": bool(trial.get("engagement_detected")),
+            "seated_detected": bool(trial.get("seated_detected")),
+            "completion_eligible": bool(trial.get("completion_eligible")),
+            "cancellation_requested": bool(
+                trial.get("cancellation_requested")
+            ),
+            "cancelled": bool(trial.get("cancelled")),
+            "released": bool(trial.get("released")),
+            "lifted": bool(trial.get("lifted")),
+            "motion_settled": evidence_value(
+                "motion_settled",
+                "insert_motion_settled",
+                default=False,
+            )
+            is True,
+            "dispatch_attempted": evidence_value(
+                "dispatch_attempted",
+                default=trial.get("dispatch_attempted", False),
+            )
+            is True,
+            "insert_phase": insert_phase,
+            "phase": insert_phase,
+            "relief_cycle_count": relief_cycle_count,
+            "disengagement_cycle_count": disengagement_cycle_count,
+            "last_disengagement_reason": str(
+                evidence_value(
+                    "last_disengagement_reason",
+                    "insert_last_disengagement_reason",
+                    default="",
+                )
+                or ""
+            ),
+            "tactile_center_valid": bool(
+                evidence_value(
+                    "tactile_center_valid",
+                    "insert_tactile_center_valid",
+                    default=False,
+                )
+            ),
+            "tactile_center_depth_m": evidence_value(
+                "tactile_center_depth_m",
+                "insert_tactile_center_depth_m",
+                default=None,
+            ),
+            "tactile_center_confidence": evidence_value(
+                "tactile_center_confidence",
+                "insert_tactile_center_confidence",
+                default=None,
+            ),
+            "tactile_center_evidence_sha256": str(
+                evidence_value(
+                    "tactile_center_evidence_sha256",
+                    "insert_tactile_center_evidence_sha256",
+                    default="",
+                )
+                or ""
+            ),
+            "scheduled_search_radius_m": evidence_value(
+                "scheduled_search_radius_m",
+                "insert_scheduled_search_radius_m",
+                default=None,
+            ),
+            "explored_search_radius_m": evidence_value(
+                "explored_search_radius_m",
+                "insert_explored_search_radius_m",
+                default=None,
+            ),
+            "disengagement_withdrawal_m": evidence_value(
+                "disengagement_withdrawal_m",
+                "insert_disengagement_withdrawal_m",
+                default=None,
+            ),
+            "disengagement_force_mode_stop_acknowledged": bool(
+                evidence_value(
+                    "disengagement_force_mode_stop_acknowledged",
+                    "insert_disengagement_force_mode_stop_acknowledged",
+                    default=False,
+                )
+            ),
+            "recenter_position_error_m": evidence_value(
+                "recenter_position_error_m",
+                "insert_recenter_position_error_m",
+                default=None,
+            ),
+            "retare_baseline_consistent": bool(
+                evidence_value(
+                    "retare_baseline_consistent",
+                    "insert_retare_baseline_consistent",
+                    default=False,
+                )
+            ),
+            "hard_limit_reason": hard_limit_reason,
+            "last_soft_overload_reason": last_soft_overload_reason,
+            "failure_id": str(trial.get("failure_id") or ""),
+            **depth_diagnostics,
+            "message": message,
+            "profile_sha256": str(trial.get("profile_sha256") or ""),
+            "move_insert_result_sha256": str(
+                trial.get("move_insert_result_sha256") or ""
+            ),
+            "result": deepcopy(result),
+            "move_insert_result": deepcopy(move_insert_result),
+            "controller_status": deepcopy(controller_status),
+            "diagnostic_directory": str(
+                trial.get("diagnostic_directory") or ""
+            ),
+            "diagnostic_bundle_path": str(
+                trial.get("diagnostic_bundle_path") or ""
+            ),
+            "download_path": str(trial.get("diagnostic_bundle_path") or ""),
+            "server_trace_copied": bool(trial.get("server_trace_copied")),
+            "server_trace_copied_sha256": str(
+                trial.get("server_trace_copied_sha256") or ""
+            ),
+        }
+
+    def _move_insert_trial_directory(self, trial_id: str) -> Path:
+        """Return the fixed application-owned directory for one exact trial ID."""
+        root = Path(getattr(self, "_move_insert_trials_dir", _MOVE_INSERT_TRIALS_DIR))
+        return root / trial_id
+
+    def _move_insert_server_trace_source(
+        self,
+        trial: dict[str, Any],
+    ) -> tuple[Path | None, str]:
+        """Validate one exact server-owned supervised trace for diagnostic copy."""
+        result = dict(trial.get("result") or {})
+        move_insert_result = dict(trial.get("move_insert_result") or {})
+        controller_status = dict(trial.get("controller_status") or {})
+        candidates = (move_insert_result, result, controller_status, trial)
+        evidence = next(
+            (
+                candidate
+                for candidate in candidates
+                if str(candidate.get("server_trace_id") or "")
+                or str(candidate.get("server_trace_path") or "")
+            ),
+            None,
+        )
+        if evidence is None:
+            return None, ""
+        trial_id = str(trial.get("trial_id") or "")
+        trace_id = str(evidence.get("server_trace_id") or "")
+        valid_trace_id = bool(
+            trace_id
+            and len(trace_id) <= 128
+            and trace_id[0].isalnum()
+            and all(
+                character.isalnum() or character in {".", "_", "-"}
+                for character in trace_id
+            )
+        )
+        if not valid_trace_id or trace_id != trial_id:
+            return None, (
+                "move_insert server trace identity does not match the exact trial_id"
+            )
+        trace_status = str(evidence.get("server_trace_status") or "")
+        trace_complete = evidence.get("server_trace_complete") is True
+        if trace_status in {"not_started", "recording"} and not trace_complete:
+            return None, ""
+        if trace_status != "complete" or not trace_complete:
+            return None, "move_insert terminal server trace is incomplete"
+        try:
+            trace_sample_count = int(evidence.get("server_trace_sample_count"))
+        except (TypeError, ValueError, OverflowError):
+            return None, "move_insert terminal server trace sample count is invalid"
+        if trace_sample_count < 0:
+            return None, "move_insert terminal server trace sample count is invalid"
+        raw_path = Path(str(evidence.get("server_trace_path") or ""))
+        try:
+            source = raw_path.resolve(strict=True)
+            trace_root = Path(
+                getattr(
+                    self,
+                    "_move_insert_server_trace_root",
+                    _MOVE_INSERT_SERVER_TRACE_ROOT,
+                )
+            ).resolve(strict=False)
+            expected = (trace_root / trace_id / "trace.jsonl").resolve(
+                strict=False
+            )
+            source.relative_to(trace_root)
+        except (OSError, RuntimeError, ValueError):
+            return None, "move_insert server trace path is outside its fixed root"
+        if source != expected:
+            return None, "move_insert server trace path does not match trial_id"
+        expected_sha256 = str(evidence.get("server_trace_sha256") or "")
+        try:
+            valid_sha256 = (
+                len(expected_sha256) == 64
+                and int(expected_sha256, 16) >= 0
+            )
+        except ValueError:
+            valid_sha256 = False
+        if not valid_sha256:
+            return None, "move_insert server trace SHA-256 is invalid"
+        try:
+            actual_sha256 = sha256_file(source)
+        except OSError as exc:
+            return None, f"Could not hash move_insert server trace: {exc}"
+        if actual_sha256 != expected_sha256:
+            return None, "move_insert server trace SHA-256 does not match"
+        return source, ""
+
+    @staticmethod
+    def _move_insert_server_trace_expected_sha256(
+        trial: dict[str, Any],
+    ) -> str:
+        """Return the terminal server digest already validated for this trial."""
+        for evidence in (
+            dict(trial.get("move_insert_result") or {}),
+            dict(trial.get("result") or {}),
+            dict(trial.get("controller_status") or {}),
+            trial,
+        ):
+            if str(evidence.get("server_trace_id") or "") or str(
+                evidence.get("server_trace_path") or ""
+            ):
+                return str(evidence.get("server_trace_sha256") or "")
+        return ""
+
+    @staticmethod
+    def _move_insert_server_trace_sample_count(
+        trial: dict[str, Any],
+    ) -> int:
+        """Return the exact terminal server trace sample count, or -1."""
+        for evidence in (
+            dict(trial.get("move_insert_result") or {}),
+            dict(trial.get("result") or {}),
+            dict(trial.get("controller_status") or {}),
+            trial,
+        ):
+            if str(evidence.get("server_trace_id") or "") or str(
+                evidence.get("server_trace_path") or ""
+            ):
+                try:
+                    return int(evidence.get("server_trace_sample_count"))
+                except (TypeError, ValueError, OverflowError):
+                    return -1
+        return -1
+
+    def _write_move_insert_trial_diagnostics(
+        self,
+        trial: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Atomically persist summary, trace, and a downloadable diagnostic ZIP."""
+        trial_id = str(trial.get("trial_id") or "")
+        if not trial_id:
+            return trial, "move_insert diagnostic trial_id is missing"
+        directory = self._move_insert_trial_directory(trial_id)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return trial, f"Could not create move_insert diagnostics: {exc}"
+
+        sanitized_trial = dict(self._move_insert_json_safe(trial))
+        sanitized_trial.pop("resource_agent", None)
+        sanitized_trial.pop("runtime_task", None)
+        sanitized_trial["diagnostic_directory"] = str(directory)
+        summary_path = directory / "summary.json"
+        trace_path = directory / "trace.jsonl"
+        bundle_path = directory / "diagnostic_bundle.zip"
+        server_trace_source, server_trace_error = (
+            self._move_insert_server_trace_source(sanitized_trial)
+        )
+        expected_server_trace_sha256 = (
+            self._move_insert_server_trace_expected_sha256(sanitized_trial)
+        )
+        persisted_trace_sha256 = str(
+            sanitized_trial.get("server_trace_copied_sha256") or ""
+        )
+        if (
+            server_trace_error
+            and sanitized_trial.get("server_trace_copied") is True
+            and expected_server_trace_sha256
+            and persisted_trace_sha256 == expected_server_trace_sha256
+            and trace_path.is_file()
+        ):
+            try:
+                if sha256_file(trace_path) == expected_server_trace_sha256:
+                    server_trace_source = trace_path
+                    server_trace_error = ""
+            except OSError:
+                pass
+        if server_trace_error:
+            return trial, server_trace_error
+        sanitized_trial["server_trace_copied"] = False
+        sanitized_trial.pop("server_trace_copied_sha256", None)
+        trace = []
+        move_insert_result = sanitized_trial.get("move_insert_result")
+        if isinstance(move_insert_result, dict):
+            for trace_field in (
+                "feedback_trace",
+                "trace",
+                "samples",
+            ):
+                candidate = move_insert_result.get(trace_field)
+                if isinstance(candidate, list):
+                    trace = candidate
+                    break
+        if not trace:
+            result = sanitized_trial.get("result")
+            if isinstance(result, dict):
+                candidate = result.get("feedback_trace")
+                if isinstance(candidate, list):
+                    trace = candidate
+        if server_trace_source is not None:
+            pending_values: list[Any] = [sanitized_trial]
+            while pending_values:
+                value = pending_values.pop()
+                if isinstance(value, dict):
+                    value.pop("feedback_trace", None)
+                    pending_values.extend(value.values())
+                elif isinstance(value, list):
+                    pending_values.extend(value)
+        try:
+            temporary_trace: Path | None = None
+            if server_trace_source is not None:
+                with tempfile.NamedTemporaryFile(
+                    dir=directory,
+                    prefix=".trace.jsonl.tmp.",
+                    delete=False,
+                ) as handle:
+                    temporary_trace = Path(handle.name)
+                shutil.copyfile(server_trace_source, temporary_trace)
+                copied_sha256 = sha256_file(temporary_trace)
+                if copied_sha256 != expected_server_trace_sha256:
+                    raise ValueError(
+                        "move_insert server trace changed while it was copied"
+                    )
+            else:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=directory,
+                    prefix=".trace.jsonl.tmp.",
+                    delete=False,
+                ) as handle:
+                    temporary_trace = Path(handle.name)
+                    for index, sample in enumerate(trace):
+                        row = (
+                            dict(sample)
+                            if isinstance(sample, dict)
+                            else {"value": sample}
+                        )
+                        row.setdefault("sample_index", index)
+                        handle.write(
+                            json.dumps(
+                                self._move_insert_json_safe(row),
+                                allow_nan=False,
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            os.replace(temporary_trace, trace_path)
+            temporary_trace = None
+            if server_trace_source is not None:
+                sanitized_trial["server_trace_copied"] = True
+                sanitized_trial["server_trace_copied_sha256"] = copied_sha256
+            atomic_json_write(summary_path, sanitized_trial)
+            temporary_bundle = directory.parent / f".{trial_id}.diagnostic.tmp.zip"
+            with zipfile.ZipFile(
+                temporary_bundle,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                archive.write(summary_path, arcname="summary.json")
+                archive.write(trace_path, arcname="trace.jsonl")
+            os.replace(temporary_bundle, bundle_path)
+        except (OSError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+            with suppress(OSError):
+                if "temporary_trace" in locals() and temporary_trace is not None:
+                    temporary_trace.unlink()
+            with suppress(OSError):
+                if "temporary_bundle" in locals():
+                    temporary_bundle.unlink()
+            return trial, f"Could not persist move_insert diagnostics: {exc}"
+        updated = {
+            **trial,
+            "diagnostic_directory": str(directory),
+            "diagnostic_bundle_path": str(bundle_path),
+            "server_trace_copied": bool(
+                sanitized_trial.get("server_trace_copied")
+            ),
+            "server_trace_copied_sha256": str(
+                sanitized_trial.get("server_trace_copied_sha256") or ""
+            ),
+        }
+        return updated, ""
+
+    def _store_move_insert_trial(self, trial: dict[str, Any]) -> dict[str, Any]:
+        """Persist one revision while preventing stale terminal-state overwrite."""
+        with self._get_move_insert_trial_lock():
+            trials, last_by_selection = self._move_insert_trial_stores()
+            trial_id = str(trial.get("trial_id") or "")
+            existing = trials.get(trial_id)
+            existing_revision = (
+                int(existing.get("_revision", 0) or 0)
+                if isinstance(existing, dict)
+                else -1
+            )
+            try:
+                incoming_revision = int(trial.get("_revision", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                incoming_revision = 0
+            if isinstance(existing, dict) and incoming_revision < existing_revision:
+                ends_active_motion = bool(existing.get("active")) and not bool(
+                    trial.get("active")
+                )
+                ends_completion_motion = bool(
+                    existing.get("completion_motion_active")
+                ) and not bool(trial.get("completion_motion_active"))
+                if not ends_active_motion and not ends_completion_motion:
+                    return deepcopy(existing)
+            candidate = (
+                {**existing, **trial}
+                if isinstance(existing, dict)
+                else dict(trial)
+            )
+            candidate["_revision"] = existing_revision + 1
+            updated, diagnostic_error = self._write_move_insert_trial_diagnostics(
+                candidate
+            )
+            if diagnostic_error:
+                updated = {
+                    **candidate,
+                    "diagnostic_error": diagnostic_error,
+                    "success": False,
+                    "automatic_checks_passed": False,
+                    "completion_eligible": False,
+                    "message": (
+                        f"{str(candidate.get('message') or '').strip()} "
+                        f"Diagnostics error: {diagnostic_error}. Confirm Completion "
+                        "is blocked. Keep the part clamped and use the normal "
+                        "Hardware Stack Repair path if motion state is uncertain."
+                    ).strip(),
+                }
+            pending_review_persistence_error = (
+                self._sync_move_insert_pending_review(updated)
+            )
+            if pending_review_persistence_error:
+                updated = {
+                    **updated,
+                    "success": False,
+                    "qualified": False,
+                    "completion_eligible": False,
+                    "review_required": True,
+                    "pending_review_persistence_error": (
+                        pending_review_persistence_error
+                    ),
+                    "message": (
+                        f"{str(updated.get('message') or '').strip()} Durable "
+                        "pending-review persistence failed: "
+                        f"{pending_review_persistence_error}. New motion remains "
+                        "blocked in this UI process; storage state is uncertain "
+                        "after restart."
+                    ).strip(),
+                }
+            key = self._move_insert_trial_selection_key(
+                str(updated.get("target") or ""),
+                str(updated.get("robot") or ""),
+                str(updated.get("destination_location") or ""),
+                str(updated.get("part_name") or ""),
+            )
+            trials[str(updated["trial_id"])] = deepcopy(updated)
+            last_by_selection[key] = str(updated["trial_id"])
+        return updated
+
+    def _publish_move_insert_trial_after_persisted_evidence(
+        self,
+        trial: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Persist confirmed evidence before clearing its custody marker."""
+        with self._get_move_insert_trial_lock():
+            trials, last_by_selection = self._move_insert_trial_stores()
+            trial_id = str(trial.get("trial_id") or "")
+            existing = trials.get(trial_id)
+            try:
+                existing_revision = int(
+                    dict(existing or {}).get("_revision", 0) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                existing_revision = 0
+            updated = {**dict(existing or {}), **trial}
+            updated["_revision"] = existing_revision + 1
+            updated, diagnostic_error = self._write_move_insert_trial_diagnostics(
+                updated
+            )
+            if diagnostic_error:
+                updated.update(
+                    {
+                        "success": False,
+                        "qualified": False,
+                        "review_required": True,
+                        "completion_eligible": False,
+                        "diagnostic_error": diagnostic_error,
+                        "message": (
+                            f"{str(updated.get('message') or '').strip()} Final "
+                            "qualification diagnostics could not be persisted: "
+                            f"{diagnostic_error}. Automatic move_insert remains "
+                            "blocked."
+                        ).strip(),
+                    }
+                )
+                pending_error = diagnostic_error
+            else:
+                pending_error = self._sync_move_insert_pending_review(updated)
+            if pending_error and not diagnostic_error:
+                updated.update(
+                    {
+                        "success": False,
+                        "qualified": False,
+                        "review_required": True,
+                        "completion_eligible": False,
+                        "pending_review_persistence_error": pending_error,
+                        "message": (
+                            f"{str(updated.get('message') or '').strip()} Durable "
+                            "pending-review state could not be cleared: "
+                            f"{pending_error}. Automatic move_insert remains blocked."
+                        ).strip(),
+                    }
+                )
+                rewritten, rewritten_error = (
+                    self._write_move_insert_trial_diagnostics(updated)
+                )
+                if rewritten_error:
+                    updated["diagnostic_error"] = rewritten_error
+                    updated["message"] = (
+                        f"{str(updated.get('message') or '').strip()} Final "
+                        "blocked-state diagnostics also could not be persisted: "
+                        f"{rewritten_error}."
+                    )
+                    pending_error = f"{pending_error}; {rewritten_error}"
+                else:
+                    updated = rewritten
+            key = self._move_insert_trial_selection_key(
+                str(updated.get("target") or ""),
+                str(updated.get("robot") or ""),
+                str(updated.get("destination_location") or ""),
+                str(updated.get("part_name") or ""),
+            )
+            trials[trial_id] = deepcopy(updated)
+            last_by_selection[key] = trial_id
+            return updated, pending_error
+
+    def _find_move_insert_trial(
+        self,
+        *,
+        target: str,
+        robot: str,
+        destination_location: str,
+        part_name: str,
+        trial_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return an exact selected trial without accepting aliases."""
+        key = self._move_insert_trial_selection_key(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        with self._get_move_insert_trial_lock():
+            trials, last_by_selection = self._move_insert_trial_stores()
+            selected_id = trial_id or str(last_by_selection.get(key) or "")
+            trial = trials.get(selected_id)
+            if not isinstance(trial, dict):
+                recovered = self._load_move_insert_pending_trial()
+                if recovered is None:
+                    return None
+                recovered_id = str(recovered.get("trial_id") or "")
+                recovered_key = self._move_insert_trial_selection_key(
+                    str(recovered.get("target") or ""),
+                    str(recovered.get("robot") or ""),
+                    str(recovered.get("destination_location") or ""),
+                    str(recovered.get("part_name") or ""),
+                )
+                if recovered_key != key or (
+                    trial_id and recovered_id != trial_id
+                ):
+                    return None
+                trials[recovered_id] = deepcopy(recovered)
+                last_by_selection[key] = recovered_id
+                trial = recovered
+            if self._move_insert_trial_selection_key(
+                str(trial.get("target") or ""),
+                str(trial.get("robot") or ""),
+                str(trial.get("destination_location") or ""),
+                str(trial.get("part_name") or ""),
+            ) != key:
+                return None
+            if bool(trial.get("durable_recovered")) and bool(
+                trial.get("active")
+            ):
+                trial = self._reconcile_recovered_move_insert_trial(
+                    deepcopy(trial)
+                )
+                trials[str(trial.get("trial_id") or selected_id)] = deepcopy(
+                    trial
+                )
+            return deepcopy(trial)
+
+    def _move_insert_offline_qualification_identities(
+        self,
+        *,
+        destination_location: str,
+        part_name: str,
+        settings: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        """Build current non-motion identities used to display persisted qualification."""
+        recording_path = (
+            _ROBOT_TAUGHT_FUNCTIONS_DIR
+            / "place_approach"
+            / "default__hardware.json"
+        )
+        try:
+            recording_sha256 = (
+                sha256_file(recording_path)
+                if recording_path.is_file()
+                else sha256_text("place_approach/default__hardware.json:missing")
+            )
+            product_geometry = self._robot_function_product_geometry_for_part(
+                part_name
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {}, f"Could not resolve move_insert qualification identities: {exc}"
+        board_status, board_error = self._digital_twin_assembly_board_v1_accepted_status(
+            "ur5e"
+        )
+        if board_error:
+            return {}, board_error
+        board_calibration_id = str(
+            board_status.get("accepted_calibration_id") or ""
+        ).strip()
+        if not board_calibration_id:
+            return {}, "move_insert accepted board calibration identity is missing."
+        demonstration_recipe = dict(
+            dict(settings.get("effective") or {}).get(
+                "demonstration_recipe"
+            )
+            or {}
+        )
+        return {
+            "robot": "ur5e",
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "tool_frame": str(demonstration_recipe.get("tool_frame") or ""),
+            "profile_sha256": str(settings.get("profile_sha256") or ""),
+            "hard_caps_sha256": str(
+                settings.get("hard_caps_sha256") or ""
+            ),
+            "place_approach_recording_sha256": recording_sha256,
+            "board_calibration_id": board_calibration_id,
+            "board_geometry_sha256": self._move_insert_canonical_sha256(
+                product_geometry
+            ),
+            "recording_id": str(
+                demonstration_recipe.get("recording_id") or ""
+            ),
+            "demonstration_sha256": str(
+                demonstration_recipe.get("demonstration_sha256") or ""
+            ),
+        }, ""
+
+    def _move_insert_normal_qualification_readiness(
+        self,
+        *,
+        destination_location: str,
+        part_name: str,
+        settings: dict[str, Any],
+        resource_agent: Any | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Revalidate current recording, board, and geometry before automatic use."""
+        demonstration_recipe = dict(
+            dict(settings.get("effective") or {}).get("demonstration_recipe")
+            or {}
+        )
+        if demonstration_recipe:
+            return {
+                "qualified": True,
+                "qualification": {},
+                "qualification_error": "",
+            }, ""
+        suspension_error = self._move_insert_suspension_error(part_name)
+        if suspension_error:
+            return {
+                "qualified": False,
+                "qualification": {},
+                "qualification_error": suspension_error,
+            }, suspension_error
+        offline_identities, identity_error = (
+            self._move_insert_offline_qualification_identities(
+                destination_location=destination_location,
+                part_name=part_name,
+                settings=settings,
+            )
+        )
+        qualification_view = self._move_insert_qualification_view(
+            part_name=part_name,
+            identities=offline_identities if not identity_error else None,
+        )
+        readiness = {
+            **qualification_view,
+            "move_insert_qualification_identities": deepcopy(
+                offline_identities
+            ),
+        }
+        if identity_error:
+            return readiness, identity_error
+        if not bool(qualification_view.get("qualified")):
+            return readiness, str(
+                qualification_view.get("qualification_error")
+                or f"move_insert is not confirmed for {part_name}."
+            )
+        if resource_agent is not None:
+            runtime_identities, runtime_error = self._move_insert_current_identities(
+                resource_agent,
+                destination_location=destination_location,
+                part_name=part_name,
+                settings=settings,
+            )
+            readiness["move_insert_runtime_identities"] = {
+                key: deepcopy(value)
+                for key, value in runtime_identities.items()
+                if key != "resource_agent_identity"
+            }
+            if runtime_error:
+                return readiness, runtime_error
+            for field in (
+                "profile_sha256",
+                "hard_caps_sha256",
+                "place_approach_recording_sha256",
+                "board_calibration_id",
+                "board_geometry_sha256",
+            ):
+                if runtime_identities.get(field) != offline_identities.get(field):
+                    return readiness, (
+                        f"move_insert runtime {field} changed before dispatch."
+                    )
+        return readiness, ""
+
+    async def _digital_twin_move_insert_trial_preflight_async(  # noqa: C901, PLR0912 - explicit safety gates.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        execution_lock_held: bool,
+        ignore_pending_trial_id: str = "",
+    ) -> tuple[Any | None, dict[str, Any], dict[str, Any], dict[str, Any], str]:
+        """Run the complete no-motion preflight for a supervised insertion trial."""
+        readiness: dict[str, Any] = {}
+        demonstration_error = self._insertion_demonstration_blocking_error()
+        if demonstration_error:
+            return None, {}, {}, readiness, demonstration_error
+        request_error = self._move_insert_trial_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return None, {}, {}, readiness, request_error
+        if bool(getattr(self, "_starting", False)):
+            return None, {}, {}, readiness, (
+                "Wait for CAIS system startup to finish before Supervised Test move_insert."
+            )
+        if bool(getattr(self, "_stopping", False)):
+            return None, {}, {}, readiness, (
+                "Wait for CAIS system shutdown to finish before Supervised Test move_insert."
+            )
+        if bool(getattr(self, "system_running", False)):
+            return None, {}, {}, readiness, (
+                "Stop the CAIS system before Supervised Test move_insert."
+            )
+        pending = self._move_insert_pending_review()
+        if pending is not None and str(pending.get("trial_id") or "") != (
+            ignore_pending_trial_id
+        ):
+            return None, {}, {}, readiness, self._move_insert_pending_review_error()
+        if not execution_lock_held and self._get_robot_function_execution_lock().locked():
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return None, {}, {}, readiness, (
+                f"Physical robot motion is already active: {active}."
+            )
+        reset_lock = getattr(self, "_ur5e_rtde_reset_lock", None)
+        if reset_lock is not None and reset_lock.locked():
+            return None, {}, {}, readiness, (
+                "Wait for Reset UR5e RTDE to finish before Supervised Test move_insert."
+            )
+        correction_error = self._digital_twin_assembly_correction_error(
+            target,
+            robot,
+            "",
+            destination_location,
+            part_name,
+            function_name="place_approach",
+        )
+        if correction_error:
+            return None, {}, {}, readiness, correction_error.replace(
+                "Run Assembly",
+                "Supervised Test move_insert",
+            )
+
+        token = _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.set(True)
+        confirmation_token = _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.set(
+            bool(ignore_pending_trial_id)
+        )
+        try:
+            resource_agent, _call_kwargs, function_readiness, preflight_error = (
+                await self._digital_twin_robot_function_execution_preflight_async(
+                    target,
+                    robot,
+                    "place_insert",
+                    "",
+                    destination_location,
+                    part_name,
+                )
+            )
+        finally:
+            _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.reset(
+                confirmation_token
+            )
+            _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.reset(token)
+        readiness.update(function_readiness)
+        if preflight_error or resource_agent is None:
+            return (
+                resource_agent,
+                {},
+                {},
+                readiness,
+                preflight_error or "place_insert preflight is not ready.",
+            )
+
+        settings = self._digital_twin_move_insert_trial_settings(part_name)
+        readiness.update(
+            {
+                "profile_sha256": str(settings.get("profile_sha256") or ""),
+                "move_insert_profile_sha256": str(
+                    settings.get("profile_sha256") or ""
+                ),
+                "move_insert_effective": deepcopy(
+                    settings.get("effective") or {}
+                ),
+                "move_insert_profile_state": str(
+                    settings.get("profile_state") or "invalid"
+                ),
+            }
+        )
+        if not bool(settings.get("validated")):
+            return resource_agent, settings, {}, readiness, str(
+                settings.get("message")
+                or f"The protected {part_name} move_insert recipe is incomplete."
+            )
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        context_hash = str(task_context.get("move_insert_profile_sha256") or "")
+        current_hash = str(settings.get("profile_sha256") or "")
+        current_effective = dict(settings.get("effective") or {})
+        retained_profile = dict(task_context.get("move_insert_profile") or {})
+        if (
+            context_hash != current_hash
+            or any(
+                retained_profile.get(key) != value
+                for key, value in current_effective.items()
+            )
+            or str(task_context.get("move_insert_hard_caps_sha256") or "")
+            != str(settings.get("hard_caps_sha256") or "")
+            or task_context.get("move_insert_boundary_ready") is not True
+            or bool(
+                str(task_context.get("move_insert_boundary_error") or "").strip()
+            )
+        ):
+            reconciled, reconciliation_error = (
+                self._reconcile_saved_insertion_demonstration_task_context(
+                    resource_agent,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    settings=settings,
+                )
+            )
+            if not reconciled:
+                detail = (
+                    f" {reconciliation_error}"
+                    if reconciliation_error
+                    else ""
+                )
+                return resource_agent, settings, {}, readiness, (
+                    "place_approach did not retain the current supervised "
+                    "move_insert recipe. Run place_approach again."
+                    f"{detail}"
+                )
+            task_context = dict(
+                getattr(resource_agent, "_task_ctx", {}) or {}
+            )
+        if str(task_context.get("move_insert_mode") or "") not in {
+            "force_limited",
+            "force_limited_trial",
+        }:
+            return resource_agent, settings, {}, readiness, (
+                "place_approach did not establish force_limited_trial for "
+                f"{part_name}."
+            )
+        for pose_name in ("insert_pose",):
+            pose_error = self._move_insert_complete_pose_error(
+                task_context.get(pose_name),
+                pose_name,
+            )
+            if pose_error:
+                return resource_agent, settings, {}, readiness, pose_error
+        descend_error = self._digital_twin_assembly_resolved_descend_error(
+            resource_agent,
+            "place_approach",
+        )
+        if descend_error:
+            return resource_agent, settings, {}, readiness, descend_error
+        insertion_axis = task_context.get("insertion_axis_world")
+        if not isinstance(insertion_axis, dict):
+            return resource_agent, settings, {}, readiness, (
+                "move_insert insertion_axis_world is missing."
+            )
+        try:
+            axis_values = [
+                float(insertion_axis[field]) for field in ("x", "y", "z")
+            ]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return resource_agent, settings, {}, readiness, (
+                "move_insert insertion_axis_world is invalid."
+            )
+        if not all(math.isfinite(value) for value in axis_values) or math.sqrt(
+            sum(value * value for value in axis_values)
+        ) <= 1e-12:
+            return resource_agent, settings, {}, readiness, (
+                "move_insert insertion_axis_world is invalid."
+            )
+        live_readiness, live_error = self._digital_twin_move_insert_live_readiness(
+            settings,
+            resource_agent,
+        )
+        readiness.update(live_readiness)
+        if live_error:
+            return resource_agent, settings, {}, readiness, live_error
+
+        identities, identity_error = self._move_insert_current_identities(
+            resource_agent,
+            destination_location=destination_location,
+            part_name=part_name,
+            settings=settings,
+        )
+        readiness.update(
+            {
+                key: deepcopy(value)
+                for key, value in identities.items()
+                if key != "resource_agent_identity"
+            }
+        )
+        if identity_error:
+            return resource_agent, settings, identities, readiness, identity_error
+        qualification_view = self._move_insert_qualification_view(
+            part_name=part_name,
+            identities=identities,
+        )
+        readiness.update(qualification_view)
+        return resource_agent, settings, identities, readiness, ""
+
+    async def digital_twin_move_insert_trial_readiness(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+    ) -> dict[str, Any]:
+        """Report no-motion readiness for one exact supervised move_insert trial."""
+        base = {
+            "success": False,
+            "ready": False,
+            "target": target,
+            "robot": robot,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "trial_id": "",
+            "active": False,
+            "completion_motion_active": False,
+            "review_required": False,
+            "completion_eligible": False,
+            "qualified": False,
+            "qualification": {},
+        }
+        resource_agent, settings, identities, readiness, error = (
+            await self._digital_twin_move_insert_trial_preflight_async(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                execution_lock_held=False,
+            )
+        )
+        qualified = bool(readiness.get("qualified"))
+        if qualified:
+            response = {
+                **base,
+                **readiness,
+                "success": True,
+                "ready": False,
+                "qualified": True,
+                "message": (
+                    f"move_insert is already confirmed for {part_name}; Run "
+                    "place_insert or Assembly."
+                ),
+            }
+            response["state"] = "confirmed"
+            response["qualification_state"] = "confirmed"
+            return response
+        ready = not error and resource_agent is not None
+        qualification_identity_sha256 = ""
+        confirmed_trial_count = 0
+        confirmed_trial_ids: list[str] = []
+        if identities and settings:
+            (
+                _qualification_identity,
+                qualification_identity_sha256,
+                qualification_identity_error,
+            ) = self._move_insert_qualification_identity(
+                identities=identities,
+                move_insert_effective=dict(settings.get("effective") or {}),
+            )
+            if not qualification_identity_error:
+                streak = self._move_insert_confirmed_trial_streak(
+                    qualification_identity_sha256=(
+                        qualification_identity_sha256
+                    )
+                )
+                confirmed_trial_count = len(streak)
+                confirmed_trial_ids = [
+                    str(item.get("trial_id") or "") for item in streak
+                ]
+        response = {
+            **base,
+            **readiness,
+            "success": ready,
+            "ready": ready,
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "qualification_policy_sha256": (
+                self._move_insert_qualification_policy_sha256()
+            ),
+            "required_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": confirmed_trial_ids,
+            "qualification_identity_sha256": (
+                qualification_identity_sha256
+            ),
+            "message": error
+            or (
+                f"Supervised Test move_insert is ready for {part_name}. "
+                f"Confirmed {confirmed_trial_count} of "
+                f"{_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS}; the test will keep "
+                "the part clamped for visual review."
+            ),
+        }
+        response["state"] = "ready_to_test" if ready else "not_confirmed"
+        response["qualification_state"] = response["state"]
+        return response
+
+    def digital_twin_move_insert_trial_status(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str = "",
+    ) -> dict[str, Any]:
+        """Return the latest in-memory trial or current persisted qualification."""
+        request_error = self._move_insert_trial_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {
+                "success": False,
+                "ready": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "qualification_state": "not_confirmed",
+                "qualified": False,
+                "active": False,
+                "completion_motion_active": False,
+                "completion_eligible": False,
+                "message": request_error,
+            }
+        self._move_insert_pending_review()
+        trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if trial is not None:
+            return self._move_insert_trial_view(trial)
+        settings = self._digital_twin_move_insert_trial_settings(part_name)
+        identities, identity_error = self._move_insert_offline_qualification_identities(
+            destination_location=destination_location,
+            part_name=part_name,
+            settings=settings,
+        )
+        qualification_view = self._move_insert_qualification_view(
+            part_name=part_name,
+            identities=identities if not identity_error else None,
+        )
+        qualified = bool(qualification_view.get("qualified"))
+        qualification_identity_sha256 = ""
+        confirmed_trial_count = 0
+        confirmed_trial_ids: list[str] = []
+        if not identity_error:
+            (
+                _qualification_identity,
+                qualification_identity_sha256,
+                qualification_identity_error,
+            ) = self._move_insert_qualification_identity(
+                identities=identities,
+                move_insert_effective=dict(settings.get("effective") or {}),
+            )
+            if not qualification_identity_error:
+                streak = self._move_insert_confirmed_trial_streak(
+                    qualification_identity_sha256=(
+                        qualification_identity_sha256
+                    )
+                )
+                confirmed_trial_count = len(streak)
+                confirmed_trial_ids = [
+                    str(item.get("trial_id") or "") for item in streak
+                ]
+        state = (
+            "confirmed"
+            if qualified
+            else "confirmation_progress"
+            if confirmed_trial_count
+            else "not_confirmed"
+        )
+        return {
+            "success": True,
+            "ready": False,
+            "target": target,
+            "robot": robot,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "trial_id": "",
+            "state": state,
+            "qualification_state": state,
+            "qualified": qualified,
+            "qualification": deepcopy(
+                qualification_view.get("qualification") or {}
+            ),
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "qualification_policy_sha256": (
+                self._move_insert_qualification_policy_sha256()
+            ),
+            "required_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": confirmed_trial_ids,
+            "qualification_identity_sha256": (
+                qualification_identity_sha256
+            ),
+            "active": False,
+            "completion_motion_active": False,
+            "review_required": False,
+            "completion_eligible": False,
+            "message": (
+                f"move_insert is confirmed for {part_name}."
+                if qualified
+                else (
+                    f"Confirmed {confirmed_trial_count} of "
+                    f"{_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS} supervised "
+                    f"move_insert tests for {part_name}."
+                )
+                if confirmed_trial_count
+                else identity_error
+                or str(qualification_view.get("qualification_error") or "")
+            ),
+        }
+
+    def _settle_move_insert_trial_result(
+        self,
+        trial_id: str,
+        resource_agent: Any,
+        result: Any,
+    ) -> dict[str, Any]:
+        """Commit one terminal trial result while retaining positioned custody."""
+        with self._get_move_insert_trial_lock():
+            trials, _last_by_selection = self._move_insert_trial_stores()
+            trial = deepcopy(trials.get(trial_id) or {})
+        if not trial:
+            return {}
+        trial_part_name = str(trial.get("part_name") or "")
+        result_payload = dict(result) if isinstance(result, dict) else {}
+        move_insert_result = self._move_insert_result_from_task_result(
+            result_payload,
+            resource_agent,
+        )
+        status = str(result_payload.get("status") or "").strip().lower()
+        dispatch_attempted = bool(
+            result_payload.get("dispatch_attempted") is True
+            or move_insert_result.get("dispatch_attempted") is True
+            or str(result_payload.get("server_trace_id") or "")
+            or str(result_payload.get("server_trace_path") or "")
+            or str(move_insert_result.get("server_trace_id") or "")
+            or str(move_insert_result.get("server_trace_path") or "")
+        )
+        engagement_detected = move_insert_result.get("engagement_detected") is True
+        seated_detected = move_insert_result.get("seated_detected") is True
+        state_uncertain = move_insert_result.get("state_uncertain") is True
+        reported_trial_id = str(
+            result_payload.get("trial_id")
+            or move_insert_result.get("trial_id")
+            or ""
+        )
+        motion_settled = bool(
+            result_payload.get("motion_settled") is True
+            or move_insert_result.get("motion_settled") is True
+        )
+        try:
+            disengagement_cycle_count = int(
+                move_insert_result.get("disengagement_cycle_count") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            disengagement_cycle_count = 0
+        contact_recovery_required = bool(
+            disengagement_cycle_count > 0
+            and move_insert_result.get("disengagement_contact_cleared") is not True
+            and motion_settled
+            and not state_uncertain
+        )
+        server_trace_source, server_trace_error = (
+            self._move_insert_server_trace_source(
+                {
+                    **trial,
+                    "result": result_payload,
+                    "move_insert_result": move_insert_result,
+                }
+            )
+        )
+        server_trace_sample_count = self._move_insert_server_trace_sample_count(
+            {
+                **trial,
+                "result": result_payload,
+                "move_insert_result": move_insert_result,
+            }
+        )
+        move_insert_result_sha256 = str(
+            result_payload.get("move_insert_result_sha256")
+            or dict(getattr(resource_agent, "_task_ctx", {}) or {}).get(
+                "move_insert_trial_result_sha256"
+            )
+            or ""
+        )
+        try:
+            result_hash_valid = bool(
+                len(move_insert_result_sha256) == 64
+                and int(move_insert_result_sha256, 16) >= 0
+            )
+        except ValueError:
+            result_hash_valid = False
+        custody_ok = bool(
+            str(getattr(resource_agent, "_current_state", "") or "")
+            == "positioned"
+            and getattr(resource_agent, "_held_part", None) == trial.get("part_name")
+            and str(getattr(resource_agent, "_gripper_state", "") or "")
+            == "closed"
+        )
+        automatic_checks_passed = bool(
+            dispatch_attempted
+            and status == "completed"
+            and result_payload.get("trial_ready_for_confirmation") is True
+            and move_insert_result.get("success") is True
+            and not state_uncertain
+            and move_insert_result.get("final_tool0_pose_valid") is True
+            and reported_trial_id == trial_id
+            and motion_settled
+            and server_trace_source is not None
+            and not server_trace_error
+            and server_trace_sample_count > 0
+            and engagement_detected
+            and seated_detected
+            and result_hash_valid
+            and custody_ok
+        )
+        depth_diagnostics = self._move_insert_depth_diagnostics(
+            trial,
+            move_insert_result,
+        )
+        message = str(
+            result_payload.get("content")
+            or result_payload.get("message")
+            or ""
+        ).strip()
+        if not message:
+            message = (
+                "Supervised Test move_insert passed its automatic checks; inspect "
+                f"{trial_part_name} before Confirm Completion."
+                if automatic_checks_passed
+                else "Supervised Test move_insert did not pass its automatic checks."
+            )
+        depth_diagnostic = str(
+            depth_diagnostics.get("insertion_depth_diagnostic") or ""
+        )
+        if depth_diagnostic and depth_diagnostic not in message:
+            message = f"{message} {depth_diagnostic}".strip()
+        if not custody_ok:
+            message = (
+                f"{message} The positioned {trial_part_name} custody state changed unexpectedly; "
+                "do not release the part."
+            )
+            state_uncertain = True
+        if reported_trial_id != trial_id:
+            message = (
+                f"{message} The terminal result trial_id did not match the exact "
+                "supervised trial; Confirm Completion remains blocked."
+            )
+        if not motion_settled:
+            message = (
+                f"{message} Stationary motion settlement was not proven; use "
+                "Repair Hardware Stack before further motion."
+            )
+            state_uncertain = True
+        if dispatch_attempted and (
+            server_trace_source is None or server_trace_error
+        ):
+            message = (
+                f"{message} Complete trial-keyed server trace evidence is missing"
+                + (f": {server_trace_error}" if server_trace_error else ".")
+            )
+        elif dispatch_attempted and server_trace_sample_count <= 0:
+            message = (
+                f"{message} The complete terminal server trace contains no RTDE "
+                "samples; Confirm Completion remains blocked."
+            )
+        if state_uncertain:
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = message
+            contact_recovery_required = False
+        suspension_error = ""
+        if dispatch_attempted and not automatic_checks_passed:
+            suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            if suspension_error:
+                message = (
+                    f"{message} Persisted qualification remains fail-closed, but "
+                    f"its removal could not be saved: {suspension_error}"
+                )
+        updated = {
+            **trial,
+            "success": automatic_checks_passed,
+            "ready": False,
+            "active": False,
+            "state": (
+                "awaiting_visual_confirmation"
+                if automatic_checks_passed
+                else "not_confirmed"
+            ),
+            "qualification_state": (
+                "awaiting_visual_confirmation"
+                if automatic_checks_passed
+                else "not_confirmed"
+            ),
+            "review_required": automatic_checks_passed,
+            "recovery_required": contact_recovery_required,
+            "normal_repair_required": state_uncertain,
+            "hardware_stack_repair_reason": message if state_uncertain else "",
+            "part_clamped": True,
+            "automatic_checks_passed": automatic_checks_passed,
+            "engagement_detected": engagement_detected,
+            "seated_detected": seated_detected,
+            "completion_eligible": automatic_checks_passed,
+            "cancelled": bool(
+                trial.get("cancellation_requested")
+                and not automatic_checks_passed
+            ),
+            "message": message,
+            "status": status or "unknown",
+            "dispatch_attempted": dispatch_attempted,
+            "result": deepcopy(result_payload),
+            "move_insert_result": deepcopy(move_insert_result),
+            "move_insert_result_sha256": move_insert_result_sha256,
+            "reported_trial_id": reported_trial_id,
+            "motion_settled": motion_settled,
+            "server_trace_validation_error": server_trace_error,
+            "server_trace_sample_count": server_trace_sample_count,
+            "released": False,
+            "lifted": False,
+            "qualification_suspension_error": suspension_error,
+            "finished_at": time.time(),
+            **depth_diagnostics,
+        }
+        if not automatic_checks_passed:
+            if not dispatch_attempted:
+                updated["state"] = "not_confirmed"
+                updated["qualification_state"] = "not_confirmed"
+                updated["message"] = (
+                    f"{message} No move_insert goal, force mode, or spiral motion "
+                    "was dispatched. Resolve the readiness blocker, then retry."
+                )
+            elif state_uncertain:
+                updated["message"] = (
+                    f"{message} Diagnostics were saved automatically. Keep the "
+                    "part clamped; do not jog. Inspect the robot and use Repair "
+                    "Hardware Stack before any further Cartesian motion."
+                )
+            elif contact_recovery_required:
+                updated["message"] = (
+                    f"{message} Diagnostics were saved automatically. Keep the "
+                    "part clamped. Protected disengagement ended before contact "
+                    "was proven clear; do not jog, rerun place_approach, release "
+                    "the part, or command further Cartesian motion. Inspect the "
+                    "physical contact and complete operator-controlled recovery first."
+                )
+            elif (
+                move_insert_result.get("final_tool0_pose_valid") is True
+                and not engagement_detected
+                and not seated_detected
+            ):
+                updated["message"] = (
+                    f"{message} Diagnostics were saved automatically. Keep the "
+                    "part clamped. You can rerun place_approach to stage at "
+                    "assembly_board-v1 again, then retry Supervised Test move_insert. "
+                    "Delete Previous Recording only when you want to relearn it."
+                )
+            else:
+                updated["message"] = (
+                    f"{message} Diagnostics were saved automatically. Keep the "
+                    "part clamped, jog back to pre-insertion, then retry or "
+                    "Delete Previous Recording."
+                )
+        stored = self._store_move_insert_trial(updated)
+        if (
+            stored.get("diagnostic_error")
+            or stored.get("pending_review_persistence_error")
+        ) and automatic_checks_passed:
+            diagnostic_suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            diagnostic_message = str(stored.get("message") or "")
+            if diagnostic_suspension_error:
+                diagnostic_message += (
+                    " Qualification removal could not be persisted: "
+                    f"{diagnostic_suspension_error}"
+                )
+                self._ur5e_robot_function_state_uncertain = True
+                self._ur5e_robot_function_state_uncertain_reason = diagnostic_message
+            stored = self._store_move_insert_trial(
+                {
+                    **stored,
+                    "success": False,
+                    "state": "not_confirmed",
+                    "qualification_state": "not_confirmed",
+                    "automatic_checks_passed": False,
+                    "completion_eligible": False,
+                    "qualification_suspension_error": (
+                        diagnostic_suspension_error
+                    ),
+                    "message": diagnostic_message,
+                }
+            )
+        return stored
+
+    def _clear_move_insert_trial_execution_status(self) -> None:
+        """Clear the shared bridge motion status after terminal trial settlement."""
+        self._ur5e_robot_function_execution_active = None
+        self._ur5e_robot_function_execution_stage = ""
+        self._ur5e_robot_function_execution_started_at = 0.0
+        self._robot_function_execution_robot = ""
+        self._robot_function_execution_active_step = ""
+
+    async def digital_twin_execute_move_insert_trial(  # noqa: C901 - explicit motion lifecycle.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute only internal place_insert.move_insert and retain the exact part."""
+        base = {
+            "success": False,
+            "ready": False,
+            "target": target,
+            "robot": robot,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "trial_id": "",
+            "state": "not_confirmed",
+            "qualification_state": "not_confirmed",
+            "qualified": False,
+            "active": False,
+            "completion_motion_active": False,
+            "completion_eligible": False,
+        }
+        if confirmed is not True:
+            return {
+                **base,
+                "message": (
+                    "Explicit operator confirmation is required for Supervised "
+                    "Test move_insert."
+                ),
+            }
+        initial_readiness = await self.digital_twin_move_insert_trial_readiness(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if not bool(initial_readiness.get("ready")):
+            return {**base, **initial_readiness, "success": False}
+
+        lock = self._get_robot_function_execution_lock()
+        if not lock.acquire(blocking=False):
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+            }
+        release_lock_here = True
+        self._ur5e_robot_function_execution_active = (
+            "Supervised Test move_insert"
+        )
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
+        self._robot_function_execution_robot = robot
+        self._robot_function_execution_active_step = "place_insert.move_insert"
+        try:
+            resource_agent, settings, identities, readiness, error = (
+                await self._digital_twin_move_insert_trial_preflight_async(
+                    target,
+                    robot,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    execution_lock_held=True,
+                )
+            )
+            if error or resource_agent is None:
+                return {
+                    **base,
+                    **readiness,
+                    "message": error or "Supervised Test move_insert is not ready.",
+                }
+            if bool(readiness.get("qualified")):
+                return {
+                    **base,
+                    **readiness,
+                    "qualified": True,
+                    "state": "confirmed",
+                    "qualification_state": "confirmed",
+                    "message": (
+                        f"move_insert is already confirmed for {part_name}; Run "
+                        "place_insert or Assembly."
+                    ),
+                }
+            trial_id = (
+                f"move-insert-{int(time.time() * 1000)}-{uuid4().hex[:8]}"
+            )
+            started_at = time.time()
+            qualification_identity, qualification_identity_sha256, identity_error = (
+                self._move_insert_qualification_identity(
+                    identities=identities,
+                    move_insert_effective=dict(settings.get("effective") or {}),
+                )
+            )
+            if identity_error:
+                return {
+                    **base,
+                    **readiness,
+                    "message": identity_error,
+                }
+            trial = {
+                **base,
+                **readiness,
+                "success": True,
+                "ready": False,
+                "trial_id": trial_id,
+                "state": "testing",
+                "qualification_state": "testing",
+                "active": True,
+                "review_required": True,
+                "recovery_required": False,
+                "normal_repair_required": False,
+                "part_clamped": True,
+                "released": False,
+                "lifted": False,
+                "message": f"Supervised Test move_insert is running for {part_name}.",
+                "started_at": started_at,
+                "updated_at": started_at,
+                "profile_sha256": str(settings.get("profile_sha256") or ""),
+                "move_insert_effective": deepcopy(
+                    settings.get("effective") or {}
+                ),
+                "hard_caps": deepcopy(settings.get("hard_caps") or {}),
+                "identities": deepcopy(identities),
+                "qualification_policy_version": (
+                    _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+                ),
+                "qualification_policy_sha256": (
+                    self._move_insert_qualification_policy_sha256()
+                ),
+                "required_confirmed_trials": (
+                    _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                ),
+                "confirmed_trial_count": len(
+                    self._move_insert_confirmed_trial_streak(
+                        qualification_identity_sha256=(
+                            qualification_identity_sha256
+                        )
+                    )
+                ),
+                "qualification_identity": qualification_identity,
+                "qualification_identity_sha256": (
+                    qualification_identity_sha256
+                ),
+            }
+            stored = self._store_move_insert_trial(trial)
+            if stored.get("diagnostic_error") or stored.get(
+                "pending_review_persistence_error"
+            ):
+                storage_error = str(
+                    stored.get("diagnostic_error")
+                    or stored.get("pending_review_persistence_error")
+                    or "trial storage failed"
+                )
+                stored.update(
+                    {
+                        "success": False,
+                        "state": "not_confirmed",
+                        "qualification_state": "not_confirmed",
+                        "active": False,
+                        "review_required": False,
+                        "message": (
+                            "Supervised Test move_insert was not dispatched because "
+                            + storage_error
+                        ),
+                    }
+                )
+                stored = self._store_move_insert_trial(stored)
+                return self._move_insert_trial_view(stored)
+
+            trial_identity = deepcopy(identities)
+
+            def _manual_pre_execute() -> str:
+                current_settings = self._digital_twin_move_insert_trial_settings(
+                    part_name
+                )
+                if (
+                    not bool(current_settings.get("validated"))
+                    or str(current_settings.get("profile_sha256") or "")
+                    != str(trial_identity.get("profile_sha256") or "")
+                ):
+                    return (
+                        "The protected move_insert recipe changed before dispatch."
+                    )
+                current_identities, identity_error = (
+                    self._move_insert_current_identities(
+                        resource_agent,
+                        destination_location=destination_location,
+                        part_name=part_name,
+                        settings=current_settings,
+                    )
+                )
+                if identity_error:
+                    return identity_error
+                for key, expected in trial_identity.items():
+                    if current_identities.get(key) != expected:
+                        return f"move_insert {key} changed before dispatch."
+                _pose_readiness, pose_error = (
+                    self._manual_dependent_function_pose_error(
+                        target,
+                        robot,
+                        "place_insert",
+                        resource_agent,
+                        deepcopy(
+                            dict(getattr(resource_agent, "_task_ctx", {}) or {})
+                        ),
+                        readiness,
+                    )
+                )
+                return pose_error
+
+            trial_function = getattr(
+                resource_agent,
+                "_execute_place_insert_move_insert_trial",
+                None,
+            )
+            if not callable(trial_function):
+                failed = self._store_move_insert_trial(
+                    {
+                        **stored,
+                        "success": False,
+                        "state": "not_confirmed",
+                        "qualification_state": "not_confirmed",
+                        "active": False,
+                        "review_required": False,
+                        "message": (
+                            "The prepared ur5e RobotAgent does not support supervised "
+                            "move_insert trials. Restart the CAIS UI."
+                        ),
+                    }
+                )
+                return self._move_insert_trial_view(failed)
+            self._ur5e_robot_function_execution_stage = "inserting"
+            runtime_task = asyncio.create_task(
+                self._run_on_agent_runtime(
+                    trial_function(
+                        _manual_pre_execute,
+                        destination_location=destination_location,
+                        part_name=part_name,
+                        trial_id=trial_id,
+                    )
+                )
+            )
+            try:
+                result = await asyncio.shield(runtime_task)
+            except asyncio.CancelledError:
+                release_lock_here = False
+
+                def _release_after_runtime(task: asyncio.Task[Any]) -> None:
+                    try:
+                        completed_result = task.result()
+                    except asyncio.CancelledError:
+                        completed_result = {
+                            "status": "failed",
+                            "trial_id": trial_id,
+                            "motion_settled": False,
+                            "content": (
+                                "Supervised Test move_insert runtime was cancelled; "
+                                "physical state is uncertain."
+                            ),
+                            "move_insert_result": {"state_uncertain": True},
+                        }
+                    except Exception as exc:  # noqa: BLE001 - background runtime boundary.
+                        log.exception(
+                            "Supervised Test move_insert failed after UI cancellation"
+                        )
+                        completed_result = {
+                            "status": "failed",
+                            "trial_id": trial_id,
+                            "motion_settled": False,
+                            "content": f"Supervised Test move_insert failed: {exc}",
+                            "move_insert_result": {"state_uncertain": True},
+                        }
+                    try:
+                        self._settle_move_insert_trial_result(
+                            trial_id,
+                            resource_agent,
+                            completed_result,
+                        )
+                    finally:
+                        self._clear_move_insert_trial_execution_status()
+                        lock.release()
+
+                runtime_task.add_done_callback(_release_after_runtime)
+                raise
+            except Exception as exc:  # noqa: BLE001 - agent runtime boundary.
+                log.exception("Supervised Test move_insert execution failed")
+                result = {
+                    "status": "failed",
+                    "trial_id": trial_id,
+                    "motion_settled": False,
+                    "content": f"Supervised Test move_insert execution failed: {exc}",
+                    "move_insert_result": {"state_uncertain": True},
+                }
+            settled = self._settle_move_insert_trial_result(
+                trial_id,
+                resource_agent,
+                result,
+            )
+            return self._move_insert_trial_view(settled)
+        finally:
+            if release_lock_here:
+                self._clear_move_insert_trial_execution_status()
+                lock.release()
+
+    async def digital_twin_cancel_move_insert_trial(
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str,
+    ) -> dict[str, Any]:
+        """Request cancellation and retain all locks until the action settles."""
+        trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if trial is None:
+            return {
+                "success": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "active": False,
+                "completion_motion_active": False,
+                "message": "The selected supervised move_insert trial does not exist.",
+            }
+        if bool(trial.get("completion_motion_active")):
+            view = self._move_insert_trial_view(trial)
+            return {
+                **view,
+                "success": False,
+                "message": (
+                    "Stop Supervised move_insert cancels only the supervised "
+                    "move_insert motion. "
+                    "Confirm Completion release/lift is active and cannot be "
+                    "cancelled with Stop Supervised move_insert."
+                ),
+            }
+        if not bool(trial.get("active")):
+            view = self._move_insert_trial_view(trial)
+            return {
+                **view,
+                "success": False,
+                "message": "Supervised Test move_insert is already terminal.",
+            }
+        trial.update(
+            {
+                "cancellation_requested": True,
+                "message": (
+                    "Stop Supervised move_insert requested; waiting for force mode "
+                    f"and motion to settle. {part_name} remains clamped."
+                ),
+                "updated_at": time.time(),
+            }
+        )
+        trial = self._store_move_insert_trial(trial)
+        resource_agent = self._physical_ur5e_robot_agent()
+        try:
+            expected_agent_identity = int(
+                dict(trial.get("identities") or {}).get(
+                    "resource_agent_identity",
+                    -1,
+                )
+                or -1
+            )
+        except (TypeError, ValueError, OverflowError):
+            expected_agent_identity = -1
+        if resource_agent is None or id(resource_agent) != expected_agent_identity:
+            trial.update(
+                {
+                    "message": (
+                        "Stop Supervised move_insert could not be sent because the "
+                        "prepared ur5e "
+                        "RobotAgent changed. Use the physical stop if motion is "
+                        "unsafe; cancellation acceptance remains unknown."
+                    ),
+                }
+            )
+            trial = self._store_move_insert_trial(trial)
+            return {**self._move_insert_trial_view(trial), "success": False}
+        controller = getattr(resource_agent, "_controller", None)
+        cancel_move_insert = getattr(controller, "cancel_move_insert", None)
+        if not callable(cancel_move_insert):
+            trial.update(
+                {
+                    "message": (
+                        "Stop Supervised move_insert could not be sent because the "
+                        "updated UR5e "
+                        "move_insert cancellation client is unavailable. Use the "
+                        "physical stop if motion is unsafe; acceptance remains unknown."
+                    ),
+                }
+            )
+            trial = self._store_move_insert_trial(trial)
+            return {**self._move_insert_trial_view(trial), "success": False}
+        try:
+            cancel_result = await asyncio.to_thread(
+                cancel_move_insert,
+                timeout_sec=8.0,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            cancel_result = {
+                "success": False,
+                "message": f"move_insert cancellation failed: {exc}",
+            }
+        current = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if current is None:
+            current = trial
+        if bool(current.get("active")):
+            cancel_payload = (
+                dict(cancel_result)
+                if isinstance(cancel_result, dict)
+                else {"success": bool(cancel_result)}
+            )
+            current["cancel_result"] = deepcopy(cancel_payload)
+            current["message"] = str(
+                cancel_payload.get("message")
+                or (
+                    "Stop Supervised move_insert was accepted; waiting for terminal "
+                    "settlement."
+                    if cancel_payload.get("success")
+                    else (
+                        "Stop Supervised move_insert acceptance was not confirmed."
+                    )
+                )
+            )
+            current = self._store_move_insert_trial(current)
+            return {
+                **self._move_insert_trial_view(current),
+                "success": bool(cancel_payload.get("success")),
+            }
+        return {
+            **self._move_insert_trial_view(current),
+            "success": bool(current.get("cancelled")),
+        }
+
+    def _finish_move_insert_confirmation(
+        self,
+        *,
+        trial: dict[str, Any],
+        resource_agent: Any,
+        completion_result: Any,
+    ) -> dict[str, Any]:
+        """Apply release/lift evidence and qualify the exact part on confirmation."""
+        part_name = str(trial.get("part_name") or "")
+        result = dict(completion_result) if isinstance(completion_result, dict) else {}
+        status = str(result.get("status") or "").strip().lower()
+        completed_steps = [str(value) for value in result.get("completed_steps") or []]
+        released = "release_part" in completed_steps
+        lifted = "lift" in completed_steps
+        effects_ok = bool(
+            status == "completed"
+            and released
+            and lifted
+            and str(getattr(resource_agent, "_current_state", "") or "")
+            == "placed"
+            and getattr(resource_agent, "_held_part", None) in (None, "")
+            and str(getattr(resource_agent, "_gripper_state", "") or "")
+            == "open"
+            and not dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        )
+        message = str(result.get("content") or result.get("message") or "").strip()
+        updated = {
+            **trial,
+            "active": False,
+            "completion_motion_active": False,
+            "released": released,
+            "lifted": lifted,
+            "completion_motion_completed": effects_ok,
+            "completion_result": deepcopy(result),
+            "updated_at": time.time(),
+        }
+        if not effects_ok:
+            if released and not lifted:
+                failure_message = (
+                    f"{message + ' ' if message else ''}{part_name} was released, but lift "
+                    "did not complete. The physical state is uncertain."
+                )
+            elif released:
+                failure_message = (
+                    f"{message + ' ' if message else ''}{part_name} was released, but the "
+                    "expected terminal place_insert effects were not established."
+                )
+            else:
+                failure_message = message or (
+                    f"Confirm Completion did not release {part_name}; it should remain clamped."
+                )
+            suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            if suspension_error:
+                failure_message += (
+                    " Automatic insertion remains blocked in this UI process, but "
+                    "the fail-closed suspension persistence had an error: "
+                    f"{suspension_error}"
+                )
+            updated.update(
+                {
+                    "success": False,
+                    "qualified": False,
+                    "review_required": True,
+                    "completion_eligible": False,
+                    "message": (
+                        f"{failure_message} Do not retry automatically; inspect the "
+                        "robot and use the normal Hardware Stack repair path."
+                    ),
+                }
+            )
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = str(
+                updated["message"]
+            )
+            return self._store_move_insert_trial(updated)
+
+        identities = dict(trial.get("identities") or {})
+        qualification_identity, qualification_identity_sha256, identity_error = (
+            self._move_insert_qualification_identity(
+                identities=identities,
+                move_insert_effective=dict(
+                    trial.get("move_insert_effective") or {}
+                ),
+            )
+        )
+        if (
+            identity_error
+            or str(trial.get("qualification_identity_sha256") or "")
+            != qualification_identity_sha256
+        ):
+            failure_message = identity_error or (
+                "move_insert qualification identity changed before confirmation."
+            )
+            suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            if suspension_error:
+                failure_message += f" Qualification suspension failed: {suspension_error}"
+            return self._store_move_insert_trial(
+                {
+                    **updated,
+                    "success": False,
+                    "qualified": False,
+                    "review_required": True,
+                    "completion_eligible": False,
+                    "message": failure_message,
+                }
+            )
+        confirmed_at = time.time()
+        evidence = self._store_move_insert_trial(
+            {
+                **updated,
+                "success": True,
+                "qualified": False,
+                "qualification": {},
+                "qualification_candidate": {},
+                "qualification_policy_version": (
+                    _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+                ),
+                "qualification_policy_sha256": (
+                    self._move_insert_qualification_policy_sha256()
+                ),
+                "required_confirmed_trials": (
+                    _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                ),
+                "qualification_identity": qualification_identity,
+                "qualification_identity_sha256": qualification_identity_sha256,
+                "confirmation_counted": True,
+                "confirmed_at": confirmed_at,
+                "review_required": True,
+                "completion_eligible": False,
+                "diagnostic_error": "",
+                "pending_review_persistence_error": "",
+                "message": (
+                    f"{message or 'Release and lift completed.'} Release/lift "
+                    "completion evidence was persisted before qualification."
+                ),
+            }
+        )
+        evidence_error = str(
+            evidence.get("diagnostic_error")
+            or evidence.get("pending_review_persistence_error")
+            or ""
+        )
+        if evidence_error:
+            suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            evidence_message = (
+                f"{str(evidence.get('message') or '')} Qualification was not "
+                "written because release/lift evidence was not durably committed."
+            )
+            if suspension_error:
+                evidence_message += (
+                    " Qualification suspension persistence also failed: "
+                    f"{suspension_error}"
+                )
+            evidence.update(
+                {
+                    "success": False,
+                    "qualified": False,
+                    "review_required": True,
+                    "completion_eligible": False,
+                    "message": evidence_message,
+                }
+            )
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = evidence_message
+            return self._store_move_insert_trial(evidence)
+        streak = self._move_insert_confirmed_trial_streak(
+            qualification_identity_sha256=qualification_identity_sha256
+        )
+        confirmed_trial_ids = [
+            str(item.get("trial_id") or "") for item in streak
+        ]
+        confirmed_trial_result_sha256s = [
+            str(item.get("move_insert_result_sha256") or "") for item in streak
+        ]
+        confirmed_trial_trace_sha256s = [
+            str(item.get("server_trace_copied_sha256") or "") for item in streak
+        ]
+        confirmed_trial_count = len(streak)
+        evidence = {
+            **evidence,
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": confirmed_trial_ids,
+        }
+        if confirmed_trial_count < _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS:
+            with self._get_move_insert_profile_edit_lock():
+                patch_result = self._patch_move_insert_qualification(
+                    part_name=str(trial.get("part_name") or ""),
+                    expected_profile_sha256=str(trial.get("profile_sha256") or ""),
+                    qualification=None,
+                )
+            if not bool(patch_result.get("success")):
+                failure_message = (
+                    "Confirmed supervised evidence was saved, but early automatic "
+                    "qualification could not be removed: "
+                    f"{patch_result.get('message') or 'unknown persistence failure'}."
+                )
+                suspension_error = self._latch_move_insert_suspension(
+                    str(trial.get("part_name") or ""),
+                    failure_message,
+                )
+                if suspension_error:
+                    failure_message += f" {suspension_error}"
+                return self._store_move_insert_trial(
+                    {
+                        **evidence,
+                        "success": False,
+                        "qualified": False,
+                        "review_required": True,
+                        "message": failure_message,
+                    }
+                )
+            if bool(patch_result.get("changed")):
+                self._ur5e_move_insert_profile_reload_required = True
+            suspension_clear_error = self._clear_move_insert_suspension(
+                str(trial.get("part_name") or "")
+            )
+            if suspension_clear_error:
+                return self._store_move_insert_trial(
+                    {
+                        **evidence,
+                        "success": False,
+                        "qualified": False,
+                        "review_required": True,
+                        "message": (
+                            "Confirmed supervised evidence was saved, but the "
+                            "automatic move_insert suspension could not be cleared: "
+                            f"{suspension_clear_error}."
+                        ),
+                    }
+                )
+            progress_trial = {
+                **evidence,
+                "success": True,
+                "ready": False,
+                "qualified": False,
+                "qualification": {},
+                "review_required": False,
+                "completion_eligible": False,
+                "message": (
+                    f"Confirmed {confirmed_trial_count} of "
+                    f"{_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS} supervised {part_name} "
+                    f"move_insert tests. Reset and pick {part_name} again, run "
+                    "place_approach, then run the next supervised test. Automatic "
+                    "place_insert and Assembly remain blocked."
+                ),
+            }
+            published, pending_clear_error = (
+                self._publish_move_insert_trial_after_persisted_evidence(
+                    progress_trial
+                )
+            )
+            if pending_clear_error:
+                published.update(
+                    {
+                        "success": False,
+                        "review_required": True,
+                        "message": (
+                            f"{str(published.get('message') or '')} Durable "
+                            "confirmation progress could not be finalized: "
+                            f"{pending_clear_error}."
+                        ),
+                    }
+                )
+                return self._store_move_insert_trial(published)
+            return published
+
+        resource, _source_sha256, _read_error = self._move_insert_resource_snapshot()
+        prior_qualification, _validated = self._move_insert_qualification_from_resource(
+            resource,
+            str(trial.get("part_name") or ""),
+        )
+        try:
+            generation = int(prior_qualification.get("generation", 0) or 0) + 1
+        except (TypeError, ValueError):
+            generation = 1
+        qualification_evidence_sha256 = (
+            self._move_insert_qualification_evidence_sha256(
+                qualification_identity=qualification_identity,
+                trial_ids=confirmed_trial_ids,
+                result_sha256s=confirmed_trial_result_sha256s,
+                trace_sha256s=confirmed_trial_trace_sha256s,
+            )
+        )
+        qualification = {
+            "trial_id": str(trial.get("trial_id") or ""),
+            "confirmed_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            **qualification_identity,
+            "board_generation": int(identities.get("board_generation") or 0),
+            "generation": generation,
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "qualification_policy_sha256": (
+                self._move_insert_qualification_policy_sha256()
+            ),
+            "required_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": confirmed_trial_ids,
+            "confirmed_trial_result_sha256s": (
+                confirmed_trial_result_sha256s
+            ),
+            "confirmed_trial_trace_sha256s": confirmed_trial_trace_sha256s,
+            "qualification_evidence_sha256": qualification_evidence_sha256,
+        }
+        evidence = self._store_move_insert_trial(
+            {
+                **evidence,
+                "qualification_candidate": deepcopy(qualification),
+            }
+        )
+        evidence_error = str(
+            evidence.get("diagnostic_error")
+            or evidence.get("pending_review_persistence_error")
+            or ""
+        )
+        if evidence_error:
+            return evidence
+        with self._get_move_insert_profile_edit_lock():
+            patch_result = self._patch_move_insert_qualification(
+                part_name=str(trial.get("part_name") or ""),
+                expected_profile_sha256=str(trial.get("profile_sha256") or ""),
+                qualification=qualification,
+            )
+        if not bool(patch_result.get("success")):
+            suspension_storage_error = self._latch_move_insert_suspension(
+                str(trial.get("part_name") or ""),
+                (
+                    f"Automatic move_insert for {trial.get('part_name')} is suspended "
+                    "because Confirm Completion qualification could not be saved."
+                ),
+            )
+            storage_message = ""
+            if suspension_storage_error:
+                storage_message = (
+                    " The durable suspension record also could not be saved: "
+                    f"{suspension_storage_error}. Automatic authorization storage "
+                    "is uncertain after this UI process exits."
+                )
+                self._ur5e_robot_function_state_uncertain = True
+                self._ur5e_robot_function_state_uncertain_reason = storage_message.strip()
+            updated.update(
+                {
+                    "success": False,
+                    "qualified": False,
+                    "review_required": True,
+                    "completion_eligible": False,
+                    "qualification": {},
+                    "message": (
+                        f"{message or 'Release and lift completed.'} Qualification "
+                        "was not saved: "
+                        f"{patch_result.get('message') or 'unknown persistence failure'}. "
+                        f"Automatic move_insert remains blocked.{storage_message}"
+                    ),
+                }
+            )
+            return self._store_move_insert_trial(updated)
+        self._ur5e_move_insert_profile_reload_required = True
+        suspension_clear_error = self._clear_move_insert_suspension(
+            str(trial.get("part_name") or "")
+        )
+        if suspension_clear_error:
+            blocked = {
+                **evidence,
+                "success": False,
+                "qualified": False,
+                "qualification": deepcopy(qualification),
+                "review_required": True,
+                "completion_eligible": False,
+                "message": (
+                    f"{message or 'Release and lift completed.'} Qualification "
+                    "was saved, but the durable move_insert suspension could not "
+                    f"be cleared: {suspension_clear_error}. Automatic move_insert "
+                    "remains blocked; do not start another automatic insertion."
+                ),
+            }
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = str(
+                blocked["message"]
+            )
+            return self._store_move_insert_trial(blocked)
+        self._ur5e_robot_function_state_uncertain = False
+        self._ur5e_robot_function_state_uncertain_reason = ""
+        qualified_trial = {
+            **evidence,
+            "success": True,
+            "qualified": True,
+            "qualification": qualification,
+            "confirmed_trial_count": confirmed_trial_count,
+            "confirmed_trial_ids": confirmed_trial_ids,
+            "review_required": False,
+            "completion_eligible": False,
+            "message": (
+                f"Confirmed {_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS} of "
+                f"{_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS} supervised move_insert "
+                f"tests for {trial.get('part_name')}; future "
+                "place_insert and Assembly runs may insert automatically."
+            ),
+            "confirmed_at": time.time(),
+        }
+        published, pending_clear_error = (
+            self._publish_move_insert_trial_after_persisted_evidence(
+                qualified_trial
+            )
+        )
+        if pending_clear_error:
+            suspension_error = self._suspend_move_insert_qualification(
+                str(trial.get("part_name") or "")
+            )
+            failure_message = str(published.get("message") or "")
+            if suspension_error:
+                failure_message += (
+                    " Qualification suspension persistence also failed: "
+                    f"{suspension_error}"
+                )
+            published.update(
+                {
+                    "success": False,
+                    "qualified": False,
+                    "review_required": True,
+                    "completion_eligible": False,
+                    "message": failure_message,
+                }
+            )
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = str(
+                published["message"]
+            )
+            published = self._store_move_insert_trial(published)
+        return published
+
+    async def digital_twin_confirm_move_insert_completion(  # noqa: C901 - guarded release/lift lifecycle.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Release and lift once, then persist one exact-part confirmation."""
+        trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if trial is None:
+            return {
+                "success": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "completion_motion_active": False,
+                "message": "The selected supervised move_insert trial does not exist.",
+            }
+        if confirmed is not True:
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "Explicit operator confirmation is required for Confirm Completion.",
+            }
+        if bool(trial.get("qualified")):
+            return self._move_insert_trial_view(trial)
+        if (
+            not bool(trial.get("completion_eligible"))
+            or bool(trial.get("active"))
+            or bool(trial.get("completion_motion_active"))
+            or bool(trial.get("diagnostic_error"))
+            or bool(trial.get("pending_review_persistence_error"))
+        ):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Confirm Completion is enabled only after engagement and seating "
+                    "checks pass and motion settles."
+                ),
+            }
+
+        lock = self._get_robot_function_execution_lock()
+        if not lock.acquire(blocking=False):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "Physical robot motion is already active.",
+            }
+        release_lock_here = True
+        self._ur5e_robot_function_execution_active = "Confirm Completion"
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
+        self._robot_function_execution_robot = robot
+        self._robot_function_execution_active_step = "place_insert.release_part"
+        try:
+            trial = self._find_move_insert_trial(
+                target=target,
+                robot=robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                trial_id=trial_id,
+            ) or trial
+            if (
+                not bool(trial.get("completion_eligible"))
+                or bool(trial.get("active"))
+                or bool(trial.get("completion_motion_active"))
+                or bool(trial.get("diagnostic_error"))
+                or bool(trial.get("pending_review_persistence_error"))
+            ):
+                return {
+                    **self._move_insert_trial_view(trial),
+                    "success": False,
+                    "message": "The supervised trial changed before confirmation.",
+                }
+            resource_agent, settings, identities, readiness, error = (
+                await self._digital_twin_move_insert_trial_preflight_async(
+                    target,
+                    robot,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    execution_lock_held=True,
+                    ignore_pending_trial_id=trial_id,
+                )
+            )
+            if error or resource_agent is None:
+                return {
+                    **self._move_insert_trial_view(trial),
+                    **readiness,
+                    "success": False,
+                    "message": error or "Confirm Completion readiness failed.",
+                }
+            expected_identities = dict(trial.get("identities") or {})
+            for key, expected in expected_identities.items():
+                if identities.get(key) != expected:
+                    return {
+                        **self._move_insert_trial_view(trial),
+                        "success": False,
+                        "message": f"move_insert {key} changed before confirmation.",
+                    }
+            if str(settings.get("profile_sha256") or "") != str(
+                trial.get("profile_sha256") or ""
+            ):
+                return {
+                    **self._move_insert_trial_view(trial),
+                    "success": False,
+                    "message": "move_insert profile changed before confirmation.",
+                }
+            release_feedback, release_feedback_error = (
+                self._move_insert_release_feedback_snapshot(
+                    resource_agent,
+                    target=target,
+                )
+            )
+            if release_feedback_error:
+                return {
+                    **self._move_insert_trial_view(trial),
+                    "success": False,
+                    "message": release_feedback_error,
+                }
+
+            def _manual_pre_execute() -> str:
+                if id(resource_agent) != int(
+                    expected_identities.get("resource_agent_identity") or -1
+                ):
+                    return "The prepared ur5e RobotAgent changed before confirmation."
+                current_result_sha256 = str(
+                    dict(getattr(resource_agent, "_task_ctx", {}) or {}).get(
+                        "move_insert_trial_result_sha256"
+                    )
+                    or ""
+                )
+                if current_result_sha256 != str(
+                    trial.get("move_insert_result_sha256") or ""
+                ):
+                    return "The supervised move_insert result changed before confirmation."
+                return self._move_insert_release_feedback_advanced(
+                    resource_agent,
+                    release_feedback,
+                    target=target,
+                    part_name=part_name,
+                )
+
+            completion_function = getattr(
+                resource_agent,
+                "_complete_place_insert_after_move_insert_trial",
+                None,
+            )
+            if not callable(completion_function):
+                return {
+                    **self._move_insert_trial_view(trial),
+                    "success": False,
+                    "message": (
+                        "The prepared ur5e RobotAgent cannot complete the reviewed "
+                        "move_insert trial. Restart the CAIS UI."
+                    ),
+                }
+            trial = self._store_move_insert_trial(
+                {
+                    **trial,
+                    "active": False,
+                    "completion_motion_active": True,
+                    "review_required": True,
+                    "message": (
+                        f"Confirm Completion is releasing {part_name} and lifting once."
+                    ),
+                }
+            )
+            if trial.get("diagnostic_error") or trial.get(
+                "pending_review_persistence_error"
+            ):
+                trial = self._store_move_insert_trial(
+                    {
+                        **trial,
+                        "completion_motion_active": False,
+                        "completion_eligible": False,
+                    }
+                )
+                return self._move_insert_trial_view(trial)
+            self._ur5e_robot_function_execution_stage = "executing"
+            runtime_task = asyncio.create_task(
+                self._run_on_agent_runtime(
+                    completion_function(
+                        _manual_pre_execute,
+                        destination_location=destination_location,
+                        part_name=part_name,
+                        expected_move_insert_result_sha256=str(
+                            trial.get("move_insert_result_sha256") or ""
+                        ),
+                    )
+                )
+            )
+            try:
+                completion_result = await asyncio.shield(runtime_task)
+            except asyncio.CancelledError:
+                release_lock_here = False
+
+                def _release_after_completion(task: asyncio.Task[Any]) -> None:
+                    try:
+                        settled_result = task.result()
+                    except asyncio.CancelledError:
+                        settled_result = {
+                            "status": "failed",
+                            "content": (
+                                "Confirm Completion runtime was cancelled; physical "
+                                "release state is uncertain."
+                            ),
+                        }
+                    except Exception as exc:  # noqa: BLE001 - background runtime boundary.
+                        log.exception(
+                            "Confirm Completion failed after UI cancellation"
+                        )
+                        settled_result = {
+                            "status": "failed",
+                            "content": f"Confirm Completion failed: {exc}",
+                        }
+                    try:
+                        self._finish_move_insert_confirmation(
+                            trial=trial,
+                            resource_agent=resource_agent,
+                            completion_result=settled_result,
+                        )
+                    finally:
+                        self._clear_move_insert_trial_execution_status()
+                        lock.release()
+
+                runtime_task.add_done_callback(_release_after_completion)
+                raise
+            except Exception as exc:  # noqa: BLE001 - agent runtime boundary.
+                log.exception("Confirm Completion execution failed")
+                completion_result = {
+                    "status": "failed",
+                    "content": f"Confirm Completion execution failed: {exc}",
+                }
+            finished = self._finish_move_insert_confirmation(
+                trial=trial,
+                resource_agent=resource_agent,
+                completion_result=completion_result,
+            )
+            return self._move_insert_trial_view(finished)
+        finally:
+            if release_lock_here:
+                self._clear_move_insert_trial_execution_status()
+                lock.release()
+
+    def digital_twin_record_move_insert_failure(  # noqa: C901, PLR0912 - guarded terminal review transition.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Record operator rejection without commanding any robot motion."""
+        trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if trial is None:
+            return {
+                "success": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "message": "The selected supervised move_insert trial does not exist.",
+            }
+        if bool(trial.get("recovery_required")):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Record Failure cannot clear or replace recovery_required. "
+                    "Complete the approved manual recovery, then use Confirm Physical "
+                    "Recovery for this exact supervised move_insert trial."
+                ),
+            }
+        if bool(trial.get("failure_recorded")):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": True,
+            }
+        if bool(trial.get("active")):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Stop Supervised move_insert and wait for settlement before "
+                    "Record Failure."
+                ),
+            }
+        if bool(trial.get("completion_motion_active")):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Confirm Completion release/lift is still active; wait for "
+                    "terminal settlement before Record Failure."
+                ),
+            }
+        if bool(trial.get("qualified")):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Record Failure is unavailable after Confirm Completion qualified "
+                    "the part."
+                ),
+            }
+        operator_note = str(note or "").strip()
+        if len(operator_note) > 4000:
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "Record Failure note must not exceed 4000 characters.",
+            }
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "Physical robot motion is still active; wait before Record Failure.",
+            }
+        current_trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if current_trial is None:
+            execution_lock.release()
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "The supervised move_insert trial changed before Record Failure.",
+            }
+        if bool(current_trial.get("recovery_required")):
+            execution_lock.release()
+            return {
+                **self._move_insert_trial_view(current_trial),
+                "success": False,
+                "message": (
+                    "Record Failure cannot clear or replace recovery_required. "
+                    "Complete the approved manual recovery, then use Confirm Physical "
+                    "Recovery for this exact supervised move_insert trial."
+                ),
+            }
+        if (
+            bool(current_trial.get("active"))
+            or bool(current_trial.get("completion_motion_active"))
+            or bool(current_trial.get("qualified"))
+            or (
+                not bool(current_trial.get("review_required"))
+                and current_trial.get("automatic_checks_passed") is not False
+            )
+        ):
+            execution_lock.release()
+            return {
+                **self._move_insert_trial_view(current_trial),
+                "success": False,
+                "message": "The supervised move_insert trial changed before Record Failure.",
+            }
+        trial = current_trial
+        result = dict(trial.get("result") or {})
+        move_insert_result = dict(trial.get("move_insert_result") or {})
+        completion_result = dict(trial.get("completion_result") or {})
+        motion_settled = bool(
+            trial.get("motion_settled") is True
+            or result.get("motion_settled") is True
+            or move_insert_result.get("motion_settled") is True
+        )
+        state_uncertain = bool(
+            trial.get("normal_repair_required")
+            or trial.get("hardware_stack_repair_required")
+            or result.get("state_uncertain") is True
+            or move_insert_result.get("state_uncertain") is True
+            or not motion_settled
+            or (
+                completion_result
+                and str(completion_result.get("status") or "").strip().lower()
+                != "completed"
+            )
+        )
+        recovery_required = False
+        hardware_stack_repair_reason = str(
+            trial.get("hardware_stack_repair_reason")
+            or trial.get("message")
+            or ""
+        ).strip()
+        if state_uncertain and not hardware_stack_repair_reason:
+            hardware_stack_repair_reason = (
+                "The terminal supervised move_insert state is uncertain. Inspect "
+                "the robot and use Repair Hardware Stack before further motion."
+            )
+        failure_id = f"move-insert-failure-{uuid4().hex}"
+        trial = self._store_move_insert_trial(
+            {
+                **trial,
+                "success": True,
+                "ready": False,
+                "active": False,
+                "completion_motion_active": False,
+                "review_required": False,
+                "recovery_required": recovery_required,
+                "normal_repair_required": state_uncertain,
+                "hardware_stack_repair_required": state_uncertain,
+                "hardware_stack_repair_reason": (
+                    hardware_stack_repair_reason if state_uncertain else ""
+                ),
+                "automatic_checks_passed": False,
+                "completion_eligible": False,
+                "qualified": False,
+                "qualification": {},
+                "failure_recorded": True,
+                "failure_id": failure_id,
+                "operator_note": operator_note,
+                "message": (
+                    f"Recording move_insert failure {failure_id}; no robot motion "
+                    "will be commanded."
+                ),
+                "failure_recorded_at": time.time(),
+            }
+        )
+        patch_message = ""
+        suspension_storage_error = self._latch_move_insert_suspension(
+            part_name,
+            (
+                f"Automatic move_insert for {part_name} is suspended after operator "
+                "Record Failure. Complete one successful supervised trial."
+            ),
+        )
+        try:
+            with self._get_move_insert_profile_edit_lock():
+                current_resource, _digest, read_error = (
+                    self._move_insert_resource_snapshot()
+                )
+                current_profile, profile_error = self._move_insert_profile_from_resource(
+                    current_resource
+                )
+                _resolver, profile_hash, _timeout = self._move_insert_profile_helpers()
+                current_hash, hash_error = profile_hash(current_profile, part_name)
+                if read_error or profile_error or hash_error:
+                    patch_result = {
+                        "success": False,
+                        "message": read_error or profile_error or hash_error,
+                    }
+                else:
+                    patch_result = self._patch_move_insert_qualification(
+                        part_name=part_name,
+                        expected_profile_sha256=current_hash,
+                        qualification=None,
+                    )
+                if not bool(patch_result.get("success")):
+                    patch_message = str(patch_result.get("message") or "")
+        finally:
+            execution_lock.release()
+        if bool(trial.get("released")):
+            message = (
+                f"Recorded move_insert failure {failure_id}. {part_name} was already released "
+                "by Confirm Completion; Record Failure commanded no additional motion."
+            )
+        else:
+            message = (
+                f"Recorded move_insert failure {failure_id}. {part_name} remains clamped; no "
+                "release, lift, retract, retry, or move_home was commanded."
+            )
+        if state_uncertain:
+            message += (
+                " Do not jog. Inspect the robot and use Repair Hardware Stack "
+                "before any further Cartesian motion."
+            )
+        elif not bool(trial.get("released")):
+            message += (
+                " Jog back to pre-insertion, then retry Supervised Test move_insert, "
+                "or use Delete Previous Recording to relearn it."
+            )
+        if patch_message:
+            message += (
+                " Persisted move_insert qualification could not be removed: "
+                f"{patch_message}."
+            )
+        if suspension_storage_error:
+            message += (
+                " The durable move_insert suspension record could not be saved: "
+                f"{suspension_storage_error}. Automatic authorization storage is "
+                "uncertain after this UI process exits."
+            )
+        if patch_message or suspension_storage_error:
+            self._ur5e_robot_function_state_uncertain = True
+            self._ur5e_robot_function_state_uncertain_reason = message
+        updated = self._store_move_insert_trial(
+            {
+                **trial,
+                "success": True,
+                "ready": False,
+                "active": False,
+                "completion_motion_active": False,
+                "review_required": False,
+                "recovery_required": recovery_required,
+                "normal_repair_required": state_uncertain,
+                "hardware_stack_repair_required": state_uncertain,
+                "hardware_stack_repair_reason": (
+                    hardware_stack_repair_reason if state_uncertain else ""
+                ),
+                "automatic_checks_passed": False,
+                "completion_eligible": False,
+                "qualified": False,
+                "qualification": {},
+                "failure_recorded": True,
+                "failure_id": failure_id,
+                "operator_note": operator_note,
+                "message": message,
+                "failure_recorded_at": time.time(),
+            }
+        )
+        return self._move_insert_trial_view(updated)
+
+    def _move_insert_physical_recovery_readiness(
+        self,
+        target: str,
+        resource_agent: Any | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Require fresh stationary UR5e feedback for no-motion recovery review."""
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        raw_tcp_speed = status.get("actual_tcp_speed")
+        control_feedback_available = bool(
+            resource_agent is not None
+            and status.get("rtde_control_connected") is True
+            and isinstance(raw_tcp_speed, list)
+            and len(raw_tcp_speed) == 6
+        )
+        if not control_feedback_available:
+            return self._move_insert_local_monitor_recovery_readiness(target)
+
+        feedback, feedback_error = self._move_insert_release_feedback_snapshot(
+            resource_agent,
+            target=target,
+        )
+        if feedback_error:
+            return {}, feedback_error
+        status = dict(self._ur5e_rtde_trajectory_status() or {})
+        try:
+            status_age_sec = time.time() - float(status.get("updated_at"))
+            feedback_timestamp_sec = float(
+                status.get("rtde_feedback_timestamp_sec")
+            )
+            tcp_speed = [float(value) for value in status.get("actual_tcp_speed")]
+        except (TypeError, ValueError, OverflowError):
+            return {}, (
+                "Fresh finite UR5e RTDE TCP speed and feedback timestamps are "
+                "required for Confirm Physical Recovery."
+            )
+        if (
+            not math.isfinite(status_age_sec)
+            or status_age_sec < 0.0
+            or status_age_sec > 3.0
+            or not math.isfinite(feedback_timestamp_sec)
+            or len(tcp_speed) != 6
+            or not all(math.isfinite(value) for value in tcp_speed)
+            or status.get("rtde_receive_connected") is not True
+            or status.get("joint_states_fresh") is not True
+            or status.get("rtde_control_connected") is not True
+        ):
+            return {}, (
+                "Fresh finite UR5e RTDE receive, joint, control, and TCP speed "
+                "feedback is required for Confirm Physical Recovery."
+            )
+        state = str(status.get("state") or "").strip().lower()
+        maximum_tcp_speed = max(abs(value) for value in tcp_speed)
+        if (
+            state in {"checking", "executing"}
+            or status.get("insert_motion_settled") is not True
+            or maximum_tcp_speed > 0.01
+        ):
+            return {}, (
+                "UR5e must be stationary with no accepted RTDE goal before Confirm "
+                "Physical Recovery."
+            )
+        return {
+            **feedback,
+            "checked_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "rtde_status_updated_at": float(status.get("updated_at")),
+            "rtde_feedback_timestamp_sec": feedback_timestamp_sec,
+            "rtde_state": state,
+            "actual_tcp_speed": tcp_speed,
+            "maximum_tcp_speed": maximum_tcp_speed,
+            "insert_motion_settled": True,
+            "feedback_source": "trajectory_control",
+        }, ""
+
+    def _move_insert_local_monitor_recovery_readiness(
+        self,
+        target: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Prove stationary recovery using only advancing read-only monitor samples."""
+        pose_fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        samples: list[dict[str, Any]] = []
+        for sample_index in range(2):
+            capture = self._robot_function_capture_snapshot(target, "ur5e")
+            waypoint = dict(capture.get("waypoint") or {})
+            positions = list(waypoint.get("positions") or [])
+            pose = dict(waypoint.get("pose") or {})
+            if (
+                not bool(capture.get("success"))
+                or len(positions) != 6
+                or not all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    for value in positions
+                )
+                or not all(
+                    isinstance(pose.get(field), (int, float))
+                    and not isinstance(pose.get(field), bool)
+                    and math.isfinite(float(pose[field]))
+                    for field in pose_fields
+                )
+                or str(pose.get("frame_id") or "") != "world"
+                or str(pose.get("child_frame_id") or "") != "tool0"
+            ):
+                return {}, str(
+                    capture.get("blocked_reason")
+                    or "Read-only Local-Control joint and world -> tool0 feedback "
+                    "is unavailable for Confirm Physical Recovery."
+                )
+
+            monitor_status = dict(
+                self._read_json_file(UR5E_CALIBRATION_MONITOR_STATUS) or {}
+            )
+            trajectory_status = dict(self._ur5e_rtde_trajectory_status() or {})
+            try:
+                trajectory_status_age_sec = time.time() - float(
+                    trajectory_status.get("updated_at")
+                )
+            except (TypeError, ValueError, OverflowError):
+                trajectory_status_age_sec = math.inf
+            if (
+                0.0 <= trajectory_status_age_sec <= 3.0
+                and str(trajectory_status.get("state") or "").strip().lower()
+                in {"checking", "executing"}
+            ):
+                return {}, (
+                    "An accepted UR5e RTDE goal is active; wait for terminal "
+                    "settlement before Confirm Physical Recovery."
+                )
+
+            def _status_rank(
+                candidate: tuple[str, dict[str, Any]],
+            ) -> tuple[bool, float]:
+                _source, body = candidate
+                try:
+                    updated_at = float(body.get("updated_at"))
+                    age_sec = time.time() - updated_at
+                except (TypeError, ValueError, OverflowError):
+                    return False, 0.0
+                return 0.0 <= age_sec <= 3.0, updated_at
+
+            source, status = max(
+                (
+                    ("calibration_monitor", monitor_status),
+                    ("trajectory_monitor", trajectory_status),
+                ),
+                key=_status_rank,
+            )
+            try:
+                updated_at = float(status.get("updated_at"))
+                status_age_sec = time.time() - updated_at
+                feedback_timestamp_sec = float(
+                    status.get("rtde_feedback_timestamp_sec")
+                )
+            except (TypeError, ValueError, OverflowError):
+                return {}, (
+                    "Read-only Local-Control RTDE feedback timestamps are unavailable "
+                    "for Confirm Physical Recovery."
+                )
+            state = str(status.get("state") or "").strip().lower()
+            if (
+                not math.isfinite(status_age_sec)
+                or status_age_sec < 0.0
+                or status_age_sec > 3.0
+                or not math.isfinite(feedback_timestamp_sec)
+                or status.get("rtde_receive_connected") is not True
+                or status.get("joint_states_fresh") is not True
+                or bool(status.get("rtde_reset_required"))
+                or state in {"checking", "executing"}
+            ):
+                return {}, (
+                    "Read-only Local-Control RTDE and TF feedback must be fresh with "
+                    "no accepted motion before Confirm Physical Recovery."
+                )
+            samples.append(
+                {
+                    "sample_index": sample_index,
+                    "observed_at": time.time(),
+                    "feedback_source": source,
+                    "status_updated_at": updated_at,
+                    "rtde_feedback_timestamp_sec": feedback_timestamp_sec,
+                    "rtde_state": state,
+                    "joint_positions": [float(value) for value in positions],
+                    "world_tool0_pose": {
+                        field: float(pose[field]) for field in pose_fields
+                    },
+                }
+            )
+            if sample_index == 0:
+                time.sleep(1.2)
+
+        first, second = samples
+        if (
+            float(second["status_updated_at"])
+            <= float(first["status_updated_at"])
+            or float(second["rtde_feedback_timestamp_sec"])
+            <= float(first["rtde_feedback_timestamp_sec"])
+        ):
+            return {}, (
+                "Read-only Local-Control RTDE feedback did not advance across the "
+                "stationary recovery samples."
+            )
+        first_joints = list(first["joint_positions"])
+        second_joints = list(second["joint_positions"])
+        maximum_joint_delta_rad = max(
+            abs(second_value - first_value)
+            for first_value, second_value in zip(
+                first_joints,
+                second_joints,
+                strict=True,
+            )
+        )
+        first_pose = dict(first["world_tool0_pose"])
+        second_pose = dict(second["world_tool0_pose"])
+        translation_delta_m = math.sqrt(
+            sum(
+                (float(second_pose[field]) - float(first_pose[field])) ** 2
+                for field in ("x", "y", "z")
+            )
+        )
+        first_quaternion = [
+            float(first_pose[field]) for field in ("qx", "qy", "qz", "qw")
+        ]
+        second_quaternion = [
+            float(second_pose[field]) for field in ("qx", "qy", "qz", "qw")
+        ]
+        first_norm = math.sqrt(sum(value * value for value in first_quaternion))
+        second_norm = math.sqrt(sum(value * value for value in second_quaternion))
+        if first_norm <= 1e-12 or second_norm <= 1e-12:
+            return {}, "Read-only world -> tool0 orientation is invalid."
+        quaternion_dot = abs(
+            sum(
+                first_value * second_value
+                for first_value, second_value in zip(
+                    (value / first_norm for value in first_quaternion),
+                    (value / second_norm for value in second_quaternion),
+                    strict=True,
+                )
+            )
+        )
+        rotation_delta_rad = 2.0 * math.acos(
+            min(1.0, max(0.0, quaternion_dot))
+        )
+        if (
+            maximum_joint_delta_rad > 0.002
+            or translation_delta_m > 0.001
+            or rotation_delta_rad > 0.01
+        ):
+            return {}, (
+                "UR5e moved between the read-only recovery samples; wait until it is "
+                "stationary before Confirm Physical Recovery."
+            )
+        return {
+            "checked_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "feedback_source": "read_only_local_control_monitor",
+            "sample_count": len(samples),
+            "samples": samples,
+            "maximum_joint_delta_rad": maximum_joint_delta_rad,
+            "translation_delta_m": translation_delta_m,
+            "rotation_delta_rad": rotation_delta_rad,
+            "stationary": True,
+        }, ""
+
+    def digital_twin_confirm_move_insert_recovery(  # noqa: C901 - exact no-motion recovery gates.
+        self,
+        target: str,
+        robot: str,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Clear one exact recovery latch after explicit no-motion confirmation."""
+        request_error = self._move_insert_trial_request_error(
+            target,
+            robot,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {
+                "success": False,
+                "ready": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "qualified": False,
+                "message": request_error,
+            }
+        trial = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+            trial_id=trial_id,
+        )
+        if trial is None:
+            return {
+                "success": False,
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "state": "not_confirmed",
+                "message": "The selected supervised move_insert trial does not exist.",
+            }
+        latest = self._find_move_insert_trial(
+            target=target,
+            robot=robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        if (
+            latest is None
+            or str(latest.get("trial_id") or "") != trial_id
+            or bool(trial.get("active"))
+            or bool(trial.get("completion_motion_active"))
+            or not bool(trial.get("recovery_required"))
+        ):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Confirm Physical Recovery is available only for the exact "
+                    "inactive current supervised move_insert trial with "
+                    "recovery_required."
+                ),
+            }
+        if confirmed is not True:
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": (
+                    "Explicit operator confirmation is required that the operator "
+                    "physically moved the part clear using approved manual recovery. "
+                    "Confirm Physical Recovery commands no robot motion."
+                ),
+            }
+
+        execution_lock = self._get_robot_function_execution_lock()
+        if not execution_lock.acquire(blocking=False):
+            return {
+                **self._move_insert_trial_view(trial),
+                "success": False,
+                "message": "Physical robot motion or control is active.",
+            }
+        try:
+            current = self._find_move_insert_trial(
+                target=target,
+                robot=robot,
+                destination_location=destination_location,
+                part_name=part_name,
+                trial_id=trial_id,
+            )
+            latest = self._find_move_insert_trial(
+                target=target,
+                robot=robot,
+                destination_location=destination_location,
+                part_name=part_name,
+            )
+            if (
+                current is None
+                or latest is None
+                or str(latest.get("trial_id") or "") != trial_id
+                or bool(current.get("active"))
+                or bool(current.get("completion_motion_active"))
+                or not bool(current.get("recovery_required"))
+            ):
+                return {
+                    **self._move_insert_trial_view(current or trial),
+                    "success": False,
+                    "message": (
+                        "Supervised move_insert recovery custody changed before "
+                        "confirmation."
+                    ),
+                }
+
+            result = dict(current.get("result") or {})
+            move_insert_result = dict(current.get("move_insert_result") or {})
+            nested_move_insert_result = dict(result.get("move_insert_result") or {})
+            recovery_state_evidence = (
+                current,
+                result,
+                move_insert_result,
+                nested_move_insert_result,
+            )
+            motion_settled_flags = [
+                evidence.get(field_name)
+                for evidence in recovery_state_evidence
+                for field_name in ("motion_settled", "insert_motion_settled")
+                if field_name in evidence
+            ]
+            motion_settled = bool(motion_settled_flags) and all(
+                value is True for value in motion_settled_flags
+            )
+            if (
+                current.get("part_clamped") is not True
+                or current.get("released") is not False
+                or current.get("lifted") is not False
+                or not motion_settled
+            ):
+                return {
+                    **self._move_insert_trial_view(current),
+                    "success": False,
+                    "message": (
+                        "Confirm Physical Recovery requires the exact trial to remain "
+                        "settled and clamped, with release_part and lift not commanded."
+                    ),
+                }
+            if (
+                current.get("success") is not False
+                or current.get("automatic_checks_passed") is not False
+                or current.get("completion_eligible") is not False
+                or current.get("qualified") is not False
+            ):
+                return {
+                    **self._move_insert_trial_view(current),
+                    "success": False,
+                    "message": (
+                        "Confirm Physical Recovery requires an unsuccessful, "
+                        "unqualified trial with completion ineligible."
+                    ),
+                }
+            normal_repair_required = bool(current.get("normal_repair_required"))
+            hardware_stack_repair_required = bool(
+                current.get("hardware_stack_repair_required")
+                or result.get("state_uncertain") is True
+                or result.get("rtde_reset_required") is True
+                or move_insert_result.get("state_uncertain") is True
+                or move_insert_result.get("rtde_reset_required") is True
+                or nested_move_insert_result.get("state_uncertain") is True
+                or nested_move_insert_result.get("rtde_reset_required") is True
+            )
+
+            suspension_error = self._move_insert_suspension_error(part_name)
+            if not suspension_error:
+                suspension_storage_error = self._latch_move_insert_suspension(
+                    part_name,
+                    (
+                        f"Automatic move_insert for {part_name} remains suspended after "
+                        "physical recovery of a failed supervised trial. Complete "
+                        "another supervised trial."
+                    ),
+                )
+                if suspension_storage_error:
+                    return {
+                        **self._move_insert_trial_view(current),
+                        "success": False,
+                        "message": (
+                            "Confirm Physical Recovery could not preserve the durable "
+                            f"move_insert suspension: {suspension_storage_error}. "
+                            "recovery_required remains latched."
+                        ),
+                    }
+
+            recovery_confirmed_at = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+            recovery_evidence = {
+                "target": target,
+                "robot": robot,
+                "destination_location": destination_location,
+                "part_name": part_name,
+                "trial_id": trial_id,
+                "operator_confirmed_physical_recovery": True,
+                "recovery_confirmed_at": recovery_confirmed_at,
+                "terminal_motion_settled": True,
+                "terminal_part_clamped": True,
+                "live_rtde_feedback_required": False,
+            }
+            updated = self._store_move_insert_trial(
+                {
+                    **current,
+                    "success": False,
+                    "ready": False,
+                    "active": False,
+                    "completion_motion_active": False,
+                    "recovery_required": False,
+                    "part_clamped": True,
+                    "automatic_checks_passed": False,
+                    "completion_eligible": False,
+                    "qualified": False,
+                    "released": False,
+                    "lifted": False,
+                    "recovery_confirmed_at": recovery_confirmed_at,
+                    "recovery_evidence": recovery_evidence,
+                    "message": (
+                        f"Physical recovery confirmed for exact supervised move_insert "
+                        f"trial {trial_id} without commanding robot motion. {part_name} "
+                        "remains clamped; insertion remains unsuccessful and unqualified. "
+                        "release_part and lift were not commanded."
+                        + (
+                            " Repair Hardware Stack remains required before UR5e motion."
+                            if normal_repair_required
+                            or hardware_stack_repair_required
+                            else ""
+                        )
+                    ),
+                }
+            )
+            if updated.get("diagnostic_error") or updated.get(
+                "pending_review_persistence_error"
+            ):
+                relatched = self._store_move_insert_trial(
+                    {
+                        **updated,
+                        "success": False,
+                        "review_required": bool(current.get("review_required")),
+                        "recovery_required": True,
+                        "qualified": False,
+                        "completion_eligible": False,
+                        "released": False,
+                        "lifted": False,
+                        "recovery_confirmed_at": (
+                            str(updated.get("recovery_confirmed_at") or "")
+                            if not updated.get("diagnostic_error")
+                            else str(current.get("recovery_confirmed_at") or "")
+                        ),
+                        "recovery_evidence": (
+                            deepcopy(updated.get("recovery_evidence") or {})
+                            if not updated.get("diagnostic_error")
+                            else deepcopy(current.get("recovery_evidence") or {})
+                        ),
+                        "message": (
+                            "Physical recovery evidence was captured, but durable "
+                            "recovery custody could not be cleared. Confirm Physical "
+                            "Recovery remains required."
+                        ),
+                    }
+                )
+                return {
+                    **self._move_insert_trial_view(relatched),
+                    "success": False,
+                }
+            return self._move_insert_trial_view(updated)
+        finally:
+            execution_lock.release()
+
+    @staticmethod
+    def _digital_twin_assembly_function_arguments(
+        function_name: str,
+        origin_resource_location: str,
+        destination_location: str,
+        part_name: str,
+    ) -> tuple[str, str, str]:
+        """Return the exact arguments for one fixed Assembly function."""
+        if function_name in {"pick_approach", "pick_grasp"}:
+            return origin_resource_location, "", part_name
+        if function_name in {"place_approach", "place_insert"}:
+            return "", destination_location, part_name
+        return "", "", ""
+
+    def _digital_twin_assembly_lifecycle_error(self) -> str:
+        """Return why manual Assembly cannot own physical motion now."""
+        demonstration_error = self._insertion_demonstration_blocking_error()
+        if demonstration_error:
+            return demonstration_error
+        pending_review_error = self._move_insert_pending_review_error()
+        if pending_review_error:
+            return pending_review_error
+        if bool(getattr(self, "_starting", False)):
+            return "Wait for CAIS system startup to finish before Run Assembly."
+        if bool(getattr(self, "_stopping", False)):
+            return "Wait for CAIS system shutdown to finish before Run Assembly."
+        if bool(getattr(self, "system_running", False)):
+            return "Stop the CAIS system before Run Assembly."
+        return ""
+
+    def _digital_twin_assembly_request_error(
+        self,
+        target: str,
+        robot: str,
+        origin_resource_location: str,
+        destination_location: str,
+        part_name: str,
+    ) -> str:
+        """Validate the exact arguments for every fixed Assembly function."""
+        if robot != "ur5e":
+            return (
+                "Assembly requires robot 'ur5e' because move_insert is only "
+                "commissioned for ur5e."
+            )
+        for function_name in self._ASSEMBLY_FUNCTION_ORDER:
+            origin, destination, function_part_name = (
+                self._digital_twin_assembly_function_arguments(
+                    function_name,
+                    origin_resource_location,
+                    destination_location,
+                    part_name,
+                )
+            )
+            _cfg, error = self._digital_twin_robot_function_request_error(
+                target,
+                robot,
+                function_name,
+                origin,
+                destination,
+                function_part_name,
+            )
+            if error:
+                return error
+        return ""
+
+    def _digital_twin_assembly_correction_error(
+        self,
+        target: str,
+        robot: str,
+        origin_resource_location: str,
+        destination_location: str,
+        part_name: str,
+        *,
+        function_name: str = "",
+    ) -> str:
+        """Return why one selected Assembly correction state is unresolved."""
+        correction_functions = (
+            ("pick_approach", origin_resource_location),
+            ("place_approach", destination_location),
+        )
+        for correction_function, name in correction_functions:
+            if function_name and correction_function != function_name:
+                continue
+            buffered_steps = self.digital_twin_list_function_buffer_steps(
+                target,
+                robot,
+                correction_function,
+                name,
+                part_name=part_name,
+            )
+            if buffered_steps:
+                step_name = str(
+                    dict(buffered_steps[0]).get("step_name") or "<unnamed>"
+                )
+                return (
+                    f"Assembly is blocked by buffered {correction_function}.{step_name}. "
+                    "Use Save/Replace Pose or Clear Position before Run Assembly."
+                )
+            saved_steps = self.digital_twin_list_function_file_steps(
+                target,
+                robot,
+                correction_function,
+                name,
+                part_name=part_name,
+            )
+            saved_unconfirmed = next(
+                (
+                    dict(step)
+                    for step in saved_steps
+                    if dict(step).get("confirmed") is not True
+                ),
+                None,
+            )
+            if saved_unconfirmed is not None:
+                step_name = str(saved_unconfirmed.get("step_name") or "<unnamed>")
+                return (
+                    "Assembly is blocked by saved-unconfirmed "
+                    f"{correction_function}.{step_name}. Use Save/Replace Pose or "
+                    "Clear Position before Run Assembly."
+                )
+        return ""
+
+    @staticmethod
+    def _digital_twin_assembly_resolved_descend_error(
+        resource_agent: Any,
+        function_name: str,
+    ) -> str:
+        """Require one completed approach to retain its exact resolved SE(3) descend."""
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        resolved_positions = task_context.get("resolved_cartesian_positions")
+        descend = (
+            dict(resolved_positions.get("descend") or {})
+            if isinstance(resolved_positions, dict)
+            else {}
+        )
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        if any(field not in descend or isinstance(descend[field], bool) for field in fields):
+            return (
+                f"Assembly requires {function_name}.descend to retain finite "
+                "x, y, z, qx, qy, qz, and qw values."
+            )
+        try:
+            values = {field: float(descend[field]) for field in fields}
+        except (TypeError, ValueError):
+            return (
+                f"Assembly requires {function_name}.descend to retain finite "
+                "x, y, z, qx, qy, qz, and qw values."
+            )
+        if not all(math.isfinite(value) for value in values.values()):
+            return f"Assembly requires {function_name}.descend to be finite."
+        quaternion_norm = math.sqrt(
+            sum(values[field] ** 2 for field in ("qx", "qy", "qz", "qw"))
+        )
+        if quaternion_norm <= 1e-12:
+            return (
+                f"Assembly requires {function_name}.descend to have a nonzero "
+                "quaternion."
+            )
+        return ""
+
+    @staticmethod
+    def _digital_twin_assembly_state_error(
+        resource_agent: Any,
+        function_name: str,
+        origin_resource_location: str,
+        destination_location: str,
+        part_name: str,
+        *,
+        after: bool,
+    ) -> str:
+        """Validate the exact physical state before or after one Assembly function."""
+        before_states = {
+            "pick_approach": "idle",
+            "pick_grasp": "at_pick",
+            "place_approach": "picked",
+            "place_insert": "positioned",
+            "move_home": "placed",
+        }
+        after_states = {
+            "pick_approach": "at_pick",
+            "pick_grasp": "picked",
+            "place_approach": "positioned",
+            "place_insert": "placed",
+            "move_home": "idle",
+        }
+        expected_state = (after_states if after else before_states)[function_name]
+        current_state = str(
+            getattr(resource_agent, "_current_state", "") or ""
+        ).strip()
+        checkpoint = "after" if after else "before"
+        if current_state != expected_state:
+            return (
+                f"Assembly requires {function_name} state '{expected_state}' {checkpoint} "
+                f"dispatch; current state is '{current_state or '<empty>'}'."
+            )
+
+        held_part = getattr(resource_agent, "_held_part", None)
+        gripper_state = str(
+            getattr(resource_agent, "_gripper_state", "") or ""
+        ).strip()
+        empty_gripper_functions = (
+            {"pick_approach", "pick_grasp"}
+            if not after
+            else {"pick_approach", "place_insert", "move_home"}
+        )
+        if not after and function_name == "move_home":
+            empty_gripper_functions.add("move_home")
+        if function_name in empty_gripper_functions:
+            if held_part not in (None, ""):
+                return (
+                    f"Assembly requires {function_name} held_part empty {checkpoint} "
+                    f"dispatch; held_part is '{held_part}'."
+                )
+            if gripper_state != "open":
+                return (
+                    f"Assembly requires {function_name} gripper_state 'open' "
+                    f"{checkpoint} dispatch; gripper_state is "
+                    f"'{gripper_state or '<empty>'}'."
+                )
+        else:
+            if str(held_part or "") != part_name:
+                return (
+                    f"Assembly requires {function_name} held_part '{part_name}' "
+                    f"{checkpoint} dispatch; held_part is "
+                    f"'{held_part or '<empty>'}'."
+                )
+            if gripper_state != "closed":
+                return (
+                    f"Assembly requires {function_name} gripper_state 'closed' "
+                    f"{checkpoint} dispatch; gripper_state is "
+                    f"'{gripper_state or '<empty>'}'."
+                )
+
+        task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        if function_name == "pick_approach" and not after and task_context:
+            return (
+                "Assembly requires an empty task context before pick_approach; "
+                "complete move_home or recover the manual sequence first."
+            )
+        if function_name in {"place_insert", "move_home"} and after and task_context:
+            return f"Assembly requires {function_name} to clear the task context."
+        if function_name in {"pick_grasp", "place_approach"} or (
+            function_name == "pick_approach" and after
+        ):
+            if str(task_context.get("origin_resource_location") or "") != (
+                origin_resource_location
+            ):
+                return (
+                    f"Assembly {function_name} origin_resource_location context changed."
+                )
+            if str(task_context.get("part_name") or "") != part_name:
+                return f"Assembly {function_name} part_name context changed."
+        if (
+            (function_name == "place_insert" and not after)
+            or (function_name == "place_approach" and after)
+        ) and str(task_context.get("destination_location") or "") != (
+            destination_location
+        ):
+            return f"Assembly {function_name} destination_location context changed."
+        return ""
+
+    @staticmethod
+    def _move_insert_geometry_helper() -> Callable[..., dict[str, Any]]:
+        """Load the shared no-motion move_insert geometry helper lazily."""
+        from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (  # noqa: PLC0415 - keep ROS-adjacent controller imports lazy.
+            compute_move_insert_geometry,
+        )
+
+        return compute_move_insert_geometry
+
+    @staticmethod
+    def _move_insert_complete_pose_error(pose: Any, label: str) -> str:
+        """Require one finite complete SE(3) pose from insertion geometry."""
+        if not isinstance(pose, dict):
+            return f"move_insert {label} is missing"
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        values: dict[str, float] = {}
+        for field in fields:
+            raw_value = pose.get(field)
+            if isinstance(raw_value, bool):
+                return f"move_insert {label}.{field} must be finite"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                return f"move_insert {label}.{field} must be finite"
+            if not math.isfinite(value):
+                return f"move_insert {label}.{field} must be finite"
+            values[field] = value
+        quaternion_norm = math.sqrt(
+            sum(values[field] ** 2 for field in ("qx", "qy", "qz", "qw"))
+        )
+        if quaternion_norm <= 1e-12:
+            return f"move_insert {label} quaternion must be nonzero"
+        return ""
+
+    def _digital_twin_assembly_move_insert_geometry_readiness(  # noqa: C901 - explicit geometry gates.
+        self,
+        *,
+        part_name: str,
+        settings: dict[str, Any],
+        board_status: dict[str, Any],
+        resource_agent: Any | None,
+        require_held_part_handoff: bool,
+        expected_product_geometry: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Validate static or complete no-motion insertion geometry for Assembly."""
+        try:
+            product_geometry = self._robot_function_product_geometry_for_part(
+                part_name
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {}, f"Could not load move_insert product geometry for {part_name}: {exc}"
+        if not product_geometry:
+            return {}, f"No move_insert product geometry is configured for {part_name}."
+        accepted_pose = board_status.get("accepted_pose")
+        live_pose = board_status.get("pose")
+        board_pose = (
+            dict(accepted_pose)
+            if isinstance(accepted_pose, dict) and accepted_pose
+            else dict(live_pose) if isinstance(live_pose, dict) and live_pose else {}
+        )
+        if not board_pose:
+            return {
+                "move_insert_product_geometry": deepcopy(product_geometry),
+            }, (
+                "Assembly move_insert geometry requires a complete accepted or current "
+                "assembly_board-v1 ArUco pose before confirmation."
+            )
+
+        task_context = (
+            dict(getattr(resource_agent, "_task_ctx", {}) or {})
+            if resource_agent is not None
+            else {}
+        )
+        held_part_handoff = (
+            dict(task_context.get("held_part_handoff") or {})
+            if require_held_part_handoff
+            else {}
+        )
+        compute_geometry = self._move_insert_geometry_helper()
+        geometry_result = dict(
+            compute_geometry(
+                part_name=part_name,
+                product_geometry=product_geometry,
+                assembly_board_v1_aruco={"pose": board_pose},
+                held_part_handoff=held_part_handoff,
+                move_insert_profile=dict(settings.get("effective") or {}),
+                move_insert_profile_sha256=str(
+                    settings.get("profile_sha256") or ""
+                ),
+            )
+            or {}
+        )
+        readiness = {
+            "move_insert_product_geometry": deepcopy(product_geometry),
+            "move_insert_geometry_board_pose": deepcopy(board_pose),
+            "move_insert_geometry_state": "invalid",
+        }
+        if not require_held_part_handoff:
+            if (
+                geometry_result.get("success") is False
+                and geometry_result.get("missing_held_part_handoff") is True
+            ):
+                readiness["move_insert_geometry_state"] = "static_ready"
+                readiness["move_insert_static_geometry_ready"] = True
+                return readiness, ""
+            return readiness, str(
+                geometry_result.get("message")
+                or "move_insert static geometry validation failed"
+            )
+
+        if not bool(geometry_result.get("success")):
+            return readiness, str(
+                geometry_result.get("message")
+                or "move_insert complete insertion geometry validation failed"
+            )
+        for pose_name in ("approach_pose", "pre_insert_pose", "insert_pose"):
+            pose_error = self._move_insert_complete_pose_error(
+                geometry_result.get(pose_name),
+                pose_name,
+            )
+            if pose_error:
+                return readiness, pose_error
+        insertion_axis = geometry_result.get("insertion_axis_world")
+        if not isinstance(insertion_axis, dict):
+            return readiness, "move_insert insertion_axis_world is missing"
+        try:
+            axis = tuple(
+                float(insertion_axis[field]) for field in ("x", "y", "z")
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return readiness, "move_insert insertion_axis_world must be finite"
+        if not all(math.isfinite(value) for value in axis) or math.sqrt(
+            sum(value * value for value in axis)
+        ) <= 1e-12:
+            return readiness, "move_insert insertion_axis_world must be finite and nonzero"
+        try:
+            timeout_sec = float(geometry_result["move_insert_timeout_sec"])
+            timeout_cap = float(
+                dict(settings.get("hard_caps") or {})["insert_max_timeout_sec"]
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return readiness, "move_insert geometry timeout or hard cap is missing"
+        if (
+            not math.isfinite(timeout_sec)
+            or timeout_sec <= 0.0
+            or timeout_sec > timeout_cap
+        ):
+            return readiness, "move_insert geometry timeout exceeds insert_max_timeout_sec"
+        readiness.update(
+            {
+                "move_insert_geometry_state": "ready",
+                "move_insert_static_geometry_ready": True,
+                "move_insert_complete_geometry_ready": True,
+                "move_insert_approach_pose": deepcopy(
+                    geometry_result["approach_pose"]
+                ),
+                "move_insert_pre_insert_pose": deepcopy(
+                    geometry_result["pre_insert_pose"]
+                ),
+                "move_insert_insert_pose": deepcopy(
+                    geometry_result["insert_pose"]
+                ),
+                "move_insert_insertion_axis_world": deepcopy(insertion_axis),
+                "move_insert_geometry_timeout_sec": timeout_sec,
+                "move_insert_assembly_board_v1_registration": deepcopy(
+                    geometry_result.get("assembly_board_v1_registration") or {}
+                ),
+                "move_insert_target_origin_pose": deepcopy(
+                    geometry_result.get("target_origin_pose") or {}
+                ),
+            }
+        )
+        return readiness, ""
+
+    def _digital_twin_assembly_move_insert_recheck(
+        self,
+        execution_context: dict[str, Any],
+        resource_agent: Any,
+    ) -> tuple[dict[str, Any], str]:
+        """Recheck the frozen move_insert profile, task context, and live RTDE authority."""
+        target = str(execution_context.get("target") or "")
+        robot = str(execution_context.get("robot") or "")
+        destination_location = str(
+            execution_context.get("destination_location") or ""
+        )
+        part_name = str(execution_context.get("part_name") or "")
+        if robot != "ur5e":
+            return {}, ""
+        settings = self.digital_twin_move_insert_settings(
+            target,
+            robot,
+            destination_location=destination_location,
+            part_name=part_name,
+        )
+        current_hash = str(settings.get("profile_sha256") or "")
+        current_effective = dict(settings.get("effective") or {})
+        readiness = {
+            "move_insert_profile_sha256": current_hash,
+            "move_insert_effective": deepcopy(current_effective),
+            "move_insert_profile_state": str(
+                settings.get("profile_state") or "invalid"
+            ),
+            "move_insert_derived_timeout_sec": settings.get(
+                "derived_timeout_sec"
+            ),
+            "move_insert_hard_caps": deepcopy(settings.get("hard_caps") or {}),
+        }
+        if not bool(settings.get("validated")):
+            settings = self._digital_twin_move_insert_trial_settings(part_name)
+            readiness.update(
+                {
+                    "move_insert_profile_sha256": str(
+                        settings.get("profile_sha256") or ""
+                    ),
+                    "move_insert_effective": deepcopy(
+                        settings.get("effective") or {}
+                    ),
+                    "move_insert_profile_state": str(
+                        settings.get("profile_state") or "invalid"
+                    ),
+                    "move_insert_derived_timeout_sec": settings.get(
+                        "derived_timeout_sec"
+                    ),
+                    "move_insert_hard_caps": deepcopy(
+                        settings.get("hard_caps") or {}
+                    ),
+                }
+            )
+        if not bool(settings.get("validated")):
+            return readiness, str(
+                settings.get("message") or "move_insert profile is unavailable"
+            )
+        live_readiness, live_error = self._digital_twin_move_insert_live_readiness(
+            settings,
+            resource_agent,
+        )
+        readiness.update(live_readiness)
+        return readiness, live_error
+
+    async def digital_twin_assembly_readiness(  # noqa: C901, PLR0912 - explicit no-motion gates.
+        self,
+        target: str,
+        robot: str,
+        *,
+        origin_resource_location: str = "",
+        destination_location: str = "",
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Report no-motion readiness for one complete fixed Assembly run."""
+        base = {
+            "success": False,
+            "ready": False,
+            "target": target,
+            "robot": robot,
+            "origin_resource_location": origin_resource_location,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "functions": list(self._ASSEMBLY_FUNCTION_ORDER),
+            "assembly_step_count": len(self._ASSEMBLY_FUNCTION_ORDER),
+            "move_insert_profile_sha256": "",
+            "move_insert_effective": {},
+        }
+        lifecycle_error = self._digital_twin_assembly_lifecycle_error()
+        if lifecycle_error:
+            return {**base, "message": lifecycle_error}
+        request_error = self._digital_twin_assembly_request_error(
+            target,
+            robot,
+            origin_resource_location,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        move_insert_settings: dict[str, Any] = {}
+        if robot == "ur5e":
+            move_insert_settings = self.digital_twin_move_insert_settings(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+            )
+            base.update(
+                {
+                    "move_insert_profile_sha256": str(
+                        move_insert_settings.get("profile_sha256") or ""
+                    ),
+                    "move_insert_effective": deepcopy(
+                        move_insert_settings.get("effective") or {}
+                    ),
+                    "move_insert_profile_state": str(
+                        move_insert_settings.get("profile_state") or "invalid"
+                    ),
+                    "move_insert_derived_timeout_sec": move_insert_settings.get(
+                        "derived_timeout_sec"
+                    ),
+                    "move_insert_hard_caps": deepcopy(
+                        move_insert_settings.get("hard_caps") or {}
+                    ),
+                }
+            )
+            if not bool(move_insert_settings.get("validated")):
+                return {
+                    **base,
+                    "message": str(
+                        move_insert_settings.get("message")
+                        or "move_insert profile is not validated"
+                    ),
+                }
+            qualification_readiness, qualification_error = (
+                self._move_insert_normal_qualification_readiness(
+                    destination_location=destination_location,
+                    part_name=part_name,
+                    settings=move_insert_settings,
+                )
+            )
+            base.update(qualification_readiness)
+            if qualification_error:
+                return {**base, "message": qualification_error}
+        execution_lock = getattr(
+            self,
+            "_ur5e_robot_function_execution_lock",
+            None,
+        )
+        if execution_lock is not None and execution_lock.locked():
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+                "active_function": active,
+            }
+        correction_error = self._digital_twin_assembly_correction_error(
+            target,
+            robot,
+            origin_resource_location,
+            destination_location,
+            part_name,
+        )
+        if correction_error:
+            return {**base, "message": correction_error}
+        move_insert_preflight_token = _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.set(
+            robot == "ur5e"
+        )
+        try:
+            resource_agent, _call_kwargs, readiness, error = (
+                await self._digital_twin_robot_function_execution_preflight_async(
+                    target,
+                    robot,
+                    "pick_approach",
+                    origin_resource_location,
+                    "",
+                    part_name,
+                )
+            )
+        finally:
+            _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.reset(
+                move_insert_preflight_token
+            )
+        if error or resource_agent is None:
+            return {
+                **base,
+                **readiness,
+                "message": error or f"{robot} Assembly is not ready.",
+            }
+        state_error = self._digital_twin_assembly_state_error(
+            resource_agent,
+            "pick_approach",
+            origin_resource_location,
+            destination_location,
+            part_name,
+            after=False,
+        )
+        if state_error:
+            return {**base, **readiness, "message": state_error}
+
+        executables = getattr(resource_agent, "executables", None)
+        for function_name in self._ASSEMBLY_FUNCTION_ORDER:
+            if (
+                not isinstance(executables, dict)
+                or function_name not in executables
+                or not callable(executables[function_name])
+                or not callable(getattr(resource_agent, function_name, None))
+            ):
+                return {
+                    **base,
+                    **readiness,
+                    "message": (
+                        f"The physical {robot} robot agent does not expose callable "
+                        f"{function_name}."
+                    ),
+                }
+
+        place_recording_path, place_recording_error = (
+            self._digital_twin_place_approach_recording_error(
+                resource_agent,
+                destination_location,
+                part_name,
+            )
+        )
+        readiness["place_approach_physical_position_file"] = place_recording_path
+        if place_recording_error:
+            return {**base, **readiness, "message": place_recording_error}
+        board_status: dict[str, Any] = {}
+        if destination_location == "assembly_board-v1":
+            board_status, board_error = (
+                self._digital_twin_assembly_board_v1_accepted_status(
+                    robot,
+                    allow_post_staging_acceptance=True,
+                )
+            )
+            readiness["assembly_board_v1_aruco"] = deepcopy(board_status)
+            if board_error:
+                return {**base, **readiness, "message": board_error}
+        home_error = (
+            self._ur5e_named_position_error(resource_agent, "home")
+            if robot == "ur5e"
+            else (
+                self._xarm6_named_position_error(resource_agent, "home")
+                if robot == "xarm6"
+                else self._configured_named_position_error(resource_agent, "home")
+            )
+        )
+        if home_error:
+            return {**base, **readiness, "message": home_error}
+        lifecycle_error = self._digital_twin_assembly_lifecycle_error()
+        if lifecycle_error:
+            return {**base, **readiness, "message": lifecycle_error}
+        if execution_lock is not None and execution_lock.locked():
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                **readiness,
+                "message": f"Physical robot motion is already active: {active}.",
+                "active_function": active,
+            }
+        correction_error = self._digital_twin_assembly_correction_error(
+            target,
+            robot,
+            origin_resource_location,
+            destination_location,
+            part_name,
+        )
+        if correction_error:
+            return {**base, **readiness, "message": correction_error}
+        if robot == "ur5e":
+            current_settings = self.digital_twin_move_insert_settings(
+                target,
+                robot,
+                destination_location=destination_location,
+                part_name=part_name,
+            )
+            if not bool(current_settings.get("validated")):
+                return {
+                    **base,
+                    **readiness,
+                    "message": (
+                        "move_insert profile is unavailable during Assembly readiness."
+                    ),
+                }
+            live_readiness, live_error = (
+                self._digital_twin_move_insert_live_readiness(
+                    current_settings,
+                    resource_agent,
+                )
+            )
+            readiness.update(live_readiness)
+            if live_error:
+                return {**base, **readiness, "message": live_error}
+            geometry_readiness, geometry_error = (
+                self._digital_twin_assembly_move_insert_geometry_readiness(
+                    part_name=part_name,
+                    settings=current_settings,
+                    board_status=board_status,
+                    resource_agent=resource_agent,
+                    require_held_part_handoff=False,
+                )
+            )
+            readiness.update(geometry_readiness)
+            if geometry_error:
+                return {**base, **readiness, "message": geometry_error}
+        return {
+            **base,
+            **readiness,
+            "success": True,
+            "ready": True,
+            "message": (
+                "Assembly is ready for operator confirmation using fresh computed "
+                "targets. Missing optional robot corrections are allowed; every present "
+                "correction is confirmed. place_insert will release the part irreversibly."
+            ),
         }
 
     def digital_twin_robot_function_execution_progress(self) -> dict[str, Any]:
@@ -14455,6 +29136,21 @@ class SystemBridge:
             }:
                 stage = detection_stage
                 detection_message = str(detection_status.get("message") or "").strip()
+        insert_phase = ""
+        active_step = str(
+            getattr(self, "_robot_function_execution_active_step", "") or ""
+        )
+        if robot == "ur5e" and active_step == "place_insert.move_insert":
+            insert_status = dict(self._ur5e_rtde_trajectory_status() or {})
+            try:
+                insert_updated_at = float(insert_status.get("updated_at", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                insert_updated_at = 0.0
+            if (
+                insert_updated_at >= started_at
+                and str(insert_status.get("motion_kind") or "") == "insert"
+            ):
+                insert_phase = str(insert_status.get("insert_phase") or "").strip()
         messages = {
             "fresh_readiness": (
                 "Checking fresh RTDE, world -> tool0, and perception readiness."
@@ -14478,9 +29174,29 @@ class SystemBridge:
             "stage": stage,
             "message": detection_message or messages.get(stage, ""),
             "started_at": started_at,
+            "assembly_step_index": int(
+                getattr(self, "_assembly_step_index", 0) or 0
+            ),
+            "assembly_step_count": int(
+                getattr(self, "_assembly_step_count", 0) or 0
+            ),
+            "completed_functions": list(
+                getattr(self, "_assembly_completed_functions", []) or []
+            ),
+            "failed_function": str(
+                getattr(self, "_assembly_failed_function", "") or ""
+            ),
+            "active_step": active_step,
+            "insert_phase": insert_phase,
+            "move_insert_profile_sha256": str(
+                getattr(self, "_assembly_move_insert_profile_sha256", "") or ""
+            ),
+            "move_insert_effective": deepcopy(
+                getattr(self, "_assembly_move_insert_effective", {}) or {}
+            ),
         }
 
-    async def digital_twin_execute_robot_function(  # noqa: PLR0915 - explicit motion gates.
+    async def digital_twin_execute_robot_function(  # noqa: C901, PLR0912, PLR0915 - explicit motion gates.
         self,
         target: str,
         robot: str,
@@ -14490,6 +29206,7 @@ class SystemBridge:
         destination_location: str = "",
         part_name: str = "",
         confirmed: bool = False,
+        operator_confirmed_held_part: bool = False,
     ) -> dict[str, Any]:
         """Execute one exact generated physical function after operator confirmation."""
         base = {
@@ -14506,7 +29223,23 @@ class SystemBridge:
                 **base,
                 "message": f"Explicit operator confirmation is required for {function_name}.",
             }
-        if self._xarm6_cartesian_session_mode() != "off":
+        execution_context = _ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT.get()
+        execution_lock_held = bool(
+            execution_context is not None
+            and execution_context.get("bridge") is self
+        )
+        if not execution_lock_held:
+            demonstration_error = self._insertion_demonstration_blocking_error()
+            if demonstration_error:
+                return {**base, "message": demonstration_error}
+            pending_review_error = self._move_insert_pending_review_error()
+            if pending_review_error:
+                return {**base, "message": pending_review_error}
+        if (
+            not execution_lock_held
+            and robot == "xarm6"
+            and self._xarm6_cartesian_session_mode() != "off"
+        ):
             closed, close_message = await asyncio.to_thread(
                 self.teleop_cartesian_mode,
                 "xarm6",
@@ -14521,11 +29254,61 @@ class SystemBridge:
                     ),
                 }
 
-        record_result = (
-            self._record_ur5e_robot_function_result
-            if robot == "ur5e"
-            else self._record_xarm6_robot_function_result
-        )
+        def record_result(
+            resource_agent: Any,
+            completed_function_name: str,
+            result: Any = None,
+            *,
+            failed: bool = False,
+        ) -> None:
+            recorder = {
+                "ur5e": self._record_ur5e_robot_function_result,
+                "xarm6": self._record_xarm6_robot_function_result,
+            }.get(robot)
+            if recorder is not None:
+                recorder(
+                    resource_agent,
+                    completed_function_name,
+                    result,
+                    failed=failed,
+                )
+
+        def _automatic_move_insert_was_not_dispatched(result: Any) -> bool:
+            if not isinstance(result, dict):
+                return False
+            failure_context = dict(result.get("failure_context") or {})
+            failure_observations = dict(
+                failure_context.get("observations") or {}
+            )
+            direct_observations = dict(result.get("observations") or {})
+            dispatch_evidence = failure_observations.get(
+                "move_insert_dispatched",
+                direct_observations.get("move_insert_dispatched"),
+            )
+            return dispatch_evidence is False
+
+        def _suspend_failed_automatic_move_insert(result: Any) -> None:
+            if not (
+                robot == "ur5e"
+                and function_name == "place_insert"
+                and destination_location == "assembly_board-v1"
+                and isinstance(result, dict)
+                and not bool(result.get("manual_pre_execute_blocked"))
+                and not _automatic_move_insert_was_not_dispatched(result)
+                and str(result.get("status") or "").strip().lower()
+                != "completed"
+            ):
+                return
+            suspension_error = self._suspend_move_insert_qualification(part_name)
+            if suspension_error:
+                reason = (
+                    f"Automatic move_insert for {part_name} failed and persisted "
+                    f"qualification removal failed: {suspension_error}"
+                )
+                self._ur5e_robot_function_state_uncertain = True
+                self._ur5e_robot_function_state_uncertain_reason = reason
+                log.error("%s", reason)
+
         computed_pose_name = (
             origin_resource_location
             if function_name == "pick_approach"
@@ -14551,8 +29334,8 @@ class SystemBridge:
                 resource_agent=resource_agent,
             )
 
-        lock = self._ur5e_robot_function_execution_lock
-        if not lock.acquire(blocking=False):
+        lock = self._get_robot_function_execution_lock()
+        if not execution_lock_held and not lock.acquire(blocking=False):
             active = str(
                 self._ur5e_robot_function_execution_active or "Physical robot motion"
             )
@@ -14561,11 +29344,20 @@ class SystemBridge:
                 "message": f"Physical robot motion is already active: {active}.",
                 "active_function": active,
             }
-        self._ur5e_robot_function_execution_active = function_name
+        if not execution_lock_held:
+            self._ur5e_robot_function_execution_active = function_name
         self._ur5e_robot_function_execution_stage = "fresh_readiness"
         self._ur5e_robot_function_execution_started_at = time.time()
         self._robot_function_execution_robot = robot
-        release_lock_here = True
+        if not execution_lock_held:
+            self._assembly_step_index = 0
+            self._assembly_step_count = 0
+            self._assembly_completed_functions = []
+            self._assembly_failed_function = ""
+            self._assembly_move_insert_profile_sha256 = ""
+            self._assembly_move_insert_effective = {}
+        self._robot_function_execution_active_step = ""
+        release_lock_here = not execution_lock_held
         try:
             preflight_task = asyncio.create_task(
                 self._digital_twin_robot_function_execution_preflight_async(
@@ -14575,6 +29367,15 @@ class SystemBridge:
                     origin_resource_location,
                     destination_location,
                     part_name,
+                    **(
+                        {
+                            "operator_confirmed_held_part": (
+                                operator_confirmed_held_part
+                            )
+                        }
+                        if operator_confirmed_held_part is not False
+                        else {}
+                    ),
                 )
             )
             try:
@@ -14599,6 +29400,9 @@ class SystemBridge:
                         self._ur5e_robot_function_execution_stage = ""
                         self._ur5e_robot_function_execution_started_at = 0.0
                         self._robot_function_execution_robot = ""
+                        self._robot_function_execution_active_step = ""
+                        self._assembly_move_insert_profile_sha256 = ""
+                        self._assembly_move_insert_effective = {}
                         lock.release()
 
                 preflight_task.add_done_callback(_release_after_preflight)
@@ -14609,6 +29413,122 @@ class SystemBridge:
                     **readiness,
                     "message": error or f"{robot} robot function execution is not ready.",
                 }
+            if not execution_lock_held:
+                move_insert_readiness, move_insert_error = (
+                    self._digital_twin_robot_function_move_insert_readiness(
+                        target,
+                        robot,
+                        function_name,
+                        destination_location,
+                        part_name,
+                        resource_agent,
+                        readiness,
+                    )
+                )
+                readiness.update(move_insert_readiness)
+                if move_insert_error:
+                    return {
+                        **base,
+                        **readiness,
+                        "message": move_insert_error,
+                    }
+                if (
+                    function_name == "place_approach"
+                    and robot == "ur5e"
+                    and move_insert_readiness
+                ):
+                    product_geometry = dict(
+                        call_kwargs.get("product_geometry") or {}
+                    )
+                    product_geometry.update(
+                        {
+                            "move_insert_profile": deepcopy(
+                                move_insert_readiness.get(
+                                    "move_insert_effective"
+                                )
+                                or {}
+                            ),
+                            "move_insert_profile_sha256": str(
+                                move_insert_readiness.get(
+                                    "move_insert_profile_sha256"
+                                )
+                                or ""
+                            ),
+                        }
+                    )
+                    call_kwargs["product_geometry"] = product_geometry
+            if execution_lock_held and execution_context is not None:
+                assembly_agent = execution_context.get("resource_agent")
+                if assembly_agent is None:
+                    execution_context["resource_agent"] = resource_agent
+                elif resource_agent is not assembly_agent:
+                    return {
+                        **base,
+                        **readiness,
+                        "message": (
+                            "Assembly physical RobotAgent changed between functions; "
+                            "inspect the robot before retrying."
+                        ),
+                    }
+                assembly_state_error = self._digital_twin_assembly_state_error(
+                    resource_agent,
+                    function_name,
+                    str(execution_context.get("origin_resource_location") or ""),
+                    str(execution_context.get("destination_location") or ""),
+                    str(execution_context.get("part_name") or ""),
+                    after=False,
+                )
+                if assembly_state_error:
+                    return {
+                        **base,
+                        **readiness,
+                        "message": assembly_state_error,
+                    }
+                if function_name in {"pick_approach", "place_approach"}:
+                    correction_error = self._digital_twin_assembly_correction_error(
+                        target,
+                        robot,
+                        str(
+                            execution_context.get("origin_resource_location") or ""
+                        ),
+                        str(execution_context.get("destination_location") or ""),
+                        str(execution_context.get("part_name") or ""),
+                        function_name=function_name,
+                    )
+                    if correction_error:
+                        return {
+                            **base,
+                            **readiness,
+                            "message": correction_error,
+                        }
+                if function_name == "place_approach" and robot == "ur5e":
+                    product_geometry = dict(call_kwargs.get("product_geometry") or {})
+                    product_geometry.update(
+                        {
+                            "move_insert_profile": deepcopy(
+                                execution_context.get("move_insert_effective") or {}
+                            ),
+                            "move_insert_profile_sha256": str(
+                                execution_context.get("move_insert_profile_sha256")
+                                or ""
+                            ),
+                        }
+                    )
+                    call_kwargs["product_geometry"] = product_geometry
+                elif function_name == "place_insert" and robot == "ur5e":
+                    move_insert_readiness, move_insert_error = (
+                        self._digital_twin_assembly_move_insert_recheck(
+                            execution_context,
+                            resource_agent,
+                        )
+                    )
+                    readiness.update(move_insert_readiness)
+                    if move_insert_error:
+                        return {
+                            **base,
+                            **readiness,
+                            "message": move_insert_error,
+                        }
 
             self._ur5e_robot_function_execution_stage = "dispatch"
             callback_was_set = hasattr(resource_agent, "_robot_task_progress_callback")
@@ -14630,6 +29550,9 @@ class SystemBridge:
             def _task_progress(task_name: str, step_id: str) -> None:
                 if task_name != function_name:
                     return
+                self._robot_function_execution_active_step = (
+                    f"{task_name}.{step_id}"
+                )
                 if step_id in {
                     "move_to_origin_resource_location",
                     "move_to_destination_location",
@@ -14676,7 +29599,16 @@ class SystemBridge:
                         f"The active {robot} calibration identity changed; "
                         "automatic post-staging board acceptance is blocked."
                     )
-                if not bool(status.get("post_staging_acceptance_allowed")):
+                fresh_post_staging_movement = bool(
+                    status.get("ready_to_accept")
+                    and status.get("accepted_baseline_ready")
+                    and status.get("calibration_identity_matches")
+                    and status.get("excessive_movement")
+                )
+                if not (
+                    status.get("post_staging_acceptance_allowed")
+                    or fresh_post_staging_movement
+                ):
                     raise RuntimeError(
                         str(
                             status.get("accepted_baseline_error")
@@ -14728,7 +29660,35 @@ class SystemBridge:
                 }
 
             def _manual_pre_execute() -> str:
+                if (
+                    function_name == "place_approach"
+                    and robot == "ur5e"
+                    and destination_location == "assembly_board-v1"
+                    and not bool(readiness.get("independent_commissioning"))
+                    and not bool(readiness.get("operator_confirmed_held_part"))
+                ):
+                    locked_motion_readiness, locked_motion_error = (
+                        self._digital_twin_ur5e_motion_readiness(
+                            target,
+                            self._digital_twin_target(target) or {},
+                            resource_agent,
+                        )
+                    )
+                    if locked_motion_error:
+                        return locked_motion_error
+                    _pre_staging_readiness, pre_staging_error = (
+                        self._physical_ur5e_place_approach_pre_staging_error(
+                            target,
+                            resource_agent,
+                            destination_location=destination_location,
+                            part_name=part_name,
+                            motion_readiness=locked_motion_readiness,
+                        )
+                    )
+                    return pre_staging_error
                 if function_name not in {"pick_grasp", "place_insert"}:
+                    return ""
+                if bool(readiness.get("independent_commissioning")):
                     return ""
                 _pose_readiness, pose_error = (
                     self._manual_dependent_function_pose_error(
@@ -14740,7 +29700,47 @@ class SystemBridge:
                         readiness,
                     )
                 )
-                return pose_error
+                if pose_error:
+                    return pose_error
+                if not (
+                    robot == "ur5e"
+                    and function_name == "place_insert"
+                    and destination_location == "assembly_board-v1"
+                ):
+                    return ""
+                current_settings = self.digital_twin_move_insert_settings(
+                    target,
+                    robot,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                )
+                if not bool(current_settings.get("validated")):
+                    return str(
+                        current_settings.get("message")
+                        or "move_insert profile is not validated before dispatch."
+                    )
+                current_identities, identity_error = (
+                    self._move_insert_current_identities(
+                        resource_agent,
+                        destination_location=destination_location,
+                        part_name=part_name,
+                        settings=current_settings,
+                    )
+                )
+                if identity_error:
+                    return identity_error
+                expected_runtime_identities = dict(
+                    readiness.get("move_insert_runtime_identities") or {}
+                )
+                for identity_name, expected_identity in (
+                    expected_runtime_identities.items()
+                ):
+                    if current_identities.get(identity_name) != expected_identity:
+                        return (
+                            f"move_insert runtime {identity_name} changed before "
+                            "dispatch."
+                        )
+                return ""
 
             runtime_task = asyncio.create_task(
                 self._run_on_agent_runtime(
@@ -14752,6 +29752,23 @@ class SystemBridge:
                             if function_name == "place_approach"
                             and destination_location == "assembly_board-v1"
                             else None
+                        ),
+                        **(
+                            {"operator_confirmed_held_part": True}
+                            if readiness.get("operator_confirmed_held_part")
+                            else {}
+                        ),
+                        **(
+                            {
+                                "operator_confirmed_held_part_handoff": deepcopy(
+                                    readiness.get(
+                                        "operator_confirmed_held_part_handoff"
+                                    )
+                                    or {}
+                                )
+                            }
+                            if readiness.get("operator_confirmed_held_part")
+                            else {}
                         ),
                         **call_kwargs,
                     )
@@ -14772,13 +29789,19 @@ class SystemBridge:
                         if not bool(
                             isinstance(completed_result, dict)
                             and completed_result.get("manual_pre_execute_blocked")
+                        ) and not _automatic_move_insert_was_not_dispatched(
+                            completed_result
                         ):
+                            _suspend_failed_automatic_move_insert(completed_result)
                             record_result(
                                 resource_agent,
                                 function_name,
                                 completed_result,
                             )
                     except asyncio.CancelledError:
+                        _suspend_failed_automatic_move_insert(
+                            {"status": "failed"}
+                        )
                         record_result(
                             resource_agent,
                             function_name,
@@ -14786,6 +29809,9 @@ class SystemBridge:
                         )
                         log.warning("physical %s runtime was cancelled", function_name)
                     except Exception:  # noqa: BLE001 - background runtime failure.
+                        _suspend_failed_automatic_move_insert(
+                            {"status": "failed"}
+                        )
                         record_result(
                             resource_agent,
                             function_name,
@@ -14801,12 +29827,16 @@ class SystemBridge:
                         self._ur5e_robot_function_execution_stage = ""
                         self._ur5e_robot_function_execution_started_at = 0.0
                         self._robot_function_execution_robot = ""
+                        self._robot_function_execution_active_step = ""
+                        self._assembly_move_insert_profile_sha256 = ""
+                        self._assembly_move_insert_effective = {}
                         lock.release()
 
                 runtime_task.add_done_callback(_release_after_runtime)
                 raise
             except Exception as exc:  # noqa: BLE001 - agent runtime boundary.
                 _restore_runtime_callbacks()
+                _suspend_failed_automatic_move_insert({"status": "failed"})
                 record_result(
                     resource_agent,
                     function_name,
@@ -14825,14 +29855,40 @@ class SystemBridge:
             _restore_runtime_callbacks()
 
             if not isinstance(result, dict):
+                _suspend_failed_automatic_move_insert({"status": "failed"})
                 record_result(
                     resource_agent,
                     function_name,
                     failed=True,
                 )
                 return {**base, "message": f"{function_name} returned an invalid result."}
+            if (
+                readiness.get("operator_confirmed_held_part")
+                and str(result.get("status") or "").strip().lower() == "completed"
+            ):
+                adoption_error = self._operator_confirmed_mg_adoption_error(
+                    resource_agent,
+                    dict(
+                        readiness.get("operator_confirmed_held_part_handoff")
+                        or {}
+                    ),
+                )
+                if adoption_error:
+                    result = {
+                        **result,
+                        "status": "failed",
+                        "content": (
+                            f"place_approach moved, but {adoption_error}. Keep {part_name} "
+                            "clamped, inspect the robot, and do not run place_insert."
+                        ),
+                        "held_part_handoff_adopted": False,
+                        "move_insert_trial_context_ready": False,
+                    }
             _cache_completed_computed_poses(resource_agent, result)
-            if not bool(result.get("manual_pre_execute_blocked")):
+            _suspend_failed_automatic_move_insert(result)
+            if not bool(
+                result.get("manual_pre_execute_blocked")
+            ) and not _automatic_move_insert_was_not_dispatched(result):
                 record_result(
                     resource_agent,
                     function_name,
@@ -14852,16 +29908,62 @@ class SystemBridge:
                     or ""
                 ).strip()
                 step_detail = f" Failed step: {failed_step}." if failed_step else ""
-                message = (
-                    f"{message or f'{function_name} failed.'}{step_detail} Physical state may "
-                    "have changed; inspect the robot and recover before retrying."
-                )
+                if _automatic_move_insert_was_not_dispatched(result):
+                    message = (
+                        f"{message or f'{function_name} failed.'}{step_detail} "
+                        "place_insert was not dispatched; the part remains held and "
+                        "release_part was not commanded."
+                    )
+                else:
+                    message = (
+                        f"{message or f'{function_name} failed.'}{step_detail} Physical "
+                        "state may have changed; inspect the robot and recover before "
+                        "retrying."
+                    )
             if not message:
                 message = (
                     f"{function_name} completed."
                     if success
                     else f"{function_name} did not complete (status={status or 'unknown'})."
                 )
+            held_part_handoff_adopted = bool(
+                success
+                and readiness.get("operator_confirmed_held_part")
+                and not self._operator_confirmed_mg_adoption_error(
+                    resource_agent,
+                    dict(
+                        readiness.get("operator_confirmed_held_part_handoff")
+                        or {}
+                    ),
+                )
+            )
+            retained_task_context = dict(
+                getattr(resource_agent, "_task_ctx", {}) or {}
+            )
+            move_insert_trial_context_ready = bool(
+                held_part_handoff_adopted
+                and retained_task_context.get("move_insert_mode")
+                in {"force_limited", "force_limited_trial"}
+                and isinstance(
+                    retained_task_context.get("move_insert_profile"), dict
+                )
+            )
+            if held_part_handoff_adopted:
+                message = (
+                    f"place_approach completed and retained operator-confirmed {part_name} "
+                    "custody from the confirmed pick_approach.descend handoff."
+                )
+                if move_insert_trial_context_ready:
+                    message += (
+                        " Supervised Test move_insert can now run after its fresh "
+                        "readiness checks; Assembly remains strict."
+                    )
+                else:
+                    message += (
+                        " place_approach did not require move_insert. Supervised Test "
+                        "move_insert remains blocked until its protected recipe and "
+                        "calibration are ready; Assembly remains strict."
+                    )
             return {
                 **base,
                 "success": success,
@@ -14869,6 +29971,26 @@ class SystemBridge:
                 "status": status or "unknown",
                 "state": str(getattr(resource_agent, "_current_state", "") or ""),
                 "result": deepcopy(result),
+                **(
+                    {"move_insert_dispatched": False}
+                    if _automatic_move_insert_was_not_dispatched(result)
+                    else {}
+                ),
+                **(
+                    {
+                        "operator_confirmed_held_part": True,
+                        "operator_held_part": str(
+                            readiness.get("operator_held_part") or ""
+                        ),
+                        "held_part_handoff_adopted": held_part_handoff_adopted,
+                        "move_insert_trial_context_ready": (
+                            move_insert_trial_context_ready
+                        ),
+                        "move_insert_authorized": False,
+                    }
+                    if readiness.get("operator_confirmed_held_part")
+                    else {}
+                ),
             }
         finally:
             if release_lock_here:
@@ -14876,6 +29998,461 @@ class SystemBridge:
                 self._ur5e_robot_function_execution_stage = ""
                 self._ur5e_robot_function_execution_started_at = 0.0
                 self._robot_function_execution_robot = ""
+                self._robot_function_execution_active_step = ""
+                self._assembly_move_insert_profile_sha256 = ""
+                self._assembly_move_insert_effective = {}
+                lock.release()
+
+    async def _digital_twin_execute_robot_function_with_held_lock(
+        self,
+        execution_context: dict[str, Any],
+        target: str,
+        robot: str,
+        function_name: str,
+        *,
+        origin_resource_location: str = "",
+        destination_location: str = "",
+        part_name: str = "",
+    ) -> dict[str, Any]:
+        """Execute one function while Assembly owns the outer bridge lock."""
+        context_token = _ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT.set(
+            execution_context
+        )
+        try:
+            return await self.digital_twin_execute_robot_function(
+                target,
+                robot,
+                function_name,
+                origin_resource_location=origin_resource_location,
+                destination_location=destination_location,
+                part_name=part_name,
+                confirmed=True,
+            )
+        finally:
+            _ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT.reset(context_token)
+
+    async def digital_twin_execute_assembly(  # noqa: C901, PLR0912, PLR0915 - explicit motion gates.
+        self,
+        target: str,
+        robot: str,
+        *,
+        origin_resource_location: str = "",
+        destination_location: str = "",
+        part_name: str = "",
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute the five exact physical Assembly functions under one lock."""
+        assembly_step_count = len(self._ASSEMBLY_FUNCTION_ORDER)
+        base = {
+            "success": False,
+            "target": target,
+            "robot": robot,
+            "origin_resource_location": origin_resource_location,
+            "destination_location": destination_location,
+            "part_name": part_name,
+            "assembly_step_index": 0,
+            "assembly_step_count": assembly_step_count,
+            "completed_functions": [],
+            "failed_function": "",
+            "function_results": [],
+            "state": "",
+            "move_insert_profile_sha256": "",
+            "move_insert_effective": {},
+        }
+        if confirmed is not True:
+            return {
+                **base,
+                "message": "Explicit operator confirmation is required for Assembly.",
+            }
+        lifecycle_error = self._digital_twin_assembly_lifecycle_error()
+        if lifecycle_error:
+            return {**base, "message": lifecycle_error}
+        request_error = self._digital_twin_assembly_request_error(
+            target,
+            robot,
+            origin_resource_location,
+            destination_location,
+            part_name,
+        )
+        if request_error:
+            return {**base, "message": request_error}
+        if robot == "xarm6" and self._xarm6_cartesian_session_mode() != "off":
+            closed, close_message = await asyncio.to_thread(
+                self.teleop_cartesian_mode,
+                "xarm6",
+                "off",
+            )
+            if not closed:
+                return {
+                    **base,
+                    "message": (
+                        "xArm6 Cartesian session could not restore Mode 1 before "
+                        f"Assembly: {close_message}"
+                    ),
+                }
+
+        lock = self._get_robot_function_execution_lock()
+        if not lock.acquire(blocking=False):
+            active = str(
+                self._ur5e_robot_function_execution_active
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+                "active_function": active,
+            }
+
+        self._assembly_step_index = 0
+        self._assembly_step_count = assembly_step_count
+        self._assembly_completed_functions = []
+        self._assembly_failed_function = ""
+        self._robot_function_execution_active_step = ""
+        self._assembly_move_insert_profile_sha256 = ""
+        self._assembly_move_insert_effective = {}
+        self._ur5e_robot_function_execution_active = "Assembly"
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
+        self._robot_function_execution_robot = robot
+        completed_functions: list[str] = []
+        function_results: list[dict[str, Any]] = []
+        current_function = ""
+        release_lock_here = True
+        execution_context: dict[str, Any] = {
+            "bridge": self,
+            "resource_agent": None,
+            "target": target,
+            "robot": robot,
+            "origin_resource_location": origin_resource_location,
+            "destination_location": destination_location,
+            "part_name": part_name,
+        }
+        try:
+            lifecycle_error = self._digital_twin_assembly_lifecycle_error()
+            if lifecycle_error:
+                return {**base, "message": lifecycle_error}
+            if robot == "ur5e":
+                move_insert_settings = self.digital_twin_move_insert_settings(
+                    target,
+                    robot,
+                    destination_location=destination_location,
+                    part_name=part_name,
+                )
+                if not bool(move_insert_settings.get("validated")):
+                    return {
+                        **base,
+                        "message": str(
+                            move_insert_settings.get("message")
+                            or "move_insert profile is not validated"
+                        ),
+                    }
+                qualification_readiness, qualification_error = (
+                    self._move_insert_normal_qualification_readiness(
+                        destination_location=destination_location,
+                        part_name=part_name,
+                        settings=move_insert_settings,
+                    )
+                )
+                base.update(qualification_readiness)
+                if qualification_error:
+                    return {**base, "message": qualification_error}
+                live_readiness, live_error = (
+                    self._digital_twin_move_insert_live_readiness(
+                        move_insert_settings,
+                    )
+                )
+                if live_error:
+                    return {**base, **live_readiness, "message": live_error}
+                frozen_hash = str(
+                    move_insert_settings.get("profile_sha256") or ""
+                )
+                frozen_effective = deepcopy(
+                    move_insert_settings.get("effective") or {}
+                )
+                base.update(
+                    {
+                        "move_insert_profile_sha256": frozen_hash,
+                        "move_insert_effective": deepcopy(frozen_effective),
+                        "move_insert_derived_timeout_sec": (
+                            move_insert_settings.get("derived_timeout_sec")
+                        ),
+                    }
+                )
+                execution_context.update(
+                    {
+                        "move_insert_profile_sha256": frozen_hash,
+                        "move_insert_effective": frozen_effective,
+                    }
+                )
+                self._assembly_move_insert_profile_sha256 = frozen_hash
+                self._assembly_move_insert_effective = deepcopy(frozen_effective)
+                board_status, board_error = (
+                    self._digital_twin_assembly_board_v1_accepted_status(
+                        robot,
+                        allow_post_staging_acceptance=True,
+                    )
+                )
+                if board_error:
+                    return {
+                        **base,
+                        "assembly_board_v1_aruco": deepcopy(board_status),
+                        "message": board_error,
+                    }
+                geometry_readiness, geometry_error = (
+                    self._digital_twin_assembly_move_insert_geometry_readiness(
+                        part_name=part_name,
+                        settings=move_insert_settings,
+                        board_status=board_status,
+                        resource_agent=None,
+                        require_held_part_handoff=False,
+                    )
+                )
+                base.update(geometry_readiness)
+                if geometry_error:
+                    return {**base, "message": geometry_error}
+                execution_context["move_insert_product_geometry"] = deepcopy(
+                    geometry_readiness.get("move_insert_product_geometry") or {}
+                )
+            correction_error = self._digital_twin_assembly_correction_error(
+                target,
+                robot,
+                origin_resource_location,
+                destination_location,
+                part_name,
+            )
+            if correction_error:
+                return {**base, "message": correction_error}
+            for step_index, function_name in enumerate(
+                self._ASSEMBLY_FUNCTION_ORDER,
+                start=1,
+            ):
+                current_function = function_name
+                self._assembly_step_index = step_index
+                self._assembly_completed_functions = list(completed_functions)
+                self._assembly_failed_function = ""
+                origin, destination, function_part_name = (
+                    self._digital_twin_assembly_function_arguments(
+                        function_name,
+                        origin_resource_location,
+                        destination_location,
+                        part_name,
+                    )
+                )
+                if robot == "ur5e" and function_name == "place_approach":
+                    resource_agent = execution_context.get("resource_agent")
+                    current_settings = self.digital_twin_move_insert_settings(
+                        target,
+                        robot,
+                        destination_location=destination_location,
+                        part_name=part_name,
+                    )
+                    geometry_error = ""
+                    geometry_readiness: dict[str, Any] = {}
+                    if not bool(current_settings.get("validated")):
+                        geometry_error = (
+                            "Assembly move_insert profile is unavailable after pick_grasp."
+                        )
+                    if not geometry_error:
+                        board_status, board_error = (
+                            self._digital_twin_assembly_board_v1_accepted_status(
+                                robot,
+                                allow_post_staging_acceptance=True,
+                            )
+                        )
+                        if board_error:
+                            geometry_error = board_error
+                        else:
+                            geometry_readiness, geometry_error = (
+                                self._digital_twin_assembly_move_insert_geometry_readiness(
+                                    part_name=part_name,
+                                    settings=current_settings,
+                                    board_status=board_status,
+                                    resource_agent=resource_agent,
+                                    require_held_part_handoff=True,
+                                    expected_product_geometry=dict(
+                                        execution_context.get(
+                                            "move_insert_product_geometry"
+                                        )
+                                        or {}
+                                    ),
+                                )
+                            )
+                    if not geometry_error:
+                        live_readiness, geometry_error = (
+                            self._digital_twin_move_insert_live_readiness(
+                                current_settings,
+                                resource_agent,
+                            )
+                        )
+                        geometry_readiness.update(live_readiness)
+                    if geometry_error:
+                        self._assembly_failed_function = function_name
+                        state = str(
+                            getattr(resource_agent, "_current_state", "") or ""
+                        ).strip()
+                        failed_result = {
+                            "success": False,
+                            "status": "failed",
+                            "function_name": function_name,
+                            **geometry_readiness,
+                            "message": geometry_error,
+                        }
+                        function_results.append(failed_result)
+                        return {
+                            **base,
+                            **geometry_readiness,
+                            "assembly_step_index": step_index,
+                            "completed_functions": list(completed_functions),
+                            "failed_function": function_name,
+                            "function_results": function_results,
+                            "state": state,
+                            "status": "failed",
+                            "message": geometry_error,
+                        }
+                    base.update(geometry_readiness)
+                result = await self._digital_twin_execute_robot_function_with_held_lock(
+                    execution_context,
+                    target,
+                    robot,
+                    function_name,
+                    origin_resource_location=origin,
+                    destination_location=destination,
+                    part_name=function_part_name,
+                )
+                function_results.append(deepcopy(result))
+                resource_agent = execution_context.get("resource_agent")
+                state = str(
+                    getattr(resource_agent, "_current_state", "") or ""
+                ).strip()
+                if not bool(result.get("success")):
+                    self._assembly_failed_function = function_name
+                    return {
+                        **base,
+                        **(
+                            {
+                                "move_insert_dispatched": result[
+                                    "move_insert_dispatched"
+                                ]
+                            }
+                            if "move_insert_dispatched" in result
+                            else {}
+                        ),
+                        "assembly_step_index": step_index,
+                        "completed_functions": list(completed_functions),
+                        "failed_function": function_name,
+                        "function_results": function_results,
+                        "state": state,
+                        "status": str(result.get("status") or "failed"),
+                        "message": str(
+                            result.get("message")
+                            or f"Assembly stopped at {function_name}."
+                        ),
+                    }
+
+                completion_error = self._digital_twin_assembly_state_error(
+                    resource_agent,
+                    function_name,
+                    origin_resource_location,
+                    destination_location,
+                    part_name,
+                    after=True,
+                )
+                if (
+                    not completion_error
+                    and function_name in {"pick_approach", "place_approach"}
+                ):
+                    completion_error = (
+                        self._digital_twin_assembly_resolved_descend_error(
+                            resource_agent,
+                            function_name,
+                        )
+                    )
+                if completion_error:
+                    suspension_error = ""
+                    if (
+                        robot == "ur5e"
+                        and function_name == "place_insert"
+                        and destination_location == "assembly_board-v1"
+                    ):
+                        suspension_error = (
+                            self._suspend_move_insert_qualification(part_name)
+                        )
+                        if suspension_error:
+                            self._ur5e_robot_function_state_uncertain = True
+                            self._ur5e_robot_function_state_uncertain_reason = (
+                                "Assembly place_insert post-state validation failed "
+                                "and qualification removal could not be persisted: "
+                                f"{suspension_error}"
+                            )
+                    recorder = {
+                        "ur5e": self._record_ur5e_robot_function_result,
+                        "xarm6": self._record_xarm6_robot_function_result,
+                    }.get(robot)
+                    if recorder is not None:
+                        recorder(
+                            resource_agent,
+                            function_name,
+                            failed=True,
+                        )
+                    failed_result = {
+                        **result,
+                        "success": False,
+                        "status": "failed",
+                        "message": (
+                            f"{completion_error} Physical state may have changed; inspect "
+                            "the robot and recover before retrying."
+                            + (
+                                " Automatic move_insert is suspended in this UI "
+                                "process, but persisted qualification removal failed: "
+                                f"{suspension_error}"
+                                if suspension_error
+                                else ""
+                            )
+                        ),
+                    }
+                    function_results[-1] = failed_result
+                    self._assembly_failed_function = function_name
+                    return {
+                        **base,
+                        "assembly_step_index": step_index,
+                        "completed_functions": list(completed_functions),
+                        "failed_function": function_name,
+                        "function_results": function_results,
+                        "state": state,
+                        "status": "failed",
+                        "message": failed_result["message"],
+                    }
+
+                completed_functions.append(function_name)
+                self._assembly_completed_functions = list(completed_functions)
+
+            resource_agent = execution_context.get("resource_agent")
+            final_state = str(
+                getattr(resource_agent, "_current_state", "") or ""
+            ).strip()
+            return {
+                **base,
+                "success": True,
+                "assembly_step_index": assembly_step_count,
+                "completed_functions": list(completed_functions),
+                "function_results": function_results,
+                "state": final_state,
+                "status": "completed",
+                "message": "Assembly completed.",
+            }
+        except asyncio.CancelledError:
+            self._assembly_failed_function = current_function
+            release_lock_here = False
+            raise
+        finally:
+            if release_lock_here:
+                self._ur5e_robot_function_execution_active = None
+                self._ur5e_robot_function_execution_stage = ""
+                self._ur5e_robot_function_execution_started_at = 0.0
+                self._robot_function_execution_robot = ""
+                self._robot_function_execution_active_step = ""
+                self._assembly_move_insert_profile_sha256 = ""
+                self._assembly_move_insert_effective = {}
                 lock.release()
 
     async def digital_twin_execute_pick_approach(
@@ -15398,6 +30975,7 @@ class SystemBridge:
         step_name: str,
         part_name: str,
         robot: str = "",
+        computed_source: str = "resolve",
     ) -> dict[str, Any]:
         """Resolve the current world reference used by one relative capture."""
         controller = getattr(resource_agent, "_controller", None)
@@ -15576,7 +31154,28 @@ class SystemBridge:
                                 f"{robot_key}; use Locate & Accept Board again."
                             ),
                         }
-                    live_pose_ready = bool(board_status.get("ready_to_accept"))
+                    if computed_source == "test_position" and bool(
+                        board_status.get("excessive_movement")
+                    ):
+                        return {
+                            "success": False,
+                            "message": (
+                                "Test Position is blocked because the current passive "
+                                "ArUco view differs from the accepted assembly_board-v1 "
+                                "pose by more than 10 mm or 2 deg. Use confirmed Run "
+                                "place_approach to stage and reaccept a fresh observation."
+                            ),
+                        }
+                    # Capture Pose records a correction against the explicit
+                    # accepted board authority, never a passive cross-view sample.
+                    capture_uses_accepted_pose = bool(
+                        computed_source == "capture"
+                        and board_status.get("accepted_baseline_ready")
+                    )
+                    live_pose_ready = bool(
+                        board_status.get("ready_to_accept")
+                        and not capture_uses_accepted_pose
+                    )
                     if live_pose_ready and board_status.get("movement_blocked"):
                         return {
                             "success": False,
@@ -15823,6 +31422,78 @@ class SystemBridge:
             "qw": relative_quaternion[3],
         }
 
+    @staticmethod
+    def _robot_function_pose_from_reference(
+        reference_pose: dict[str, Any],
+        relative_pose: dict[str, Any],
+    ) -> dict[str, float]:
+        """Return world_T_tool for finite world_T_reference and reference_T_tool poses."""
+        fields = ("x", "y", "z", "qx", "qy", "qz", "qw")
+        try:
+            reference = {field: float(reference_pose[field]) for field in fields}
+            relative = {field: float(relative_pose[field]) for field in fields}
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if not all(
+            math.isfinite(value)
+            for value in (*reference.values(), *relative.values())
+        ):
+            return {}
+
+        def _normalized_quaternion(
+            pose: dict[str, float],
+        ) -> tuple[float, float, float, float]:
+            quaternion = tuple(pose[field] for field in ("qx", "qy", "qz", "qw"))
+            norm = math.sqrt(sum(value * value for value in quaternion))
+            if norm <= 1e-12:
+                raise ValueError("quaternion norm is zero")
+            return tuple(value / norm for value in quaternion)
+
+        def _multiply(
+            left: tuple[float, float, float, float],
+            right: tuple[float, float, float, float],
+        ) -> tuple[float, float, float, float]:
+            lx, ly, lz, lw = left
+            rx, ry, rz, rw = right
+            return (
+                lw * rx + lx * rw + ly * rz - lz * ry,
+                lw * ry - lx * rz + ly * rw + lz * rx,
+                lw * rz + lx * ry - ly * rx + lz * rw,
+                lw * rw - lx * rx - ly * ry - lz * rz,
+            )
+
+        try:
+            reference_quaternion = _normalized_quaternion(reference)
+            relative_quaternion = _normalized_quaternion(relative)
+        except ValueError:
+            return {}
+        rotated = _multiply(
+            _multiply(
+                reference_quaternion,
+                (relative["x"], relative["y"], relative["z"], 0.0),
+            ),
+            (
+                -reference_quaternion[0],
+                -reference_quaternion[1],
+                -reference_quaternion[2],
+                reference_quaternion[3],
+            ),
+        )
+        quaternion = _multiply(reference_quaternion, relative_quaternion)
+        quaternion_norm = math.sqrt(sum(value * value for value in quaternion))
+        if quaternion_norm <= 1e-12:
+            return {}
+        quaternion = tuple(value / quaternion_norm for value in quaternion)
+        return {
+            "x": reference["x"] + rotated[0],
+            "y": reference["y"] + rotated[1],
+            "z": reference["z"] + rotated[2],
+            "qx": quaternion[0],
+            "qy": quaternion[1],
+            "qz": quaternion[2],
+            "qw": quaternion[3],
+        }
+
     def digital_twin_capture_function_step(  # noqa: C901, PLR0912
         self,
         target: str,
@@ -15833,7 +31504,28 @@ class SystemBridge:
         primitive: str = "move_cartesian",
         *,
         part_name: str = "",
+        operator_confirmed_held_part: bool = False,
+        operator_handoff_origin_resource_location: str = "",
     ) -> dict[str, Any]:
+        if not isinstance(operator_confirmed_held_part, bool):
+            return {
+                "success": False,
+                "message": "operator_confirmed_held_part must be an exact boolean.",
+            }
+        if operator_confirmed_held_part and not (
+            str(robot or "") == "ur5e"
+            and str(function_name or "") == "place_approach"
+            and str(name or "") == "assembly_board-v1"
+            and str(part_name or "") in _MOVE_INSERT_SUPPORTED_PARTS
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "operator_confirmed_held_part Capture Pose is available only for "
+                    "physical ur5e place_approach at assembly_board-v1 with exact "
+                    "supported part_name."
+                ),
+            }
         cfg, err = self._robot_function_validate_request(target, robot, function_name)
         if err or cfg is None:
             return {"success": False, "message": err}
@@ -15882,11 +31574,13 @@ class SystemBridge:
                 "message": f"Physical robot motion is already active: {active}.",
                 "active_function": active,
             }
-        resource_agent = (
-            self._physical_ur5e_robot_agent()
-            if robot_key == "ur5e"
-            else self._physical_xarm6_robot_agent()
-        )
+        resource_agent = self._physical_robot_agent(robot_key)
+        if resource_agent is None:
+            execution_lock.release()
+            return {
+                "success": False,
+                "message": f"No configured physical RobotAgent is available for {robot_key}.",
+            }
         agent_motion_lock = getattr(resource_agent, "_robot_motion_lock", None)
         agent_lock_acquired = False
         if agent_motion_lock is not None:
@@ -15904,22 +31598,121 @@ class SystemBridge:
         )
         readiness: dict[str, Any] = {}
         resolved: dict[str, Any] = {}
+        missing_task_context = object()
+        remembered_task_context = getattr(
+            resource_agent,
+            "_task_ctx",
+            missing_task_context,
+        )
         try:
             with self._ur5e_robot_function_preflight_lock:
                 readiness = self._robot_function_capture_snapshot(target, robot_key)
                 if readiness.get("success"):
-                    resolved = self._resolve_robot_function_position(
-                        target,
-                        robot_key,
-                        function_name,
-                        name,
-                        step_key,
-                        part_name=str(part_name or "").strip(),
-                        readiness=readiness,
-                        resource_agent=resource_agent,
-                        computed_source="capture",
-                    )
+                    if operator_confirmed_held_part:
+                        held_part = getattr(resource_agent, "_held_part", None)
+                        task_context = dict(
+                            getattr(resource_agent, "_task_ctx", {}) or {}
+                        )
+                        active_pick_context = bool(
+                            held_part not in (None, "")
+                            or task_context.get("part_name") not in (None, "")
+                            or task_context.get("origin_resource_location")
+                            not in (None, "")
+                        )
+                        if active_pick_context:
+                            resolved = {
+                                "success": False,
+                                "message": (
+                                    "operator_confirmed_held_part Capture Pose cannot "
+                                    "replace existing RobotAgent custody or an active pick "
+                                    "context."
+                                ),
+                            }
+                        else:
+                            try:
+                                product_geometry = (
+                                    self._robot_function_product_geometry_for_part(
+                                        str(part_name or "")
+                                    )
+                                )
+                            except Exception as exc:  # noqa: BLE001 - manifest boundary.
+                                resolved = {
+                                    "success": False,
+                                    "message": (
+                                        "Could not resolve product geometry for "
+                                        f"{str(part_name or '')}: "
+                                        f"{exc}"
+                                    ),
+                                }
+                            else:
+                                handoff, handoff_readiness, handoff_error = (
+                                    self._operator_confirmed_mg_held_part_handoff(
+                                        target,
+                                        resource_agent,
+                                        origin_resource_location=(
+                                            operator_handoff_origin_resource_location
+                                        ),
+                                        part_name=str(part_name or ""),
+                                        product_geometry=product_geometry,
+                                    )
+                                )
+                                readiness.update(handoff_readiness)
+                                if handoff_error:
+                                    resolved = {
+                                        "success": False,
+                                        "message": handoff_error,
+                                    }
+                                else:
+                                    resource_agent._task_ctx = {
+                                        "part_name": str(part_name or ""),
+                                        "model_name": str(
+                                            product_geometry.get("model_name") or ""
+                                        ),
+                                        "origin_resource_location": handoff[
+                                            "origin_resource_location"
+                                        ],
+                                        "origin_pose": deepcopy(
+                                            handoff[
+                                                "world_held_part_pose_at_grasp"
+                                            ]
+                                        ),
+                                        "origin_pose_provenance": deepcopy(
+                                            handoff["origin_pose_provenance"]
+                                        ),
+                                        "resolved_cartesian_positions": {
+                                            "descend": deepcopy(
+                                                handoff["world_tool0_pose_at_grasp"]
+                                            )
+                                        },
+                                        "held_part_handoff": deepcopy(handoff),
+                                        "operator_confirmed_held_part": True,
+                                        "pick_approach_recording_path": handoff[
+                                            "pick_approach_recording_path"
+                                        ],
+                                        "pick_approach_recording_sha256": handoff[
+                                            "pick_approach_recording_sha256"
+                                        ],
+                                    }
+                    if not resolved:
+                        resolved = self._resolve_robot_function_position(
+                            target,
+                            robot_key,
+                            function_name,
+                            name,
+                            step_key,
+                            part_name=str(part_name or "").strip(),
+                            readiness=readiness,
+                            resource_agent=resource_agent,
+                            computed_source="capture",
+                        )
         finally:
+            if remembered_task_context is missing_task_context:
+                try:
+                    delattr(resource_agent, "_task_ctx")
+                except AttributeError:
+                    pass
+            else:
+                resource_agent._task_ctx = remembered_task_context
             self._ur5e_robot_function_execution_active = None
             if agent_lock_acquired:
                 agent_motion_lock.release()
@@ -15950,39 +31743,24 @@ class SystemBridge:
             str(part_name or "").strip(),
         )
         relative_reference = dict(resolved.get("computed_reference") or {})
-        relative_pose: dict[str, float] = {}
-        if (
-            function_name == "place_approach"
-            and str(name or "").strip() == "assembly_board-v1"
-        ):
-            board_pose = dict(relative_reference.get("pose") or {})
-            relative_pose = self._robot_function_pose_relative_to_reference(
-                board_pose,
-                pose,
-            )
-            if (
-                str(relative_reference.get("kind") or "") != "destination_target"
-                or str(relative_reference.get("frame_id") or "") != "world"
-                or str(relative_reference.get("name") or "") != "assembly_board-v1"
-                or str(relative_reference.get("source") or "")
-                != "assembly_board-v1_aruco"
-                or str(relative_reference.get("camera_role") or "") != robot_key
-                or not relative_reference.get("generation")
-                or not relative_pose
-            ):
-                return {
-                    "success": False,
-                    "message": (
-                        "Capture Pose did not buffer place_approach: Locate & Accept Board "
-                        f"for {robot_key} so the full assembly_board-v1 ArUco relative "
-                        "pose is available."
-                    ),
-                    "readiness": readiness,
-                }
         try:
+            raw_computed_pose = dict(resolved["computed_position"])
+            computed_pose = {
+                field: float(raw_computed_pose[field])
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            }
+            quaternion_norm = math.sqrt(
+                sum(
+                    computed_pose[field] ** 2
+                    for field in ("qx", "qy", "qz", "qw")
+                )
+            )
+            if not math.isfinite(quaternion_norm) or quaternion_norm <= 1e-12:
+                raise ValueError("computed quaternion is invalid")
+            for field in ("qx", "qy", "qz", "qw"):
+                computed_pose[field] /= quaternion_norm
             computed_position_m = {
-                field: float(dict(resolved["computed_position"])[field])
-                for field in ("x", "y", "z")
+                field: computed_pose[field] for field in ("x", "y", "z")
             }
             computed_at = float(resolved["computed_at"])
             computed_pose_delta_m = {
@@ -15995,6 +31773,57 @@ class SystemBridge:
                 "message": (
                     f"The computed pose for {function_name}.{step_key} is invalid. "
                     "No pose was buffered."
+                ),
+                "readiness": readiness,
+            }
+        relative_pose = self._robot_function_pose_relative_to_reference(
+            computed_pose,
+            pose,
+        )
+        if not relative_pose:
+            return {
+                "success": False,
+                "message": (
+                    f"The Cartesian correction for {function_name}.{step_key} is invalid. "
+                    "No pose was buffered."
+                ),
+                "readiness": readiness,
+            }
+        reconstructed_pose = self._robot_function_pose_from_reference(
+            computed_pose,
+            relative_pose,
+        )
+        try:
+            captured_quaternion = tuple(
+                float(pose[field]) for field in ("qx", "qy", "qz", "qw")
+            )
+            captured_quaternion_norm = math.sqrt(
+                sum(value * value for value in captured_quaternion)
+            )
+            reconstructed_alignment = abs(
+                sum(
+                    reconstructed_pose[field]
+                    * captured_quaternion[index]
+                    / captured_quaternion_norm
+                    for index, field in enumerate(("qx", "qy", "qz", "qw"))
+                )
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            reconstructed_alignment = -1.0
+        if (
+            not reconstructed_pose
+            or any(
+                abs(reconstructed_pose[field] - float(pose[field])) > 1e-6
+                for field in ("x", "y", "z")
+            )
+            or 1.0 - reconstructed_alignment > 1e-6
+        ):
+            return {
+                "success": False,
+                "message": (
+                    f"The full computed_pose and relative_pose do not reconstruct the "
+                    f"captured waypoint for {function_name}.{step_key}. No pose was "
+                    "buffered."
                 ),
                 "readiness": readiness,
             }
@@ -16031,7 +31860,7 @@ class SystemBridge:
                 "success": False,
                 "message": (
                     f"Capture Pose did not buffer {function_name}.{step_key}: the current "
-                    f"world -> {'tool0' if robot_key == 'ur5e' else 'link_eef'} pose is not "
+                    f"world -> {pose.get('child_frame_id') or 'ee_link'} pose is not "
                     "near its freshly computed pose. "
                     f"Offset X={offset_mm['x']:+.1f} mm, Y={offset_mm['y']:+.1f} mm, "
                     f"Z={offset_mm['z']:+.1f} mm; {largest_axis.upper()} exceeds the "
@@ -16047,11 +31876,7 @@ class SystemBridge:
                 "relative_position_m": computed_pose_delta_m,
                 "readiness": readiness,
             }
-        relative_position_m = (
-            {field: relative_pose[field] for field in ("x", "y", "z")}
-            if relative_pose
-            else computed_pose_delta_m
-        )
+        relative_position_m = computed_pose_delta_m
         step = {
             "step_name": step_key,
             "primitive": primitive,
@@ -16066,8 +31891,10 @@ class SystemBridge:
             "relative_position_m": relative_position_m,
             "relative_reference": relative_reference,
             "computed_position_m": computed_position_m,
+            "computed_pose": computed_pose,
             "computed_source": str(resolved.get("computed_source") or "capture"),
             "computed_at": computed_at,
+            "confirmed": False,
             "waypoint": {
                 "joint_names": list(waypoint.get("joint_names") or []),
                 "joint_positions": [float(v) for v in (waypoint.get("positions") or [])],
@@ -16077,8 +31904,7 @@ class SystemBridge:
                 "source": source,
             },
         }
-        if relative_pose:
-            step["relative_pose"] = relative_pose
+        step["relative_pose"] = relative_pose
         with self._digital_twin_record_lock:
             steps = self._digital_twin_function_steps.setdefault(key, [])
             steps[:] = [item for item in steps if str(item.get("step_name") or "") != step_key]
@@ -16093,12 +31919,7 @@ class SystemBridge:
             "success": True,
             "message": (
                 f"captured robot pose for {robot_key} {function_name}.{step['step_name']} "
-                + (
-                    "relative to assembly_board-v1 ArUco with pose "
-                    if relative_pose
-                    else "relative to its computed pose with offset "
-                )
-                +
+                "relative to its computed pose with correction "
                 f"X={relative_position_m['x'] * 1000.0:+.1f} mm, "
                 f"Y={relative_position_m['y'] * 1000.0:+.1f} mm, "
                 f"Z={relative_position_m['z'] * 1000.0:+.1f} mm; use Save/Replace Pose "
@@ -16106,6 +31927,7 @@ class SystemBridge:
             ),
             "count": count,
             "computed_position_m": computed_position_m,
+            "computed_pose": computed_pose,
             "current_position_m": {
                 field: float(pose[field]) for field in ("x", "y", "z")
             },
@@ -16185,6 +32007,7 @@ class SystemBridge:
         steps: list[dict[str, Any]],
         *,
         part_name: str = "",
+        existing_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         storage_source = self._robot_function_storage_source(target, cfg)
         replay_targets = ["gazebo"] if storage_source == "gazebo" else ["hardware", "digital_twin"]
@@ -16194,20 +32017,182 @@ class SystemBridge:
             if waypoint.get("source"):
                 capture_source = str(waypoint.get("source") or capture_source)
                 break
-        payload = {
-            "robot": str(robot or "").strip().lower(),
-            "function_name": self._robot_function_safe_function_name(function_name),
+        robot_key = str(robot or "").strip().lower()
+        function_key = self._robot_function_safe_function_name(function_name)
+        if function_key in {
+            "pick_approach",
+            "place_approach",
+        }:
+            payload = deepcopy(dict(existing_payload or {}))
+            payload.update(
+                {
+                    "function_name": function_key,
+                    "capture_source": capture_source,
+                    "replay_targets": replay_targets,
+                }
+            )
+            payload.pop("robot", None)
+            payload.pop("name", None)
+            payload.pop("part_name", None)
+            resource_agent = self._physical_robot_agent(robot_key)
+            controller = getattr(resource_agent, "_controller", None)
+            controller_config = dict(
+                getattr(resource_agent, "controller_config", {})
+                or getattr(controller, "controller_config", {})
+                or {}
+            )
+            move_group = dict(controller_config.get("move_group") or {})
+            first_pose = next(
+                (
+                    dict(dict(step.get("waypoint") or {}).get("pose") or {})
+                    for step in steps
+                    if dict(dict(step.get("waypoint") or {}).get("pose") or {})
+                ),
+                {},
+            )
+            frame_id = str(
+                getattr(controller, "frame_id", "")
+                or move_group.get("frame_id")
+                or first_pose.get("frame_id")
+                or "world"
+            ).strip()
+            ee_link = str(
+                getattr(controller, "ee_link", "")
+                or move_group.get("ee_link")
+                or first_pose.get("child_frame_id")
+            ).strip()
+            tcp_link = str(
+                getattr(controller, "tcp_link", "")
+                or move_group.get("tcp_link")
+                or ee_link
+            ).strip()
+            robots = dict(payload.get("robots") or {})
+            robots[robot_key] = {
+                "frame_id": frame_id,
+                "ee_link": ee_link,
+                "tcp_link": tcp_link,
+                "steps": deepcopy(steps),
+            }
+            payload["robots"] = robots
+            return payload
+        return {
+            "robot": robot_key,
+            "function_name": function_key,
             "name": str(name or "").strip() or "default",
             "capture_source": capture_source,
             "replay_targets": replay_targets,
             "steps": deepcopy(steps),
         }
-        if self._robot_function_safe_function_name(function_name) in {
-            "pick_approach",
-            "place_approach",
-        }:
-            payload["part_name"] = str(part_name or "").strip()
-        return payload
+
+    def _refresh_retained_place_approach_descend_after_save(
+        self,
+        *,
+        robot: str,
+        function_name: str,
+        name: str,
+        part_name: str,
+        captured: dict[str, Any],
+    ) -> bool:
+        """Refresh one active UR5e place context after replacing ``descend``.
+
+        Saving a replacement waypoint commands no motion. When the exact held-part
+        context is still positioned, the captured hardware pose becomes the repeat
+        ``place_approach`` start pose immediately. Board and ``move_insert`` fields
+        remain invalid until that repeat finishes.
+        """
+        if (
+            robot != "ur5e"
+            or function_name != "place_approach"
+            or name != "assembly_board-v1"
+            or not part_name
+            or str(captured.get("capture_source") or "") != "hardware"
+        ):
+            return False
+        resource_agent = self._physical_ur5e_robot_agent()
+        if (
+            resource_agent is None
+            or str(getattr(resource_agent, "execution_mode", "") or "")
+            != "physical"
+            or str(getattr(resource_agent, "_current_state", "") or "")
+            != "positioned"
+            or str(getattr(resource_agent, "_held_part", "") or "")
+            != part_name
+            or str(getattr(resource_agent, "_gripper_state", "") or "")
+            != "closed"
+        ):
+            return False
+
+        task_context = deepcopy(
+            dict(getattr(resource_agent, "_task_ctx", {}) or {})
+        )
+        if (
+            str(task_context.get("destination_location") or "") != name
+            or str(task_context.get("part_name") or "") != part_name
+            or self._physical_ur5e_place_approach_handoff_error(
+                task_context,
+                part_name=part_name,
+            )
+        ):
+            return False
+        retained_results = (
+            task_context.get("move_insert_result"),
+            task_context.get("move_insert_trial_result"),
+        )
+        if any(
+            isinstance(result, dict)
+            and (
+                result.get("state_uncertain") is True
+                or result.get("engagement_detected") is True
+                or result.get("seated_detected") is True
+            )
+            for result in retained_results
+        ):
+            return False
+
+        waypoint = dict(captured.get("waypoint") or {})
+        raw_pose = dict(waypoint.get("pose") or {})
+        if (
+            str(waypoint.get("source") or "") != "hardware"
+            or str(raw_pose.get("frame_id") or "") != "world"
+            or str(raw_pose.get("child_frame_id") or "") != "tool0"
+        ):
+            return False
+        descend, pose_error = self._insertion_demonstration_pose(
+            raw_pose,
+            label="saved place_approach.descend world -> tool0 pose",
+        )
+        if pose_error:
+            return False
+
+        retained_positions = deepcopy(
+            dict(task_context.get("resolved_cartesian_positions") or {})
+        )
+        retained_positions["descend"] = descend
+        retained_positions.pop("move_insert", None)
+        task_context["resolved_cartesian_positions"] = retained_positions
+        task_context["pre_insert_pose"] = deepcopy(descend)
+        for stale_field in (
+            "computed_cartesian_positions",
+            "computed_cartesian_reference",
+            "computed_cartesian_at",
+            "assembly_board_v1_aruco",
+            "assembly_board_v1_aruco_generation",
+            "move_insert_profile",
+            "move_insert_profile_sha256",
+            "move_insert_mode",
+            "move_insert_timeout_sec",
+            "insert_pose",
+            "insertion_axis_world",
+            "move_insert_hard_caps",
+            "move_insert_hard_caps_sha256",
+            "move_insert_boundary_ready",
+            "move_insert_boundary_error",
+            "move_insert_boundary_metrics",
+            "move_insert_qualification_error",
+        ):
+            task_context.pop(stale_field, None)
+        resource_agent._task_ctx = task_context
+        return True
 
     def digital_twin_save_function(
         self,
@@ -16242,6 +32227,8 @@ class SystemBridge:
         )
         with self._digital_twin_record_lock:
             unsaved_steps = deepcopy(list(self._digital_twin_function_steps.get(key, [])))
+        for step in unsaved_steps:
+            step["confirmed"] = True
         storage_source = self._robot_function_storage_source(target, cfg)
         path = self._robot_function_path(
             robot,
@@ -16251,19 +32238,24 @@ class SystemBridge:
             part_key,
         )
         saved_steps: list[dict[str, Any]] = []
+        existing_payload: dict[str, Any] = {}
         if path.is_file():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(existing, dict):
+                    existing_payload = dict(existing)
                     identity_error = self._robot_function_payload_identity_error(
                         existing,
                         function_key,
                         name,
                         part_key,
+                        robot=robot,
                     )
                     if identity_error:
                         return {"success": False, "message": identity_error}
-                    saved_steps = deepcopy(list(existing.get("steps") or []))
+                    saved_steps = deepcopy(
+                        self._robot_function_payload_steps(existing, function_key, robot)
+                    )
             except (OSError, json.JSONDecodeError, TypeError):
                 saved_steps = []
         by_step_name: dict[str, dict[str, Any]] = {}
@@ -16289,20 +32281,47 @@ class SystemBridge:
             str(name or "").strip(),
             steps,
             part_name=part_key,
+            existing_payload=existing_payload,
         )
         atomic_json_write(path, payload)
         with self._digital_twin_record_lock:
             self._digital_twin_function_steps.pop(key, None)
+        refreshed_descend = False
+        saved_descend = next(
+            (
+                dict(step)
+                for step in unsaved_steps
+                if str(dict(step).get("step_name") or "") == "descend"
+            ),
+            None,
+        )
+        if saved_descend is not None:
+            refreshed_descend = (
+                self._refresh_retained_place_approach_descend_after_save(
+                    robot=str(robot or ""),
+                    function_name=function_key,
+                    name=str(name or ""),
+                    part_name=part_key,
+                    captured=saved_descend,
+                )
+            )
         return {
             "success": True,
             "message": (
                 f"saved or replaced {len(unsaved_steps)} position(s) in "
                 f"{self._robot_function_display_path(path)}"
+                + (
+                    "; refreshed the retained place_approach.descend. Run "
+                    "place_approach before place_insert."
+                    if refreshed_descend
+                    else ""
+                )
             ),
             "file": str(path),
             "display_path": self._robot_function_display_path(path),
             "saved_steps": len(steps),
             "unsaved_steps": 0,
+            "retained_descend_refreshed": refreshed_descend,
         }
 
     def digital_twin_save_function_position(
@@ -16350,6 +32369,7 @@ class SystemBridge:
                 "success": False,
                 "message": f"Capture {function_key}.{step_key} before saving it.",
             }
+        captured["confirmed"] = True
 
         storage_source = self._robot_function_storage_source(target, cfg)
         path = self._robot_function_path(
@@ -16360,18 +32380,25 @@ class SystemBridge:
             part_key,
         )
         existing_steps: list[dict[str, Any]] = []
+        existing_payload: dict[str, Any] = {}
         if path.is_file():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
+                existing_payload = dict(existing)
                 identity_error = self._robot_function_payload_identity_error(
                     dict(existing),
                     function_key,
                     name,
                     part_key,
+                    robot=robot,
                 )
                 if identity_error:
                     return {"success": False, "message": identity_error}
-                existing_steps = [dict(step) for step in list(dict(existing).get("steps") or [])]
+                existing_steps = self._robot_function_payload_steps(
+                    dict(existing),
+                    function_key,
+                    robot,
+                )
             except (OSError, json.JSONDecodeError) as exc:
                 return {"success": False, "message": f"could not read {path.name}: {exc}"}
         by_step_name = {
@@ -16396,6 +32423,7 @@ class SystemBridge:
             str(name or "").strip(),
             steps,
             part_name=part_key,
+            existing_payload=existing_payload,
         )
         atomic_json_write(path, payload)
         with self._digital_twin_record_lock:
@@ -16408,15 +32436,32 @@ class SystemBridge:
                 self._digital_twin_function_steps[key] = remaining
             else:
                 self._digital_twin_function_steps.pop(key, None)
+        refreshed_descend = bool(
+            step_key == "descend"
+            and self._refresh_retained_place_approach_descend_after_save(
+                robot=str(robot or ""),
+                function_name=function_key,
+                name=str(name or ""),
+                part_name=part_key,
+                captured=captured,
+            )
+        )
         return {
             "success": True,
             "message": (
                 f"saved or replaced {function_key}.{step_key} in "
                 f"{self._robot_function_display_path(path)}"
+                + (
+                    "; refreshed the retained place_approach.descend. Run "
+                    "place_approach before place_insert."
+                    if refreshed_descend
+                    else ""
+                )
             ),
             "file": str(path),
             "display_path": self._robot_function_display_path(path),
             "saved_steps": len(steps),
+            "retained_descend_refreshed": refreshed_descend,
         }
 
     def digital_twin_update_function_position_axes(
@@ -16445,20 +32490,22 @@ class SystemBridge:
                 "success": False,
                 "message": f"{function_name}.{step_key} is not a move_cartesian step.",
             }
+        if self._robot_function_safe_function_name(function_name) in {
+            "pick_approach",
+            "place_approach",
+        }:
+            return {
+                "success": False,
+                "message": (
+                    f"{function_name} uses a computed Cartesian target plus an optional "
+                    "captured robot correction. Capture Pose again instead of editing "
+                    "absolute position axes."
+                ),
+            }
         sources = {
             field: str(dict(position_sources or {}).get(field) or "").strip()
             for field in ("x", "y", "z")
         }
-        if function_name == "pick_approach" and str(part_name or "").strip() == "MG" and any(
-            source != "computed" for source in sources.values()
-        ):
-            return {
-                "success": False,
-                "message": (
-                    "physical MG pick_approach requires computed x, y, and z; "
-                    "the captured pose supplies orientation only."
-                ),
-            }
         invalid_sources = [
             field
             for field, source in sources.items()
@@ -16520,13 +32567,18 @@ class SystemBridge:
                     function_key,
                     name,
                     part_key,
+                    robot=robot,
                 )
                 if identity_error:
                     return {"success": False, "message": identity_error}
             step = next(
                 (
                     dict(item)
-                    for item in list(payload.get("steps") or [])
+                    for item in self._robot_function_payload_steps(
+                        payload,
+                        function_key,
+                        robot,
+                    )
                     if str(dict(item).get("step_name") or "") == step_key
                 ),
                 None,
@@ -16633,16 +32685,36 @@ class SystemBridge:
                 function_key,
                 name,
                 part_key,
+                robot=robot,
             )
             if identity_error:
                 return {"success": False, "message": identity_error}
+            saved_steps = self._robot_function_payload_steps(
+                dict(payload),
+                function_key,
+                robot,
+            )
             steps = [
                 dict(step)
-                for step in list(dict(payload).get("steps") or [])
+                for step in saved_steps
                 if str(dict(step).get("step_name") or "") != step_key
             ]
-            removed = removed or len(steps) != len(list(dict(payload).get("steps") or []))
-            if steps:
+            removed = removed or len(steps) != len(saved_steps)
+            if function_key in {"pick_approach", "place_approach"}:
+                robots = dict(dict(payload).get("robots") or {})
+                robot_key = str(robot or "").strip().lower()
+                entry = dict(robots.get(robot_key) or {})
+                if steps:
+                    entry["steps"] = steps
+                    robots[robot_key] = entry
+                else:
+                    robots.pop(robot_key, None)
+                if robots:
+                    payload["robots"] = robots
+                    atomic_json_write(path, payload)
+                else:
+                    path.unlink(missing_ok=True)
+            elif steps:
                 payload["steps"] = steps
                 atomic_json_write(path, payload)
             else:
@@ -16678,11 +32750,7 @@ class SystemBridge:
             return {"success": False, "message": part_error}
         robot_key = str(robot or "").strip().lower()
         if resource_agent is None:
-            resource_agent = (
-                self._physical_ur5e_robot_agent()
-                if robot_key == "ur5e"
-                else self._physical_xarm6_robot_agent()
-            )
+            resource_agent = self._physical_robot_agent(robot_key)
         if resource_agent is None:
             return {
                 "success": False,
@@ -16717,16 +32785,12 @@ class SystemBridge:
         cartesian_error = self._physical_robot_function_cartesian_error(robot_key)
         if cartesian_error:
             return {"success": False, "message": cartesian_error}
+        uncertain_attribute = {
+            "ur5e": "_ur5e_robot_function_state_uncertain",
+            "xarm6": "_xarm6_robot_function_state_uncertain",
+        }.get(robot_key)
         state_uncertain = bool(
-            getattr(
-                self,
-                (
-                    "_ur5e_robot_function_state_uncertain"
-                    if robot_key == "ur5e"
-                    else "_xarm6_robot_function_state_uncertain"
-                ),
-                False,
-            )
+            getattr(self, uncertain_attribute, False) if uncertain_attribute else False
         )
         if state_uncertain:
             return {
@@ -16782,6 +32846,7 @@ class SystemBridge:
                 step_name=step_key,
                 part_name=str(part_name or "").strip(),
                 robot=robot_key,
+                computed_source=computed_source,
             )
             if not reference_result.get("success"):
                 return dict(reference_result)
@@ -16797,6 +32862,7 @@ class SystemBridge:
                 step_name=step_key,
                 part_name=str(part_name or "").strip(),
                 robot=robot_key,
+                computed_source=computed_source,
             )
             if not reference_result.get("success"):
                 return dict(reference_result)
@@ -16981,7 +33047,7 @@ class SystemBridge:
         if part_error:
             return {"success": False, "message": part_error}
         robot_key = str(robot or "").strip().lower()
-        if self._xarm6_cartesian_session_mode() != "off":
+        if robot_key == "xarm6" and self._xarm6_cartesian_session_mode() != "off":
             closed, close_message = self.teleop_cartesian_mode("xarm6", "off")
             if not closed:
                 return {
@@ -16991,11 +33057,7 @@ class SystemBridge:
                         f"Test Position: {close_message}"
                     ),
                 }
-        resource_agent = (
-            self._physical_ur5e_robot_agent()
-            if robot_key == "ur5e"
-            else self._physical_xarm6_robot_agent()
-        )
+        resource_agent = self._physical_robot_agent(robot_key)
         if resource_agent is None:
             return {
                 "success": False,
@@ -17056,11 +33118,23 @@ class SystemBridge:
                 cfg,
                 resource_agent,
             )
-        else:
+        elif robot_key == "xarm6":
             motion_readiness, motion_error = self._digital_twin_xarm6_motion_readiness(
                 target,
                 cfg,
                 resource_agent,
+            )
+        else:
+            controller = getattr(resource_agent, "_controller", None)
+            is_usable = getattr(controller, "is_usable", None)
+            controller_ready = controller is not None and (
+                not callable(is_usable) or bool(is_usable())
+            )
+            motion_readiness = {"controller_ready": controller_ready}
+            motion_error = (
+                ""
+                if controller_ready
+                else f"The physical {robot_key} controller is not ready."
             )
         if motion_error:
             return {"success": False, "message": motion_error, **motion_readiness}
@@ -17102,7 +33176,7 @@ class SystemBridge:
             log.exception("physical function position test failed")
             if robot_key == "ur5e":
                 self._ur5e_robot_function_state_uncertain = True
-            else:
+            elif robot_key == "xarm6":
                 self._xarm6_robot_function_state_uncertain = True
             return {"success": False, "message": str(exc)}
         finally:
@@ -17117,7 +33191,7 @@ class SystemBridge:
         if not bool(normalized_result.get("success")):
             if robot_key == "ur5e":
                 self._ur5e_robot_function_state_uncertain = True
-            else:
+            elif robot_key == "xarm6":
                 self._xarm6_robot_function_state_uncertain = True
         return normalized_result
 
@@ -17152,9 +33226,32 @@ class SystemBridge:
             function_name,
             name,
             part_name,
+            robot=robot,
         )
         if identity_error:
             return {"success": False, "message": identity_error}
+        function_key = self._robot_function_safe_function_name(function_name)
+        if function_key in {"pick_approach", "place_approach"}:
+            robots = dict(payload.get("robots") or {})
+            robot_key = str(robot or "").strip().lower()
+            if robot_key not in robots:
+                return {
+                    "success": False,
+                    "message": f"{robot_key} has no saved correction for {function_key}.",
+                }
+            robots.pop(robot_key)
+            if robots:
+                payload["robots"] = robots
+                atomic_json_write(path, payload)
+            else:
+                path.unlink()
+            return {
+                "success": True,
+                "message": (
+                    f"deleted {robot_key} correction from "
+                    f"{self._robot_function_display_path(path)}"
+                ),
+            }
         try:
             path.unlink()
         except Exception as exc:
@@ -17244,6 +33341,7 @@ class SystemBridge:
             function_name,
             name,
             part_name,
+            robot=robot,
         )
         if identity_error:
             return None, path, identity_error
@@ -17263,6 +33361,17 @@ class SystemBridge:
         replay_target: str = "twin",
         repeat_count: int = 1,
     ) -> dict[str, Any]:
+        if self._robot_function_safe_function_name(function_name) in {
+            "pick_approach",
+            "place_approach",
+        }:
+            return {
+                "success": False,
+                "message": (
+                    f"Raw waypoint Replay is disabled for {function_name}; use Preview, "
+                    "Test Position, or Function Run so current geometry is resolved."
+                ),
+            }
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
@@ -17306,6 +33415,17 @@ class SystemBridge:
         part_name: str = "",
         replay_target: str = "twin",
     ) -> dict[str, Any]:
+        if self._robot_function_safe_function_name(function_name) in {
+            "pick_approach",
+            "place_approach",
+        }:
+            return {
+                "success": False,
+                "message": (
+                    f"Raw waypoint Replay is disabled for {function_name}; use Preview, "
+                    "Test Position, or Function Run so current geometry is resolved."
+                ),
+            }
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
@@ -17465,6 +33585,18 @@ class SystemBridge:
         replay_target: str = "twin",
         repeat_count: int = 1,
     ) -> dict[str, Any]:
+        if {
+            self._robot_function_safe_function_name(xarm6_function_name),
+            self._robot_function_safe_function_name(ur5e_function_name),
+        } & {"pick_approach", "place_approach"}:
+            return {
+                "success": False,
+                "message": (
+                    "Raw waypoint Replay is disabled when either dual function is "
+                    "pick_approach or place_approach; use Function Run so current "
+                    "geometry is resolved."
+                ),
+            }
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
@@ -17519,6 +33651,18 @@ class SystemBridge:
         *,
         replay_target: str = "twin",
     ) -> dict[str, Any]:
+        if {
+            self._robot_function_safe_function_name(xarm6_function_name),
+            self._robot_function_safe_function_name(ur5e_function_name),
+        } & {"pick_approach", "place_approach"}:
+            return {
+                "success": False,
+                "message": (
+                    "Raw waypoint Replay is disabled when either selected dual step is "
+                    "from pick_approach or place_approach; use Function Run so current "
+                    "geometry is resolved."
+                ),
+            }
         cfg = self._digital_twin_target(target)
         if not cfg:
             return {"success": False, "message": f"unknown digital twin target: {target}"}
@@ -18560,7 +34704,24 @@ class SystemBridge:
             self._hardware_stack_lifecycle_lock = lifecycle_lock
         if not lifecycle_lock.acquire(blocking=False):
             return "Hardware Stack start or stop is already running."
+        execution_lock = self._get_robot_function_execution_lock()
+        execution_lock_acquired = False
         try:
+            execution_lock_acquired = bool(
+                execution_lock.acquire(blocking=False)
+            )
+            if not execution_lock_acquired:
+                return self._hardware_stack_lifecycle_motion_error(
+                    "start",
+                    key,
+                ) or (
+                    "Cannot start Hardware Stack while physical robot motion is active."
+                )
+            agent_motion_error = self._hardware_stack_agent_motion_error(
+                "start"
+            )
+            if agent_motion_error:
+                return agent_motion_error
             selected_stack = str(getattr(self, "_hardware_stack_selected", "") or "")
             lifecycle_state = str(
                 getattr(self, "_hardware_stack_lifecycle_state", "stopped") or "stopped"
@@ -18601,10 +34762,171 @@ class SystemBridge:
                 self._hardware_stack_last_error = ownership_error
                 self._record_hardware_stack_start_failure(key, ownership_error)
                 return ownership_error
+            if "ur5e" in starting_robots:
+                durable_uncertainty, durable_uncertainty_error = (
+                    self._read_ur5e_hardware_state_uncertainty()
+                )
+                if durable_uncertainty_error or durable_uncertainty is not None:
+                    uncertainty_reason = str(
+                        durable_uncertainty_error
+                        or dict(durable_uncertainty or {}).get("reason")
+                        or "UR5e physical state requires fresh stationary validation."
+                    )
+                    self._ur5e_robot_function_state_uncertain = True
+                    self._ur5e_robot_function_state_uncertain_reason = (
+                        uncertainty_reason
+                    )
+                    self._ur5e_cartesian_jog_state_uncertain = True
+                    self._ur5e_cartesian_jog_state_uncertain_reason = (
+                        uncertainty_reason
+                    )
+            pending_move_insert = (
+                self._move_insert_pending_review()
+                if "ur5e" in starting_robots
+                else None
+            )
+            move_insert_repair_pending = bool(
+                pending_move_insert is not None
+                and str(pending_move_insert.get("robot") or "") == "ur5e"
+                and (
+                    pending_move_insert.get("hardware_stack_repair_required")
+                    or pending_move_insert.get("normal_repair_required")
+                )
+            )
+            if "ur5e" in starting_robots and bool(
+                getattr(self, "_ur5e_robot_function_state_uncertain", False)
+                or getattr(self, "_ur5e_cartesian_jog_state_uncertain", False)
+                or move_insert_repair_pending
+            ):
+                generation = int(
+                    getattr(self, "_hardware_stack_lifecycle_generation", 0)
+                    or 0
+                )
+                stationary_error = self._validate_hardware_stationary(
+                    "ur5e",
+                    ros_domain_id=self._default_ros_domain_id(),
+                )
+                readiness = dict(
+                    self._hardware_cartesian_readiness_states().get("ur5e")
+                    or {}
+                )
+                if stationary_error:
+                    uncertainty_error = (
+                        "ur5e stationary feedback validation failed after Hardware "
+                        f"Stack startup: {stationary_error}"
+                    )
+                elif int(readiness.get("generation", -1)) != generation:
+                    uncertainty_error = (
+                        "ur5e Cartesian frame validation belongs to generation "
+                        f"{readiness.get('generation')}, expected {generation}"
+                    )
+                elif (
+                    readiness.get("cartesian_jog_ready") is not True
+                    or readiness.get("cartesian_function_ready") is not True
+                ):
+                    uncertainty_error = str(
+                        readiness.get("message")
+                        or "ur5e Cartesian frame validation failed"
+                    )
+                else:
+                    uncertainty_error = ""
+                if uncertainty_error:
+                    self._hardware_stack_lifecycle_state = "failed"
+                    self._hardware_stack_last_error = uncertainty_error
+                    self._record_hardware_stack_start_failure(
+                        key,
+                        uncertainty_error,
+                    )
+                    return uncertainty_error
+                uncertainty_clear_error = (
+                    self._clear_ur5e_hardware_state_uncertainty()
+                )
+                if uncertainty_clear_error:
+                    self._hardware_stack_lifecycle_state = "failed"
+                    self._hardware_stack_last_error = uncertainty_clear_error
+                    self._record_hardware_stack_start_failure(
+                        key,
+                        uncertainty_clear_error,
+                    )
+                    return uncertainty_clear_error
+                self._ur5e_robot_function_state_uncertain = False
+                self._ur5e_robot_function_state_uncertain_reason = ""
+                self._ur5e_cartesian_jog_state_uncertain = False
+                self._ur5e_cartesian_jog_state_uncertain_reason = ""
+            if move_insert_repair_pending:
+                move_insert_repair_error = (
+                    self._clear_move_insert_repair_gate_after_hardware_stack(
+                        hardware_stack=key,
+                        generation=int(
+                            getattr(
+                                self,
+                                "_hardware_stack_lifecycle_generation",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                )
+                if move_insert_repair_error:
+                    self._hardware_stack_lifecycle_state = "failed"
+                    self._hardware_stack_last_error = move_insert_repair_error
+                    self._record_hardware_stack_start_failure(
+                        key,
+                        move_insert_repair_error,
+                    )
+                    return move_insert_repair_error
             self._hardware_stack_lifecycle_state = "running"
             return None
         finally:
+            if execution_lock_acquired:
+                execution_lock.release()
             lifecycle_lock.release()
+
+    def _stop_ur5e_calibration_state_publisher_for_hardware_authority(
+        self,
+    ) -> str | None:
+        """Stop the standalone publisher before the Hardware Stack owns UR5e TF."""
+        process_name = "ur5e_calibration_state_publisher"
+        process_start_lock = getattr(self, "_ros2_process_start_lock", None)
+        if process_start_lock is None:
+            process_start_lock = threading.RLock()
+            self._ros2_process_start_lock = process_start_lock
+        with process_start_lock:
+            if self.ros2_proc_status(process_name) == "running":
+                tracked_process = getattr(self, "_ros2_procs", {}).get(process_name)
+                if tracked_process is None:
+                    return (
+                        "Hardware Stack cannot verify the tracked process for "
+                        f"{process_name}"
+                    )
+                tracked_pid = int(getattr(tracked_process, "pid", 0) or 0)
+                error = self.ros2_stop(
+                    process_name,
+                    reason="hardware_robot_state_publisher_authority",
+                )
+                if error:
+                    return (
+                        "Hardware Stack could not stop "
+                        f"{process_name}: {error}"
+                    )
+                try:
+                    return_code = tracked_process.poll()
+                except OSError as exc:
+                    return (
+                        "Hardware Stack could not verify terminal state for "
+                        f"{process_name} pid={tracked_pid}: {type(exc).__name__}: {exc}"
+                    )
+                if return_code is None:
+                    return (
+                        "Hardware Stack requires exclusive UR5e TF authority, but "
+                        f"{process_name} pid={tracked_pid} did not reach terminal state"
+                    )
+            if self.ros2_proc_status(process_name) == "running":
+                return (
+                    "Hardware Stack requires exclusive UR5e TF authority, but "
+                    f"{process_name} is still running"
+                )
+        return None
 
     def _ros2_start_hardware_stack_locked(self, robot: str) -> str | None:
         """Start one Hardware Stack while the lifecycle lock is held."""
@@ -18624,15 +34946,11 @@ class SystemBridge:
 
         hw_links = self.hardware_connection_statuses(force=True)
         required_robots = ("xarm6", "ur5e") if key == "dual robots" else (key,)
-        if (
-            "ur5e" in required_robots
-            and self.ros2_proc_status("ur5e_calibration_state_publisher")
-            == "running"
-        ):
-            self.ros2_stop(
-                "ur5e_calibration_state_publisher",
-                reason="hardware_robot_state_publisher_authority",
-            )
+        authority_error = (
+            self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+        )
+        if authority_error:
+            return authority_error
         for required_robot in required_robots:
             self._hardware_cartesian_readiness_states()[required_robot] = {
                 "cartesian_jog_ready": False,
@@ -18684,11 +35002,17 @@ class SystemBridge:
                 if err:
                     return _rollback(f"dual robots xarm6 driver startup failed: {err}")
                 started_here.append(xarm_driver)
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback(err)
             if self.ros2_proc_status(state_publisher) != "running":
                 err = self.ros2_start(state_publisher)
                 if err:
                     return _rollback(f"dual robots state publisher startup failed: {err}")
                 started_here.append(state_publisher)
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback(err)
             err = self._wait_with_ros2_daemon_retry(
                 "dual robots xarm6 controller_manager",
                 lambda: self._wait_for_ros_service(
@@ -18874,6 +35198,9 @@ class SystemBridge:
                 return _rollback(
                     f"dual robots ur5e Cartesian frame validation failed: {err}"
                 )
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback(err)
             return None
 
         if key == "xarm6":
@@ -18892,6 +35219,9 @@ class SystemBridge:
                 if err:
                     return err
                 started_here.append(driver_name)
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_xarm6(err)
             if self.ros2_proc_status(state_publisher) != "running":
                 err = self.ros2_start(state_publisher)
                 if err:
@@ -18899,6 +35229,9 @@ class SystemBridge:
                         f"xArm6 state publisher startup failed: {err}"
                     )
                 started_here.append(state_publisher)
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_xarm6(err)
             err = self._wait_for_ros_service(
                 "/xarm6/controller_manager/list_controllers",
                 timeout_sec=22.0,
@@ -19011,6 +35344,9 @@ class SystemBridge:
                 return _rollback_xarm6(
                     f"xArm6 Cartesian frame validation failed: {err}"
                 )
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_xarm6(err)
             return None
 
         driver_name = stack[0]
@@ -19072,11 +35408,17 @@ class SystemBridge:
                     return _rollback_ur5e(
                         f"{key} RG2 gripper bridge is not ready: {err}"
                     )
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_ur5e(err)
             if self.ros2_proc_status(state_publisher) != "running":
                 err = self.ros2_start(state_publisher)
                 if err:
                     return _rollback_ur5e(f"{key} state publisher startup failed: {err}")
                 started_here.append(state_publisher)
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_ur5e(err)
             err = self._wait_for_ur5e_hardware_snapshot_ready(
                 driver_process_name=driver_name,
                 state_publisher_process_name=state_publisher,
@@ -19095,6 +35437,9 @@ class SystemBridge:
                 return _rollback_ur5e(
                     f"ur5e Cartesian frame validation failed: {err}"
                 )
+            err = self._stop_ur5e_calibration_state_publisher_for_hardware_authority()
+            if err:
+                return _rollback_ur5e(err)
             return None
         return f"unknown hardware robot: {robot}"
 
@@ -19103,23 +35448,49 @@ class SystemBridge:
         key = str(robot).strip().lower()
         if not self._hardware_stack_for_robot(key):
             return f"unknown hardware robot: {robot}"
-        smooth_stop_result = self._stop_cartesian_smooth_for_repair(key)
-        if "stop was not confirmed" in smooth_stop_result:
-            return smooth_stop_result
-        if key in {"xarm6", "dual robots"} and self._xarm6_cartesian_session_mode() != "off":
-            session_closed, session_message = self.teleop_cartesian_mode(
-                "xarm6",
-                "off",
-            )
-            if not session_closed:
-                return session_message
         lifecycle_lock = getattr(self, "_hardware_stack_lifecycle_lock", None)
         if lifecycle_lock is None:
             lifecycle_lock = threading.Lock()
             self._hardware_stack_lifecycle_lock = lifecycle_lock
         if not lifecycle_lock.acquire(blocking=False):
             return "Hardware Stack start or stop is already running."
+        execution_lock = self._get_robot_function_execution_lock()
+        execution_lock_acquired = False
         try:
+            execution_lock_acquired = bool(
+                execution_lock.acquire(blocking=False)
+            )
+            if not execution_lock_acquired:
+                return self._hardware_stack_lifecycle_motion_error(
+                    "stop",
+                    key,
+                ) or (
+                    "Cannot stop Hardware Stack while physical robot motion is active."
+                )
+            demonstration_error = (
+                self._hardware_stack_active_insertion_error(
+                    "stop",
+                    key,
+                )
+            )
+            if demonstration_error:
+                return demonstration_error
+            agent_motion_error = self._hardware_stack_agent_motion_error("stop")
+            if agent_motion_error:
+                return agent_motion_error
+            smooth_stop_result = self._stop_cartesian_smooth_for_repair(key)
+            if "stop was not confirmed" in smooth_stop_result:
+                return smooth_stop_result
+            if (
+                key in {"xarm6", "dual robots"}
+                and self._xarm6_cartesian_session_mode() != "off"
+            ):
+                session_closed, session_message = self.teleop_cartesian_mode(
+                    "xarm6",
+                    "off",
+                )
+                if not session_closed:
+                    return session_message
             selected_stack = str(getattr(self, "_hardware_stack_selected", "") or "")
             if selected_stack and selected_stack != key:
                 return (
@@ -19151,6 +35522,8 @@ class SystemBridge:
                 )
             return None
         finally:
+            if execution_lock_acquired:
+                execution_lock.release()
             lifecycle_lock.release()
 
     def _hardware_stack_motion_error(self) -> str:
@@ -19162,6 +35535,10 @@ class SystemBridge:
                 or "UR5e motion"
             )
             return f"Cannot repair Hardware Stack while motion is active: {active}."
+        return self._hardware_stack_agent_motion_error("repair")
+
+    def _hardware_stack_agent_motion_error(self, operation: str) -> str:
+        """Return a retained RobotAgent motion blocking one lifecycle operation."""
         for agent_attr in (
             "_xarm6_robot_function_agent",
             "_ur5e_robot_function_agent",
@@ -19169,7 +35546,91 @@ class SystemBridge:
             agent = getattr(self, agent_attr, None)
             motion_lock = getattr(agent, "_robot_motion_lock", None)
             if motion_lock is not None and motion_lock.locked():
-                return "Cannot repair Hardware Stack while a RobotAgent motion is active."
+                return (
+                    f"Cannot {operation} Hardware Stack while a RobotAgent motion "
+                    "is active."
+                )
+        return ""
+
+    def _hardware_stack_active_insertion_error(
+        self,
+        operation: str,
+        robot: str,
+    ) -> str:
+        """Prevent UR5e teardown while an insertion action is actually active."""
+        if str(robot or "").strip().lower() not in {"ur5e", "dual robots"}:
+            return ""
+        rtde_process_name = "hardware_ur5e_rtde_trajectory_server"
+        rtde_running = self.ros2_proc_status(rtde_process_name) == "running"
+        rtde_status = (
+            dict(self._ur5e_rtde_trajectory_status() or {})
+            if rtde_running
+            else {}
+        )
+        if rtde_status.get("insertion_demonstration_active") is True:
+            recording_id = str(
+                rtde_status.get("insertion_demonstration_recording_id")
+                or "<unknown>"
+            )
+            return (
+                f"Cannot {operation} Hardware Stack while insertion demonstration "
+                f"{recording_id} is active. Use Save Recording or Cancel "
+                "Recording first."
+            )
+        if (
+            str(rtde_status.get("state") or "").strip().lower()
+            in {"checking", "executing"}
+            and (
+                str(rtde_status.get("trial_id") or "")
+                or str(rtde_status.get("insert_phase") or "")
+            )
+        ):
+            trial_id = str(rtde_status.get("trial_id") or "<unknown>")
+            return (
+                f"Cannot {operation} Hardware Stack while supervised move_insert "
+                f"{trial_id} is active. Wait for terminal settlement."
+            )
+        with self._get_insertion_demonstration_lock():
+            recording = getattr(self, "_insertion_demonstration", None)
+            recording = deepcopy(recording) if isinstance(recording, dict) else None
+        if (
+            not rtde_running
+            or recording is None
+            or not bool(recording.get("active"))
+        ):
+            return ""
+        if rtde_status.get("insertion_demonstration_active") is False:
+            return ""
+        recording_id = str(recording.get("recording_id") or "<unknown>")
+        part_name = str(recording.get("part_name") or "<unknown>")
+        return (
+            f"Cannot {operation} Hardware Stack while insertion demonstration "
+            f"{recording_id} for {part_name} is active. Use Save Recording or "
+            "Cancel Recording first."
+        )
+
+    def _hardware_stack_lifecycle_motion_error(
+        self,
+        operation: str,
+        robot: str,
+    ) -> str:
+        """Protect active physical work during stack lifecycle changes."""
+        if operation in {"stop", "repair"}:
+            demonstration_error = (
+                self._hardware_stack_active_insertion_error(
+                    operation,
+                    robot,
+                )
+            )
+            if demonstration_error:
+                return demonstration_error
+        motion_error = self._hardware_stack_motion_error()
+        if motion_error:
+            return motion_error.replace(
+                "Cannot repair Hardware Stack",
+                f"Cannot {operation} Hardware Stack",
+                1,
+            )
         return ""
 
     def _stop_cartesian_smooth_for_repair(self, robot: str) -> str:
@@ -19220,11 +35681,20 @@ class SystemBridge:
             self._xarm6_cartesian_jog_state_uncertain_reason = reason
         return reason
 
-    def ros2_repair_hardware_stack(self, robot: str) -> str | None:
+    def ros2_repair_hardware_stack(  # noqa: C901, PLR0912, PLR0915 - guarded lifecycle.
+        self,
+        robot: str,
+    ) -> str | None:
         """Stop and restart one failed Hardware Stack under one lifecycle lock."""
         key = str(robot).strip().lower()
         if not self._hardware_stack_for_robot(key):
             return f"unknown hardware robot: {robot}"
+        lifecycle_motion_error = self._hardware_stack_lifecycle_motion_error(
+            "repair",
+            key,
+        )
+        if lifecycle_motion_error:
+            return lifecycle_motion_error
         smooth_stop_result = self._stop_cartesian_smooth_for_repair(key)
         if key in {"xarm6", "dual robots"} and self._xarm6_cartesian_session_mode() != "off":
             session_closed, session_message = self.teleop_cartesian_mode(
@@ -19335,14 +35805,44 @@ class SystemBridge:
                     jog_reset_results[affected_robot] = f"failed: {repair_error}"
                     return repair_error
                 if affected_robot == "ur5e":
+                    uncertainty_clear_error = (
+                        self._clear_ur5e_hardware_state_uncertainty()
+                    )
+                    if uncertainty_clear_error:
+                        self._hardware_stack_lifecycle_state = "failed"
+                        self._hardware_stack_last_error = uncertainty_clear_error
+                        jog_reset_results[affected_robot] = (
+                            f"failed: {uncertainty_clear_error}"
+                        )
+                        return uncertainty_clear_error
                     self._ur5e_cartesian_jog_state_uncertain = False
                     self._ur5e_cartesian_jog_state_uncertain_reason = ""
+                    self._ur5e_robot_function_state_uncertain = False
+                    self._ur5e_robot_function_state_uncertain_reason = ""
                 else:
                     self._xarm6_cartesian_jog_state_uncertain = False
                     self._xarm6_cartesian_jog_state_uncertain_reason = ""
                 jog_reset_results[affected_robot] = (
                     f"cleared at generation {generation}; {smooth_stop_result}"
                 )
+            if "ur5e" in affected_robots:
+                move_insert_repair_error = (
+                    self._clear_move_insert_repair_gate_after_hardware_stack(
+                        hardware_stack=key,
+                        generation=int(
+                            getattr(
+                                self,
+                                "_hardware_stack_lifecycle_generation",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                )
+                if move_insert_repair_error:
+                    self._hardware_stack_lifecycle_state = "failed"
+                    self._hardware_stack_last_error = move_insert_repair_error
+                    return move_insert_repair_error
             self._hardware_stack_lifecycle_state = "running"
             return None
         finally:
@@ -20578,6 +37078,51 @@ class SystemBridge:
         warning = str(target.get("warning") or "")
         if warning:
             return target
+        recording_cartesian_jog = bool(
+            str(robot or "").strip().lower() == "ur5e"
+            and str(op or "").strip().lower()
+            in {"cartesian", "cartesian_smooth"}
+            and (
+                current_recording := self._current_insertion_demonstration()
+            )
+            is not None
+            and bool(current_recording.get("active"))
+            and not bool(current_recording.get("recovery_required"))
+        )
+        recording_read_only_state = bool(
+            str(robot or "").strip().lower() == "ur5e"
+            and str(op or "").strip().lower() == "state"
+        )
+        demonstration_error = (
+            ""
+            if recording_read_only_state
+            else self._insertion_demonstration_blocking_error(
+                allow_ur5e_cartesian_jog=recording_cartesian_jog
+            )
+        )
+        if demonstration_error:
+            target = dict(target)
+            target["ready"] = False
+            target["warning"] = demonstration_error
+            if recording_cartesian_jog:
+                self._insertion_demonstration_cartesian_blocker = (
+                    demonstration_error
+                )
+            return target
+        if (
+            str(robot or "").strip().lower() == "ur5e"
+            and target.get("environment") == "real"
+        ):
+            pending_review_error = (
+                ""
+                if recording_cartesian_jog or recording_read_only_state
+                else self._move_insert_pending_review_error()
+            )
+            if pending_review_error:
+                target = dict(target)
+                target["ready"] = False
+                target["warning"] = pending_review_error
+                return target
         if (
             str(robot or "").strip().lower() == "ur5e"
             and str(op or "").strip().lower() in {"cartesian", "cartesian_smooth", "joint"}
@@ -20589,6 +37134,26 @@ class SystemBridge:
                 target["ready"] = False
                 target["warning"] = message
                 return target
+            if (
+                bool(
+                    getattr(
+                        self,
+                        "_ur5e_robot_function_state_uncertain",
+                        False,
+                    )
+                )
+                and str(
+                    getattr(
+                        self,
+                        "_ur5e_robot_function_state_uncertain_reason",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                == _UR5E_RTDE_RESET_UNCERTAINTY_REASON
+            ):
+                self._ur5e_robot_function_state_uncertain = False
+                self._ur5e_robot_function_state_uncertain_reason = ""
         op_key = str(op or "").strip().lower()
         if target.get("environment") == "real" and op_key in {
             "cartesian",
@@ -20620,9 +37185,17 @@ class SystemBridge:
                 ).strip()
                 target = dict(target)
                 target["ready"] = False
+                recovery_action = (
+                    "Inspect the robot and click Repair Hardware Stack before "
+                    "Cartesian motion."
+                    if str(robot).strip().lower() == "ur5e"
+                    else (
+                        "Inspect the robot and complete Robot Functions -> move_home "
+                        "before Cartesian motion."
+                    )
+                )
                 target["warning"] = (
-                    f"The physical {robot} state is uncertain. Inspect the robot and "
-                    "complete Robot Functions -> move_home before Cartesian motion."
+                    f"The physical {robot} state is uncertain. {recovery_action}"
                     + (f" Last failure: {reason}" if reason else "")
                 )
                 return target
@@ -20672,6 +37245,8 @@ class SystemBridge:
                     readiness.get("message")
                     or "Cartesian frame validation has not completed"
                 )
+        if recording_cartesian_jog:
+            self._insertion_demonstration_cartesian_blocker = ""
         return target
 
     def _release_xarm6_cartesian_session_locked(self) -> None:
@@ -20752,7 +37327,11 @@ class SystemBridge:
             session = getattr(self, "_teleop_xarm6_cartesian_session", None)
             return str(session.get("mode") or "off") if session else "off"
 
-    def teleop_cartesian_mode(self, robot: str, mode: str) -> tuple[bool, str]:
+    def teleop_cartesian_mode(  # noqa: C901 - explicit session and safety gates.
+        self,
+        robot: str,
+        mode: str,
+    ) -> tuple[bool, str]:
         """Prepare or close the explicit Interactive Teleop Cartesian mode."""
         key = str(robot or "").strip().lower()
         requested = str(mode or "").strip().lower()
@@ -20765,6 +37344,23 @@ class SystemBridge:
             self._teleop_cartesian_modes[key] = requested
             return True, f"{key} Cartesian {requested} selected for Gazebo"
         if key == "ur5e":
+            if requested != "off":
+                recording = self._current_insertion_demonstration()
+                recording_cartesian_jog = bool(
+                    recording is not None
+                    and bool(recording.get("active"))
+                    and not bool(recording.get("recovery_required"))
+                    and not self._insertion_demonstration_blocking_error(
+                        allow_ur5e_cartesian_jog=True
+                    )
+                )
+                pending_review_error = (
+                    ""
+                    if recording_cartesian_jog
+                    else self._move_insert_pending_review_error()
+                )
+                if pending_review_error:
+                    return False, pending_review_error
             self._teleop_cartesian_modes[key] = requested
             return True, f"UR5e Cartesian {requested} ready"
 
@@ -21039,6 +37635,8 @@ class SystemBridge:
                     f"{robot} Cartesian speed {exact_speed_mm_s:.3f} mm/s is outside "
                     f"[{minimum:.3f}, {maximum:.3f}] mm/s"
                 )
+            if exact_speed_mm_s == 0.0:
+                return False, f"{robot} Cartesian speed is 0; no motion was commanded"
             speed_mm_s = exact_speed_mm_s
         estimated_motion_sec = (
             abs(float(step_mm)) / float(speed_mm_s)
@@ -21088,14 +37686,25 @@ class SystemBridge:
             "robot": key,
             "environment": environment,
             "physical_units": environment == "real",
-            "cartesian_speed_min_mm_s": 5.0,
+            "cartesian_speed_min_mm_s": 0.0,
             "cartesian_speed_default_mm_s": cartesian_default,
             "cartesian_speed_max_mm_s": cartesian_max,
             "cartesian_acceleration_mm_s2": cartesian_acceleration,
-            "joint_speed_min_deg_s": 0.1,
+            "joint_speed_min_deg_s": 0.0,
             "joint_speed_default_deg_s": min(joint_default, joint_max),
             "joint_speed_max_deg_s": joint_max,
         }
+
+    def teleop_cartesian_smooth_active(self, robot: str) -> bool:
+        """Return whether one robot owns the current Cartesian Smooth Hold session."""
+        key = str(robot or "").strip().lower()
+        lock = getattr(self, "_teleop_smooth_session_lock", None)
+        if lock is None:
+            session = getattr(self, "_teleop_smooth_session", None)
+            return bool(session and session.get("robot") == key)
+        with lock:
+            session = getattr(self, "_teleop_smooth_session", None)
+            return bool(session and session.get("robot") == key)
 
     def teleop_cartesian_readiness(self, robot: str) -> dict[str, Any]:
         """Return fail-closed Cartesian readiness for Interactive Teleop."""
@@ -21554,6 +38163,8 @@ class SystemBridge:
                     f"{robot} joint jog speed {exact_speed_deg_s:.3f} deg/s is outside "
                     f"[{minimum:.3f}, {maximum:.3f}] deg/s"
                 )
+            if exact_speed_deg_s == 0.0:
+                return False, f"{robot} joint jog speed is 0; no motion was commanded"
             speed_deg_s = exact_speed_deg_s
         estimated_motion_sec = (
             abs(float(delta_deg)) / float(speed_deg_s)

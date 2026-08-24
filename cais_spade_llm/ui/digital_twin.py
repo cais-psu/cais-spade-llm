@@ -215,10 +215,11 @@ def robot_function_buffer_key(
         str(target or "").strip().lower(),
         str(robot or "").strip().lower(),
         str(function_name or "").strip(),
-        str(name or "").strip(),
     ]
-    if str(part_name or "").strip():
-        values.append(str(part_name).strip())
+    if str(function_name or "").strip() not in {"pick_approach", "place_approach"}:
+        values.append(str(name or "").strip())
+        if str(part_name or "").strip():
+            values.append(str(part_name).strip())
     return "::".join(values)
 
 
@@ -251,12 +252,10 @@ def robot_function_path(
     """Return the taught-function JSON path."""
     robot_key = str(robot or "").strip().lower()
     function_key = robot_function_safe_function_name(function_name)
-    safe_name = robot_function_safe_name(name)
-    if function_key in {"pick_approach", "place_approach"} and str(
-        part_name or ""
-    ).strip():
-        safe_name = f"{safe_name}__{robot_function_safe_name(part_name)}"
     source_key = str(storage_source or "hardware").strip()
+    if function_key in {"pick_approach", "place_approach"}:
+        return Path(taught_functions_dir) / function_key / f"default__{source_key}.json"
+    safe_name = robot_function_safe_name(name)
     return Path(taught_functions_dir) / robot_key / function_key / f"{safe_name}__{source_key}.json"
 
 
@@ -330,7 +329,7 @@ def digital_twin_dual_robot_keys(cfg: dict[str, Any]) -> list[str]:
     return [
         str(robot).strip().lower()
         for robot in (cfg.get("hardware") or ())
-        if str(robot).strip().lower() in {"xarm6", "ur5e"}
+        if str(robot).strip()
     ]
 
 

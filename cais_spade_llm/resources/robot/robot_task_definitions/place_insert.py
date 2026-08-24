@@ -99,11 +99,108 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         ),
         steps=(
             RobotTaskStep(
-                id="delay_before_release",
-                op="delay",
+                id="move_insert",
+                op="move_insert",
                 executor="primitive",
                 exposed=False,
-                params={"duration_sec": 0.25},
+                params={
+                    "part_name": _arg("part_name"),
+                    "calibration_id": _state(
+                        "_task_ctx", "move_insert_profile", "calibration_id"
+                    ),
+                    "profile_sha256": _state(
+                        "_task_ctx", "move_insert_profile_sha256"
+                    ),
+                    "hard_caps_sha256": _state(
+                        "_task_ctx", "move_insert_hard_caps_sha256"
+                    ),
+                    "expected_start_pose": _state(
+                        "_task_ctx", "resolved_cartesian_positions", "descend"
+                    ),
+                    "target_pose": _state("_task_ctx", "insert_pose"),
+                    "insertion_axis_world": _state(
+                        "_task_ctx", "insertion_axis_world"
+                    ),
+                    "contact_speed_m_s": _state(
+                        "_task_ctx", "move_insert_profile", "contact_speed_m_s"
+                    ),
+                    "contact_force_delta_n": _state(
+                        "_task_ctx", "move_insert_profile", "contact_force_delta_n"
+                    ),
+                    "engagement_progress_m": _state(
+                        "_task_ctx", "move_insert_profile", "engagement_progress_m"
+                    ),
+                    "insertion_force_n": _state(
+                        "_task_ctx", "move_insert_profile", "insertion_force_n"
+                    ),
+                    "spiral_radius_m": _state(
+                        "_task_ctx", "move_insert_profile", "spiral_radius_m"
+                    ),
+                    "spiral_pitch_m": _state(
+                        "_task_ctx", "move_insert_profile", "spiral_pitch_m"
+                    ),
+                    "spiral_speed_m_s": _state(
+                        "_task_ctx", "move_insert_profile", "spiral_speed_m_s"
+                    ),
+                    "spiral_acceleration_m_s2": _state(
+                        "_task_ctx",
+                        "move_insert_profile",
+                        "spiral_acceleration_m_s2",
+                    ),
+                    "max_axial_force_n": _state(
+                        "_task_ctx", "move_insert_profile", "max_axial_force_n"
+                    ),
+                    "max_lateral_force_n": _state(
+                        "_task_ctx", "move_insert_profile", "max_lateral_force_n"
+                    ),
+                    "max_torque_nm": _state(
+                        "_task_ctx", "move_insert_profile", "max_torque_nm"
+                    ),
+                    "force_depth_profile": _state(
+                        "_task_ctx", "move_insert_profile", "force_depth_profile"
+                    ),
+                    "baseline_force_uncertainty_n": _state(
+                        "_task_ctx",
+                        "move_insert_profile",
+                        "demonstration_recipe",
+                        "baseline_force_uncertainty_n",
+                    ),
+                    "baseline_torque_uncertainty_nm": _state(
+                        "_task_ctx",
+                        "move_insert_profile",
+                        "demonstration_recipe",
+                        "baseline_torque_uncertainty_nm",
+                    ),
+                    "tilt_tolerance_rad": _state(
+                        "_task_ctx", "move_insert_profile", "tilt_tolerance_rad"
+                    ),
+                    "seated_depth_tolerance_m": _state(
+                        "_task_ctx",
+                        "move_insert_profile",
+                        "seated_depth_tolerance_m",
+                    ),
+                    "settle_time_sec": _state(
+                        "_task_ctx", "move_insert_profile", "settle_time_sec"
+                    ),
+                    "timeout_sec": _state("_task_ctx", "move_insert_timeout_sec"),
+                    "trial_id": _format(
+                        "{trial_id}",
+                        trial_id=_state("_task_ctx", "move_insert_trial_id"),
+                    ),
+                },
+                when=(
+                    RobotTaskGuard(
+                        predicate="move_insert_required",
+                    ),
+                ),
+                failure_observations={
+                    "part_name": _state("_held_part"),
+                    "destination_location": _arg("destination_location"),
+                },
+                note=(
+                    "Internal force-limited insertion; any failure stops before "
+                    "release_part."
+                ),
             ),
             RobotTaskStep(
                 id="release_part",
@@ -122,13 +219,6 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "part_name": _state("_held_part"),
                     "destination_location": _arg("destination_location"),
                 },
-            ),
-            RobotTaskStep(
-                id="delay_after_release",
-                op="delay",
-                executor="primitive",
-                exposed=False,
-                params={"duration_sec": 0.25},
             ),
             RobotTaskStep(
                 id="snap_part_to_slot",
@@ -208,7 +298,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         dry_run_duration=5.0,
         failure_part=_first(_arg("part_name"), _state("_held_part")),
         notes=(
-            "RobotAgent.place_insert releases the part at the pose established by place_approach, detaches and snaps/settles in simulation, then lifts away.",
+            "RobotAgent.place_insert performs the internal move_insert from the pre-insert pose, then releases the part, detaches and snaps/settles in simulation, and lifts away.",
             "open_gripper and detach_part are hidden from synthesis; use release_part as the visible composite.",
         ),
     ),

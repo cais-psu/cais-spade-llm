@@ -139,13 +139,6 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                 },
             ),
             RobotTaskStep(
-                id="delay_after_grasp",
-                op="delay",
-                executor="primitive",
-                exposed=False,
-                params={"duration_sec": 0.25},
-            ),
-            RobotTaskStep(
                 id="lift",
                 op="move_relative",
                 executor="primitive",

@@ -25,7 +25,8 @@ if TYPE_CHECKING:
     from cais_spade_llm.ui.bridge import SystemBridge
 
 CAMERA_ROLES = ("ur5e", "xarm6", "stationary")
-ASSEMBLY_BOARD_V1_ARUCO_ROLES = ("ur5e", "xarm6")
+ASSEMBLY_BOARD_V1_ARUCO_ROLES = CAMERA_ROLES
+ASSEMBLY_BOARD_V1_ACCEPTANCE_ROLES = ("ur5e", "xarm6")
 CONFIG_PATH = Path("~/.config/cais-spade-llm/perception_cameras.yaml").expanduser()
 PREVIEW_ROOT = Path("/tmp/cais_perception_previews")
 SNAPSHOT_ROOT = Path("/tmp")
@@ -45,6 +46,20 @@ ASSEMBLY_BOARD_V1_MARKER_LENGTH_M = 0.076
 ASSEMBLY_BOARD_V1_TRANSLATION_LIMIT_M = 0.010
 ASSEMBLY_BOARD_V1_ROTATION_LIMIT_DEG = 2.0
 ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC = 2.0
+STATIONARY_INSPECTION_XY_TOLERANCE_M = 0.010
+STATIONARY_INSPECTION_SEATING_TOLERANCE_M = 0.005
+STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES = (
+    "LG",
+    "SRP",
+    "MRP",
+    "LRP",
+    "SCP",
+    "MCP",
+    "LCP",
+)
+ASSEMBLY_BOARD_V1_GEOMETRY_RELATIVE_PATH = Path(
+    "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
+)
 UR5E_CALIBRATION_MONITOR_STATUS = Path(
     "/tmp/cais_ur5e_calibration_monitor_status.json"
 )
@@ -296,6 +311,7 @@ class PerceptionManager:
         self._wsl_devices_discovery_lock = threading.Lock()
         self._connection_lock = threading.RLock()
         self._assembly_board_v1_config_lock = threading.RLock()
+        self._stationary_calibration_samples_lock = threading.Lock()
         self._desired_connected: set[str] = set()
         self._desired_perception: set[str] = set()
         self._recovery: dict[str, dict[str, Any]] = {
@@ -370,12 +386,107 @@ class PerceptionManager:
         return payload
 
     def save_stationary_board_pose(self, pose: dict[str, Any]) -> dict[str, Any]:
-        """Persist the surveyed fixed-board pose used by the stationary camera."""
+        """Persist the legacy surveyed pose; inspection-only stationary ignores it."""
         payload = self.config()
         values = {name: float(pose[name]) for name in ("x", "y", "z", "roll", "pitch", "yaw")}
         payload["stationary_board_world_pose"] = {"configured": True, **values}
         _atomic_yaml_write(self.config_path, payload)
         return payload
+
+    def reset_stationary_calibration_samples(self) -> dict[str, Any]:
+        """Archive the legacy stationary sample set retained for compatibility."""
+        camera = self._camera("stationary")
+        samples_path = Path(str(camera["samples_path"])).expanduser()
+        with self._stationary_calibration_samples_lock:
+            archive_path: Path | None = None
+            if samples_path.is_file():
+                archive_path = samples_path.with_name(
+                    f"{samples_path.stem}.archive-{time.time_ns()}{samples_path.suffix}"
+                )
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(samples_path, archive_path)
+            _atomic_json_write(
+                samples_path,
+                {
+                    "camera_role": "stationary",
+                    "world_frame": "world",
+                    "tool_frame": "world",
+                    "stationary_camera": True,
+                    "samples": [],
+                },
+            )
+        archived = str(archive_path) if archive_path is not None else ""
+        return {
+            "camera_role": "stationary",
+            "samples_path": str(samples_path),
+            "archive_path": archived,
+            "sample_count": 0,
+            "robot_motion_requested": False,
+            "message": (
+                f"Archived the previous stationary sample set at {archived} and started "
+                "a new empty stationary sample set; no robot motion was requested."
+                if archived
+                else (
+                    "Started a new empty stationary sample set; no previous sample file "
+                    "existed and no robot motion was requested."
+                )
+            ),
+        }
+
+    def stationary_inspection_configuration(self) -> dict[str, Any]:
+        """Return read-only assembly_board-v1 registration readiness for inspection."""
+        geometry_path = self.project_root / ASSEMBLY_BOARD_V1_GEOMETRY_RELATIVE_PATH
+        try:
+            payload = json.loads(geometry_path.read_text(encoding="utf-8"))
+            registration = dict(
+                payload["real"]["assembly_board"][
+                    "assembly_board-v1_aruco_to_assembly_board-v1"
+                ]
+            )
+        except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, TypeError):
+            registration = {}
+        calibration_id = str(registration.get("calibration_id") or "")
+        try:
+            pose = {
+                field: float(registration[field])
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            }
+        except (KeyError, TypeError, ValueError):
+            pose = {}
+        quaternion_norm = math.sqrt(
+            sum(pose.get(field, 0.0) ** 2 for field in ("qx", "qy", "qz", "qw"))
+        )
+        configured = bool(
+            calibration_id
+            and calibration_id == calibration_id.strip()
+            and pose
+            and all(math.isfinite(value) for value in pose.values())
+            and quaternion_norm > 1e-12
+        )
+        error = ""
+        if not configured:
+            error = (
+                "assembly_board-v1_aruco_to_assembly_board-v1 is not configured; "
+                "stationary assembly inspection is unavailable."
+            )
+        return {
+            "geometry_path": str(geometry_path),
+            "configured": configured,
+            "registration": {
+                "name": "assembly_board-v1_aruco_to_assembly_board-v1",
+                "configured": configured,
+                "calibration_id": calibration_id,
+                **pose,
+            },
+            "supported_part_names": ["SG", "MG"],
+            "unsupported_part_names": list(
+                STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES
+            ),
+            "xy_tolerance_m": STATIONARY_INSPECTION_XY_TOLERANCE_M,
+            "seating_tolerance_m": STATIONARY_INSPECTION_SEATING_TOLERANCE_M,
+            "error": error,
+            "diagnostic_only": True,
+        }
 
     def save_assembly_board_v1_marker_length(
         self,
@@ -865,6 +976,185 @@ class PerceptionManager:
         )
         return translation_delta_m, rotation_delta_deg
 
+    def _stationary_assembly_board_v1_aruco_status(self) -> dict[str, Any]:
+        """Return exact-frame stationary ID 70 evidence without world authority."""
+        snapshot_path = self._snapshot_path("stationary")
+        snapshot = self._read_json(snapshot_path)
+        raw_inspection = snapshot.get("stationary_inspection")
+        inspection = dict(raw_inspection) if isinstance(raw_inspection, dict) else {}
+        raw_aruco = inspection.get("aruco")
+        aruco = dict(raw_aruco) if isinstance(raw_aruco, dict) else {}
+        config = self.config()["assembly_board-v1_aruco"]
+        inspection_configuration = self.stationary_inspection_configuration()
+
+        def _optional_float(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        marker_captured_at = _optional_float(aruco.get("captured_at"))
+        inspection_captured_at = _optional_float(inspection.get("captured_at"))
+        captured_at = inspection_captured_at or marker_captured_at
+        frame_age_sec = (
+            max(0.0, time.time() - captured_at) if captured_at is not None else None
+        )
+        exact_frame_evidence = bool(
+            marker_captured_at is not None
+            and inspection_captured_at is not None
+            and math.isclose(
+                marker_captured_at,
+                inspection_captured_at,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+        )
+        try:
+            marker_id = int(aruco.get("marker_id"))
+        except (TypeError, ValueError):
+            marker_id = None
+        marker_length_m = _optional_float(aruco.get("marker_length_m"))
+        configured_marker_length_m = float(config["marker_length_m"])
+        marker_length_matches = bool(
+            marker_length_m is not None
+            and math.isclose(
+                marker_length_m,
+                configured_marker_length_m,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        )
+        try:
+            sample_count = int(aruco.get("sample_count", 0) or 0)
+        except (TypeError, ValueError):
+            sample_count = 0
+        try:
+            required_sample_count = int(
+                aruco.get("required_sample_count", 10) or 10
+            )
+        except (TypeError, ValueError):
+            required_sample_count = 10
+        reprojection_error_px = _optional_float(
+            aruco.get("reprojection_error_px")
+        )
+        translation_spread_m = _optional_float(aruco.get("translation_spread_m"))
+        rotation_spread_deg = _optional_float(aruco.get("rotation_spread_deg"))
+        maximum_reprojection_error_px = _optional_float(
+            aruco.get("maximum_reprojection_error_px")
+        )
+        maximum_translation_spread_m = _optional_float(
+            aruco.get("maximum_translation_spread_m")
+        )
+        maximum_rotation_spread_deg = _optional_float(
+            aruco.get("maximum_rotation_spread_deg")
+        )
+        visible = bool(aruco.get("visible", False))
+        valid = bool(aruco.get("valid", False))
+        stable = bool(aruco.get("stable", False))
+        quality_ready = bool(
+            visible
+            and valid
+            and stable
+            and marker_id == 70
+            and marker_length_matches
+            and sample_count >= required_sample_count
+            and reprojection_error_px is not None
+            and maximum_reprojection_error_px is not None
+            and reprojection_error_px <= maximum_reprojection_error_px
+            and translation_spread_m is not None
+            and maximum_translation_spread_m is not None
+            and translation_spread_m <= maximum_translation_spread_m
+            and rotation_spread_deg is not None
+            and maximum_rotation_spread_deg is not None
+            and rotation_spread_deg <= maximum_rotation_spread_deg
+            and exact_frame_evidence
+            and frame_age_sec is not None
+            and frame_age_sec <= ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC
+        )
+        inspection_message = str(inspection.get("message") or "").strip()
+        inspection_available = bool(inspection.get("available", False))
+        inspection_success = bool(inspection.get("success", False))
+        if not inspection_configuration["configured"]:
+            inspection_available = False
+            inspection_success = False
+            inspection_message = str(inspection_configuration["error"])
+        error = inspection_message
+        if not inspection and inspection_configuration["configured"]:
+            error = "stationary assembly inspection snapshot is unavailable"
+        placement_reason = (
+            "stationary ID 70 is inspection-only and has no world or robot placement "
+            "authority."
+        )
+        return {
+            "resource_location": "assembly_board-v1",
+            "camera_role": "stationary",
+            "snapshot_path": str(snapshot_path),
+            "source": "stationary_inspection",
+            "marker_id": marker_id,
+            "dictionary": "DICT_ARUCO_ORIGINAL",
+            "marker_length_m": marker_length_m,
+            "configured_marker_length_m": configured_marker_length_m,
+            "marker_length_matches": marker_length_matches,
+            "frame_captured_at": captured_at,
+            "sample_started_at": None,
+            "sample_count": sample_count,
+            "required_sample_count": required_sample_count,
+            "frame_age_sec": frame_age_sec,
+            "visible": visible,
+            "stable": stable,
+            "world_pose_ready": False,
+            "reprojection_error_px": reprojection_error_px,
+            "translation_spread_m": translation_spread_m,
+            "rotation_spread_deg": rotation_spread_deg,
+            "quality_ready": quality_ready,
+            "marker_quality_ready": quality_ready,
+            "valid": valid,
+            "calibration_id": "",
+            "calibration_ready": False,
+            "active_calibration_id": "",
+            "active_calibration_ready": False,
+            "frame_id": "assembly_board-v1",
+            "pose": {},
+            "error": error,
+            "last_failure": error,
+            "ready_to_accept": False,
+            "accepted": False,
+            "accepted_generation": 0,
+            "generation": 0,
+            "accepted_pose": {},
+            "accepted_at": None,
+            "accepted_frame_captured_at": None,
+            "accepted_calibration_id": "",
+            "calibration_changed": False,
+            "translation_delta_m": None,
+            "rotation_delta_deg": None,
+            "movement_evidence_valid": False,
+            "excessive_movement": False,
+            "movement_blocked": False,
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": placement_reason,
+            "calibration_identity_matches": False,
+            "post_staging_acceptance_allowed": False,
+            "stationary_diagnostic_only": True,
+            "calibration_required": False,
+            "inspection_only": True,
+            "exact_frame_evidence": exact_frame_evidence,
+            "inspection_available": inspection_available,
+            "inspection_success": inspection_success,
+            "inspection_message": inspection_message,
+            "registration": inspection_configuration["registration"],
+            "aruco": aruco,
+            "unsupported_part_names": list(
+                inspection.get("unsupported_part_names")
+                or STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES
+            ),
+            "placement_blocked": True,
+            "placement_blocked_reason": placement_reason,
+            "translation_limit_m": None,
+            "rotation_limit_deg": None,
+        }
+
     def assembly_board_v1_aruco_status(  # noqa: C901, PLR0912, PLR0915 - explicit snapshot contract.
         self,
         role: str,
@@ -873,6 +1163,9 @@ class PerceptionManager:
         key = str(role or "").strip().lower()
         if key not in ASSEMBLY_BOARD_V1_ARUCO_ROLES:
             raise ValueError(f"assembly_board-v1 ArUco is unavailable for camera role: {role}")
+        if key == "stationary":
+            return self._stationary_assembly_board_v1_aruco_status()
+        stationary_diagnostic_only = key == "stationary"
         config = self.config()["assembly_board-v1_aruco"]
         accepted = dict((config.get("roles") or {}).get(key) or {})
         snapshot_path = self._assembly_board_v1_aruco_path(key)
@@ -972,10 +1265,13 @@ class PerceptionManager:
             and active_calibration_id
             and accepted_calibration_id != active_calibration_id
         )
-        translation_delta_m, rotation_delta_deg = self._assembly_board_v1_movement(
-            accepted_pose,
-            pose,
-        )
+        if stationary_diagnostic_only:
+            translation_delta_m, rotation_delta_deg = None, None
+        else:
+            translation_delta_m, rotation_delta_deg = self._assembly_board_v1_movement(
+                accepted_pose,
+                pose,
+            )
         error = str(
             snapshot.get("error")
             or snapshot.get("last_error")
@@ -1046,7 +1342,7 @@ class PerceptionManager:
             and math.isfinite(rotation_spread_deg)
             and rotation_spread_deg <= 0.5
         )
-        ready_to_accept = bool(
+        marker_quality_ready = bool(
             snapshot
             and snapshot_role == key
             and resource_location == "assembly_board-v1"
@@ -1054,6 +1350,13 @@ class PerceptionManager:
             and frame_age_sec <= ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC
             and visible
             and stable
+            and marker_length_matches
+            and quality_ready
+            and not error
+        )
+        ready_to_accept = bool(
+            not stationary_diagnostic_only
+            and marker_quality_ready
             and calibration_ready
             and bool(calibration_id)
             and active_calibration_ready
@@ -1061,9 +1364,6 @@ class PerceptionManager:
             and world_pose_ready
             and frame_id == "world"
             and bool(pose)
-            and marker_length_matches
-            and quality_ready
-            and not error
         )
         movement_evidence_valid = bool(
             ready_to_accept
@@ -1079,21 +1379,11 @@ class PerceptionManager:
                 or rotation_delta_deg > ASSEMBLY_BOARD_V1_ROTATION_LIMIT_DEG
             )
         )
+        # A wrist-camera view change can exceed these diagnostic deltas even when
+        # the board is stationary. Status polling must not turn that observation
+        # into a persistent motion decision; explicit acceptance remains the pose
+        # authority and is the only path that clears an existing persisted block.
         latched_movement_blocked = bool(accepted.get("movement_blocked", False))
-        if excessive_movement and not latched_movement_blocked:
-            with self._assembly_board_v1_config_lock:
-                payload = self.config()
-                role_config = payload["assembly_board-v1_aruco"]["roles"][key]
-                try:
-                    current_generation = int(
-                        role_config.get("accepted_generation", 0) or 0
-                    )
-                except (TypeError, ValueError):
-                    current_generation = 0
-                if current_generation == accepted_generation:
-                    role_config["movement_blocked"] = True
-                    _atomic_yaml_write(self.config_path, payload)
-                    latched_movement_blocked = True
         movement_blocked = latched_movement_blocked or calibration_changed
         accepted_baseline = accepted_generation > 0 and bool(accepted_pose)
         calibration_identity_matches = bool(
@@ -1103,7 +1393,12 @@ class PerceptionManager:
             and accepted_calibration_id == active_calibration_id
         )
         accepted_baseline_error = ""
-        if not accepted_baseline:
+        if stationary_diagnostic_only:
+            accepted_baseline_error = (
+                "stationary assembly_board-v1 world pose is diagnostic only; "
+                "stationary inspection uses exact-frame ID 70 evidence."
+            )
+        elif not accepted_baseline:
             accepted_baseline_error = (
                 f"Locate & Accept Board for {key} before using assembly_board-v1."
             )
@@ -1191,6 +1486,7 @@ class PerceptionManager:
             "translation_spread_m": translation_spread_m,
             "rotation_spread_deg": rotation_spread_deg,
             "quality_ready": quality_ready,
+            "marker_quality_ready": marker_quality_ready,
             "valid": valid,
             "calibration_id": calibration_id,
             "calibration_ready": calibration_ready,
@@ -1212,11 +1508,13 @@ class PerceptionManager:
             "translation_delta_m": translation_delta_m,
             "rotation_delta_deg": rotation_delta_deg,
             "movement_evidence_valid": movement_evidence_valid,
+            "excessive_movement": excessive_movement,
             "movement_blocked": movement_blocked,
             "accepted_baseline_ready": accepted_baseline_ready,
             "accepted_baseline_error": accepted_baseline_error,
             "calibration_identity_matches": calibration_identity_matches,
             "post_staging_acceptance_allowed": post_staging_acceptance_allowed,
+            "stationary_diagnostic_only": stationary_diagnostic_only,
             "placement_blocked": not accepted_baseline_ready,
             "placement_blocked_reason": accepted_baseline_error,
             "translation_limit_m": ASSEMBLY_BOARD_V1_TRANSLATION_LIMIT_M,
@@ -1244,6 +1542,13 @@ class PerceptionManager:
             ValueError: If ``minimum_sample_started_at`` is not finite.
         """
         key = str(role or "").strip().lower()
+        if key not in ASSEMBLY_BOARD_V1_ARUCO_ROLES:
+            raise ValueError(f"assembly_board-v1 ArUco is unavailable for camera role: {role}")
+        if key not in ASSEMBLY_BOARD_V1_ACCEPTANCE_ROLES:
+            raise ValueError(
+                "Locate & Accept Board is unavailable for stationary; its world pose is "
+                "diagnostic only and inspection uses exact-frame ID 70 evidence."
+            )
         minimum_started_at: float | None = None
         if minimum_sample_started_at is not None:
             if isinstance(minimum_sample_started_at, bool):
@@ -1415,13 +1720,6 @@ class PerceptionManager:
             "digital_twin_ur5e_only_hardware_ur5e_moveit",
             "digital_twin_dual_robots_hardware_moveit",
         }
-        if any(
-            self.bridge.ros2_proc_status(name) == "running"
-            for name in process_names
-        ):
-            return True
-        if self.bridge.ros2_proc_status("hardware_robot_state_publisher") != "running":
-            return False
         active_stack_lookup = getattr(
             self.bridge,
             "_active_normal_hardware_stack",
@@ -1442,10 +1740,26 @@ class PerceptionManager:
             if callable(selected_stack_lookup)
             else ""
         )
-        return active_stack in {"ur5e", "dual robots"} or selected_stack in {
+        if (
+            self.bridge.ros2_proc_status("hardware_robot_state_publisher")
+            == "running"
+        ):
+            return True
+        if active_stack in {"xarm6", "ur5e", "dual robots"} or selected_stack in {
+            "xarm6",
             "ur5e",
             "dual robots",
-        }
+        }:
+            # The selected Hardware Stack reserves the unprefixed UR5e TF tree
+            # throughout startup, repair, and failure handling. Waiting for the
+            # combined publisher process here permits the calibration publisher
+            # to race its startup and publish a conflicting world -> base. The
+            # xarm6 stack uses the same combined publisher and reserves it too.
+            return True
+        return any(
+            self.bridge.ros2_proc_status(name) == "running"
+            for name in process_names
+        )
 
     def _ur5e_joint_state_publisher_running(self) -> bool:
         monitor_process = self._process_names("ur5e")["calibration_rtde_monitor"]
@@ -1491,7 +1805,9 @@ class PerceptionManager:
                 self._logged_command(state_publisher, command),
                 ros_domain_id=resolved_domain_id,
             )
-            if error and "already running" not in error:
+            if self._ur5e_full_state_publisher_running():
+                self.bridge.ros2_stop(state_publisher)
+            elif error and "already running" not in error:
                 raise RuntimeError(f"cannot start UR5e calibration state publisher: {error}")
 
         rtde_monitor = names["calibration_rtde_monitor"]
@@ -1847,7 +2163,7 @@ class PerceptionManager:
         """Start one Roboflow process without changing operator intent."""
         camera = self._camera(key)
         calibration_path = Path(str(camera["calibration_path"])).expanduser()
-        if not calibration_path.is_file():
+        if key != "stationary" and not calibration_path.is_file():
             return f"Calibration is missing for {key}: {calibration_path}"
         if not str(os.environ.get("ROBOFLOW_API_KEY", "")).strip():
             return "ROBOFLOW_API_KEY is not configured in the ignored .env file."
@@ -1869,9 +2185,24 @@ class PerceptionManager:
             / "ros2/cais_lab_robotics/config/perception/realsense_roboflow.yaml"
         )
         detect_root = f"/perception/{key}"
-        table_plane_path = self._camera("ur5e")["calibration_path"]
         canonical = "true" if key == "ur5e" else "false"
         background_rate = "0.2" if key == "ur5e" else "0.0"
+        world_pose_parameters = ""
+        if key != "stationary":
+            table_plane_path = self._camera("ur5e")["calibration_path"]
+            world_pose_parameters = (
+                f" -p hand_eye_config:={calibration_path}"
+                f" -p table_plane_config:={table_plane_path}"
+            )
+        stationary_inspection_parameters = ""
+        if key == "stationary":
+            inspection = self.stationary_inspection_configuration()
+            stationary_inspection_parameters = (
+                " -p assembly_board_v1_geometry_path:="
+                f"{inspection['geometry_path']}"
+                " -p assembly_board_v1_marker_length_m:="
+                f"{float(self.config()['assembly_board-v1_aruco']['marker_length_m'])}"
+            )
         command = (
             f"{self.venv_python} -m "
             "cais_spade_llm.resources.sensor.physical.realsense_roboflow_node "
@@ -1884,14 +2215,14 @@ class PerceptionManager:
             f"-p tool_frame:={camera['parent_frame']} "
             f"-p camera_link_frame:={camera['camera_name']}_link "
             f"-p camera_optical_frame:={camera['camera_name']}_color_optical_frame "
-            f"-p hand_eye_config:={calibration_path} "
-            f"-p table_plane_config:={table_plane_path} "
             f"-p snapshot_path:={self._snapshot_path(key)} "
             f"-p preview_root:={PREVIEW_ROOT} "
             f"-p detect_all_service:={detect_root}/detect_all "
             f"-p detect_part_service:={detect_root}/detect_part "
             f"-p publish_canonical_services:={canonical} "
             f"-p background_rate_hz:={background_rate}"
+            f"{world_pose_parameters}"
+            f"{stationary_inspection_parameters}"
         )
         return self.bridge._start_tracked_ros2_command(
             process_name,
@@ -1943,7 +2274,7 @@ class PerceptionManager:
         )
 
     def start_detection(self, role: str) -> str | None:
-        """Start the complete camera stack and request one visual detection."""
+        """Start one camera stack and request an initial wrist-camera detection."""
         key = str(role).strip().lower()
         self._clear_detection_preview(key)
         camera_error = self.start_camera(key)
@@ -1958,6 +2289,8 @@ class PerceptionManager:
         perception_error = self.start_perception(key)
         if perception_error:
             return perception_error
+        if key == "stationary":
+            return None
         result = self.test_detection(key)
         if not bool(result.get("visual_detection_ready", False)):
             return str(result.get("message") or "visual detection did not complete")
@@ -2269,23 +2602,31 @@ class PerceptionManager:
         )
 
     @staticmethod
-    def _calibration_capture_error(result: subprocess.CompletedProcess[str]) -> str:
+    def _calibration_capture_error(
+        result: subprocess.CompletedProcess[str],
+        role: str = "ur5e",
+    ) -> str:
         output = "\n".join(
             text for text in (result.stderr.strip(), result.stdout.strip()) if text
         )
+        key = str(role or "").strip().lower() or "ur5e"
+        capture_action = "Capture Sample" if key == "stationary" else "Save Pose + Capture"
         if "fewer than four ChArUco markers are visible" in output:
             return (
                 "ChArUco board is not visible enough: fewer than four markers were detected. "
                 "Place the complete board in the color view, avoid glare or blur, then retry "
-                "Save Pose + Capture."
+                f"{capture_action}."
             )
         if "fewer than six ChArUco corners are visible" in output:
             return (
                 "ChArUco board is only partially visible: fewer than six corners were detected. "
-                "Show more of the board in the color view, then retry Save Pose + Capture."
+                f"Show more of the board in the color view, then retry {capture_action}."
             )
         if "color image or CameraInfo is unavailable" in output:
-            return "UR5e color image or CameraInfo is unavailable; wait for camera topics and retry."
+            return (
+                f"{key} color image or CameraInfo is unavailable; wait for camera topics "
+                "and retry."
+            )
         for line in reversed(output.splitlines()):
             if "RuntimeError:" in line:
                 return line.split("RuntimeError:", maxsplit=1)[1].strip()
@@ -2294,9 +2635,30 @@ class PerceptionManager:
     def save_pose_and_capture(self, role: str) -> dict[str, Any]:
         """Save one reviewed robot pose and one stationary board observation."""
         key = str(role).strip().lower()
+        if key == "stationary":
+            with self._stationary_calibration_samples_lock:
+                return self._save_pose_and_capture(key)
+        return self._save_pose_and_capture(key)
+
+    def _save_pose_and_capture(self, key: str) -> dict[str, Any]:
+        """Capture one calibration observation after role-specific serialization."""
         camera = self._camera(key)
         if key == "ur5e":
             self._ensure_ur5e_calibration_monitor()
+        if key == "stationary":
+            samples_path = Path(str(camera["samples_path"])).expanduser()
+            existing = self._read_json(samples_path)
+            existing_role = str(existing.get("camera_role") or "").strip().lower()
+            if existing and existing_role != "stationary":
+                raise RuntimeError(
+                    "stationary calibration samples belong to another camera role; use "
+                    "Archive + Reset Samples before Capture Sample."
+                )
+            if existing and existing.get("stationary_camera") is False:
+                raise RuntimeError(
+                    "stationary calibration samples are not a stationary-camera sample set; "
+                    "use Archive + Reset Samples before Capture Sample."
+                )
         joint_state = None if key == "stationary" else self._read_joint_state(key)
         pose_path = None
         poses: list[dict[str, Any]] = []
@@ -2312,7 +2674,7 @@ class PerceptionManager:
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("ChArUco capture timed out") from exc
         if result.returncode != 0:
-            raise RuntimeError(self._calibration_capture_error(result))
+            raise RuntimeError(self._calibration_capture_error(result, key))
         samples = self._read_json(Path(str(camera["samples_path"])).expanduser())
         sample_count = len(samples.get("samples", []))
         if joint_state is not None:
@@ -2562,6 +2924,107 @@ class PerceptionManager:
             ros_domain_id=self._domain_id(key),
         )
 
+    def _stationary_inspection_result(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        requested_at: float,
+    ) -> dict[str, Any]:
+        """Validate exact-frame stationary inspection evidence without robot authority."""
+        configuration = self.stationary_inspection_configuration()
+        raw = snapshot.get("stationary_inspection")
+        inspection = dict(raw) if isinstance(raw, dict) else {}
+        inspection_present = bool(inspection)
+        inspection.setdefault(
+            "xy_tolerance_m",
+            STATIONARY_INSPECTION_XY_TOLERANCE_M,
+        )
+        inspection.setdefault(
+            "seating_tolerance_m",
+            STATIONARY_INSPECTION_SEATING_TOLERANCE_M,
+        )
+        inspection.setdefault("frame_id", "assembly_board-v1")
+        inspection.setdefault("parts", [])
+        inspection.setdefault("aruco", {})
+        inspection.setdefault(
+            "unsupported_part_names",
+            list(STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES),
+        )
+        if not configuration["configured"]:
+            return {
+                **inspection,
+                "available": False,
+                "success": False,
+                "message": configuration["error"],
+                "registration": configuration["registration"],
+            }
+        if not inspection_present:
+            return {
+                "available": False,
+                "success": False,
+                "message": "stationary assembly inspection evidence is unavailable.",
+                "frame_id": "assembly_board-v1",
+                "captured_at": None,
+                "xy_tolerance_m": STATIONARY_INSPECTION_XY_TOLERANCE_M,
+                "seating_tolerance_m": STATIONARY_INSPECTION_SEATING_TOLERANCE_M,
+                "registration": configuration["registration"],
+                "aruco": {},
+                "parts": [],
+                "unsupported_part_names": list(
+                    STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES
+                ),
+            }
+        try:
+            captured_at = float(inspection["captured_at"])
+        except (KeyError, TypeError, ValueError):
+            captured_at = 0.0
+        fresh = bool(
+            math.isfinite(captured_at)
+            and requested_at - 0.25 <= captured_at <= time.time() + 1.0
+        )
+        if not fresh:
+            return {
+                **inspection,
+                "available": False,
+                "success": False,
+                "message": (
+                    "stationary assembly inspection evidence is stale; run Test Detection "
+                    "again."
+                ),
+            }
+        inspection_available = bool(inspection.get("available", False))
+        if inspection_available:
+            aruco = inspection.get("aruco")
+            aruco = dict(aruco) if isinstance(aruco, dict) else {}
+            try:
+                aruco_captured_at = float(aruco["captured_at"])
+            except (KeyError, TypeError, ValueError):
+                aruco_captured_at = 0.0
+            if not (
+                math.isfinite(aruco_captured_at)
+                and math.isclose(
+                    aruco_captured_at,
+                    captured_at,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            ):
+                return {
+                    **inspection,
+                    "available": False,
+                    "success": False,
+                    "message": (
+                        "stationary ID 70 evidence does not match the exact SG/MG "
+                        "detection frame; run Test Detection again."
+                    ),
+                }
+        inspection["available"] = inspection_available
+        inspection["success"] = bool(
+            inspection["available"] and inspection.get("success", False)
+        )
+        inspection["message"] = str(inspection.get("message") or "").strip()
+        return inspection
+
     def test_detection(self, role: str) -> dict[str, Any]:
         """Request one role-specific detection without initiating robot motion."""
         key = str(role).strip().lower()
@@ -2577,6 +3040,27 @@ class PerceptionManager:
                 ["bash", "-c", command], capture_output=True, text=True, timeout=40.0, check=False
             )
         except subprocess.TimeoutExpired:
+            if key == "stationary":
+                stationary_inspection = self._stationary_inspection_result(
+                    {},
+                    requested_at=requested_at,
+                )
+                configuration = self.stationary_inspection_configuration()
+                if configuration["configured"]:
+                    stationary_inspection["message"] = "Test Detection timed out"
+                return {
+                    "success": False,
+                    "visual_detection_ready": False,
+                    "world_pose_ready": False,
+                    "message": stationary_inspection["message"],
+                    "detections": [],
+                    "visual_detections": [],
+                    "stationary_inspection_ready": False,
+                    "stationary_inspection": stationary_inspection,
+                    "diagnostic_only": True,
+                    "canonical_authority": False,
+                    "robot_motion_requested": False,
+                }
             return {
                 "success": False,
                 "visual_detection_ready": False,
@@ -2597,6 +3081,37 @@ class PerceptionManager:
         world_pose_ready = bool(visual.get("world_pose_ready", False))
         pose_error = str(visual.get("pose_error") or error).strip()
         world_rows = detections if isinstance(detections, list) else []
+        stationary_inspection: dict[str, Any] = {}
+        if key == "stationary":
+            stationary_inspection = self._stationary_inspection_result(
+                snapshot,
+                requested_at=requested_at,
+            )
+            inspection_available = bool(stationary_inspection.get("available"))
+            inspection_success = bool(stationary_inspection.get("success"))
+            message = str(stationary_inspection.get("message") or "").strip()
+            if not message:
+                message = (
+                    "Stationary SG/MG inspection passed; no robot motion was requested."
+                    if inspection_success
+                    else "Stationary SG/MG inspection failed."
+                )
+            return {
+                "success": inspection_success,
+                "visual_detection_ready": visual_ready,
+                "world_pose_ready": False,
+                "pose_error": pose_error,
+                "message": message,
+                "detections": world_rows,
+                "visual_detections": (
+                    visual_detections if isinstance(visual_detections, list) else []
+                ),
+                "stationary_inspection_ready": inspection_available,
+                "stationary_inspection": stationary_inspection,
+                "diagnostic_only": True,
+                "canonical_authority": False,
+                "robot_motion_requested": False,
+            }
         if visual_ready and world_pose_ready:
             message = "Detection and world pose validated; no robot motion was requested."
         elif visual_ready:
@@ -2705,6 +3220,8 @@ class PerceptionManager:
 
     @staticmethod
     def _cross_camera_comparisons(cameras: dict[str, Any]) -> list[dict[str, Any]]:
+        if bool((cameras.get("stationary") or {}).get("inspection_only", False)):
+            return []
         authoritative = (
             (cameras.get("ur5e") or {}).get("perception", {}).get("detections", [])
         )
@@ -2770,6 +3287,7 @@ class PerceptionManager:
             recovery_by_role = deepcopy(self._recovery)
             desired_connected = set(self._desired_connected)
         cameras: dict[str, Any] = {}
+        stationary_inspection_configuration = self.stationary_inspection_configuration()
         now = time.time()
         for role in CAMERA_ROLES:
             camera = dict(config["cameras"][role])
@@ -2779,17 +3297,84 @@ class PerceptionManager:
             detection_preview = self._read_json(
                 PREVIEW_ROOT / role / "detection_status.json"
             )
+            if role == "stationary":
+                perception = {
+                    **perception,
+                    "world_pose_ready": False,
+                    "tf_ready": False,
+                }
+                detection_preview = {
+                    **detection_preview,
+                    "world_pose_ready": False,
+                    "tf_ready": False,
+                }
             frame_at = float(preview.get("frame_captured_at", 0.0) or 0.0)
             detection_at = float(detection_preview.get("captured_at", 0.0) or 0.0)
             calibration_path = Path(str(camera["calibration_path"])).expanduser()
             samples = self._read_json(Path(str(camera["samples_path"])).expanduser())
             names = self._process_names(role)
             calibration = self._calibration_file_status(camera)
+            calibration_required = role != "stationary"
+            if not calibration_required:
+                calibration = {
+                    **calibration,
+                    "ready": True,
+                    "required": False,
+                    "inspection_only": True,
+                }
             assembly_board_v1_aruco = (
                 self.assembly_board_v1_aruco_status(role)
                 if role in ASSEMBLY_BOARD_V1_ARUCO_ROLES
                 else {}
             )
+            raw_stationary_inspection = perception.get("stationary_inspection")
+            stationary_inspection = (
+                dict(raw_stationary_inspection)
+                if role == "stationary"
+                and isinstance(raw_stationary_inspection, dict)
+                else {}
+            )
+            if role == "stationary" and not stationary_inspection_configuration[
+                "configured"
+            ]:
+                stationary_inspection.update(
+                    {
+                        "available": False,
+                        "success": False,
+                        "message": stationary_inspection_configuration["error"],
+                        "registration": stationary_inspection_configuration[
+                            "registration"
+                        ],
+                    }
+                )
+            elif role == "stationary" and stationary_inspection:
+                try:
+                    inspection_captured_at = float(
+                        stationary_inspection["captured_at"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    inspection_captured_at = 0.0
+                inspection_age_sec = (
+                    now - inspection_captured_at
+                    if math.isfinite(inspection_captured_at)
+                    else math.inf
+                )
+                stationary_inspection["age_sec"] = max(0.0, inspection_age_sec)
+                if not (
+                    0.0
+                    <= inspection_age_sec
+                    <= ASSEMBLY_BOARD_V1_SNAPSHOT_MAX_AGE_SEC
+                ):
+                    stationary_inspection.update(
+                        {
+                            "available": False,
+                            "success": False,
+                            "message": (
+                                "stationary assembly inspection evidence is stale; run "
+                                "Test Detection again."
+                            ),
+                        }
+                    )
             camera_process = self.bridge.ros2_proc_status(names["camera"])
             perception_process = self.bridge.ros2_proc_status(names["perception"])
             if role == "ur5e" and self._ur5e_digital_twin_process_running("camera"):
@@ -2833,10 +3418,12 @@ class PerceptionManager:
                 "visual_detection_ready": bool(
                     detection_preview.get("visual_detection_ready", False)
                 ),
-                "world_pose_ready": bool(
-                    detection_preview.get("world_pose_ready", False)
-                ),
-                "tf_ready": bool(detection_preview.get("world_pose_ready", False)),
+                "world_pose_ready": role != "stationary"
+                and bool(detection_preview.get("world_pose_ready", False)),
+                "tf_ready": role != "stationary"
+                and bool(detection_preview.get("world_pose_ready", False)),
+                "calibration_required": calibration_required,
+                "inspection_only": role == "stationary",
                 "preview": preview,
                 "perception": perception,
                 "detection_preview": {
@@ -2850,6 +3437,7 @@ class PerceptionManager:
                 "calibration_ready": calibration["ready"],
                 "calibration": calibration,
                 "assembly_board-v1_aruco": assembly_board_v1_aruco,
+                "stationary_inspection": stationary_inspection,
                 "sample_count": len(samples.get("samples", [])),
                 "pose_count": self._pose_count(camera),
                 "replay": self._read_json(
@@ -2883,6 +3471,7 @@ class PerceptionManager:
             "cameras": cameras,
             "stationary_board_world_pose": config["stationary_board_world_pose"],
             "assembly_board-v1_aruco": config["assembly_board-v1_aruco"],
+            "stationary_inspection_configuration": stationary_inspection_configuration,
             "digital_twin": self._read_json(Path("/tmp/cais_physical_part_twin_status.json")),
             "cross_camera_comparisons": self._cross_camera_comparisons(cameras),
             "lg_status": "LG unavailable: model has no large_gear class",

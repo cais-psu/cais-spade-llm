@@ -528,6 +528,16 @@ class KeyboardTeleop(Node):
             if SetUR5eCartesianJog is not None
             else None
         )
+        self._ur5e_smooth_active = False
+        self._ur5e_last_stop_motion_confirmed = True
+        self._ur5e_smooth_state_lock = threading.Lock()
+        self._ur5e_smooth_service_lock = threading.Lock()
+        self._ur5e_smooth_world_velocity_m_s = [0.0] * 3
+        self._ur5e_smooth_watchdog_sec = 0.50
+        self._ur5e_smooth_heartbeat_monotonic = 0.0
+        self._ur5e_smooth_pending_error = ''
+        self._ur5e_smooth_refresh_stop = threading.Event()
+        self._ur5e_smooth_refresh_thread = None
         self.xarm6_hardware_cartesian_client = (
             self.create_client(
                 MoveCartesian,
@@ -1724,13 +1734,11 @@ class KeyboardTeleop(Node):
             else float(speed_mm_s) / 1000.0
         )
         if not math.isfinite(requested_speed_m_s) or not (
-            0.005
-            <= requested_speed_m_s
-            <= self.ur5e_hardware_cartesian_max_speed_m_s
+            0.0 < requested_speed_m_s <= self.ur5e_hardware_cartesian_max_speed_m_s
         ):
             return False, (
                 'UR5e Cartesian speed must be finite and within '
-                f'[5.0, {self.ur5e_hardware_cartesian_max_speed_m_s * 1000.0:.1f}] mm/s'
+                f'(0, {self.ur5e_hardware_cartesian_max_speed_m_s * 1000.0:.1f}] mm/s'
             )
         goal = MoveUR5eRelativeCartesian.Goal()
         goal.world_translation_m.x = values[0]
@@ -1748,7 +1756,14 @@ class KeyboardTeleop(Node):
         if goal_handle is None or not goal_handle.accepted:
             return False, f'{self.ur5e_hardware_relative_cartesian_action}: goal rejected'
         result_future = goal_handle.get_result_async()
-        if not self._wait_future(result_future, timeout=self.ur5e_hardware_result_timeout_sec):
+        expected_duration_sec = math.sqrt(sum(value * value for value in values)) / (
+            requested_speed_m_s
+        )
+        result_timeout_sec = max(
+            self.ur5e_hardware_result_timeout_sec,
+            expected_duration_sec + 15.0,
+        )
+        if not self._wait_future(result_future, timeout=result_timeout_sec):
             try:
                 cancel_future = goal_handle.cancel_goal_async()
                 self._wait_future(cancel_future, timeout=2.0)
@@ -1790,13 +1805,11 @@ class KeyboardTeleop(Node):
         if not math.isfinite(delta_rad) or abs(delta_rad) <= 1e-12:
             return False, 'UR5e joint jog delta must be non-zero and finite'
         if not math.isfinite(speed_rad_s) or not (
-            math.radians(0.1)
-            <= speed_rad_s
-            <= self.ur5e_hardware_max_joint_speed_rad_s
+            0.0 < speed_rad_s <= self.ur5e_hardware_max_joint_speed_rad_s
         ):
             return False, (
                 'UR5e joint jog speed must be finite and within '
-                f'[0.1, {math.degrees(self.ur5e_hardware_max_joint_speed_rad_s):.1f}] deg/s'
+                f'(0, {math.degrees(self.ur5e_hardware_max_joint_speed_rad_s):.1f}] deg/s'
             )
         goal = MoveUR5eJointJog.Goal()
         goal.joint = int(joint)
@@ -1922,13 +1935,11 @@ class KeyboardTeleop(Node):
             )
         )
         if not math.isfinite(requested_speed_mm_s) or not (
-            5.0
-            <= requested_speed_mm_s
-            <= speed_limit_mm_s
+            0.0 < requested_speed_mm_s <= speed_limit_mm_s
         ):
             return False, (
                 'xArm6 Cartesian speed must be finite and within '
-                f'[5.0, {speed_limit_mm_s:.3f}] mm/s'
+                f'(0, {speed_limit_mm_s:.3f}] mm/s'
             )
         request = MoveCartesian.Request()
         request.pose = [
@@ -2743,6 +2754,163 @@ class KeyboardTeleop(Node):
             return False, refresh_error
         return True, 'xArm6 Cartesian Smooth Hold active'
 
+    def _send_ur5e_cartesian_jog(
+        self,
+        world_velocity_m_s,
+        watchdog_sec,
+        *,
+        stop,
+        timeout_sec,
+    ):
+        client = self.ur5e_hardware_cartesian_jog_client
+        if client is None or SetUR5eCartesianJog is None:
+            return False, 'UR5e Cartesian jog service type is unavailable'
+        request = SetUR5eCartesianJog.Request()
+        request.stop = bool(stop)
+        if not stop:
+            request.world_linear_velocity_m_s.x = float(world_velocity_m_s[0])
+            request.world_linear_velocity_m_s.y = float(world_velocity_m_s[1])
+            request.world_linear_velocity_m_s.z = float(world_velocity_m_s[2])
+            request.acceleration_m_s2 = self.ur5e_hardware_cartesian_acceleration_m_s2
+            request.watchdog_sec = min(0.50, max(0.10, float(watchdog_sec)))
+        with self._ur5e_smooth_service_lock:
+            response, error = self._call_service(
+                client,
+                request,
+                timeout_sec=timeout_sec,
+            )
+        if error is not None:
+            return False, f'{self.ur5e_hardware_cartesian_jog_service}: {error}'
+        return bool(response.accepted), str(response.message)
+
+    def _ur5e_refresh_cartesian_jog_once(self):
+        with self._ur5e_smooth_state_lock:
+            if not self._ur5e_smooth_active:
+                return False
+            world_velocity_m_s = list(self._ur5e_smooth_world_velocity_m_s)
+            watchdog_sec = float(self._ur5e_smooth_watchdog_sec)
+            heartbeat_age_sec = (
+                time.monotonic() - self._ur5e_smooth_heartbeat_monotonic
+            )
+        if heartbeat_age_sec > watchdog_sec:
+            failure = (
+                'UR5e Cartesian Smooth Hold UI heartbeat expired after '
+                f'{heartbeat_age_sec:.3f}s'
+            )
+        else:
+            ok, failure = self._send_ur5e_cartesian_jog(
+                world_velocity_m_s,
+                watchdog_sec,
+                stop=False,
+                timeout_sec=0.40,
+            )
+            if ok:
+                return True
+            failure = f'UR5e Cartesian Smooth Hold refresh failed: {failure}'
+        with self._ur5e_smooth_state_lock:
+            if not self._ur5e_smooth_active:
+                return False
+            self._ur5e_smooth_pending_error = failure
+        self._stop_ur5e_cartesian_jog(clear_pending_error=False)
+        return False
+
+    def _ur5e_cartesian_jog_refresh_loop(self):
+        while not self._ur5e_smooth_refresh_stop.wait(0.10):
+            if not self._ur5e_refresh_cartesian_jog_once():
+                return
+
+    def _start_ur5e_cartesian_jog_refresh(self):
+        previous = self._ur5e_smooth_refresh_thread
+        if previous is not None and previous.is_alive():
+            self._ur5e_smooth_refresh_stop.set()
+            previous.join(timeout=0.60)
+            if previous.is_alive():
+                return False, 'UR5e Cartesian Smooth Hold refresh thread did not stop'
+        self._ur5e_smooth_refresh_stop.clear()
+        refresh_thread = threading.Thread(
+            target=self._ur5e_cartesian_jog_refresh_loop,
+            name='ur5e_cartesian_smooth_refresh',
+            daemon=True,
+        )
+        self._ur5e_smooth_refresh_thread = refresh_thread
+        refresh_thread.start()
+        return True, 'OK'
+
+    def _stop_ur5e_cartesian_jog(self, *, clear_pending_error=True):
+        errors = []
+        with self._ur5e_smooth_state_lock:
+            motion_was_active = bool(self._ur5e_smooth_active)
+            pending_error = str(self._ur5e_smooth_pending_error or '')
+            self._ur5e_smooth_active = False
+            self._ur5e_smooth_refresh_stop.set()
+            if clear_pending_error:
+                self._ur5e_smooth_pending_error = ''
+        if pending_error:
+            errors.append(pending_error)
+        previous_stop_confirmed = bool(
+            getattr(self, '_ur5e_last_stop_motion_confirmed', True)
+        )
+        self._ur5e_last_stop_motion_confirmed = bool(
+            not motion_was_active and previous_stop_confirmed
+        )
+        ok, stop_message = self._send_ur5e_cartesian_jog(
+            (0.0, 0.0, 0.0),
+            0.50,
+            stop=True,
+            timeout_sec=3.0,
+        )
+        if ok:
+            self._ur5e_last_stop_motion_confirmed = True
+        else:
+            errors.append(stop_message)
+        if errors:
+            return False, '; '.join(errors)
+        return True, stop_message or 'UR5e Cartesian Smooth Hold stopped'
+
+    def _set_ur5e_cartesian_jog(self, world_velocity_m_s, watchdog_sec):
+        client = self.ur5e_hardware_cartesian_jog_client
+        if client is None or SetUR5eCartesianJog is None:
+            return False, 'UR5e Cartesian jog service type is unavailable'
+        with self._ur5e_smooth_state_lock:
+            pending_error = str(self._ur5e_smooth_pending_error or '')
+            if pending_error:
+                self._ur5e_smooth_pending_error = ''
+            smooth_active = bool(self._ur5e_smooth_active)
+        if pending_error:
+            return False, pending_error
+        watchdog_sec = min(0.50, max(0.10, float(watchdog_sec)))
+        if smooth_active:
+            with self._ur5e_smooth_state_lock:
+                if not self._ur5e_smooth_active:
+                    return False, 'UR5e Cartesian Smooth Hold is no longer active'
+                self._ur5e_smooth_world_velocity_m_s = list(world_velocity_m_s)
+                self._ur5e_smooth_watchdog_sec = watchdog_sec
+                self._ur5e_smooth_heartbeat_monotonic = time.monotonic()
+            return True, 'UR5e Cartesian Smooth Hold active'
+        if not client.wait_for_service(timeout_sec=2.0):
+            return False, f'{self.ur5e_hardware_cartesian_jog_service} is unavailable'
+        ok, message = self._send_ur5e_cartesian_jog(
+            world_velocity_m_s,
+            watchdog_sec,
+            stop=False,
+            timeout_sec=3.0,
+        )
+        if not ok:
+            return False, message
+        with self._ur5e_smooth_state_lock:
+            self._ur5e_smooth_world_velocity_m_s = list(world_velocity_m_s)
+            self._ur5e_smooth_watchdog_sec = watchdog_sec
+            self._ur5e_smooth_heartbeat_monotonic = time.monotonic()
+            self._ur5e_smooth_pending_error = ''
+            self._ur5e_smooth_active = True
+        refresh_ok, refresh_error = self._start_ur5e_cartesian_jog_refresh()
+        if not refresh_ok:
+            with self._ur5e_smooth_state_lock:
+                self._ur5e_smooth_pending_error = refresh_error
+            self._stop_ur5e_cartesian_jog(clear_pending_error=False)
+            return False, refresh_error
+        return True, message or 'UR5e Cartesian Smooth Hold active'
+
     def set_cartesian_jog(
         self,
         robot,
@@ -2762,15 +2930,7 @@ class KeyboardTeleop(Node):
                         self._xarm6_cartesian_session_mode != 'smooth'
                     ),
                 )
-            client = self.ur5e_hardware_cartesian_jog_client
-            if client is None or SetUR5eCartesianJog is None:
-                return False, 'UR5e Cartesian jog service type is unavailable'
-            request = SetUR5eCartesianJog.Request()
-            request.stop = True
-            response, error = self._call_service(client, request, timeout_sec=3.0)
-            if error is not None:
-                return False, f'{self.ur5e_hardware_cartesian_jog_service}: {error}'
-            return bool(response.accepted), str(response.message)
+            return self._stop_ur5e_cartesian_jog()
         if axis not in {'x', 'y', 'z'}:
             return False, f'unknown axis: {axis}'
         speed_m_s = float(speed_mm_s) / 1000.0
@@ -2785,10 +2945,10 @@ class KeyboardTeleop(Node):
                 )
             )
             requested_speed_mm_s = abs(speed_m_s) * 1000.0
-            if not 5.0 <= requested_speed_mm_s <= xarm6_speed_limit_mm_s:
+            if not 0.0 < requested_speed_mm_s <= xarm6_speed_limit_mm_s:
                 return False, (
                     'xArm6 Cartesian Smooth Hold speed must be finite and within '
-                    f'[5.0, {xarm6_speed_limit_mm_s:.3f}] mm/s'
+                    f'(0, {xarm6_speed_limit_mm_s:.3f}] mm/s'
                 )
         world_velocity_m_s = [0.0, 0.0, 0.0]
         world_velocity_m_s[{'x': 0, 'y': 1, 'z': 2}[axis]] = speed_m_s
@@ -2797,22 +2957,10 @@ class KeyboardTeleop(Node):
                 world_velocity_m_s,
                 watchdog_sec,
             )
-        client = self.ur5e_hardware_cartesian_jog_client
-        if client is None or SetUR5eCartesianJog is None:
-            return False, 'UR5e Cartesian jog service type is unavailable'
-        if not client.wait_for_service(timeout_sec=2.0):
-            return False, f'{self.ur5e_hardware_cartesian_jog_service} is unavailable'
-        request = SetUR5eCartesianJog.Request()
-        request.world_linear_velocity_m_s.x = world_velocity_m_s[0]
-        request.world_linear_velocity_m_s.y = world_velocity_m_s[1]
-        request.world_linear_velocity_m_s.z = world_velocity_m_s[2]
-        request.acceleration_m_s2 = self.ur5e_hardware_cartesian_acceleration_m_s2
-        request.watchdog_sec = min(0.50, max(0.10, float(watchdog_sec)))
-        request.stop = False
-        response, error = self._call_service(client, request, timeout_sec=3.0)
-        if error is not None:
-            return False, f'{self.ur5e_hardware_cartesian_jog_service}: {error}'
-        return bool(response.accepted), str(response.message)
+        return self._set_ur5e_cartesian_jog(
+            world_velocity_m_s,
+            watchdog_sec,
+        )
 
     def move_cartesian(
         self,
@@ -2973,11 +3121,11 @@ class KeyboardTeleop(Node):
                 else self.ur5e_hardware_max_joint_speed_rad_s
             )
             if not math.isfinite(requested_speed_deg_s) or not (
-                0.1 <= requested_speed_deg_s <= math.degrees(speed_limit_rad_s)
+                0.0 < requested_speed_deg_s <= math.degrees(speed_limit_rad_s)
             ):
                 return False, (
                     f'{robot} joint jog speed must be finite and within '
-                    f'[0.1, {math.degrees(speed_limit_rad_s):.1f}] deg/s'
+                    f'(0, {math.degrees(speed_limit_rad_s):.1f}] deg/s'
                 )
             if environment == 'real' and robot == 'ur5e':
                 return self._move_ur5e_joint_jog(
@@ -3648,6 +3796,8 @@ def run_server(args):
                 continue
 
             if op == 'shutdown':
+                if node._ur5e_smooth_active:
+                    node._stop_ur5e_cartesian_jog()
                 if node._xarm6_cartesian_session_mode != 'off':
                     node._close_xarm6_cartesian_session()
                 elif node._xarm6_smooth_active:
@@ -3806,6 +3956,10 @@ def run_server(args):
                 if robot == 'xarm6' and stop:
                     response['state_uncertain'] = bool(
                         not node._xarm6_last_stop_motion_confirmed
+                    )
+                elif robot == 'ur5e' and stop:
+                    response['state_uncertain'] = bool(
+                        not node._ur5e_last_stop_motion_confirmed
                     )
                 emit(response)
                 continue
@@ -3992,6 +4146,8 @@ def run_server(args):
 
             emit({'ok': False, 'msg': f'unknown op: {op}'})
     finally:
+        if node._ur5e_smooth_active:
+            node._stop_ur5e_cartesian_jog()
         if node._xarm6_cartesian_session_mode != 'off':
             node._close_xarm6_cartesian_session()
         elif node._xarm6_smooth_active:

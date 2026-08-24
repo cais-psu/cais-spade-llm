@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +28,23 @@ class _ImmediateFuture:
 
     def result(self) -> Any:
         return self._result
+
+
+class _SettableFuture:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._result: Any = None
+
+    def done(self) -> bool:
+        return self._event.is_set()
+
+    def result(self) -> Any:
+        assert self._event.is_set()
+        return self._result
+
+    def set_result(self, result: Any) -> None:
+        self._result = result
+        self._event.set()
 
 
 class _Goal:
@@ -110,8 +129,13 @@ def _arm_controller_double(client: _ActionClient) -> UR5eHardwareController:
         "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
     )
     controller._ur5e_hardware_cartesian_client = _ActionClient()
+    controller._ur5e_hardware_insert_action = (
+        "/cais_ur5e_rtde_cartesian_controller/move_insert"
+    )
+    controller._ur5e_hardware_insert_client = _ActionClient()
     controller._FollowJointTrajectory = SimpleNamespace(Goal=_Goal)
     controller._MoveUR5eCartesian = SimpleNamespace(Goal=object)
+    controller._MoveUR5eInsert = SimpleNamespace(Goal=object)
     controller._JointTrajectoryPoint = _Point
     controller._Duration = lambda *, sec, nanosec: SimpleNamespace(
         sec=sec,
@@ -312,19 +336,40 @@ def test_physical_ur5e_move_home_does_not_trust_cached_home_when_action_is_missi
     assert client.goals == []
 
 
-def test_reset_ur5e_hardware_trajectory_client_replaces_joint_and_cartesian_clients() -> None:
+def test_generic_ur5e_readiness_does_not_require_optional_insert_action() -> None:
+    controller = _arm_controller_double(_ActionClient())
+    controller.init = lambda: True
+    controller._services_ready = False
+    controller._rg2_action_client = _ActionClient()
+    controller._get_arm_joint_positions = lambda **_kwargs: ([0.0] * 6, [])
+    controller._ur5e_hardware_insert_client.wait_for_server = (
+        lambda **_kwargs: pytest.fail("generic readiness waited for move_insert")
+    )
+
+    ready = UR5eHardwareController.wait_for_services(controller, timeout_sec=2.0)
+
+    assert ready is True
+    assert controller._services_ready is True
+
+
+def test_reset_ur5e_hardware_trajectory_client_leaves_optional_insert_client() -> None:
     previous_arm_client = _ActionClient()
     previous_cartesian_client = _ActionClient()
+    previous_insert_client = _ActionClient()
     gripper_client = _ActionClient()
     replacement_arm_client = _ActionClient()
     replacement_cartesian_client = _ActionClient()
     wait_timeouts: list[float] = []
-    for replacement_client in (replacement_arm_client, replacement_cartesian_client):
+    for replacement_client in (
+        replacement_arm_client,
+        replacement_cartesian_client,
+    ):
         replacement_client.wait_for_server = (
             lambda timeout_sec: wait_timeouts.append(timeout_sec) or True
         )
     controller = _arm_controller_double(previous_arm_client)
     controller._ur5e_hardware_cartesian_client = previous_cartesian_client
+    controller._ur5e_hardware_insert_client = previous_insert_client
     controller._node = object()
     controller._cb_group = object()
     controller._rg2_action_client = gripper_client
@@ -338,11 +383,11 @@ def test_reset_ur5e_hardware_trajectory_client_replaces_joint_and_cartesian_clie
         callback_group: Any,
     ) -> _ActionClient:
         created.append((node, action_type, action_name, callback_group))
-        return (
-            replacement_arm_client
-            if action_name == controller._ur5e_hardware_trajectory_action
-            else replacement_cartesian_client
-        )
+        if action_name == controller._ur5e_hardware_trajectory_action:
+            return replacement_arm_client
+        if action_name == controller._ur5e_hardware_cartesian_action:
+            return replacement_cartesian_client
+        raise AssertionError(f"unexpected action client: {action_name}")
 
     controller._ActionClient = _create_client
 
@@ -352,10 +397,12 @@ def test_reset_ur5e_hardware_trajectory_client_replaces_joint_and_cartesian_clie
     assert "recreated" in message
     assert previous_arm_client.destroyed is True
     assert previous_cartesian_client.destroyed is True
+    assert previous_insert_client.destroyed is False
     assert gripper_client.destroyed is False
     assert controller._rg2_action_client is gripper_client
     assert controller._ur5e_hardware_trajectory_client is replacement_arm_client
     assert controller._ur5e_hardware_cartesian_client is replacement_cartesian_client
+    assert controller._ur5e_hardware_insert_client is previous_insert_client
     assert len(wait_timeouts) == 2
     assert 0.0 <= wait_timeouts[1] <= wait_timeouts[0] <= 8.0
     assert created == [
@@ -380,6 +427,7 @@ def test_reset_ur5e_hardware_trajectory_client_reports_discovery_timeout() -> No
     replacement_client.wait_for_server = lambda timeout_sec: False
     controller = _arm_controller_double(previous_arm_client)
     previous_cartesian_client = controller._ur5e_hardware_cartesian_client
+    previous_insert_client = controller._ur5e_hardware_insert_client
     controller._node = object()
     controller._cb_group = object()
     controller._ActionClient = lambda *_args, **_kwargs: replacement_client
@@ -390,6 +438,7 @@ def test_reset_ur5e_hardware_trajectory_client_reports_discovery_timeout() -> No
     assert "was not discovered" in message
     assert previous_arm_client.destroyed is True
     assert previous_cartesian_client.destroyed is True
+    assert previous_insert_client.destroyed is False
     assert controller._ur5e_hardware_trajectory_client is replacement_client
 
 
@@ -443,20 +492,83 @@ def test_physical_ur5e_gripper_rejects_unsafe_position(position: float) -> None:
     assert client.goals == []
 
 
-def test_physical_ur5e_gripper_fails_closed_on_result_timeout() -> None:
+def test_physical_ur5e_gripper_uses_terminal_settlement_wait() -> None:
     client = _ActionClient()
     controller = _controller_double(client)
-    completed_waits = 0
+    waits: list[float] = []
 
-    def _wait(future: _ImmediateFuture, **_kwargs: Any) -> Any:
-        nonlocal completed_waits
-        completed_waits += 1
-        return future.result() if completed_waits == 1 else None
+    def _wait(
+        _goal_handle: Any,
+        future: _ImmediateFuture,
+        *,
+        timeout_sec: float,
+    ) -> Any:
+        waits.append(timeout_sec)
+        return future.result()
 
-    controller._wait_future = _wait
+    controller._wait_ur5e_action_terminal_settlement = _wait
 
-    assert controller.open_gripper() is False
-    assert "result timeout" in controller._last_failure_message
+    assert controller.open_gripper() is True
+    assert waits == [8.0]
+
+
+def test_physical_ur5e_gripper_retains_call_until_delayed_acceptance_settles() -> None:
+    client = _ActionClient()
+    controller = _controller_double(client)
+    controller._ur5e_action_send_timeout_sec = 0.01
+    send_future = _SettableFuture()
+    wrapped = SimpleNamespace(
+        status=4,
+        result=SimpleNamespace(error_code=0, error_string=""),
+    )
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: _ImmediateFuture(wrapped),
+    )
+    client.send_goal_async = lambda goal: client.goals.append(goal) or send_future
+    results: list[bool] = []
+
+    worker = threading.Thread(target=lambda: results.append(controller.open_gripper()))
+    worker.start()
+    time.sleep(0.05)
+
+    assert worker.is_alive()
+    assert len(client.goals) == 1
+
+    send_future.set_result(goal_handle)
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert results == [True]
+
+
+def test_physical_ur5e_gripper_retains_call_without_terminal_observer() -> None:
+    client = _ActionClient()
+    controller = _controller_double(client)
+    goal_handle = SimpleNamespace(
+        accepted=True,
+        get_result_async=lambda: (_ for _ in ()).throw(RuntimeError("observer lost")),
+    )
+    client.send_goal_async = (
+        lambda goal: client.goals.append(goal) or _ImmediateFuture(goal_handle)
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    controller._retain_accepted_action_without_terminal_observer = (
+        lambda: entered.set() or release.wait()
+    )
+    results: list[bool] = []
+    worker = threading.Thread(target=lambda: results.append(controller.open_gripper()))
+    worker.start()
+
+    assert entered.wait(timeout=1.0)
+    assert worker.is_alive()
+
+    release.set()
+    worker.join(timeout=1.0)
+
+    assert results == [False]
+    assert "observer lost" in controller._last_failure_message
 
 
 def test_physical_ur5e_shutdown_releases_action_client() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +68,27 @@ def _robot_facet(snapshot: dict[str, Any]) -> dict[str, Any]:
         "gripper_state": resource_snapshot_field_value(snapshot, "gripper_state"),
         "current_pose": deepcopy(resource_snapshot_field_value(snapshot, "current_pose")),
         "current_pose_ref": resource_snapshot_field_value(snapshot, "current_pose_ref"),
+        "current_pose_captured_at": resource_snapshot_field_value(
+            snapshot,
+            "current_pose_captured_at",
+        ),
+        "controller_ready": resource_snapshot_field_value(
+            snapshot,
+            "controller_ready",
+        ),
+        "tf_ready": resource_snapshot_field_value(snapshot, "tf_ready"),
+        "tcp_ready": resource_snapshot_field_value(snapshot, "tcp_ready"),
+        "perception_ready": resource_snapshot_field_value(
+            snapshot,
+            "perception_ready",
+        ),
+        "destination_localization_ready": resource_snapshot_field_value(
+            snapshot,
+            "destination_localization_ready",
+        ),
+        "function_names": list(
+            resource_snapshot_field_value(snapshot, "function_names") or []
+        ),
         "named_poses": {
             str(pose_name): str(pose_name)
             for pose_name in (resource_snapshot_field_value(snapshot, "named_poses") or [])
@@ -399,31 +421,80 @@ def _robot_primitive_owner(agent: Any) -> Any | None:
 
 def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
     current_pose = None
+    current_pose_captured_at = None
     controller = getattr(agent, "_controller", None)
+    controller_config = dict(
+        getattr(agent, "controller_config", {})
+        or getattr(controller, "controller_config", {})
+        or {}
+    )
+    move_group = dict(controller_config.get("move_group") or {})
+    services = dict(controller_config.get("services") or {})
+    controller_ready = controller is not None
+    is_usable = getattr(controller, "is_usable", None)
+    if callable(is_usable):
+        try:
+            controller_ready = bool(is_usable())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            controller_ready = False
+    pose_feedback_ready = False
     if (
         controller is not None
         and str(getattr(agent, "execution_mode", "")).strip().lower() != "dry_run"
     ):
+        get_current_pose = getattr(controller, "get_current_pose", None)
         try:
-            pose_result = controller.get_current_pose()
-        except Exception:
+            pose_result = get_current_pose() if callable(get_current_pose) else None
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             pose_result = None
         if isinstance(pose_result, dict) and pose_result.get("success"):
             pose = dict(pose_result.get("pose") or {})
             if {"x", "y", "z"} <= set(pose.keys()):
-                current_pose = {
-                    "x": float(pose["x"]),
-                    "y": float(pose["y"]),
-                    "z": float(pose["z"]),
-                }
+                try:
+                    current_pose = {
+                        "x": float(pose["x"]),
+                        "y": float(pose["y"]),
+                        "z": float(pose["z"]),
+                    }
+                except (TypeError, ValueError):
+                    current_pose = None
+                if current_pose is not None:
+                    current_pose_captured_at = time.time()
+                    pose_feedback_ready = True
     if current_pose is None and getattr(agent, "_recovery_pose_ref", None) is None:
         position = getattr(agent, "_position", None)
         if isinstance(position, dict) and {"x", "y", "z"} <= set(position.keys()):
-            current_pose = {
-                "x": float(position["x"]),
-                "y": float(position["y"]),
-                "z": float(position["z"]),
-            }
+            try:
+                current_pose = {
+                    "x": float(position["x"]),
+                    "y": float(position["y"]),
+                    "z": float(position["z"]),
+                }
+            except (TypeError, ValueError):
+                current_pose = None
+    frame_id = str(
+        getattr(controller, "frame_id", "") or move_group.get("frame_id") or ""
+    ).strip()
+    ee_link = str(
+        getattr(controller, "ee_link", "") or move_group.get("ee_link") or ""
+    ).strip()
+    tcp_link = str(
+        getattr(controller, "tcp_link", "") or move_group.get("tcp_link") or ""
+    ).strip()
+    perception_behavior = bool(
+        callable(getattr(controller, "detect_parts", None))
+        or services.get("detect_all")
+    )
+    destination_localization_behavior = bool(
+        callable(getattr(controller, "localize_assembly_board_v1", None))
+        or services.get("detect_all")
+    )
+    executables = getattr(agent, "executables", {})
+    function_names = sorted(
+        str(name)
+        for name, executable in dict(executables or {}).items()
+        if str(name or "").strip() and callable(executable)
+    )
     return {
         "resource_type": "robot",
         "current_state": str(getattr(agent, "_current_state", "") or "").strip() or "idle",
@@ -431,6 +502,20 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
         "gripper_state": str(getattr(agent, "_gripper_state", "") or "").strip() or "unknown",
         "current_pose": current_pose,
         "current_pose_ref": getattr(agent, "_recovery_pose_ref", None),
+        "current_pose_captured_at": current_pose_captured_at,
+        "controller_ready": controller_ready,
+        "tf_ready": bool(
+            controller_ready
+            and pose_feedback_ready
+            and frame_id == "world"
+            and ee_link
+        ),
+        "tcp_ready": bool(controller_ready and tcp_link),
+        "perception_ready": bool(controller_ready and perception_behavior),
+        "destination_localization_ready": bool(
+            controller_ready and destination_localization_behavior
+        ),
+        "function_names": function_names,
         "named_poses": sorted((getattr(agent, "named_positions", {}) or {}).keys()),
     }
 

@@ -11,7 +11,30 @@ from typing import Any
 
 import pytest
 
+from cais_spade_llm.ui import bridge as bridge_module
 from cais_spade_llm.ui.bridge import SystemBridge
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_insertion_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bridge_module,
+        "_MOVE_INSERT_TRIALS_DIR",
+        tmp_path / "operator_move_insert_trials",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_INSERTION_DEMONSTRATIONS_DIR",
+        tmp_path / "operator_move_insert_demonstrations",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_HARDWARE_STATE_DIR",
+        tmp_path / "operator_hardware_state",
+    )
 
 
 class _LifecycleLock:
@@ -140,13 +163,18 @@ def test_targeted_reset_restarts_only_ur5e_rtde_and_exact_mirror(
         rtde_process=rtde_process,
         mirror_process=mirror_process,
     )
+    pending_review_calls: list[dict[str, Any]] = []
+    bridge._move_insert_pending_review_error = (  # type: ignore[method-assign]
+        lambda **kwargs: pending_review_calls.append(dict(kwargs)) or ""
+    )
 
     ok, message = bridge.teleop_reset_ur5e_rtde_connection()
 
     assert ok is True
     assert "without robot motion" in message
     assert "move_home" not in message
-    assert "normal fresh readiness and function-state checks" in message
+    assert "physical joint state were reacquired" in message
+    assert "normal fresh readiness checks" in message
     assert calls["teleop_stops"] == 1
     expected_stops = (
         [(mirror_process, "ur5e_rtde_reset")] if mirror_process else []
@@ -164,8 +192,9 @@ def test_targeted_reset_restarts_only_ur5e_rtde_and_exact_mirror(
     ]
     assert calls["controller_timeouts"] == [8.0]
     assert calls["cache_clears"] == 2
-    assert bridge._ur5e_robot_function_state_uncertain is True
-    assert "inspect the physical UR5e" in bridge._ur5e_robot_function_state_uncertain_reason
+    assert pending_review_calls == [{"allow_terminal_recovery": True}]
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
     untouched = {
         "gazebo-kept-running",
         "hardware_ur5e_moveit",
@@ -346,30 +375,104 @@ def test_reset_reports_robot_functions_action_client_failure() -> None:
     assert "client discovery timed out" in message
 
 
-def test_reset_preserves_uncertain_gate_until_successful_move_home() -> None:
+def test_reset_reacquires_physical_state_without_requiring_move_home() -> None:
     bridge, _calls = _reset_bridge(
         source="hardware",
         cfg=None,
         rtde_process="hardware_ur5e_rtde_trajectory_server",
     )
     bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = "motion result was not observed"
 
-    ok, _message = bridge.teleop_reset_ur5e_rtde_connection()
+    ok, message = bridge.teleop_reset_ur5e_rtde_connection()
     assert ok is True
-    assert bridge._ur5e_robot_function_state_uncertain is True
-
-    bridge._record_ur5e_robot_function_result(
-        object(),
-        "pick_approach",
-        {"status": "completed"},
-    )
-    assert bridge._ur5e_robot_function_state_uncertain is True
-    bridge._record_ur5e_robot_function_result(
-        object(),
-        "move_home",
-        {"status": "completed"},
-    )
+    assert "physical joint state were reacquired" in message
     assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
+
+
+def test_successful_reset_clears_a_previous_reset_only_uncertain_gate() -> None:
+    bridge, _calls = _reset_bridge(
+        source="hardware",
+        cfg=None,
+        rtde_process="hardware_ur5e_rtde_trajectory_server",
+    )
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = (
+        "Reset UR5e RTDE replaced the control process without robot motion; "
+        "inspect the physical UR5e before commanding motion."
+    )
+
+    ok, message = bridge.teleop_reset_ur5e_rtde_connection()
+
+    assert ok is True
+    assert "physical joint state were reacquired" in message
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
+
+
+def test_fresh_physical_state_clears_reset_only_gate_after_hardware_restart() -> None:
+    bridge, _calls = _reset_bridge(
+        source="hardware",
+        cfg=None,
+        rtde_process="hardware_ur5e_rtde_trajectory_server",
+    )
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = (
+        "Reset UR5e RTDE replaced the control process without robot motion; "
+        "inspect the physical UR5e before commanding motion."
+    )
+    bridge._move_insert_pending_review_error = lambda: ""
+    bridge.teleop_target = lambda *_args: {
+        "environment": "real",
+        "ready": True,
+        "warning": "",
+        "hardware_cartesian_readiness": {
+            "cartesian_jog_ready": True,
+            "message": "ready",
+        },
+    }
+    bridge.teleop_named_position_readiness = lambda _robot: (
+        True,
+        "fresh physical joint state",
+    )
+
+    readiness = bridge._teleop_preflight("ur5e", "cartesian")
+
+    assert readiness["ready"] is True
+    assert readiness["warning"] == ""
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
+
+
+def test_fresh_physical_state_does_not_clear_motion_uncertainty() -> None:
+    bridge, _calls = _reset_bridge(
+        source="hardware",
+        cfg=None,
+        rtde_process="hardware_ur5e_rtde_trajectory_server",
+    )
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = "motion result was not observed"
+    bridge._move_insert_pending_review_error = lambda: ""
+    bridge.teleop_target = lambda *_args: {
+        "environment": "real",
+        "ready": True,
+        "warning": "",
+        "hardware_cartesian_readiness": {
+            "cartesian_jog_ready": True,
+            "message": "ready",
+        },
+    }
+    bridge.teleop_named_position_readiness = lambda _robot: (
+        True,
+        "fresh physical joint state",
+    )
+
+    readiness = bridge._teleop_preflight("ur5e", "cartesian")
+
+    assert readiness["ready"] is False
+    assert "motion result was not observed" in readiness["warning"]
+    assert bridge._ur5e_robot_function_state_uncertain is True
 
 
 def test_disposing_cached_agent_does_not_clear_uncertain_physical_state() -> None:

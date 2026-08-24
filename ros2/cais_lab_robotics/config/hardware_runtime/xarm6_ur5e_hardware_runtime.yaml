@@ -54,8 +54,8 @@ ur5e:
   moveit:
     launch: "ur5e_rg2_hardware_moveit.launch.py"
     group_name: "ur_manipulator"
-    default_velocity_scaling: 0.425
-    default_acceleration_scaling: 0.425
+    default_velocity_scaling: 0.50
+    default_acceleration_scaling: 0.50
     arm_joint_limits:
       max_velocity: 2.90
       max_acceleration: 4.80
@@ -69,12 +69,13 @@ ur5e:
     # The server consumes feedback at 50 Hz. A 125 Hz RTDE session leaves
     # sampling headroom without running two 500 Hz native clients in WSL.
     frequency_hz: 125.0
-    max_joint_vel_rad_s: 1.125
-    max_joint_accel_rad_s2: 1.263
-    max_joint_jerk_rad_s3: 2.571
+    max_joint_vel_rad_s: 1.324
+    max_joint_accel_rad_s2: 1.486
+    max_joint_jerk_rad_s3: 3.025
+    joint_goal_tolerance_rad: 0.025
     shoulder_pan_extra_scale: 2.0
-    movej_speed_rad_s: 1.263
-    movej_accel_rad_s2: 1.539
+    movej_speed_rad_s: 1.486
+    movej_accel_rad_s2: 1.81
     control_program_start_timeout_sec: 2.0
     motion_start_timeout_sec: 2.0
     motion_start_delta_rad: 0.001
@@ -82,11 +83,79 @@ ur5e:
     feedback_reconnect_retry_sec: 1.0
     feedback_recovery_timeout_sec: 2.0
     stopped_away_hold_sec: 0.5
-    cartesian_speed_m_s: 0.05
+    cartesian_speed_m_s: 0.10
     cartesian_max_speed_m_s: 0.10
     cartesian_accel_m_s2: 0.10
     cartesian_position_tolerance_m: 0.002
     cartesian_orientation_tolerance_rad: 0.0349065850
+    # Effective configured lab geometry for TF world -> base, not the launch
+    # world -> base_link mount.
+    cartesian_world_base:
+      x_m: 0.0
+      y_m: 0.5
+      z_m: 1.021
+      roll_rad: 0.0
+      pitch_rad: 0.0
+      yaw_rad: 0.0
+    insert_demonstration_max_duration_sec: 300.0
+    insert_demonstration_baseline_sec: 1.0
+    insert_demonstration_stationary_speed_m_s: 0.001
+    insert_demonstration_stationary_angular_speed_rad_s: 0.02
+    # Protected absolute ceilings for learned insertion recipes. The recorded
+    # successful envelope can only lower these values; Control exposes none of
+    # them as operator inputs.
+    insert_max_contact_speed_m_s: 0.005
+    insert_max_contact_force_delta_n: 12.0
+    insert_max_engagement_progress_m: 0.02
+    insert_max_insertion_force_n: 15.0
+    insert_max_spiral_radius_m: 0.002
+    insert_max_spiral_pitch_m: 0.001
+    insert_max_spiral_speed_m_s: 0.004
+    insert_max_spiral_acceleration_m_s2: 0.03
+    insert_max_axial_force_n: 25.0
+    insert_max_lateral_force_n: 12.0
+    insert_max_torque_nm: 1.5
+    # Exact provisional MG commissioning ceilings. These authorize only the
+    # supervised one-confirmation workflow until its durable qualification is
+    # complete; Control exposes no numeric editor for these protected values.
+    MG:
+      insert_max_insertion_force_n: 76.0
+      insert_max_axial_force_n: 104.0
+      insert_max_lateral_force_n: 55.0
+      insert_max_torque_nm: 2.9
+      insert_max_tool_flange_torque_nm: 7.8
+      insert_max_relief_retreat_m: 0.0006
+      insert_max_contact_search_radius_m: 0.010
+      insert_max_disengagement_cycles: 6
+      insert_search_peck_retreat_m: 0.003
+      insert_search_peck_interval_sec: 0.75
+    # Protected recoverable-overload commissioning profile. Control exposes
+    # none of these values as operator inputs, and exact-part learned soft
+    # thresholds must remain strictly below the absolute ceilings above.
+    insert_max_tool_flange_torque_nm: 3.0
+    insert_soft_filter_window_sec: 0.05
+    insert_soft_overload_hold_sec: 0.10
+    insert_relief_unload_dwell_sec: 0.10
+    insert_relief_clear_dwell_sec: 0.10
+    insert_relief_clear_hysteresis_ratio: 0.80
+    insert_relief_timeout_sec: 1.0
+    insert_relief_axial_force_ratio: 0.50
+    insert_relief_reverse_force_ratio: 0.25
+    insert_relief_resume_ramp_sec: 0.10
+    insert_relief_search_force_ratio: 0.50
+    insert_relief_search_speed_ratio: 0.50
+    insert_relief_backoff_step_m: 0.0001
+    insert_max_relief_retreat_m: 0.0003
+    insert_relief_stationary_speed_m_s: 0.0005
+    insert_relief_stationary_angular_speed_rad_s: 0.01
+    insert_max_relief_cycles: 3
+    insert_max_tilt_tolerance_rad: 0.0523598776
+    insert_max_seated_depth_tolerance_m: 0.003
+    insert_max_settle_time_sec: 1.5
+    insert_max_timeout_sec: 60.0
+    insert_max_travel_m: 0.05
+    insert_start_position_tolerance_m: 0.003
+    insert_start_orientation_tolerance_rad: 0.0349065850
     cartesian_workspace_bounds:
       x_min_m: -0.7
       x_max_m: 0.7
@@ -106,6 +175,8 @@ ur5e:
   trajectory_topics: []
   hardware_trajectory_action: "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
   hardware_cartesian_action: "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
+  hardware_insert_action: "/cais_ur5e_rtde_cartesian_controller/move_insert"
+  hardware_insertion_demonstration_action: "/cais_ur5e_rtde_cartesian_controller/record_insertion_demonstration"
   hardware_relative_cartesian_action: "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
   hardware_cartesian_jog_service: "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
   gazebo_trajectory_topics:

@@ -1,0 +1,235 @@
+{
+  "function_name": "place_approach",
+  "capture_source": "hardware",
+  "replay_targets": [
+    "hardware",
+    "digital_twin"
+  ],
+  "robots": {
+    "ur5e": {
+      "frame_id": "world",
+      "ee_link": "tool0",
+      "tcp_link": "ur5e_rg2_gripper_tcp",
+      "steps": [
+        {
+          "step_name": "move_above_destination",
+          "primitive": "move_cartesian",
+          "params": {
+            "x": -0.0024237710134053236,
+            "y": 0.10074035624892608,
+            "z": 1.3541657576936437,
+            "qx": 0.7014291843409808,
+            "qy": 0.7127030407551918,
+            "qz": 9.528814383702962e-05,
+            "qw": -0.007173978897350205
+          },
+          "capture_source": "hardware",
+          "captured_at": 1787356321.685581,
+          "position_sources": {
+            "x": "captured_relative",
+            "y": "captured_relative",
+            "z": "captured_relative"
+          },
+          "relative_position_m": {
+            "x": -0.0024237710134053236,
+            "y": 0.020740356248926076,
+            "z": 0.02796158354060707
+          },
+          "relative_reference": {
+            "kind": "destination_target",
+            "frame_id": "world",
+            "name": "assembly_board-v1",
+            "position_m": {
+              "x": 0.14040694968988407,
+              "y": 0.047347239365466615,
+              "z": 1.0414342835841193
+            },
+            "pose": {
+              "x": 0.14040694968988407,
+              "y": 0.047347239365466615,
+              "z": 1.0414342835841193,
+              "qx": -0.01017732733705167,
+              "qy": -0.015772898987535044,
+              "qz": 0.0068339283965558,
+              "qw": 0.9998004476336637
+            },
+            "source": "assembly_board-v1_aruco",
+            "captured_at": 1787356222.1064122,
+            "camera_role": "ur5e",
+            "generation": 17,
+            "calibration_id": "ce2da819-e953-4a84-b809-6d32e72cf9a8",
+            "marker_length_m": 0.076,
+            "observation_source": "accepted"
+          },
+          "computed_position_m": {
+            "x": 0.0,
+            "y": 0.08,
+            "z": 1.3262041741530366
+          },
+          "computed_pose": {
+            "x": 0.0,
+            "y": 0.08,
+            "z": 1.3262041741530366,
+            "qx": 0.6727390249297289,
+            "qy": 0.7398160539916842,
+            "qz": -0.006919965278064899,
+            "qw": 0.006820899744287707
+          },
+          "computed_source": "capture",
+          "computed_at": 1787356321.6627588,
+          "confirmed": true,
+          "waypoint": {
+            "joint_names": [
+              "shoulder_pan_joint",
+              "shoulder_lift_joint",
+              "elbow_joint",
+              "wrist_1_joint",
+              "wrist_2_joint",
+              "wrist_3_joint"
+            ],
+            "joint_positions": [
+              -1.2348678747760218,
+              -1.3649552923491974,
+              -2.153934955596924,
+              -1.2064868670753022,
+              1.5646190643310547,
+              -4.392354075108663
+            ],
+            "pose": {
+              "frame_id": "world",
+              "child_frame_id": "tool0",
+              "x": -0.0024237710134053236,
+              "y": 0.10074035624892608,
+              "z": 1.3541657576936437,
+              "qx": 0.7014291843409808,
+              "qy": 0.7127030407551918,
+              "qz": 9.528814383702962e-05,
+              "qw": -0.007173978897350205
+            },
+            "gripper_joint": null,
+            "gripper_position": null,
+            "source": "hardware"
+          },
+          "relative_pose": {
+            "x": 0.020330237225455485,
+            "y": -0.0004774300769756039,
+            "z": -0.02836090111816694,
+            "qx": 0.004608217718214256,
+            "qy": 0.01508667040133066,
+            "qz": 0.0394164288776502,
+            "qw": 0.9990983444287137
+          }
+        },
+        {
+          "step_name": "descend",
+          "primitive": "move_cartesian",
+          "params": {
+            "x": 0.011529899457625253,
+            "y": 0.09448488102303032,
+            "z": 1.3242364923228567,
+            "qx": 0.7013566506263265,
+            "qy": 0.7127760235701722,
+            "qz": 6.063902719359839e-05,
+            "qw": -0.007013213858352018
+          },
+          "capture_source": "hardware",
+          "captured_at": 1787508899.2234457,
+          "position_sources": {
+            "x": "captured_relative",
+            "y": "captured_relative",
+            "z": "captured_relative"
+          },
+          "relative_position_m": {
+            "x": 0.011529899457625253,
+            "y": 0.014484881023030319,
+            "z": 0.07125813644992074
+          },
+          "relative_reference": {
+            "kind": "destination_target",
+            "frame_id": "world",
+            "name": "assembly_board-v1",
+            "position_m": {
+              "x": 0.15583007013578973,
+              "y": 0.04551616726192955,
+              "z": 1.0412381028975388
+            },
+            "pose": {
+              "x": 0.15583007013578973,
+              "y": 0.04551616726192955,
+              "z": 1.0412381028975388,
+              "qx": -0.014871886912202948,
+              "qy": -0.030479078040355784,
+              "qz": 0.017391872732802096,
+              "qw": 0.9992734238156875
+            },
+            "source": "assembly_board-v1_aruco",
+            "captured_at": 1787508501.4863648,
+            "camera_role": "ur5e",
+            "generation": 32,
+            "calibration_id": "ce2da819-e953-4a84-b809-6d32e72cf9a8",
+            "marker_length_m": 0.076,
+            "observation_source": "accepted"
+          },
+          "computed_position_m": {
+            "x": 0.0,
+            "y": 0.08,
+            "z": 1.252978355872936
+          },
+          "computed_pose": {
+            "x": 0.0,
+            "y": 0.08,
+            "z": 1.252978355872936,
+            "qx": 0.6727390249297289,
+            "qy": 0.7398160539916842,
+            "qz": -0.006919965278064899,
+            "qw": 0.006820899744287707
+          },
+          "computed_source": "capture",
+          "computed_at": 1787508899.2155354,
+          "confirmed": true,
+          "waypoint": {
+            "joint_names": [
+              "shoulder_pan_joint",
+              "shoulder_lift_joint",
+              "elbow_joint",
+              "wrist_1_joint",
+              "wrist_2_joint",
+              "wrist_3_joint"
+            ],
+            "joint_positions": [
+              -1.2060626188861292,
+              -1.4179552358439942,
+              -2.1960055828094482,
+              -1.1112904411605378,
+              1.5650634765625,
+              -4.363792006169454
+            ],
+            "pose": {
+              "frame_id": "world",
+              "child_frame_id": "tool0",
+              "x": 0.011529899457625253,
+              "y": 0.09448488102303032,
+              "z": 1.3242364923228567,
+              "qx": 0.7013566506263265,
+              "qy": 0.7127760235701722,
+              "qz": 6.063902719359839e-05,
+              "qw": -0.007013213858352018
+            },
+            "gripper_joint": null,
+            "gripper_position": null,
+            "source": "hardware"
+          },
+          "relative_pose": {
+            "x": 0.01194187265540485,
+            "y": 0.012774795366034644,
+            "z": -0.07151691164268664,
+            "qx": 0.004524698991643967,
+            "qy": 0.014944419909290959,
+            "qz": 0.039314545033643546,
+            "qw": 0.999104878359328
+          }
+        }
+      ]
+    }
+  }
+}

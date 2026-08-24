@@ -19,9 +19,11 @@ from .gazebo_pick_place_controller import (
     UR5E_TRAJECTORY_TOPIC,
     XARM6_JOINT_STATES_TOPIC,
     GazeboPickPlaceController,
+    derive_move_insert_timeout_sec,
 )
 
 TAUGHT_FUNCTIONS_ROOT = Path(__file__).resolve().parent / "taught_functions"
+UR5E_RTDE_STATUS_PATH = Path("/tmp/cais_ur5e_rtde_trajectory_status.json")
 XARM6_HARDWARE_JOINT_NAMES = [f"joint{index}" for index in range(1, 7)]
 
 
@@ -809,6 +811,13 @@ class UR5eHardwareController(HardwarePickPlaceController):
         self._ur5e_hardware_cartesian_action = str(
             self.controller_config.get("hardware_cartesian_action") or ""
         ).strip()
+        self._ur5e_hardware_insert_action = str(
+            self.controller_config.get("hardware_insert_action") or ""
+        ).strip()
+        self._ur5e_hardware_insertion_demonstration_action = str(
+            self.controller_config.get("hardware_insertion_demonstration_action")
+            or ""
+        ).strip()
         self._ur5e_action_send_timeout_sec = max(
             3.0,
             _as_float(
@@ -832,11 +841,26 @@ class UR5eHardwareController(HardwarePickPlaceController):
         )
         self._ur5e_hardware_trajectory_client: Any | None = None
         self._ur5e_hardware_cartesian_client: Any | None = None
+        self._ur5e_hardware_insert_client: Any | None = None
+        self._ur5e_hardware_insertion_demonstration_client: Any | None = None
+        self._move_insert_goal_condition = threading.Condition()
+        self._move_insert_dispatch_active = False
+        self._active_move_insert_send_future: Any | None = None
+        self._active_move_insert_goal_handle: Any | None = None
+        self._active_move_insert_result_future: Any | None = None
+        self._insertion_demonstration_condition = threading.Condition()
+        self._active_insertion_demonstration_send_future: Any | None = None
+        self._active_insertion_demonstration_goal_handle: Any | None = None
+        self._active_insertion_demonstration_result_future: Any | None = None
+        self._active_insertion_demonstration_status: dict[str, Any] = {}
         self._rg2_action_name = str(gripper_config.get("action") or "").strip()
         self._rg2_action_client: Any | None = None
         self._FollowJointTrajectory: Any | None = None
         self._MoveUR5eCartesian: Any | None = None
+        self._MoveUR5eInsert: Any | None = None
+        self._RecordUR5eInsertionDemonstration: Any | None = None
         self._PoseStamped: Any | None = None
+        self._Vector3: Any | None = None
 
     def _ur5e_rg2_settings(self) -> UR5eRG2GripperControllerSettings:
         settings = getattr(self, "_cached_ur5e_rg2_settings", None)
@@ -1261,7 +1285,7 @@ class UR5eHardwareController(HardwarePickPlaceController):
         *,
         timeout_sec: float = 8.0,
     ) -> tuple[bool, str]:
-        """Recreate both cached actions after one serialized RTDE replacement."""
+        """Recreate cached arm actions after one serialized RTDE replacement."""
         if (
             self._node is None
             or self._FollowJointTrajectory is None
@@ -1278,12 +1302,14 @@ class UR5eHardwareController(HardwarePickPlaceController):
             message = "UR5e hardware Cartesian action is not configured"
             self._last_failure_message = message
             return False, message
-
         previous_client = self._ur5e_hardware_trajectory_client
         previous_cartesian_client = self._ur5e_hardware_cartesian_client
         self._ur5e_hardware_trajectory_client = None
         self._ur5e_hardware_cartesian_client = None
-        for stale_client in (previous_client, previous_cartesian_client):
+        for stale_client in (
+            previous_client,
+            previous_cartesian_client,
+        ):
             destroy = getattr(stale_client, "destroy", None)
             if callable(destroy):
                 with suppress(AttributeError, RuntimeError):
@@ -1338,6 +1364,54 @@ class UR5eHardwareController(HardwarePickPlaceController):
             return False, message
         self._last_failure_message = ""
         return True, "UR5e Robot Functions joint and Cartesian action clients recreated"
+
+    @staticmethod
+    def _wait_ur5e_action_future_without_cancel(
+        future: Any,
+        timeout_sec: float,
+    ) -> Any | None:
+        """Wait for one ROS action future without discarding late acceptance."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while time.monotonic() < deadline and not future.done():
+            time.sleep(0.01)
+        return future.result() if future.done() else None
+
+    def _wait_ur5e_action_terminal_settlement(
+        self,
+        goal_handle: Any,
+        result_future: Any,
+        *,
+        timeout_sec: float,
+    ) -> Any:
+        """Cancel once after timeout, then retain the caller until terminal status."""
+        try:
+            wrapped = self._wait_ur5e_action_future_without_cancel(
+                result_future,
+                timeout_sec,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            while True:
+                time.sleep(1.0)
+        if wrapped is not None:
+            return wrapped
+        try:
+            cancel_future = goal_handle.cancel_goal_async()
+            self._wait_ur5e_action_future_without_cancel(cancel_future, 3.0)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+        while not result_future.done():
+            time.sleep(0.01)
+        try:
+            return result_future.result()
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            while True:
+                time.sleep(1.0)
+
+    @staticmethod
+    def _retain_accepted_action_without_terminal_observer() -> None:
+        """Retain the runtime motion lock when accepted-goal settlement is unknowable."""
+        while True:
+            time.sleep(1.0)
 
     def _cancel_ur5e_hardware_trajectory_goal(
         self,
@@ -1614,10 +1688,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
                     f"{self._ur5e_hardware_cartesian_action} is unavailable"
                 )
                 return False
-            goal_handle = self._wait_future(
-                client.send_goal_async(goal),
-                timeout_sec=send_timeout_sec,
-                label=f"send:{label}",
+            send_future = client.send_goal_async(goal)
+            goal_handle = self._wait_ur5e_action_future_without_cancel(
+                send_future,
+                send_timeout_sec,
             )
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = (
@@ -1625,41 +1699,30 @@ class UR5eHardwareController(HardwarePickPlaceController):
             )
             return False
         if goal_handle is None:
-            self._last_failure_message = (
-                f"{self._ur5e_hardware_cartesian_action}: send acknowledgement "
-                f"timeout after {send_timeout_sec:.1f}s; goal acceptance is unknown "
-                "and physical motion may still be executing"
-            )
-            return False
+            while not send_future.done():
+                time.sleep(0.01)
+            try:
+                goal_handle = send_future.result()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                while True:
+                    time.sleep(1.0)
         if not bool(getattr(goal_handle, "accepted", False)):
             self._last_failure_message = (
                 f"{self._ur5e_hardware_cartesian_action}: goal rejected"
             )
             return False
         try:
-            wrapped = self._wait_future(
-                goal_handle.get_result_async(),
+            result_future = goal_handle.get_result_async()
+            wrapped = self._wait_ur5e_action_terminal_settlement(
+                goal_handle,
+                result_future,
                 timeout_sec=75.0,
-                label=f"result:{label}",
             )
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-            cancel_detail = self._cancel_ur5e_hardware_trajectory_goal(
-                goal_handle,
-                label=label,
-            )
             self._last_failure_message = (
-                f"{self._ur5e_hardware_cartesian_action}: result failed ({exc}); "
-                f"{cancel_detail}"
+                f"{self._ur5e_hardware_cartesian_action}: result failed ({exc})"
             )
-            return False
-        if wrapped is None:
-            cancel_detail = self._cancel_ur5e_hardware_trajectory_goal(
-                goal_handle,
-                label=label,
-            )
-            self._last_failure_message = (
-                f"{self._ur5e_hardware_cartesian_action}: result timeout; {cancel_detail}"
-            )
+            self._retain_accepted_action_without_terminal_observer()
             return False
         result = getattr(wrapped, "result", None)
         try:
@@ -1679,6 +1742,2125 @@ class UR5eHardwareController(HardwarePickPlaceController):
             return False
         self._last_failure_message = ""
         return True
+
+    def _live_insert_max_timeout_sec(self) -> tuple[float, str]:
+        """Read the insertion timeout hard cap from fresh RTDE server status."""
+        try:
+            status = json.loads(UR5E_RTDE_STATUS_PATH.read_text(encoding="utf-8"))
+            updated_at = float(status["updated_at"])
+            hard_cap = float(status["insert_max_timeout_sec"])
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError) as exc:
+            return 0.0, f"live UR5e RTDE insertion hard cap is unavailable: {exc}"
+        age_sec = time.time() - updated_at
+        if not math.isfinite(age_sec) or age_sec < -1.0 or age_sec > 3.0:
+            return 0.0, f"UR5e RTDE insertion hard-cap status is stale (age={age_sec:.2f}s)"
+        if status.get("insert_action_ready") is not True:
+            return 0.0, "UR5e RTDE status does not report insert_action_ready"
+        if not math.isfinite(hard_cap) or hard_cap <= 0.0:
+            return 0.0, "UR5e RTDE insert_max_timeout_sec is not finite and positive"
+        return hard_cap, ""
+
+    def _ensure_move_insert_client_ready(
+        self,
+        *,
+        timeout_sec: float = 2.0,
+    ) -> tuple[bool, str]:
+        """Create and discover the optional move_insert action client on demand."""
+        if not self._ur5e_hardware_insert_action:
+            return False, "UR5e hardware move_insert action is not configured"
+        if self._MoveUR5eInsert is None or self._Vector3 is None:
+            try:
+                from cais_lab_robotics.action import MoveUR5eInsert
+                from geometry_msgs.msg import Vector3
+            except ImportError as exc:
+                return False, f"UR5e move_insert action type is unavailable: {exc}"
+            self._MoveUR5eInsert = MoveUR5eInsert
+            self._Vector3 = Vector3
+        if self._ur5e_hardware_insert_client is None:
+            try:
+                self._ur5e_hardware_insert_client = self._ActionClient(
+                    self._node,
+                    self._MoveUR5eInsert,
+                    self._ur5e_hardware_insert_action,
+                    callback_group=self._cb_group,
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                return False, f"could not create UR5e move_insert action client: {exc}"
+        try:
+            ready = bool(
+                self._ur5e_hardware_insert_client.wait_for_server(
+                    timeout_sec=max(0.0, float(timeout_sec))
+                )
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return False, f"UR5e move_insert action readiness failed: {exc}"
+        if not ready:
+            return False, f"{self._ur5e_hardware_insert_action} is unavailable"
+        return True, ""
+
+    def _ensure_insertion_demonstration_client_ready(
+        self,
+        *,
+        timeout_sec: float = 2.0,
+    ) -> tuple[bool, str]:
+        """Create the passive insertion-demonstration action client on demand."""
+        action_name = self._ur5e_hardware_insertion_demonstration_action
+        if not action_name:
+            return False, "UR5e insertion demonstration action is not configured"
+        if (
+            self._RecordUR5eInsertionDemonstration is None
+            or self._PoseStamped is None
+        ):
+            try:
+                from cais_lab_robotics.action import RecordUR5eInsertionDemonstration
+                from geometry_msgs.msg import PoseStamped
+            except ImportError as exc:
+                return False, (
+                    "UR5e insertion demonstration action type is unavailable: "
+                    f"{exc}"
+                )
+            self._RecordUR5eInsertionDemonstration = (
+                RecordUR5eInsertionDemonstration
+            )
+            self._PoseStamped = PoseStamped
+        if self._ur5e_hardware_insertion_demonstration_client is None:
+            try:
+                self._ur5e_hardware_insertion_demonstration_client = self._ActionClient(
+                    self._node,
+                    self._RecordUR5eInsertionDemonstration,
+                    action_name,
+                    callback_group=self._cb_group,
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                return False, (
+                    "could not create UR5e insertion demonstration action client: "
+                    f"{exc}"
+                )
+        try:
+            ready = bool(
+                self._ur5e_hardware_insertion_demonstration_client.wait_for_server(
+                    timeout_sec=max(0.0, float(timeout_sec))
+                )
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return False, f"UR5e insertion demonstration readiness failed: {exc}"
+        if not ready:
+            return False, f"{action_name} is unavailable"
+        return True, ""
+
+    @staticmethod
+    def _insertion_demonstration_pose(pose_message: Any) -> dict[str, float]:
+        pose = getattr(pose_message, "pose", pose_message)
+        return {
+            "x": float(pose.position.x),
+            "y": float(pose.position.y),
+            "z": float(pose.position.z),
+            "qx": float(pose.orientation.x),
+            "qy": float(pose.orientation.y),
+            "qz": float(pose.orientation.z),
+            "qw": float(pose.orientation.w),
+        }
+
+    @staticmethod
+    def _insertion_demonstration_result_payload(wrapped: Any) -> dict[str, Any]:
+        result = getattr(wrapped, "result", None)
+        if result is None:
+            return {
+                "success": False,
+                "active": False,
+                "message": "insertion demonstration result is unavailable",
+                "state_uncertain": True,
+            }
+        try:
+            force_bias = [float(value) for value in result.force_bias]
+            payload = {
+                "success": int(result.error_code) == 0,
+                "active": False,
+                "goal_status": int(getattr(wrapped, "status", -1)),
+                "error_code": int(result.error_code),
+                "message": str(result.error_string or ""),
+                "state_uncertain": bool(result.state_uncertain),
+                "motion_settled": bool(result.motion_settled),
+                "recording_id": str(result.recording_id or ""),
+                "trace_path": str(result.trace_path or ""),
+                "trace_sha256": str(result.trace_sha256 or ""),
+                "sample_count": int(result.sample_count),
+                "started_at": float(result.started_at),
+                "finished_at": float(result.finished_at),
+                "baseline_valid": bool(result.baseline_valid),
+                "force_bias": force_bias,
+                "baseline_force_span_n": float(result.baseline_force_span_n),
+                "baseline_torque_span_nm": float(result.baseline_torque_span_nm),
+            }
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "active": False,
+                "message": f"insertion demonstration result is invalid: {exc}",
+                "state_uncertain": True,
+            }
+        return payload
+
+    def start_insertion_demonstration(
+        self,
+        *,
+        recording_id: str,
+        part_name: str,
+        destination_location: str,
+        context_sha256: str,
+        expected_start_tool0_pose: dict[str, float],
+        max_duration_sec: float = 300.0,
+    ) -> dict[str, Any]:
+        """Start passive feedback recording without commanding robot motion."""
+        ready, message = self._ensure_insertion_demonstration_client_ready()
+        if not ready:
+            return {"success": False, "active": False, "message": message}
+        condition = self._insertion_demonstration_condition
+        with condition:
+            if (
+                self._active_insertion_demonstration_send_future is not None
+                or self._active_insertion_demonstration_goal_handle is not None
+            ):
+                return {
+                    "success": False,
+                    "active": True,
+                    "message": "another insertion demonstration is already active",
+                }
+            action_type = self._RecordUR5eInsertionDemonstration
+            pose_stamped_type = self._PoseStamped
+            client = self._ur5e_hardware_insertion_demonstration_client
+            if any(value is None for value in (action_type, pose_stamped_type, client)):
+                return {
+                    "success": False,
+                    "active": False,
+                    "message": "UR5e insertion demonstration action client is unavailable",
+                }
+            goal = action_type.Goal()
+            goal.recording_id = str(recording_id)
+            goal.part_name = str(part_name)
+            goal.destination_location = str(destination_location)
+            goal.context_sha256 = str(context_sha256)
+            goal.max_duration_sec = float(max_duration_sec)
+            stamped = pose_stamped_type()
+            stamped.header.frame_id = "world"
+            stamped.header.stamp = self._node.get_clock().now().to_msg()
+            stamped.pose.position.x = float(expected_start_tool0_pose["x"])
+            stamped.pose.position.y = float(expected_start_tool0_pose["y"])
+            stamped.pose.position.z = float(expected_start_tool0_pose["z"])
+            stamped.pose.orientation.x = float(expected_start_tool0_pose["qx"])
+            stamped.pose.orientation.y = float(expected_start_tool0_pose["qy"])
+            stamped.pose.orientation.z = float(expected_start_tool0_pose["qz"])
+            stamped.pose.orientation.w = float(expected_start_tool0_pose["qw"])
+            goal.expected_start_tool0_pose = stamped
+
+            def feedback_callback(feedback_message: Any) -> None:
+                feedback = getattr(feedback_message, "feedback", feedback_message)
+                try:
+                    status = {
+                        "success": True,
+                        "active": True,
+                        "recording_id": str(recording_id),
+                        "phase": str(feedback.phase or ""),
+                        "sample_count": int(feedback.sample_count),
+                        "elapsed_sec": float(feedback.elapsed_sec),
+                        "actual_tool0_pose": self._insertion_demonstration_pose(
+                            feedback.actual_tool0_pose
+                        ),
+                        "actual_tcp_force": [
+                            float(value) for value in feedback.actual_tcp_force
+                        ],
+                        "actual_tcp_speed": [
+                            float(value) for value in feedback.actual_tcp_speed
+                        ],
+                        "baseline_valid": bool(feedback.baseline_valid),
+                        "force_bias": [float(value) for value in feedback.force_bias],
+                        "updated_at": time.time(),
+                    }
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return
+                with condition:
+                    self._active_insertion_demonstration_status = status
+                    condition.notify_all()
+
+            send_future = client.send_goal_async(
+                goal,
+                feedback_callback=feedback_callback,
+            )
+            self._active_insertion_demonstration_send_future = send_future
+            self._active_insertion_demonstration_status = {
+                "success": True,
+                "active": True,
+                "recording_id": str(recording_id),
+                "phase": "starting",
+                "sample_count": 0,
+                "baseline_valid": False,
+                "updated_at": time.time(),
+            }
+        try:
+            goal_handle = self._wait_ur5e_action_future_without_cancel(
+                send_future,
+                self._ur5e_action_send_timeout_sec,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "success": False,
+                "active": True,
+                "recording_id": recording_id,
+                "message": f"insertion demonstration acceptance is unknown: {exc}",
+            }
+        if goal_handle is None:
+            return {
+                "success": False,
+                "active": True,
+                "recording_id": recording_id,
+                "message": "insertion demonstration acceptance is still pending",
+            }
+        if not bool(getattr(goal_handle, "accepted", False)):
+            with condition:
+                self._active_insertion_demonstration_send_future = None
+                self._active_insertion_demonstration_status = {}
+            return {
+                "success": False,
+                "active": False,
+                "recording_id": recording_id,
+                "message": "insertion demonstration goal was rejected",
+            }
+        try:
+            result_future = goal_handle.get_result_async()
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self._retain_accepted_action_without_terminal_observer()
+            raise RuntimeError("unreachable") from exc
+        with condition:
+            self._active_insertion_demonstration_send_future = None
+            self._active_insertion_demonstration_goal_handle = goal_handle
+            self._active_insertion_demonstration_result_future = result_future
+            condition.notify_all()
+            return dict(self._active_insertion_demonstration_status)
+
+    def insertion_demonstration_status(self) -> dict[str, Any]:
+        """Return the latest passive recording feedback or terminal result."""
+        condition = self._insertion_demonstration_condition
+        with condition:
+            result_future = self._active_insertion_demonstration_result_future
+            status = dict(self._active_insertion_demonstration_status)
+        if result_future is not None and result_future.done():
+            try:
+                terminal = self._insertion_demonstration_result_payload(
+                    result_future.result()
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                terminal = {
+                    "success": False,
+                    "active": False,
+                    "state_uncertain": True,
+                    "message": f"insertion demonstration result failed: {exc}",
+                }
+            with condition:
+                self._active_insertion_demonstration_status = dict(terminal)
+            return terminal
+        return status or {
+            "success": True,
+            "active": False,
+            "phase": "",
+            "message": "no insertion demonstration is active",
+        }
+
+    def stop_insertion_demonstration(self, *, timeout_sec: float = 10.0) -> dict[str, Any]:
+        """Stop passive recording and wait for its trace to become terminal."""
+        condition = self._insertion_demonstration_condition
+        with condition:
+            send_future = self._active_insertion_demonstration_send_future
+            goal_handle = self._active_insertion_demonstration_goal_handle
+            result_future = self._active_insertion_demonstration_result_future
+        if goal_handle is None and send_future is not None:
+            goal_handle = self._wait_ur5e_action_future_without_cancel(
+                send_future,
+                self._ur5e_action_send_timeout_sec,
+            )
+            if goal_handle is not None and bool(getattr(goal_handle, "accepted", False)):
+                result_future = goal_handle.get_result_async()
+                with condition:
+                    self._active_insertion_demonstration_send_future = None
+                    self._active_insertion_demonstration_goal_handle = goal_handle
+                    self._active_insertion_demonstration_result_future = result_future
+        if goal_handle is None or result_future is None:
+            return {
+                "success": False,
+                "active": send_future is not None,
+                "message": "no accepted insertion demonstration is available to stop",
+            }
+        try:
+            cancel_future = goal_handle.cancel_goal_async()
+            self._wait_ur5e_action_future_without_cancel(cancel_future, 3.0)
+            wrapped = self._wait_ur5e_action_future_without_cancel(
+                result_future,
+                timeout_sec,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "success": False,
+                "active": True,
+                "message": f"insertion demonstration stop is unresolved: {exc}",
+                "state_uncertain": True,
+            }
+        if wrapped is None:
+            return {
+                "success": False,
+                "active": True,
+                "message": "insertion demonstration is still stopping",
+                "state_uncertain": True,
+            }
+        payload = self._insertion_demonstration_result_payload(wrapped)
+        with condition:
+            self._active_insertion_demonstration_send_future = None
+            self._active_insertion_demonstration_goal_handle = None
+            self._active_insertion_demonstration_result_future = None
+            self._active_insertion_demonstration_status = dict(payload)
+            condition.notify_all()
+        return payload
+
+    def _claim_move_insert_dispatch(self) -> bool:
+        condition = self._move_insert_goal_condition
+        with condition:
+            if self._move_insert_dispatch_active:
+                return False
+            self._move_insert_dispatch_active = True
+            self._active_move_insert_send_future = None
+            self._active_move_insert_goal_handle = None
+            self._active_move_insert_result_future = None
+            return True
+
+    def _set_pending_move_insert_send_future(self, send_future: Any) -> None:
+        condition = self._move_insert_goal_condition
+        with condition:
+            self._active_move_insert_send_future = send_future
+            condition.notify_all()
+
+    def _set_active_move_insert_goal(
+        self,
+        goal_handle: Any,
+        result_future: Any,
+    ) -> None:
+        condition = self._move_insert_goal_condition
+        with condition:
+            self._active_move_insert_send_future = None
+            self._active_move_insert_goal_handle = goal_handle
+            self._active_move_insert_result_future = result_future
+            condition.notify_all()
+
+    def _clear_move_insert_goal(self, goal_handle: Any | None) -> None:
+        condition = self._move_insert_goal_condition
+        with condition:
+            if (
+                goal_handle is None
+                or self._active_move_insert_goal_handle is goal_handle
+            ):
+                self._active_move_insert_send_future = None
+                self._active_move_insert_goal_handle = None
+                self._active_move_insert_result_future = None
+                self._move_insert_dispatch_active = False
+                condition.notify_all()
+
+    @staticmethod
+    def _wait_move_insert_terminal_result(
+        result_future: Any,
+        timeout_sec: float,
+    ) -> Any | None:
+        """Wait for an insertion result without canceling its shared ROS future."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while time.monotonic() < deadline and not result_future.done():
+            time.sleep(0.01)
+        return result_future.result() if result_future.done() else None
+
+    def _retain_move_insert_until_terminal_settlement(
+        self,
+        goal_handle: Any,
+        result_future: Any,
+        settlement: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Keep insertion ownership only while its terminal result is unknown."""
+        if bool(settlement.get("terminal", False)):
+            return settlement
+        while True:
+            with self._move_insert_goal_condition:
+                dispatch_active = self._move_insert_dispatch_active
+            if not dispatch_active:
+                return settlement
+            if result_future.done():
+                try:
+                    wrapped = result_future.result()
+                    result = getattr(wrapped, "result", None)
+                    terminal_status = int(getattr(wrapped, "status", -1))
+                    error_code = int(getattr(result, "error_code", -1))
+                    result_uncertain = bool(
+                        getattr(result, "state_uncertain", True)
+                    )
+                    motion_settled = bool(
+                        getattr(result, "motion_settled", not result_uncertain)
+                    )
+                    result_message = str(
+                        getattr(result, "error_string", "") or ""
+                    ).strip()
+                    result_trial_id = str(
+                        getattr(result, "trial_id", "") or ""
+                    )
+                    force_mode_stop_acknowledged = bool(
+                        getattr(result, "force_mode_stop_acknowledged", False)
+                    )
+                    servo_stop_acknowledged = bool(
+                        getattr(result, "servo_stop_acknowledged", False)
+                    )
+                    stop_l_command_completed = bool(
+                        getattr(result, "stop_l_command_completed", False)
+                    )
+                    stationary_confirmed = bool(
+                        getattr(result, "stationary_confirmed", False)
+                    )
+                    relief_load_cleared = bool(
+                        getattr(result, "relief_load_cleared", False)
+                    )
+                    relief_backoff_m = float(
+                        getattr(result, "relief_backoff_m", math.nan)
+                    )
+                    relief_planned_backoff_m = float(
+                        getattr(result, "relief_planned_backoff_m", math.nan)
+                    )
+                    total_relief_backoff_m = float(
+                        getattr(result, "total_relief_backoff_m", math.nan)
+                    )
+                    relief_resume_phase = str(
+                        getattr(result, "relief_resume_phase", "") or ""
+                    )
+                    relief_force_mode_stop_acknowledged = bool(
+                        getattr(
+                            result,
+                            "relief_force_mode_stop_acknowledged",
+                            False,
+                        )
+                    )
+                    relief_stop_l_command_completed = bool(
+                        getattr(result, "relief_stop_l_command_completed", False)
+                    )
+                    relief_stationary_confirmed = bool(
+                        getattr(result, "relief_stationary_confirmed", False)
+                    )
+                    relief_force_mode_restart_acknowledged = bool(
+                        getattr(
+                            result,
+                            "relief_force_mode_restart_acknowledged",
+                            False,
+                        )
+                    )
+                    server_trace_id = str(
+                        getattr(result, "server_trace_id", "") or ""
+                    )
+                    server_trace_path = str(
+                        getattr(result, "server_trace_path", "") or ""
+                    )
+                    server_trace_sha256 = str(
+                        getattr(result, "server_trace_sha256", "") or ""
+                    )
+                    server_trace_status = str(
+                        getattr(result, "server_trace_status", "") or ""
+                    )
+                    server_trace_complete = bool(
+                        getattr(result, "server_trace_complete", False)
+                    )
+                    server_trace_sample_count = int(
+                        getattr(result, "server_trace_sample_count", 0) or 0
+                    )
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    self._clear_move_insert_goal(goal_handle)
+                    return {
+                        "settled": False,
+                        "terminal": True,
+                        "state_uncertain": True,
+                        "message": (
+                            "move_insert produced an immutable terminal result that "
+                            f"could not be read ({exc}); action ownership was released "
+                            "for Hardware Stack recovery"
+                        ),
+                    }
+                terminal = terminal_status in {4, 5, 6}
+                self._clear_move_insert_goal(goal_handle)
+                uncertain = bool(
+                    not terminal or result_uncertain or not motion_settled
+                )
+                if terminal and motion_settled and not result_uncertain:
+                    message = "move_insert terminal settlement was confirmed"
+                else:
+                    message = result_message or (
+                        f"move_insert terminal status {terminal_status} did not prove "
+                        "stationary settlement"
+                    )
+                    message += (
+                        "; action ownership was released for Hardware Stack recovery"
+                    )
+                return {
+                    "settled": bool(terminal and motion_settled),
+                    "terminal": True,
+                    "state_uncertain": uncertain,
+                    "message": message,
+                    "goal_status": terminal_status,
+                    "error_code": error_code,
+                    "trial_id": result_trial_id,
+                    "force_mode_stop_acknowledged": force_mode_stop_acknowledged,
+                    "servo_stop_acknowledged": servo_stop_acknowledged,
+                    "stop_l_command_completed": stop_l_command_completed,
+                    "stationary_confirmed": stationary_confirmed,
+                    "relief_load_cleared": relief_load_cleared,
+                    "relief_backoff_m": relief_backoff_m,
+                    "relief_planned_backoff_m": relief_planned_backoff_m,
+                    "total_relief_backoff_m": total_relief_backoff_m,
+                    "relief_resume_phase": relief_resume_phase,
+                    "relief_force_mode_stop_acknowledged": (
+                        relief_force_mode_stop_acknowledged
+                    ),
+                    "relief_stop_l_command_completed": (
+                        relief_stop_l_command_completed
+                    ),
+                    "relief_stationary_confirmed": relief_stationary_confirmed,
+                    "relief_force_mode_restart_acknowledged": (
+                        relief_force_mode_restart_acknowledged
+                    ),
+                    "server_trace_id": server_trace_id,
+                    "server_trace_path": server_trace_path,
+                    "server_trace_sha256": server_trace_sha256,
+                    "server_trace_status": server_trace_status,
+                    "server_trace_complete": server_trace_complete,
+                    "server_trace_sample_count": server_trace_sample_count,
+                }
+            time.sleep(0.05)
+
+    def cancel_move_insert(  # noqa: C901, PLR0915 - explicit cancellation lifecycle.
+        self,
+        timeout_sec: float = 8.0,
+    ) -> dict[str, Any]:
+        """Cancel the accepted move_insert goal and wait for its terminal result."""
+        try:
+            timeout = max(0.1, float(timeout_sec))
+        except (TypeError, ValueError, OverflowError):
+            timeout = 8.0
+        deadline = time.monotonic() + timeout
+        condition = self._move_insert_goal_condition
+        goal_handle = None
+        result_future = None
+        dispatch_active = False
+        while time.monotonic() < deadline:
+            with condition:
+                goal_handle = self._active_move_insert_goal_handle
+                result_future = self._active_move_insert_result_future
+                send_future = getattr(self, "_active_move_insert_send_future", None)
+                dispatch_active = self._move_insert_dispatch_active
+            if goal_handle is not None or not dispatch_active:
+                break
+            if send_future is not None and send_future.done():
+                try:
+                    accepted_handle = send_future.result()
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    return {
+                        "success": False,
+                        "canceled": False,
+                        "settled": False,
+                        "state_uncertain": True,
+                        "message": f"move_insert goal acceptance is unknown ({exc})",
+                    }
+                if accepted_handle is None:
+                    return {
+                        "success": False,
+                        "canceled": False,
+                        "settled": False,
+                        "state_uncertain": True,
+                        "message": "move_insert goal acceptance is still pending",
+                    }
+                if not bool(getattr(accepted_handle, "accepted", False)):
+                    self._clear_move_insert_goal(None)
+                    return {
+                        "success": True,
+                        "canceled": False,
+                        "settled": True,
+                        "state_uncertain": False,
+                        "message": "move_insert goal was rejected before motion",
+                    }
+                try:
+                    accepted_result_future = accepted_handle.get_result_async()
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    self._set_active_move_insert_goal(accepted_handle, None)
+                    return {
+                        "success": False,
+                        "canceled": False,
+                        "settled": False,
+                        "state_uncertain": True,
+                        "message": f"move_insert terminal result cannot be observed ({exc})",
+                    }
+                self._set_active_move_insert_goal(
+                    accepted_handle,
+                    accepted_result_future,
+                )
+                goal_handle = accepted_handle
+                result_future = accepted_result_future
+                break
+            with condition:
+                condition.wait(
+                    timeout=max(0.0, min(0.05, deadline - time.monotonic()))
+                )
+        if goal_handle is None:
+            return {
+                "success": False,
+                "canceled": False,
+                "settled": False,
+                "state_uncertain": bool(dispatch_active),
+                "message": (
+                    "move_insert goal acceptance is still pending"
+                    if dispatch_active
+                    else "no accepted move_insert goal is active"
+                ),
+            }
+        if result_future is None:
+            try:
+                result_future = goal_handle.get_result_async()
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "canceled": False,
+                    "settled": False,
+                    "state_uncertain": True,
+                    "message": f"move_insert terminal result cannot be observed ({exc})",
+                }
+            self._set_active_move_insert_goal(goal_handle, result_future)
+
+        cancel_accepted = False
+        cancel_detail = ""
+        try:
+            cancel_response = self._wait_future(
+                goal_handle.cancel_goal_async(),
+                timeout_sec=min(3.0, max(0.1, deadline - time.monotonic())),
+                label="cancel:move_insert",
+                timeout_log_level="warning",
+            )
+            cancel_accepted = bool(
+                cancel_response is not None
+                and list(getattr(cancel_response, "goals_canceling", []) or [])
+            )
+            if not cancel_accepted:
+                cancel_detail = "cancel request was not confirmed"
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            cancel_detail = f"cancel request failed ({exc})"
+
+        remaining_sec = max(0.0, deadline - time.monotonic())
+        try:
+            wrapped = self._wait_move_insert_terminal_result(
+                result_future,
+                remaining_sec,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self._clear_move_insert_goal(goal_handle)
+            return {
+                "success": False,
+                "canceled": False,
+                "settled": False,
+                "terminal": True,
+                "state_uncertain": True,
+                "message": (
+                    f"terminal move_insert result is unavailable ({exc}); action "
+                    "ownership was released for Hardware Stack recovery"
+                ),
+            }
+        if wrapped is None:
+            return {
+                "success": False,
+                "canceled": False,
+                "settled": False,
+                "state_uncertain": True,
+                "message": (
+                    f"{cancel_detail}; terminal move_insert settlement was not confirmed"
+                    if cancel_detail
+                    else "cancel accepted but terminal move_insert settlement was not confirmed"
+                ),
+            }
+
+        try:
+            terminal_status = int(getattr(wrapped, "status", -1))
+            result = getattr(wrapped, "result", None)
+            error_code = int(getattr(result, "error_code", -1))
+            result_uncertain = bool(getattr(result, "state_uncertain", False))
+            motion_settled = bool(
+                getattr(result, "motion_settled", not result_uncertain)
+            )
+            force_mode_stop_acknowledged = bool(
+                getattr(result, "force_mode_stop_acknowledged", False)
+            )
+            servo_stop_acknowledged = bool(
+                getattr(result, "servo_stop_acknowledged", False)
+            )
+            stop_l_command_completed = bool(
+                getattr(result, "stop_l_command_completed", False)
+            )
+            stationary_confirmed = bool(
+                getattr(result, "stationary_confirmed", False)
+            )
+            relief_load_cleared = bool(
+                getattr(result, "relief_load_cleared", False)
+            )
+            relief_backoff_m = float(
+                getattr(result, "relief_backoff_m", math.nan)
+            )
+            relief_planned_backoff_m = float(
+                getattr(result, "relief_planned_backoff_m", math.nan)
+            )
+            total_relief_backoff_m = float(
+                getattr(result, "total_relief_backoff_m", math.nan)
+            )
+            relief_resume_phase = str(
+                getattr(result, "relief_resume_phase", "") or ""
+            )
+            relief_force_mode_stop_acknowledged = bool(
+                getattr(result, "relief_force_mode_stop_acknowledged", False)
+            )
+            relief_stop_l_command_completed = bool(
+                getattr(result, "relief_stop_l_command_completed", False)
+            )
+            relief_stationary_confirmed = bool(
+                getattr(result, "relief_stationary_confirmed", False)
+            )
+            relief_force_mode_restart_acknowledged = bool(
+                getattr(result, "relief_force_mode_restart_acknowledged", False)
+            )
+            server_trace_id = str(
+                getattr(result, "server_trace_id", "") or ""
+            )
+            server_trace_path = str(
+                getattr(result, "server_trace_path", "") or ""
+            )
+            server_trace_sha256 = str(
+                getattr(result, "server_trace_sha256", "") or ""
+            )
+            server_trace_status = str(
+                getattr(result, "server_trace_status", "") or ""
+            )
+            server_trace_complete = bool(
+                getattr(result, "server_trace_complete", False)
+            )
+            server_trace_sample_count = int(
+                getattr(result, "server_trace_sample_count", 0) or 0
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self._clear_move_insert_goal(goal_handle)
+            return {
+                "success": False,
+                "canceled": False,
+                "settled": False,
+                "terminal": True,
+                "state_uncertain": True,
+                "message": (
+                    f"terminal move_insert result is unavailable ({exc}); action "
+                    "ownership was released for Hardware Stack recovery"
+                ),
+            }
+
+        terminal = terminal_status in {4, 5, 6}
+        settled = bool(terminal and motion_settled)
+        if result_future.done():
+            # A completed ROS result future is immutable. Keeping controller ownership
+            # cannot make an unsettled terminal result become settled and would prevent
+            # the normal Hardware Stack recovery path from acquiring its lock.
+            self._clear_move_insert_goal(goal_handle)
+        canceled = bool(terminal_status == 5 and error_code == -3)
+        result_message = str(getattr(result, "error_string", "") or "").strip()
+        result_trial_id = str(getattr(result, "trial_id", "") or "")
+        state_uncertain = bool(
+            not terminal or result_uncertain or not motion_settled
+        )
+        if settled and not result_uncertain:
+            message = (
+                "move_insert canceled and stationary settlement confirmed"
+                if canceled
+                else "move_insert reached a settled terminal result before cancellation"
+            )
+        else:
+            message = result_message or (
+                f"move_insert terminal status {terminal_status} did not prove settlement"
+            )
+            if terminal:
+                message += (
+                    "; action ownership was released for Hardware Stack recovery"
+                )
+        return {
+            "success": settled,
+            "canceled": canceled,
+            "settled": settled,
+            "terminal": terminal,
+            "state_uncertain": state_uncertain,
+            "motion_settled": motion_settled,
+            "message": message,
+            "cancel_accepted": cancel_accepted,
+            "goal_status": terminal_status,
+            "error_code": error_code,
+            "trial_id": result_trial_id,
+            "force_mode_stop_acknowledged": force_mode_stop_acknowledged,
+            "servo_stop_acknowledged": servo_stop_acknowledged,
+            "stop_l_command_completed": stop_l_command_completed,
+            "stationary_confirmed": stationary_confirmed,
+            "relief_load_cleared": relief_load_cleared,
+            "relief_backoff_m": relief_backoff_m,
+            "relief_planned_backoff_m": relief_planned_backoff_m,
+            "total_relief_backoff_m": total_relief_backoff_m,
+            "relief_resume_phase": relief_resume_phase,
+            "relief_force_mode_stop_acknowledged": (
+                relief_force_mode_stop_acknowledged
+            ),
+            "relief_stop_l_command_completed": relief_stop_l_command_completed,
+            "relief_stationary_confirmed": relief_stationary_confirmed,
+            "relief_force_mode_restart_acknowledged": (
+                relief_force_mode_restart_acknowledged
+            ),
+            "server_trace_id": server_trace_id,
+            "server_trace_path": server_trace_path,
+            "server_trace_sha256": server_trace_sha256,
+            "server_trace_status": server_trace_status,
+            "server_trace_complete": server_trace_complete,
+            "server_trace_sample_count": server_trace_sample_count,
+        }
+
+    def move_insert(  # noqa: C901, PLR0912, PLR0913, PLR0915 - fixed action contract.
+        self,
+        part_name: str,
+        calibration_id: str,
+        profile_sha256: str,
+        hard_caps_sha256: str,
+        expected_start_pose: dict[str, Any],
+        target_pose: dict[str, Any],
+        insertion_axis_world: dict[str, Any],
+        contact_speed_m_s: float,
+        contact_force_delta_n: float,
+        engagement_progress_m: float,
+        insertion_force_n: float,
+        spiral_radius_m: float,
+        spiral_pitch_m: float,
+        spiral_speed_m_s: float,
+        spiral_acceleration_m_s2: float,
+        max_axial_force_n: float,
+        max_lateral_force_n: float,
+        max_torque_nm: float,
+        force_depth_profile: dict[str, Any],
+        baseline_force_uncertainty_n: float,
+        baseline_torque_uncertainty_nm: float,
+        tilt_tolerance_rad: float,
+        seated_depth_tolerance_m: float,
+        settle_time_sec: float,
+        timeout_sec: float,
+        trial_id: str = "",
+    ) -> dict[str, Any]:
+        """Execute one force-limited physical insertion through the RTDE action owner."""
+        requested_part = part_name if isinstance(part_name, str) else ""
+        if requested_part not in {"SG", "MG", "LG", "SCP", "MCP", "LCP"}:
+            return {
+                "success": False,
+                "message": f"move_insert does not support exact part identifier {requested_part!r}",
+                "state_uncertain": False,
+            }
+        selected_calibration_id = calibration_id if isinstance(calibration_id, str) else ""
+        selected_hash = profile_sha256 if isinstance(profile_sha256, str) else ""
+        selected_hard_caps_hash = (
+            hard_caps_sha256 if isinstance(hard_caps_sha256, str) else ""
+        )
+        selected_trial_id = trial_id if isinstance(trial_id, str) else ""
+        try:
+            valid_hash = len(selected_hash) == 64 and int(selected_hash, 16) >= 0
+            valid_hard_caps_hash = (
+                len(selected_hard_caps_hash) == 64
+                and int(selected_hard_caps_hash, 16) >= 0
+            )
+        except ValueError:
+            valid_hash = False
+            valid_hard_caps_hash = False
+        if (
+            not selected_calibration_id
+            or not valid_hash
+            or not valid_hard_caps_hash
+            or not isinstance(trial_id, str)
+            or selected_trial_id != selected_trial_id.strip()
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "move_insert calibration_id, profile_sha256, hard_caps_sha256, "
+                    "or trial_id is invalid"
+                ),
+                "state_uncertain": False,
+            }
+
+        def normalized_pose(raw_pose: Any, label: str) -> tuple[dict[str, float], str]:
+            if not isinstance(raw_pose, dict):
+                return {}, f"{label} must be an object"
+            try:
+                pose = {
+                    field: float(raw_pose[field])
+                    for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                }
+                if not all(math.isfinite(value) for value in pose.values()):
+                    raise ValueError("contains a non-finite value")
+                quaternion = _normalized_quaternion(
+                    tuple(pose[field] for field in ("qx", "qy", "qz", "qw"))
+                )
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                return {}, f"{label} is invalid: {exc}"
+            pose.update(
+                dict(zip(("qx", "qy", "qz", "qw"), quaternion, strict=True))
+            )
+            return pose, ""
+
+        start, start_error = normalized_pose(
+            expected_start_pose,
+            "move_insert expected_start_pose",
+        )
+        target, target_error = normalized_pose(target_pose, "move_insert target_pose")
+        if start_error or target_error:
+            return {
+                "success": False,
+                "message": start_error or target_error,
+                "state_uncertain": False,
+            }
+        profile = {
+            "contact_speed_m_s": contact_speed_m_s,
+            "contact_force_delta_n": contact_force_delta_n,
+            "engagement_progress_m": engagement_progress_m,
+            "insertion_force_n": insertion_force_n,
+            "spiral_radius_m": spiral_radius_m,
+            "spiral_pitch_m": spiral_pitch_m,
+            "spiral_speed_m_s": spiral_speed_m_s,
+            "spiral_acceleration_m_s2": spiral_acceleration_m_s2,
+            "max_axial_force_n": max_axial_force_n,
+            "max_lateral_force_n": max_lateral_force_n,
+            "max_torque_nm": max_torque_nm,
+            "tilt_tolerance_rad": tilt_tolerance_rad,
+            "seated_depth_tolerance_m": seated_depth_tolerance_m,
+            "settle_time_sec": settle_time_sec,
+        }
+        if not isinstance(force_depth_profile, dict):
+            return {
+                "success": False,
+                "message": "move_insert force_depth_profile must be an object",
+                "state_uncertain": False,
+            }
+        force_depth_fields = (
+            "depth_fraction",
+            "axial_upper_n",
+            "lateral_upper_n",
+            "torque_upper_nm",
+        )
+        try:
+            force_depth_values = {
+                field_name: [
+                    float(value)
+                    for value in force_depth_profile[field_name]
+                ]
+                for field_name in force_depth_fields
+            }
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                "success": False,
+                "message": "move_insert force_depth_profile is invalid",
+                "state_uncertain": False,
+            }
+        if (
+            any(len(values) != 16 for values in force_depth_values.values())
+            or not all(
+                math.isfinite(value)
+                for values in force_depth_values.values()
+                for value in values
+            )
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "move_insert force_depth_profile requires 16 finite synchronized points"
+                ),
+                "state_uncertain": False,
+            }
+        try:
+            baseline_force_uncertainty_n = float(
+                baseline_force_uncertainty_n
+            )
+            baseline_torque_uncertainty_nm = float(
+                baseline_torque_uncertainty_nm
+            )
+        except (TypeError, ValueError, OverflowError):
+            baseline_force_uncertainty_n = math.nan
+            baseline_torque_uncertainty_nm = math.nan
+        if (
+            not math.isfinite(baseline_force_uncertainty_n)
+            or baseline_force_uncertainty_n <= 0.0
+            or not math.isfinite(baseline_torque_uncertainty_nm)
+            or baseline_torque_uncertainty_nm <= 0.0
+        ):
+            return {
+                "success": False,
+                "message": "move_insert baseline uncertainty evidence is invalid",
+                "state_uncertain": False,
+            }
+        hard_cap, hard_cap_error = self._live_insert_max_timeout_sec()
+        if hard_cap_error:
+            return {
+                "success": False,
+                "message": hard_cap_error,
+                "state_uncertain": False,
+            }
+        derived_timeout, timeout_error = derive_move_insert_timeout_sec(
+            start,
+            target,
+            insertion_axis_world,
+            profile,
+            part_name=requested_part,
+            insert_max_timeout_sec=hard_cap,
+        )
+        try:
+            supplied_timeout = float(timeout_sec)
+        except (TypeError, ValueError, OverflowError):
+            supplied_timeout = math.nan
+        if timeout_error or not math.isfinite(supplied_timeout) or not math.isclose(
+            supplied_timeout,
+            derived_timeout,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return {
+                "success": False,
+                "message": timeout_error or (
+                    "move_insert timeout_sec does not match the timeout derived from "
+                    "the frozen poses and profile"
+                ),
+                "state_uncertain": False,
+            }
+        if derived_timeout > hard_cap:
+            return {
+                "success": False,
+                "message": (
+                    f"derived move_insert timeout {derived_timeout:.3f}s exceeds live "
+                    f"RTDE insert_max_timeout_sec {hard_cap:.3f}s"
+                ),
+                "state_uncertain": False,
+            }
+        if not self.wait_for_services():
+            return {
+                "success": False,
+                "message": self._last_failure_message or "services not ready",
+                "state_uncertain": False,
+            }
+        insert_ready, insert_error = self._ensure_move_insert_client_ready()
+        if not insert_ready:
+            return {
+                "success": False,
+                "message": insert_error,
+                "state_uncertain": False,
+            }
+        client = self._ur5e_hardware_insert_client
+        action_type = self._MoveUR5eInsert
+        pose_stamped_type = self._PoseStamped
+        vector_type = self._Vector3
+        if any(value is None for value in (client, action_type, pose_stamped_type, vector_type)):
+            return {
+                "success": False,
+                "message": "UR5e move_insert action client is unavailable",
+                "state_uncertain": False,
+            }
+
+        def pose_stamped(pose: dict[str, float]) -> Any:
+            stamped = pose_stamped_type()
+            stamped.header.frame_id = "world"
+            stamped.header.stamp = self._node.get_clock().now().to_msg()
+            stamped.pose.position.x = pose["x"]
+            stamped.pose.position.y = pose["y"]
+            stamped.pose.position.z = pose["z"]
+            stamped.pose.orientation.x = pose["qx"]
+            stamped.pose.orientation.y = pose["qy"]
+            stamped.pose.orientation.z = pose["qz"]
+            stamped.pose.orientation.w = pose["qw"]
+            return stamped
+
+        goal = action_type.Goal()
+        goal.trial_id = selected_trial_id
+        goal.part_name = requested_part
+        goal.calibration_id = selected_calibration_id
+        goal.profile_sha256 = selected_hash
+        goal.hard_caps_sha256 = selected_hard_caps_hash
+        goal.expected_start_tool0_pose = pose_stamped(start)
+        goal.target_tool0_pose = pose_stamped(target)
+        axis = vector_type()
+        try:
+            axis.x = float(insertion_axis_world["x"])
+            axis.y = float(insertion_axis_world["y"])
+            axis.z = float(insertion_axis_world["z"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "message": f"move_insert insertion_axis_world is invalid: {exc}",
+                "state_uncertain": False,
+            }
+        goal.insertion_axis_world = axis
+        for field_name, value in profile.items():
+            setattr(goal, field_name, float(value))
+        goal.force_depth_fraction = force_depth_values["depth_fraction"]
+        goal.force_depth_axial_upper_n = force_depth_values["axial_upper_n"]
+        goal.force_depth_lateral_upper_n = force_depth_values["lateral_upper_n"]
+        goal.force_depth_torque_upper_nm = force_depth_values["torque_upper_nm"]
+        goal.baseline_force_uncertainty_n = float(
+            baseline_force_uncertainty_n
+        )
+        goal.baseline_torque_uncertainty_nm = float(
+            baseline_torque_uncertainty_nm
+        )
+        goal.timeout_sec = supplied_timeout
+
+        feedback_trace: list[dict[str, Any]] = []
+        feedback_trace_lock = threading.Lock()
+
+        def capture_feedback(feedback_message: Any) -> None:
+            feedback = getattr(feedback_message, "feedback", feedback_message)
+            captured_at = time.time()
+
+            def finite_number(field_name: str) -> float | None:
+                try:
+                    value = float(getattr(feedback, field_name))
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return None
+                return value if math.isfinite(value) else None
+
+            def finite_six(field_name: str) -> list[float] | None:
+                try:
+                    values = [float(value) for value in getattr(feedback, field_name)]
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return None
+                if len(values) != 6 or not all(math.isfinite(value) for value in values):
+                    return None
+                return values
+
+            def integer(field_name: str) -> int | None:
+                try:
+                    return int(getattr(feedback, field_name))
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return None
+
+            def pose_stamped_value(field_name: str) -> dict[str, float] | None:
+                try:
+                    pose = getattr(feedback, field_name).pose
+                    return {
+                        "x": float(pose.position.x),
+                        "y": float(pose.position.y),
+                        "z": float(pose.position.z),
+                        "qx": float(pose.orientation.x),
+                        "qy": float(pose.orientation.y),
+                        "qz": float(pose.orientation.z),
+                        "qw": float(pose.orientation.w),
+                    }
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return None
+
+            trace_item: dict[str, Any] = {
+                "timestamp": captured_at,
+                "trial_id": str(
+                    getattr(feedback, "trial_id", selected_trial_id) or ""
+                ),
+                "phase": str(getattr(feedback, "phase", "") or ""),
+                "insertion_depth_m": finite_number("insertion_depth_m"),
+                "depth_error_m": finite_number("depth_error_m"),
+                "lateral_offset_m": finite_number("lateral_offset_m"),
+                "search_radius_m": finite_number("search_radius_m"),
+                "axial_force_n": finite_number("axial_force_n"),
+                "lateral_force_n": finite_number("lateral_force_n"),
+                "torque_nm": finite_number("torque_nm"),
+                "filtered_axial_force_n": finite_number(
+                    "filtered_axial_force_n"
+                ),
+                "filtered_lateral_force_n": finite_number(
+                    "filtered_lateral_force_n"
+                ),
+                "filtered_torque_nm": finite_number("filtered_torque_nm"),
+                "tool_flange_torque_nm": finite_number(
+                    "tool_flange_torque_nm"
+                ),
+                "filtered_tool_flange_torque_nm": finite_number(
+                    "filtered_tool_flange_torque_nm"
+                ),
+                "current_force_depth_fraction": finite_number(
+                    "current_force_depth_fraction"
+                ),
+                "force_depth_axial_upper_n": finite_number(
+                    "force_depth_axial_upper_n"
+                ),
+                "force_depth_lateral_upper_n": finite_number(
+                    "force_depth_lateral_upper_n"
+                ),
+                "force_depth_torque_upper_nm": finite_number(
+                    "force_depth_torque_upper_nm"
+                ),
+                "axial_profile_exceeded": bool(
+                    getattr(feedback, "axial_profile_exceeded", False)
+                ),
+                "axial_progress_stalled": bool(
+                    getattr(feedback, "axial_progress_stalled", False)
+                ),
+                "contact_detected": bool(
+                    getattr(feedback, "contact_detected", False)
+                ),
+                "engagement_detected": bool(
+                    getattr(feedback, "engagement_detected", False)
+                ),
+                "seated_detected": bool(
+                    getattr(feedback, "seated_detected", False)
+                ),
+                "soft_overload_detected": bool(
+                    getattr(feedback, "soft_overload_detected", False)
+                ),
+                "soft_overload_reason": str(
+                    getattr(feedback, "soft_overload_reason", "") or ""
+                ),
+                "soft_overload_duration_sec": finite_number(
+                    "soft_overload_duration_sec"
+                ),
+                "relief_cycle_count": integer("relief_cycle_count"),
+                "relief_elapsed_sec": finite_number("relief_elapsed_sec"),
+                "relief_retreat_m": finite_number("relief_retreat_m"),
+                "relief_load_cleared": bool(
+                    getattr(feedback, "relief_load_cleared", False)
+                ),
+                "relief_backoff_m": finite_number("relief_backoff_m"),
+                "relief_planned_backoff_m": finite_number(
+                    "relief_planned_backoff_m"
+                ),
+                "total_relief_backoff_m": finite_number(
+                    "total_relief_backoff_m"
+                ),
+                "relief_resume_phase": str(
+                    getattr(feedback, "relief_resume_phase", "") or ""
+                ),
+                "commanded_axial_force_n": finite_number(
+                    "commanded_axial_force_n"
+                ),
+                "commanded_lateral_force_x_n": finite_number(
+                    "commanded_lateral_force_x_n"
+                ),
+                "commanded_lateral_force_y_n": finite_number(
+                    "commanded_lateral_force_y_n"
+                ),
+                "hard_limit_detected": bool(
+                    getattr(feedback, "hard_limit_detected", False)
+                ),
+                "hard_limit_reason": str(
+                    getattr(feedback, "hard_limit_reason", "") or ""
+                ),
+                "limit_trigger": str(
+                    getattr(feedback, "limit_trigger", "") or ""
+                ),
+                "limit_trigger_value": finite_number("limit_trigger_value"),
+                "limit_trigger_threshold": finite_number(
+                    "limit_trigger_threshold"
+                ),
+                "limit_trigger_actual_tcp_force": finite_six(
+                    "limit_trigger_actual_tcp_force"
+                ),
+                "limit_trigger_tared_tcp_force": finite_six(
+                    "limit_trigger_tared_tcp_force"
+                ),
+                "tactile_center_valid": bool(
+                    getattr(feedback, "tactile_center_valid", False)
+                ),
+                "tactile_center_tool0_pose": pose_stamped_value(
+                    "tactile_center_tool0_pose"
+                ),
+                "tactile_center_depth_m": finite_number(
+                    "tactile_center_depth_m"
+                ),
+                "tactile_center_confidence": finite_number(
+                    "tactile_center_confidence"
+                ),
+                "tactile_center_evidence_sha256": str(
+                    getattr(feedback, "tactile_center_evidence_sha256", "") or ""
+                ),
+                "scheduled_search_radius_m": finite_number(
+                    "scheduled_search_radius_m"
+                ),
+                "explored_search_radius_m": finite_number(
+                    "explored_search_radius_m"
+                ),
+                "explored_search_angle_rad": finite_number(
+                    "explored_search_angle_rad"
+                ),
+                "disengagement_cycle_count": integer(
+                    "disengagement_cycle_count"
+                ),
+                "last_disengagement_reason": str(
+                    getattr(feedback, "last_disengagement_reason", "") or ""
+                ),
+                "disengagement_withdrawal_m": finite_number(
+                    "disengagement_withdrawal_m"
+                ),
+                "disengagement_contact_cleared": bool(
+                    getattr(feedback, "disengagement_contact_cleared", False)
+                ),
+                "disengagement_force_mode_stop_acknowledged": bool(
+                    getattr(
+                        feedback,
+                        "disengagement_force_mode_stop_acknowledged",
+                        False,
+                    )
+                ),
+                "recenter_position_error_m": finite_number(
+                    "recenter_position_error_m"
+                ),
+                "recenter_command_acknowledged": bool(
+                    getattr(feedback, "recenter_command_acknowledged", False)
+                ),
+                "disengagement_stationary_confirmed": bool(
+                    getattr(feedback, "disengagement_stationary_confirmed", False)
+                ),
+                "retare_baseline_consistent": bool(
+                    getattr(feedback, "retare_baseline_consistent", False)
+                ),
+                "force_bias_valid": bool(
+                    getattr(feedback, "force_bias_valid", False)
+                ),
+                "force_bias": finite_six("force_bias"),
+                "tared_tcp_force": finite_six("tared_tcp_force"),
+                "actual_tcp_force": finite_six("actual_tcp_force"),
+                "actual_tcp_speed": finite_six("actual_tcp_speed"),
+            }
+            stamped = getattr(feedback, "actual_tool0_pose", None)
+            pose_message = getattr(stamped, "pose", None)
+            try:
+                pose = {
+                    "x": float(pose_message.position.x),
+                    "y": float(pose_message.position.y),
+                    "z": float(pose_message.position.z),
+                    "qx": float(pose_message.orientation.x),
+                    "qy": float(pose_message.orientation.y),
+                    "qz": float(pose_message.orientation.z),
+                    "qw": float(pose_message.orientation.w),
+                }
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                pose = {}
+            if pose and all(math.isfinite(value) for value in pose.values()):
+                trace_item["actual_tool0_pose"] = pose
+            with feedback_trace_lock:
+                if feedback_trace:
+                    previous = feedback_trace[-1]
+                    elapsed = captured_at - float(previous["timestamp"])
+                    previous_depth = previous.get("insertion_depth_m")
+                    current_depth = trace_item.get("insertion_depth_m")
+                    if (
+                        elapsed > 1e-9
+                        and isinstance(previous_depth, (int, float))
+                        and isinstance(current_depth, (int, float))
+                    ):
+                        trace_item["axial_speed_m_s"] = (
+                            current_depth
+                            - float(previous_depth)
+                        ) / elapsed
+                feedback_trace.append(trace_item)
+
+        def captured_feedback_trace() -> list[dict[str, Any]]:
+            with feedback_trace_lock:
+                return [dict(item) for item in feedback_trace]
+
+        send_timeout_sec = float(getattr(self, "_ur5e_action_send_timeout_sec", 10.0))
+        if not self._claim_move_insert_dispatch():
+            return {
+                "success": False,
+                "message": "another move_insert goal is already active",
+                "state_uncertain": False,
+                "feedback_trace": [],
+            }
+        send_attempted = False
+        try:
+            if not client.wait_for_server(timeout_sec=2.0):
+                self._clear_move_insert_goal(None)
+                return {
+                    "success": False,
+                    "message": f"{self._ur5e_hardware_insert_action} is unavailable",
+                    "state_uncertain": False,
+                    "feedback_trace": [],
+                }
+            send_attempted = True
+            send_future = client.send_goal_async(
+                goal,
+                feedback_callback=capture_feedback,
+            )
+            self._set_pending_move_insert_send_future(send_future)
+            goal_handle = self._wait_move_insert_terminal_result(
+                send_future,
+                send_timeout_sec,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            if not send_attempted:
+                self._clear_move_insert_goal(None)
+            else:
+                with self._move_insert_goal_condition:
+                    while self._move_insert_dispatch_active:
+                        self._move_insert_goal_condition.wait(timeout=1.0)
+            return {
+                "success": False,
+                "message": (
+                    f"{self._ur5e_hardware_insert_action}: send failed ({exc}); "
+                    + (
+                        "goal acceptance is unknown and physical motion may still be executing"
+                        if send_attempted
+                        else "goal was not dispatched"
+                    )
+                ),
+                "state_uncertain": send_attempted,
+                "feedback_trace": captured_feedback_trace(),
+            }
+        if goal_handle is None:
+            acknowledgement_error = (
+                f"{self._ur5e_hardware_insert_action}: send acknowledgement timeout "
+                f"after {send_timeout_sec:.1f}s"
+            )
+            while not send_future.done():
+                time.sleep(0.01)
+            try:
+                goal_handle = send_future.result()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                while True:
+                    time.sleep(1.0)
+            if goal_handle is None:
+                while True:
+                    time.sleep(1.0)
+            if not bool(getattr(goal_handle, "accepted", False)):
+                self._clear_move_insert_goal(None)
+                return {
+                    "success": False,
+                    "message": f"{acknowledgement_error}; delayed goal was rejected",
+                    "state_uncertain": False,
+                    "feedback_trace": captured_feedback_trace(),
+                }
+            try:
+                result_future = goal_handle.get_result_async()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                self._set_active_move_insert_goal(goal_handle, None)
+                while True:
+                    time.sleep(1.0)
+            self._set_active_move_insert_goal(goal_handle, result_future)
+            cancel_result = self.cancel_move_insert(timeout_sec=8.0)
+            cancel_result = self._retain_move_insert_until_terminal_settlement(
+                goal_handle,
+                result_future,
+                cancel_result,
+            )
+            return {
+                "success": False,
+                "message": f"{acknowledgement_error}; {cancel_result['message']}",
+                "state_uncertain": bool(
+                    cancel_result.get("state_uncertain", True)
+                ),
+                "motion_settled": bool(cancel_result.get("settled", False)),
+                "trial_id": str(
+                    cancel_result.get("trial_id") or selected_trial_id
+                ),
+                "force_mode_stop_acknowledged": bool(
+                    cancel_result.get("force_mode_stop_acknowledged", False)
+                ),
+                "servo_stop_acknowledged": bool(
+                    cancel_result.get("servo_stop_acknowledged", False)
+                ),
+                "stop_l_command_completed": bool(
+                    cancel_result.get("stop_l_command_completed", False)
+                ),
+                "stationary_confirmed": bool(
+                    cancel_result.get("stationary_confirmed", False)
+                ),
+                "relief_load_cleared": bool(
+                    cancel_result.get("relief_load_cleared", False)
+                ),
+                "relief_backoff_m": cancel_result.get("relief_backoff_m"),
+                "relief_planned_backoff_m": cancel_result.get(
+                    "relief_planned_backoff_m"
+                ),
+                "total_relief_backoff_m": cancel_result.get(
+                    "total_relief_backoff_m"
+                ),
+                "relief_resume_phase": str(
+                    cancel_result.get("relief_resume_phase") or ""
+                ),
+                "relief_force_mode_stop_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_stop_acknowledged",
+                        False,
+                    )
+                ),
+                "relief_stop_l_command_completed": bool(
+                    cancel_result.get("relief_stop_l_command_completed", False)
+                ),
+                "relief_stationary_confirmed": bool(
+                    cancel_result.get("relief_stationary_confirmed", False)
+                ),
+                "relief_force_mode_restart_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_restart_acknowledged",
+                        False,
+                    )
+                ),
+                "server_trace_id": str(
+                    cancel_result.get("server_trace_id") or ""
+                ),
+                "server_trace_path": str(
+                    cancel_result.get("server_trace_path") or ""
+                ),
+                "server_trace_sha256": str(
+                    cancel_result.get("server_trace_sha256") or ""
+                ),
+                "server_trace_status": str(
+                    cancel_result.get("server_trace_status") or ""
+                ),
+                "server_trace_complete": bool(
+                    cancel_result.get("server_trace_complete", False)
+                ),
+                "server_trace_sample_count": int(
+                    cancel_result.get("server_trace_sample_count", 0) or 0
+                ),
+                "feedback_trace": captured_feedback_trace(),
+            }
+        if not bool(getattr(goal_handle, "accepted", False)):
+            self._clear_move_insert_goal(None)
+            return {
+                "success": False,
+                "message": f"{self._ur5e_hardware_insert_action}: goal rejected",
+                "state_uncertain": False,
+                "feedback_trace": captured_feedback_trace(),
+            }
+        self._set_active_move_insert_goal(goal_handle, None)
+        result_future = None
+        try:
+            result_future = goal_handle.get_result_async()
+            self._set_active_move_insert_goal(goal_handle, result_future)
+            wrapped = self._wait_move_insert_terminal_result(
+                result_future,
+                supplied_timeout + 10.0,
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            cancel_result = self.cancel_move_insert(timeout_sec=8.0)
+            if result_future is None:
+                while True:
+                    time.sleep(1.0)
+            cancel_result = self._retain_move_insert_until_terminal_settlement(
+                goal_handle,
+                result_future,
+                cancel_result,
+            )
+            return {
+                "success": False,
+                "message": (
+                    f"{self._ur5e_hardware_insert_action}: result failed ({exc}); "
+                    f"{cancel_result['message']}"
+                ),
+                "state_uncertain": True,
+                "motion_settled": bool(cancel_result.get("settled", False)),
+                "trial_id": str(
+                    cancel_result.get("trial_id") or selected_trial_id
+                ),
+                "force_mode_stop_acknowledged": bool(
+                    cancel_result.get("force_mode_stop_acknowledged", False)
+                ),
+                "servo_stop_acknowledged": bool(
+                    cancel_result.get("servo_stop_acknowledged", False)
+                ),
+                "stop_l_command_completed": bool(
+                    cancel_result.get("stop_l_command_completed", False)
+                ),
+                "stationary_confirmed": bool(
+                    cancel_result.get("stationary_confirmed", False)
+                ),
+                "relief_load_cleared": bool(
+                    cancel_result.get("relief_load_cleared", False)
+                ),
+                "relief_backoff_m": cancel_result.get("relief_backoff_m"),
+                "relief_planned_backoff_m": cancel_result.get(
+                    "relief_planned_backoff_m"
+                ),
+                "total_relief_backoff_m": cancel_result.get(
+                    "total_relief_backoff_m"
+                ),
+                "relief_resume_phase": str(
+                    cancel_result.get("relief_resume_phase") or ""
+                ),
+                "relief_force_mode_stop_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_stop_acknowledged",
+                        False,
+                    )
+                ),
+                "relief_stop_l_command_completed": bool(
+                    cancel_result.get("relief_stop_l_command_completed", False)
+                ),
+                "relief_stationary_confirmed": bool(
+                    cancel_result.get("relief_stationary_confirmed", False)
+                ),
+                "relief_force_mode_restart_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_restart_acknowledged",
+                        False,
+                    )
+                ),
+                "server_trace_id": str(
+                    cancel_result.get("server_trace_id") or ""
+                ),
+                "server_trace_path": str(
+                    cancel_result.get("server_trace_path") or ""
+                ),
+                "server_trace_sha256": str(
+                    cancel_result.get("server_trace_sha256") or ""
+                ),
+                "server_trace_status": str(
+                    cancel_result.get("server_trace_status") or ""
+                ),
+                "server_trace_complete": bool(
+                    cancel_result.get("server_trace_complete", False)
+                ),
+                "server_trace_sample_count": int(
+                    cancel_result.get("server_trace_sample_count", 0) or 0
+                ),
+                "feedback_trace": captured_feedback_trace(),
+            }
+        if wrapped is None:
+            cancel_result = self.cancel_move_insert(timeout_sec=8.0)
+            cancel_result = self._retain_move_insert_until_terminal_settlement(
+                goal_handle,
+                result_future,
+                cancel_result,
+            )
+            return {
+                "success": False,
+                "message": (
+                    f"{self._ur5e_hardware_insert_action}: result timeout; "
+                    f"{cancel_result['message']}"
+                ),
+                "state_uncertain": True,
+                "motion_settled": bool(cancel_result.get("settled", False)),
+                "trial_id": str(
+                    cancel_result.get("trial_id") or selected_trial_id
+                ),
+                "force_mode_stop_acknowledged": bool(
+                    cancel_result.get("force_mode_stop_acknowledged", False)
+                ),
+                "servo_stop_acknowledged": bool(
+                    cancel_result.get("servo_stop_acknowledged", False)
+                ),
+                "stop_l_command_completed": bool(
+                    cancel_result.get("stop_l_command_completed", False)
+                ),
+                "stationary_confirmed": bool(
+                    cancel_result.get("stationary_confirmed", False)
+                ),
+                "relief_load_cleared": bool(
+                    cancel_result.get("relief_load_cleared", False)
+                ),
+                "relief_backoff_m": cancel_result.get("relief_backoff_m"),
+                "relief_planned_backoff_m": cancel_result.get(
+                    "relief_planned_backoff_m"
+                ),
+                "total_relief_backoff_m": cancel_result.get(
+                    "total_relief_backoff_m"
+                ),
+                "relief_resume_phase": str(
+                    cancel_result.get("relief_resume_phase") or ""
+                ),
+                "relief_force_mode_stop_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_stop_acknowledged",
+                        False,
+                    )
+                ),
+                "relief_stop_l_command_completed": bool(
+                    cancel_result.get("relief_stop_l_command_completed", False)
+                ),
+                "relief_stationary_confirmed": bool(
+                    cancel_result.get("relief_stationary_confirmed", False)
+                ),
+                "relief_force_mode_restart_acknowledged": bool(
+                    cancel_result.get(
+                        "relief_force_mode_restart_acknowledged",
+                        False,
+                    )
+                ),
+                "server_trace_id": str(
+                    cancel_result.get("server_trace_id") or ""
+                ),
+                "server_trace_path": str(
+                    cancel_result.get("server_trace_path") or ""
+                ),
+                "server_trace_sha256": str(
+                    cancel_result.get("server_trace_sha256") or ""
+                ),
+                "server_trace_status": str(
+                    cancel_result.get("server_trace_status") or ""
+                ),
+                "server_trace_complete": bool(
+                    cancel_result.get("server_trace_complete", False)
+                ),
+                "server_trace_sample_count": int(
+                    cancel_result.get("server_trace_sample_count", 0) or 0
+                ),
+                "feedback_trace": captured_feedback_trace(),
+            }
+        result = getattr(wrapped, "result", None)
+        try:
+            goal_status = int(getattr(wrapped, "status", -1))
+            error_code = int(getattr(result, "error_code", -1))
+        except (TypeError, ValueError):
+            goal_status = -1
+            error_code = -1
+        state_uncertain = bool(getattr(result, "state_uncertain", False))
+        motion_settled = bool(
+            getattr(result, "motion_settled", not state_uncertain)
+        )
+        terminal = goal_status in {4, 5, 6}
+        if terminal:
+            self._clear_move_insert_goal(goal_handle)
+        else:
+            settlement = self._retain_move_insert_until_terminal_settlement(
+                goal_handle,
+                result_future,
+                {
+                    "settled": False,
+                    "terminal": False,
+                    "state_uncertain": True,
+                    "message": "move_insert terminal settlement is unconfirmed",
+                },
+            )
+            state_uncertain = bool(settlement.get("state_uncertain", True))
+            motion_settled = bool(settlement.get("settled", False))
+        state_uncertain = bool(
+            state_uncertain or not terminal or not motion_settled
+        )
+        final_tool0_pose_valid = bool(
+            getattr(result, "final_tool0_pose_valid", False)
+        )
+        result_trial_id = str(
+            getattr(result, "trial_id", selected_trial_id) or ""
+        )
+        result_hard_caps_sha256 = str(
+            getattr(result, "hard_caps_sha256", "") or ""
+        )
+        if result_hard_caps_sha256 != selected_hard_caps_hash:
+            state_uncertain = True
+        response = {
+            "success": bool(
+                terminal
+                and goal_status == 4
+                and error_code == 0
+                and motion_settled
+                and not state_uncertain
+            ),
+            "message": str(getattr(result, "error_string", "") or "").strip(),
+            "terminal": terminal,
+            "goal_status": goal_status,
+            "state_uncertain": state_uncertain,
+            "motion_settled": motion_settled,
+            "trial_id": result_trial_id,
+            "hard_caps_sha256": result_hard_caps_sha256,
+            "final_phase": str(getattr(result, "final_phase", "") or ""),
+            "final_tool0_pose_valid": final_tool0_pose_valid,
+            "error_code": error_code,
+            "final_insertion_depth_m": float(
+                getattr(result, "final_insertion_depth_m", math.nan)
+            ),
+            "final_depth_error_m": float(
+                getattr(result, "final_depth_error_m", math.nan)
+            ),
+            "final_lateral_offset_m": float(
+                getattr(result, "final_lateral_offset_m", math.nan)
+            ),
+            "final_tilt_error_rad": float(
+                getattr(result, "final_tilt_error_rad", math.nan)
+            ),
+            "final_search_radius_m": float(
+                getattr(result, "final_search_radius_m", math.nan)
+            ),
+            "peak_axial_force_n": float(
+                getattr(result, "peak_axial_force_n", math.nan)
+            ),
+            "peak_lateral_force_n": float(
+                getattr(result, "peak_lateral_force_n", math.nan)
+            ),
+            "peak_torque_nm": float(getattr(result, "peak_torque_nm", math.nan)),
+            "peak_filtered_axial_force_n": float(
+                getattr(result, "peak_filtered_axial_force_n", math.nan)
+            ),
+            "peak_filtered_lateral_force_n": float(
+                getattr(result, "peak_filtered_lateral_force_n", math.nan)
+            ),
+            "peak_filtered_torque_nm": float(
+                getattr(result, "peak_filtered_torque_nm", math.nan)
+            ),
+            "peak_tool_flange_torque_nm": float(
+                getattr(result, "peak_tool_flange_torque_nm", math.nan)
+            ),
+            "contact_detected": bool(getattr(result, "contact_detected", False)),
+            "engagement_detected": bool(
+                getattr(result, "engagement_detected", False)
+            ),
+            "seated_detected": bool(getattr(result, "seated_detected", False)),
+            "soft_overload_detected": bool(
+                getattr(result, "soft_overload_detected", False)
+            ),
+            "soft_overload_recovered": bool(
+                getattr(result, "soft_overload_recovered", False)
+            ),
+            "relief_exhausted": bool(
+                getattr(result, "relief_exhausted", False)
+            ),
+            "relief_cycle_count": int(
+                getattr(result, "relief_cycle_count", 0) or 0
+            ),
+            "last_soft_overload_reason": str(
+                getattr(result, "last_soft_overload_reason", "") or ""
+            ),
+            "relief_load_cleared": bool(
+                getattr(result, "relief_load_cleared", False)
+            ),
+            "relief_backoff_m": float(
+                getattr(result, "relief_backoff_m", math.nan)
+            ),
+            "relief_planned_backoff_m": float(
+                getattr(result, "relief_planned_backoff_m", math.nan)
+            ),
+            "total_relief_backoff_m": float(
+                getattr(result, "total_relief_backoff_m", math.nan)
+            ),
+            "relief_resume_phase": str(
+                getattr(result, "relief_resume_phase", "") or ""
+            ),
+            "relief_force_mode_stop_acknowledged": bool(
+                getattr(result, "relief_force_mode_stop_acknowledged", False)
+            ),
+            "relief_stop_l_command_completed": bool(
+                getattr(result, "relief_stop_l_command_completed", False)
+            ),
+            "relief_stationary_confirmed": bool(
+                getattr(result, "relief_stationary_confirmed", False)
+            ),
+            "relief_force_mode_restart_acknowledged": bool(
+                getattr(
+                    result,
+                    "relief_force_mode_restart_acknowledged",
+                    False,
+                )
+            ),
+            "hard_limit_detected": bool(
+                getattr(result, "hard_limit_detected", False)
+            ),
+            "hard_limit_reason": str(
+                getattr(result, "hard_limit_reason", "") or ""
+            ),
+            "limit_trigger": str(getattr(result, "limit_trigger", "") or ""),
+            "limit_trigger_value": float(
+                getattr(result, "limit_trigger_value", math.nan)
+            ),
+            "limit_trigger_threshold": float(
+                getattr(result, "limit_trigger_threshold", math.nan)
+            ),
+            "force_bias_valid": bool(getattr(result, "force_bias_valid", False)),
+            "force_mode_stop_acknowledged": bool(
+                getattr(result, "force_mode_stop_acknowledged", False)
+            ),
+            "servo_stop_acknowledged": bool(
+                getattr(result, "servo_stop_acknowledged", False)
+            ),
+            "stop_l_command_completed": bool(
+                getattr(result, "stop_l_command_completed", False)
+            ),
+            "stationary_confirmed": bool(
+                getattr(result, "stationary_confirmed", False)
+            ),
+            "server_trace_id": str(
+                getattr(result, "server_trace_id", "") or ""
+            ),
+            "server_trace_path": str(
+                getattr(result, "server_trace_path", "") or ""
+            ),
+            "server_trace_sha256": str(
+                getattr(result, "server_trace_sha256", "") or ""
+            ),
+            "server_trace_status": str(
+                getattr(result, "server_trace_status", "") or ""
+            ),
+            "server_trace_complete": bool(
+                getattr(result, "server_trace_complete", False)
+            ),
+            "server_trace_sample_count": int(
+                getattr(result, "server_trace_sample_count", 0) or 0
+            ),
+            "tactile_center_valid": bool(
+                getattr(result, "tactile_center_valid", False)
+            ),
+            "tactile_center_depth_m": float(
+                getattr(result, "tactile_center_depth_m", math.nan)
+            ),
+            "tactile_center_confidence": float(
+                getattr(result, "tactile_center_confidence", math.nan)
+            ),
+            "tactile_center_evidence_sha256": str(
+                getattr(result, "tactile_center_evidence_sha256", "") or ""
+            ),
+            "scheduled_search_radius_m": float(
+                getattr(result, "scheduled_search_radius_m", math.nan)
+            ),
+            "explored_search_radius_m": float(
+                getattr(result, "explored_search_radius_m", math.nan)
+            ),
+            "explored_search_angle_rad": float(
+                getattr(result, "explored_search_angle_rad", math.nan)
+            ),
+            "disengagement_cycle_count": int(
+                getattr(result, "disengagement_cycle_count", 0) or 0
+            ),
+            "last_disengagement_reason": str(
+                getattr(result, "last_disengagement_reason", "") or ""
+            ),
+            "disengagement_withdrawal_m": float(
+                getattr(result, "disengagement_withdrawal_m", math.nan)
+            ),
+            "disengagement_contact_cleared": bool(
+                getattr(result, "disengagement_contact_cleared", False)
+            ),
+            "disengagement_force_mode_stop_acknowledged": bool(
+                getattr(
+                    result,
+                    "disengagement_force_mode_stop_acknowledged",
+                    False,
+                )
+            ),
+            "recenter_position_error_m": float(
+                getattr(result, "recenter_position_error_m", math.nan)
+            ),
+            "recenter_command_acknowledged": bool(
+                getattr(result, "recenter_command_acknowledged", False)
+            ),
+            "disengagement_stationary_confirmed": bool(
+                getattr(result, "disengagement_stationary_confirmed", False)
+            ),
+            "retare_baseline_consistent": bool(
+                getattr(result, "retare_baseline_consistent", False)
+            ),
+            "profile_sha256": selected_hash,
+            "feedback_trace": captured_feedback_trace(),
+        }
+        try:
+            result_force_bias = [
+                float(value) for value in getattr(result, "force_bias", [])
+            ]
+        except (TypeError, ValueError, OverflowError):
+            result_force_bias = []
+        response["force_bias"] = (
+            result_force_bias
+            if len(result_force_bias) == 6
+            and all(math.isfinite(value) for value in result_force_bias)
+            else None
+        )
+        if response["force_bias"] is None:
+            response["force_bias_valid"] = False
+        try:
+            tactile_pose = result.tactile_center_tool0_pose.pose
+            response["tactile_center_tool0_pose"] = {
+                "x": float(tactile_pose.position.x),
+                "y": float(tactile_pose.position.y),
+                "z": float(tactile_pose.position.z),
+                "qx": float(tactile_pose.orientation.x),
+                "qy": float(tactile_pose.orientation.y),
+                "qz": float(tactile_pose.orientation.z),
+                "qw": float(tactile_pose.orientation.w),
+            }
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            response["tactile_center_tool0_pose"] = None
+            response["tactile_center_valid"] = False
+        for field_name in (
+            "limit_trigger_actual_tcp_force",
+            "limit_trigger_tared_tcp_force",
+        ):
+            try:
+                values = [float(value) for value in getattr(result, field_name, [])]
+            except (TypeError, ValueError, OverflowError):
+                values = []
+            response[field_name] = (
+                values
+                if len(values) == 6
+                and all(math.isfinite(value) for value in values)
+                else None
+            )
+        if result_trial_id != selected_trial_id:
+            response.update(
+                {
+                    "success": False,
+                    "state_uncertain": True,
+                    "message": (
+                        "move_insert terminal trial_id does not match the dispatched "
+                        f"trial_id {selected_trial_id!r}"
+                    ),
+                }
+            )
+        if result_hard_caps_sha256 != selected_hard_caps_hash:
+            response.update(
+                {
+                    "success": False,
+                    "state_uncertain": True,
+                    "message": (
+                        "move_insert terminal hard_caps_sha256 does not match the "
+                        "dispatched exact-part hard caps"
+                    ),
+                }
+            )
+        if not response["message"]:
+            response["message"] = (
+                "move_insert completed"
+                if response["success"]
+                else f"goal_status={goal_status} error_code={error_code}"
+            )
+        if response["success"] and not (
+            response["engagement_detected"] and response["seated_detected"]
+        ):
+            response.update(
+                {
+                    "success": False,
+                    "state_uncertain": True,
+                    "message": (
+                        "move_insert action succeeded without confirmed engagement "
+                        "and seating evidence"
+                    ),
+                }
+            )
+        if final_tool0_pose_valid:
+            final_stamped = getattr(result, "final_tool0_pose", None)
+            final_frame = str(
+                getattr(getattr(final_stamped, "header", None), "frame_id", "") or ""
+            ).strip()
+            final_pose_message = getattr(final_stamped, "pose", None)
+            final_pose, final_pose_error = normalized_pose(
+                {
+                    "x": getattr(getattr(final_pose_message, "position", None), "x", None),
+                    "y": getattr(getattr(final_pose_message, "position", None), "y", None),
+                    "z": getattr(getattr(final_pose_message, "position", None), "z", None),
+                    "qx": getattr(getattr(final_pose_message, "orientation", None), "x", None),
+                    "qy": getattr(getattr(final_pose_message, "orientation", None), "y", None),
+                    "qz": getattr(getattr(final_pose_message, "orientation", None), "z", None),
+                    "qw": getattr(getattr(final_pose_message, "orientation", None), "w", None),
+                },
+                "move_insert final_tool0_pose",
+            )
+            if final_frame == "world" and not final_pose_error:
+                response["absolute_position"] = final_pose
+                response["final_tool0_pose"] = final_pose
+        if response["success"] and "absolute_position" not in response:
+            response.update(
+                {
+                    "success": False,
+                    "state_uncertain": True,
+                    "message": (
+                        "move_insert action succeeded without a valid complete world -> "
+                        "tool0 final pose"
+                    ),
+                }
+            )
+        self._last_failure_message = "" if response["success"] else str(response["message"])
+        return response
 
     def move_to_named_pose(
         self,
@@ -1784,21 +3966,21 @@ class UR5eHardwareController(HardwarePickPlaceController):
             getattr(self, "_ur5e_action_send_timeout_sec", 10.0)
         )
         try:
-            goal_handle = self._wait_future(
+            goal_handle = self._wait_ur5e_action_future_without_cancel(
                 send_future,
-                timeout_sec=send_timeout_sec,
-                label=f"send:{label}",
+                send_timeout_sec,
             )
         except (RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = f"{self._rg2_action_name}: send failed ({exc})"
             return False
         if goal_handle is None:
-            self._last_failure_message = (
-                f"{self._rg2_action_name}: send acknowledgement timeout after "
-                f"{send_timeout_sec:.1f}s; goal acceptance is unknown and physical "
-                "gripper motion may still be executing"
-            )
-            return False
+            while not send_future.done():
+                time.sleep(0.01)
+            try:
+                goal_handle = send_future.result()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                while True:
+                    time.sleep(1.0)
         if not bool(getattr(goal_handle, "accepted", False)):
             self._last_failure_message = f"{self._rg2_action_name}: goal rejected"
             return False
@@ -1807,22 +3989,21 @@ class UR5eHardwareController(HardwarePickPlaceController):
             result_future = goal_handle.get_result_async()
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = f"{self._rg2_action_name}: result failed ({exc})"
+            self._retain_accepted_action_without_terminal_observer()
             return False
         result_timeout = max(
             8.0,
             duration + float(self.gripper_feedback_timeout_pad_sec) + 4.0,
         )
         try:
-            wrapped = self._wait_future(
+            wrapped = self._wait_ur5e_action_terminal_settlement(
+                goal_handle,
                 result_future,
                 timeout_sec=result_timeout,
-                label=f"result:{label}",
             )
         except (RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = f"{self._rg2_action_name}: result failed ({exc})"
-            return False
-        if wrapped is None:
-            self._last_failure_message = f"{self._rg2_action_name}: result timeout"
+            self._retain_accepted_action_without_terminal_observer()
             return False
         result = getattr(wrapped, "result", None)
         try:
@@ -1852,14 +4033,31 @@ class UR5eHardwareController(HardwarePickPlaceController):
         """Release physical action clients before destroying their ROS node."""
         arm_client = getattr(self, "_ur5e_hardware_trajectory_client", None)
         cartesian_client = getattr(self, "_ur5e_hardware_cartesian_client", None)
+        insert_client = getattr(self, "_ur5e_hardware_insert_client", None)
+        demonstration_client = getattr(
+            self,
+            "_ur5e_hardware_insertion_demonstration_client",
+            None,
+        )
         gripper_client = getattr(self, "_rg2_action_client", None)
         self._ur5e_hardware_trajectory_client = None
         self._ur5e_hardware_cartesian_client = None
+        self._ur5e_hardware_insert_client = None
+        self._ur5e_hardware_insertion_demonstration_client = None
         self._rg2_action_client = None
         self._FollowJointTrajectory = None
         self._MoveUR5eCartesian = None
+        self._MoveUR5eInsert = None
+        self._RecordUR5eInsertionDemonstration = None
         self._PoseStamped = None
-        for client in (arm_client, cartesian_client, gripper_client):
+        self._Vector3 = None
+        for client in (
+            arm_client,
+            cartesian_client,
+            insert_client,
+            demonstration_client,
+            gripper_client,
+        ):
             if client is None:
                 continue
             destroy = getattr(client, "destroy", None)
@@ -2060,8 +4258,8 @@ class XArm6HardwareController(HardwarePickPlaceController):
             self._last_failure_message = "xArm6 hardware Cartesian service is not configured"
             return False
         try:
-            from controller_manager_msgs.srv import ListControllers
             from control_msgs.action import FollowJointTrajectory, GripperCommand
+            from controller_manager_msgs.srv import ListControllers
             from xarm_msgs.msg import RobotMsg
             from xarm_msgs.srv import MoveCartesian, SetInt16
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -28,6 +30,30 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
     recovery_validation_fingerprint,
     recovery_validation_reply_matches,
 )
+from cais_spade_llm.resources.resource_primitives import (
+    get_resource_recovery_snapshot,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("robot", ["xarm6", "ur5e"])
+def test_robot_manifest_exposes_manipulator_pick_place_capability(robot: str) -> None:
+    payload = json.loads(
+        (
+            ROOT
+            / "cais_spade_llm"
+            / "initialization"
+            / "resources"
+            / f"robot_{robot}.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    for execution_environment in ("gazebo", "real"):
+        static_capabilities = payload[robot][execution_environment][
+            "static_capabilities"
+        ]
+        assert static_capabilities["supports_manipulator_pick_place"] is True
 
 
 def _product_transport_double() -> SimpleNamespace:
@@ -410,6 +436,335 @@ def test_ra_rejects_wrong_resource_and_robot_specific_physical_conflicts() -> No
     )
     assert result["allowed"] is False
     assert result["constraint_code"] == "gripper_occupancy_conflict"
+
+
+def _configured_recovery_robot() -> SimpleNamespace:
+    robot = SimpleNamespace(
+        jid="xarm6@localhost",
+        static_capabilities={
+            "supports_manipulator_pick_place": True,
+            "reachability": ["prusa-mk4-1", "assembly_board-v1"],
+            "workspace_bounds": {
+                "x_min_m": -0.6,
+                "x_max_m": 0.6,
+                "y_min_m": -1.0,
+                "y_max_m": 0.2,
+                "z_min_m": 0.9,
+                "z_max_m": 1.6,
+            },
+            "gripper_reach": {
+                "frame": "world",
+                "origin_pose": {"x": 0.0, "y": -0.5, "z": 1.02},
+                "max_xy_radius_m": 0.8,
+                "z_min_m": 0.9,
+                "z_max_m": 1.6,
+                "tolerance_m": 0.01,
+            },
+        },
+        controller_config={
+            "hardware_cartesian_service": "/xarm6/xarm/set_position",
+            "joint_state_topics": ["/joint_states"],
+            "move_group": {
+                "frame_id": "world",
+                "ee_link": "link_eef",
+                "tcp_link": "link_tcp",
+            },
+            "gripper": {
+                "hardware_action": "/xarm6/xarm_gripper/gripper_action",
+                "open_width_mm": 85.0,
+            },
+            "services": {"detect_all": "/perception/xarm6/detect_all"},
+        },
+        executables={
+            "pick_approach": lambda: None,
+            "place_approach": lambda: None,
+        },
+        motion_config={"recovery_observed_pick_approach_height_m": 0.06},
+        _controller=None,
+    )
+    robot._is_pose_in_workspace = lambda pose: RobotAgent._is_pose_in_workspace(
+        robot,
+        pose,
+    )
+    return robot
+
+
+def test_configured_robot_recovery_snapshot_exposes_current_runtime_evidence() -> None:
+    controller = SimpleNamespace(
+        frame_id="world",
+        ee_link="future_ee",
+        tcp_link="future_tcp",
+        is_usable=lambda: True,
+        get_current_pose=lambda: {
+            "success": True,
+            "pose": {"x": 0.1, "y": -0.2, "z": 1.1},
+        },
+    )
+    agent = SimpleNamespace(
+        jid="future_robot@localhost",
+        agent_name="future_robot",
+        execution_mode="physical",
+        static_capabilities={"resource_type": "robot"},
+        controller_config={
+            "move_group": {
+                "frame_id": "world",
+                "ee_link": "future_ee",
+                "tcp_link": "future_tcp",
+            },
+            "services": {"detect_all": "/future_robot/detect_all"},
+        },
+        _controller=controller,
+        _current_state="idle",
+        _held_part=None,
+        _gripper_state="open",
+        _recovery_pose_ref=None,
+        _position={"x": 0.0, "y": 0.0, "z": 1.0},
+        named_positions={"home": [0.0] * 6},
+        executables={"pick_approach": lambda: None},
+    )
+
+    snapshot = get_resource_recovery_snapshot(agent)
+
+    assert snapshot["controller_ready"] is True
+    assert snapshot["tf_ready"] is True
+    assert snapshot["tcp_ready"] is True
+    assert snapshot["perception_ready"] is True
+    assert snapshot["destination_localization_ready"] is True
+    assert snapshot["function_names"] == ["pick_approach"]
+    assert snapshot["current_pose"] == pytest.approx(
+        {"x": 0.1, "y": -0.2, "z": 1.1}
+    )
+    assert snapshot["current_pose_captured_at"] > 0.0
+
+
+def _configured_pick_recovery_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    observed_pose = {"x": 0.4, "y": -0.3, "z": 1.04}
+    part_context = {
+        "current_holder_resource_jid": "",
+        "observed_pose": deepcopy(observed_pose),
+    }
+    snapshot = {
+        "held_part": None,
+        "gripper_state": "open",
+        "controller_ready": True,
+        "tf_ready": True,
+        "tcp_ready": True,
+        "perception_ready": True,
+        "current_pose": {"x": 0.0, "y": -0.4, "z": 1.2},
+    }
+    action = {
+        "function_name": "pick_approach",
+        "part_name": "MG",
+        "effect_scope": "resource_and_part",
+        "task_kind": "part_handling",
+        "product_geometry": {"grasp_width_m": 0.03},
+        "target": {"named_pose": "prusa-mk4-1"},
+        "preconditions": {
+            "part": {"requires_acquisition": True},
+            "source_ref": {
+                "location": "prusa-mk4-1",
+                "pose": deepcopy(observed_pose),
+                "captured_at": time.time(),
+            },
+        },
+        "poses": {
+            "source_pose": deepcopy(observed_pose),
+            "approach_pose": {"x": 0.4, "y": -0.3, "z": 1.10},
+            "target_pose": deepcopy(observed_pose),
+            "retreat_pose": {"x": 0.4, "y": -0.3, "z": 1.10},
+        },
+        "expected_effect": {"part": {"state": "secured"}},
+    }
+    return part_context, snapshot, action
+
+
+def test_configured_pick_recovery_uses_geometry_and_not_recording_history() -> None:
+    robot = _configured_recovery_robot()
+    part_context, snapshot, action = _configured_pick_recovery_inputs()
+
+    result = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context=part_context,
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+
+    assert result["allowed"] is True
+    assert result["evidence"]["recording_history_used"] is False
+    assert set(result["evidence"]["checked_poses"]) == {
+        "source_pose",
+        "approach_pose",
+        "target_pose",
+        "retreat_pose",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_status", "expected_guard"),
+    [
+        (
+            lambda robot, _context, _snapshot, _action: robot.controller_config.pop(
+                "move_group"
+            ),
+            "INFEASIBLE",
+            "controller_behavior_unavailable",
+        ),
+        (
+            lambda robot, _context, _snapshot, _action: robot.static_capabilities.pop(
+                "supports_manipulator_pick_place"
+            ),
+            "INFEASIBLE",
+            "manipulator_pick_place_unavailable",
+        ),
+        (
+            lambda _robot, _context, snapshot, _action: snapshot.pop("tf_ready"),
+            "NEEDS_CONTEXT",
+            "runtime_behavior_evidence_unavailable",
+        ),
+        (
+            lambda robot, _context, _snapshot, _action: robot.controller_config[
+                "services"
+            ].clear(),
+            "INFEASIBLE",
+            "perception_unavailable",
+        ),
+        (
+            lambda _robot, _context, _snapshot, action: action.pop(
+                "product_geometry"
+            ),
+            "NEEDS_CONTEXT",
+            "product_geometry_unavailable",
+        ),
+        (
+            lambda _robot, _context, _snapshot, action: action[
+                "product_geometry"
+            ].update({"grasp_width_m": 0.2}),
+            "INFEASIBLE",
+            "gripper_incompatible",
+        ),
+        (
+            lambda robot, _context, _snapshot, _action: robot.static_capabilities.update(
+                {"reachability": ["assembly_board-v1"]}
+            ),
+            "INFEASIBLE",
+            "location_unreachable",
+        ),
+        (
+            lambda _robot, context, _snapshot, action: (
+                context["observed_pose"].update({"x": 2.0}),
+                action["preconditions"]["source_ref"]["pose"].update({"x": 2.0}),
+                action["poses"]["source_pose"].update({"x": 2.0}),
+            ),
+            "INFEASIBLE",
+            "pose_unreachable",
+        ),
+        (
+            lambda _robot, _context, _snapshot, action: action["preconditions"][
+                "source_ref"
+            ].update({"captured_at": time.time() - 30.0}),
+            "NEEDS_CONTEXT",
+            "pose_evidence_stale",
+        ),
+    ],
+)
+def test_configured_pick_recovery_classifies_missing_and_incompatible_evidence(
+    mutation: Any,
+    expected_status: str,
+    expected_guard: str,
+) -> None:
+    robot = _configured_recovery_robot()
+    part_context, snapshot, action = _configured_pick_recovery_inputs()
+    mutation(robot, part_context, snapshot, action)
+
+    result = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context=part_context,
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+
+    assert result["allowed"] is False
+    assert result["feasibility_status"] == expected_status
+    assert result["guard"]["kind"] == expected_guard
+
+
+def test_configured_pick_recovery_requires_handoff_when_other_robot_holds_part() -> None:
+    robot = _configured_recovery_robot()
+    part_context, snapshot, action = _configured_pick_recovery_inputs()
+    part_context["current_holder_resource_jid"] = "ur5e@localhost"
+
+    result = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context=part_context,
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+
+    assert result["allowed"] is False
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert result["constraint_code"] == "holder_conflict"
+
+
+def test_configured_place_recovery_requires_destination_support_and_occupancy() -> None:
+    robot = _configured_recovery_robot()
+    pose = {"x": 0.0, "y": -0.08, "z": 1.03}
+    action = {
+        "function_name": "place_approach",
+        "part_name": "MG",
+        "effect_scope": "resource_and_part",
+        "task_kind": "part_handling",
+        "product_geometry": {"grasp_width_m": 0.03},
+        "target": {
+            "destination_location": "assembly_board-v1",
+            "destination_pose": deepcopy(pose),
+            "captured_at": time.time(),
+        },
+        "poses": {
+            "source_pose": {"x": 0.1, "y": -0.3, "z": 1.2},
+            "approach_pose": {"x": 0.0, "y": -0.08, "z": 1.09},
+            "target_pose": deepcopy(pose),
+            "retreat_pose": {"x": 0.0, "y": -0.08, "z": 1.09},
+        },
+        "expected_effect": {"part": {"state": "assembled"}},
+    }
+    snapshot = {
+        "held_part": "MG",
+        "gripper_state": "closed",
+        "controller_ready": True,
+        "tf_ready": True,
+        "tcp_ready": True,
+        "destination_localization_ready": True,
+    }
+
+    missing = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context={"current_holder_resource_jid": "xarm6@localhost"},
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+    assert missing["feasibility_status"] == "NEEDS_CONTEXT"
+    assert missing["guard"]["kind"] == "destination_support_unavailable"
+
+    snapshot.update(
+        {"destination_support_valid": True, "destination_occupied": True}
+    )
+    occupied = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context={"current_holder_resource_jid": "xarm6@localhost"},
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+    assert occupied["feasibility_status"] == "INFEASIBLE"
+    assert occupied["guard"]["kind"] == "destination_occupied"
+
+    snapshot["destination_occupied"] = False
+    allowed = RobotAgent.check_recovery_physical_feasibility(
+        robot,
+        part_context={"current_holder_resource_jid": "xarm6@localhost"},
+        recovery_snapshot=snapshot,
+        grounded_action=action,
+    )
+    assert allowed["allowed"] is True
 
 
 def test_ra_uses_fresh_field_specific_location_domains() -> None:

@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,11 @@ import yaml
 from cais_spade_llm.resources.robot.robot_primitives import _normalize_detected_item_output
 from cais_spade_llm.resources.sensor.camera_module import CameraModule
 from cais_spade_llm.resources.sensor.physical import calibrate_hand_eye, calibration_pose_replay
+from cais_spade_llm.resources.sensor.physical.assembly_board_v1_aruco import (
+    ArucoLocalizationError,
+    ArucoPoseEstimate,
+    CameraCalibration,
+)
 from cais_spade_llm.resources.sensor.physical.realsense_pose_estimator import (
     CalibrationError,
     ColorIntrinsics,
@@ -31,7 +37,13 @@ from cais_spade_llm.resources.sensor.physical.realsense_pose_estimator import (
     table_surface_z_from_calibration,
 )
 from cais_spade_llm.resources.sensor.physical.realsense_roboflow_node import (
+    STATIONARY_REGISTRATION_UNAVAILABLE,
     RealSenseRoboflowNode,
+    _load_stationary_inspection_geometry,
+    _stationary_aruco_evidence,
+    _stationary_aruco_window_quality,
+    _stationary_inspection_from_rows,
+    _StationaryArucoObservation,
 )
 from cais_spade_llm.resources.sensor.physical.roboflow_detector import (
     DuplicateDetectionError,
@@ -690,6 +702,533 @@ def test_valid_tf_keeps_world_pose_payload_unchanged(
     assert snapshots == []
     assert statuses[-1]["world_pose_ready"] is False
     assert "calibration measurement only" in str(statuses[-1]["pose_error"])
+
+
+def _stationary_camera_calibration(
+    *,
+    frame_id: str = "stationary_camera_color_optical_frame",
+    width: int = 100,
+) -> CameraCalibration:
+    return CameraCalibration(
+        camera_matrix=np.array(
+            [[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        ),
+        distortion=np.zeros(5, dtype=np.float64),
+        frame_id=frame_id,
+        width=width,
+        height=100,
+        distortion_model="plumb_bob",
+    )
+
+
+def _stationary_aruco_observation(
+    captured_at: float,
+    *,
+    camera_to_aruco: np.ndarray | None = None,
+    camera: CameraCalibration | None = None,
+) -> _StationaryArucoObservation:
+    transform = (
+        np.eye(4, dtype=np.float64)
+        if camera_to_aruco is None
+        else np.asarray(camera_to_aruco, dtype=np.float64)
+    )
+    return _StationaryArucoObservation(
+        stamp_ns=int(round(captured_at * 1e9)),
+        captured_at=captured_at,
+        camera=camera or _stationary_camera_calibration(),
+        estimate=ArucoPoseEstimate(
+            camera_to_aruco=transform,
+            corners=np.zeros((4, 2), dtype=np.float64),
+            reprojection_error_px=0.2,
+            alternative_reprojection_error_px=0.8,
+            ambiguity_margin_px=0.6,
+            minimum_corner_depth_m=0.45,
+        ),
+    )
+
+
+def _configured_stationary_geometry(tmp_path: Path) -> dict[str, object]:
+    geometry_path = tmp_path / "assembly_board-v1.json"
+    payload = json.loads(
+        (ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json")
+        .read_text(encoding="utf-8")
+    )
+    payload["real"]["assembly_board"][
+        "assembly_board-v1_aruco_to_assembly_board-v1"
+    ] = {
+        "calibration_id": "stationary-board-registration-v1",
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+    }
+    geometry_path.write_text(json.dumps(payload), encoding="utf-8")
+    return _load_stationary_inspection_geometry(geometry_path)
+
+
+def _stationary_row(part_name: str, point: tuple[float, float, float]) -> dict[str, object]:
+    return {
+        "part_name": part_name,
+        "camera_x": point[0],
+        "camera_y": point[1],
+        "camera_z": point[2],
+        "camera_frame_id": "stationary_camera_color_optical_frame",
+        "confidence": 0.9,
+        "depth_sample_count": 100,
+        "depth_mad_m": 0.001,
+    }
+
+
+def test_stationary_geometry_reports_null_registration_unavailable() -> None:
+    geometry = _load_stationary_inspection_geometry(
+        ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
+    )
+
+    assert geometry["registration_configured"] is False
+    assert geometry["registration_error"] == STATIONARY_REGISTRATION_UNAVAILABLE
+    assert geometry["expected_top_surfaces"]["SG"] == pytest.approx(
+        (-0.1, 0.08, 0.025)
+    )
+    assert geometry["expected_top_surfaces"]["MG"] == pytest.approx(
+        (0.0, 0.08, 0.025)
+    )
+
+
+def test_stationary_aruco_window_requires_fresh_stable_ten_frames() -> None:
+    stable = [_stationary_aruco_observation(100.0 + index * 0.1) for index in range(10)]
+    quality = _stationary_aruco_window_quality(stable)
+    assert quality["sample_count"] == 10
+    assert quality["translation_spread_m"] == pytest.approx(0.0)
+
+    moved_transform = np.eye(4, dtype=np.float64)
+    moved_transform[0, 3] = 0.0021
+    unstable = [*stable[:-1], _stationary_aruco_observation(100.9, camera_to_aruco=moved_transform)]
+    with pytest.raises(ArucoLocalizationError, match="pose is unstable"):
+        _stationary_aruco_window_quality(unstable)
+
+    stale = [_stationary_aruco_observation(100.0 + index * 0.25) for index in range(10)]
+    with pytest.raises(ArucoLocalizationError, match="window is stale"):
+        _stationary_aruco_window_quality(stale)
+
+
+def test_stationary_aruco_requires_exact_stamp_and_resets_for_camera_info_change() -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._lock = threading.RLock()
+    perception.camera_role = "stationary"
+    perception.camera_optical_frame = "stationary_camera_color_optical_frame"
+    perception._stationary_marker_length_m = 0.076
+    perception._stationary_inspection_geometry = {}
+    perception._last_stationary_inspection = {}
+    observations = [
+        _stationary_aruco_observation(100.0 + index * 0.1) for index in range(10)
+    ]
+    perception._stationary_aruco_observations = deque(observations, maxlen=20)
+    perception._stationary_aruco_error = ""
+    perception._stationary_aruco_error_stamp_ns = None
+
+    stamp = SimpleNamespace(sec=100, nanosec=900_000_000)
+    exact, evidence = perception._stationary_aruco_for_frame(stamp)
+    assert exact.stamp_ns == observations[-1].stamp_ns
+    assert evidence["captured_at"] == pytest.approx(100.9)
+    assert evidence["sample_count"] == 10
+    with pytest.raises(ArucoLocalizationError, match="exact detection frame"):
+        perception._stationary_aruco_for_frame(
+            SimpleNamespace(sec=100, nanosec=950_000_000)
+        )
+
+    perception._latest_camera_calibration = observations[-1].camera
+    perception._latest_intrinsics = None
+    perception._latest_intrinsics_image_size = None
+    changed_info = SimpleNamespace(
+        k=[100.0, 0.0, 50.0, 0.0, 100.0, 50.0, 0.0, 0.0, 1.0],
+        d=[0.0] * 5,
+        header=SimpleNamespace(frame_id="changed_camera_color_optical_frame"),
+        width=100,
+        height=100,
+        distortion_model="plumb_bob",
+    )
+    perception._on_camera_info(changed_info)
+    assert not perception._stationary_aruco_observations
+    assert "CameraInfo changed" in perception._last_stationary_inspection["message"]
+
+    perception._stationary_aruco_observations.extend(observations)
+    invalid_info = SimpleNamespace(**vars(changed_info))
+    invalid_info.k = [0.0, 0.0, 50.0, 0.0, 100.0, 50.0, 0.0, 0.0, 1.0]
+    perception._on_camera_info(invalid_info)
+    assert perception._latest_camera_calibration is None
+    assert perception._latest_intrinsics is None
+    assert not perception._stationary_aruco_observations
+    assert "invalid RealSense CameraInfo" in perception._last_stationary_inspection[
+        "message"
+    ]
+
+
+def test_stationary_inspection_compensates_for_settled_camera_movement(
+    tmp_path: Path,
+) -> None:
+    geometry = _configured_stationary_geometry(tmp_path)
+    board_points = {
+        "SG": np.array([-0.1, 0.08, 0.025], dtype=np.float64),
+        "MG": np.array([0.0, 0.08, 0.025], dtype=np.float64),
+    }
+    fixed_observation = _stationary_aruco_observation(100.0)
+    fixed_rows = [
+        _stationary_row(part_name, tuple(point))
+        for part_name, point in board_points.items()
+    ]
+    fixed = _stationary_inspection_from_rows(
+        fixed_rows,
+        geometry=geometry,
+        observation=fixed_observation,
+        aruco=_stationary_aruco_evidence(
+            fixed_observation,
+            _stationary_aruco_window_quality(
+                [_stationary_aruco_observation(99.1 + index * 0.1) for index in range(10)]
+            ),
+            marker_length_m=0.076,
+        ),
+    )
+
+    angle = math.radians(1.0)
+    moved_transform = np.array(
+        [
+            [math.cos(angle), -math.sin(angle), 0.0, 0.004],
+            [math.sin(angle), math.cos(angle), 0.0, -0.003],
+            [0.0, 0.0, 1.0, 0.006],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    moved_observation = _stationary_aruco_observation(
+        101.0,
+        camera_to_aruco=moved_transform,
+    )
+    moved_rows = []
+    for part_name, board_point in board_points.items():
+        camera_point = moved_transform @ np.append(board_point, 1.0)
+        moved_rows.append(_stationary_row(part_name, tuple(camera_point[:3])))
+    moved = _stationary_inspection_from_rows(
+        moved_rows,
+        geometry=geometry,
+        observation=moved_observation,
+        aruco={"marker_length_m": 0.076, "captured_at": 101.0},
+    )
+
+    assert fixed["success"] is True
+    assert moved["success"] is True
+    for part in moved["parts"]:
+        assert part["observed"]["x"] == pytest.approx(part["expected"]["x"])
+        assert part["observed"]["y"] == pytest.approx(part["expected"]["y"])
+        assert part["observed"]["z"] == pytest.approx(part["expected"]["z"])
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([_stationary_row("SG", (-0.1, 0.08, 0.025))], "MG was not detected"),
+        (
+            [
+                _stationary_row("SG", (0.0, 0.08, 0.025)),
+                _stationary_row("MG", (-0.1, 0.08, 0.025)),
+            ],
+            "XY error",
+        ),
+        (
+            [
+                _stationary_row("SG", (-0.0899, 0.08, 0.025)),
+                _stationary_row("MG", (0.0, 0.08, 0.025)),
+            ],
+            "XY error 10.10 mm",
+        ),
+        (
+            [
+                _stationary_row("SG", (-0.1, 0.08, 0.025)),
+                _stationary_row("MG", (0.0, 0.08, 0.0301)),
+            ],
+            "seating error 5.10 mm",
+        ),
+    ],
+)
+def test_stationary_inspection_rejects_missing_wrong_or_unseated_parts(
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+    message: str,
+) -> None:
+    geometry = _configured_stationary_geometry(tmp_path)
+    observation = _stationary_aruco_observation(100.0)
+    inspection = _stationary_inspection_from_rows(
+        rows,
+        geometry=geometry,
+        observation=observation,
+        aruco={"marker_length_m": 0.076, "captured_at": 100.0},
+    )
+    assert inspection["available"] is True
+    assert inspection["success"] is False
+    assert message in inspection["message"]
+
+
+def test_stationary_inspection_rejects_duplicate_accepted_detection(
+    tmp_path: Path,
+) -> None:
+    geometry = _configured_stationary_geometry(tmp_path)
+    rows = [
+        _stationary_row("SG", (-0.1, 0.08, 0.025)),
+        _stationary_row("SG", (-0.1, 0.08, 0.025)),
+        _stationary_row("MG", (0.0, 0.08, 0.025)),
+    ]
+    with pytest.raises(DuplicateDetectionError, match="multiple accepted SG"):
+        _stationary_inspection_from_rows(
+            rows,
+            geometry=geometry,
+            observation=_stationary_aruco_observation(100.0),
+            aruco={"marker_length_m": 0.076, "captured_at": 100.0},
+        )
+
+
+def test_stationary_run_uses_raw_depth_without_world_pose_or_tf(
+    tmp_path: Path,
+) -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._inference_lock = threading.Lock()
+    perception._last_rows = []
+    perception._last_error = ""
+    perception._last_inference_latency_ms = None
+    perception._roboflow_model_validated = False
+    perception._table_surface_z_m = 1.0
+    perception.camera_role = "stationary"
+    perception.world_frame = "world"
+    perception.tool_frame = "world"
+    perception.camera_optical_frame = "stationary_camera_color_optical_frame"
+    perception._stationary_marker_length_m = 0.076
+    perception._stationary_inspection_geometry = _configured_stationary_geometry(
+        tmp_path
+    )
+    perception._last_stationary_inspection = {}
+    stamp = SimpleNamespace(sec=10, nanosec=0)
+    color = np.zeros((100, 100, 3), dtype=np.uint8)
+    depth = np.full((100, 100), 0.5, dtype=np.float32)
+    perception._frame_copy = lambda **_kwargs: (
+        stamp,
+        color,
+        depth,
+        ColorIntrinsics(fx=100.0, fy=100.0, cx=50.0, cy=50.0),
+    )
+    marker_transform = np.eye(4, dtype=np.float64)
+    marker_transform[2, 3] = 0.475
+    window = [
+        _stationary_aruco_observation(
+            9.1 + index * 0.1,
+            camera_to_aruco=marker_transform,
+        )
+        for index in range(10)
+    ]
+    observation = window[-1]
+    marker_evidence = _stationary_aruco_evidence(
+        observation,
+        _stationary_aruco_window_quality(window),
+        marker_length_m=0.076,
+    )
+    perception._stationary_aruco_for_frame = lambda _stamp: (
+        observation,
+        marker_evidence,
+    )
+    perception._wait_for_stationary_tool_pose = lambda: pytest.fail(
+        "stationary inspection requested a tool pose"
+    )
+    perception._lookup_transform = lambda *_args, **_kwargs: pytest.fail(
+        "stationary inspection requested TF"
+    )
+    perception._detector = SimpleNamespace(
+        detect=lambda _image: [
+            GearBoundingBox(
+                part_name="SG",
+                model_name="gear_small",
+                label="small_gear",
+                confidence=0.9,
+                center_x=30.0,
+                center_y=66.0,
+                width=10.0,
+                height=10.0,
+            ),
+            GearBoundingBox(
+                part_name="MG",
+                model_name="gear_medium",
+                label="medium_gear",
+                confidence=0.9,
+                center_x=50.0,
+                center_y=66.0,
+                width=10.0,
+                height=10.0,
+            ),
+        ],
+        settings=SimpleNamespace(model_id="hrc-assembly-gph6m/5"),
+    )
+    perception.node = SimpleNamespace(
+        get_parameter=lambda name: SimpleNamespace(
+            value={"minimum_depth_samples": 25, "maximum_depth_mad_m": 0.003}[name]
+        )
+    )
+    snapshots: list[list[dict[str, object]]] = []
+    perception._write_detection_preview = lambda *_args, **_kwargs: None
+    perception._write_detection_status = lambda *_args, **_kwargs: None
+    perception._write_snapshot = lambda rows: snapshots.append(rows)
+    perception._reload_table_plane_calibration = lambda: pytest.fail(
+        "stationary inspection loaded table-plane calibration"
+    )
+
+    rows = perception._run_detection()
+
+    assert len(rows) == 2
+    assert rows[0]["frame_id"] == "assembly_board-v1"
+    assert rows[0]["x"] == pytest.approx(-0.1)
+    assert rows[0]["y"] == pytest.approx(0.08)
+    assert rows[0]["z"] == pytest.approx(0.025)
+    assert "observed_center_z" not in rows[0]
+    assert "table_surface_z_m" not in rows[0]
+    assert rows[0]["stationary_inspection"]["observed"]["z"] == pytest.approx(
+        0.025
+    )
+    assert perception._last_stationary_inspection["success"] is True
+    assert perception._last_stationary_inspection["diagnostic_only"] is True
+    assert perception._last_stationary_inspection["aruco"]["captured_at"] == 10.0
+    assert snapshots[-1] == rows
+
+
+def test_stationary_role_skips_calibration_and_disables_canonical_services() -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception.camera_role = "stationary"
+    perception.node = SimpleNamespace(
+        get_parameter=lambda name: SimpleNamespace(
+            value={"publish_canonical_services": True}[name]
+        )
+    )
+    perception._initialize_world_pose_pipeline = lambda **_kwargs: pytest.fail(
+        "stationary startup loaded calibration or initialized TF"
+    )
+
+    perception._initialize_role_pose_pipeline(
+        calibration_path="/missing/stationary_realsense_extrinsic.yaml",
+        table_plane_path="/missing/table_plane.yaml",
+    )
+
+    assert perception._canonical_services_enabled() is False
+
+    calls: list[dict[str, str]] = []
+    perception.camera_role = "ur5e"
+    perception._initialize_world_pose_pipeline = lambda **kwargs: calls.append(kwargs)
+    perception._initialize_role_pose_pipeline(
+        calibration_path="/configured/ur5e.yaml",
+        table_plane_path="/configured/table_plane.yaml",
+    )
+    assert calls == [
+        {
+            "calibration_path": "/configured/ur5e.yaml",
+            "table_plane_path": "/configured/table_plane.yaml",
+        }
+    ]
+    assert perception._canonical_services_enabled() is True
+
+
+def test_stationary_null_registration_publishes_no_detection_rows() -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception._inference_lock = threading.Lock()
+    perception._last_rows = [{"part_name": "old", "frame_id": "world"}]
+    perception.camera_role = "stationary"
+    perception._stationary_marker_length_m = 0.076
+    perception._stationary_inspection_geometry = _load_stationary_inspection_geometry(
+        ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
+    )
+    perception._stationary_inspection_geometry_error = ""
+    perception._last_stationary_inspection = {}
+    perception._frame_copy = lambda **_kwargs: pytest.fail(
+        "null registration reached frame acquisition"
+    )
+    snapshots: list[list[dict[str, object]]] = []
+    perception._write_snapshot = lambda rows: snapshots.append(rows)
+    response = SimpleNamespace(success=True, message="")
+
+    result = perception._service_result(response)
+
+    assert result.success is False
+    assert "is not configured" in result.message
+    assert perception._last_rows == []
+    assert snapshots == [[]]
+    assert perception._last_stationary_inspection["available"] is False
+    assert perception._last_stationary_inspection["registration"]["configured"] is False
+
+
+def test_stationary_status_and_snapshot_are_inspection_only(tmp_path: Path) -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception.camera_role = "stationary"
+    perception._last_stationary_inspection = {
+        "available": True,
+        "success": False,
+        "diagnostic_only": True,
+        "message": "MG was not detected.",
+    }
+    perception._last_inference_latency_ms = 12.0
+    perception.preview_dir = tmp_path / "preview"
+    perception._write_detection_status(
+        [],
+        100.0,
+        np.zeros((10, 10, 3), dtype=np.uint8),
+        world_pose_ready=False,
+        pose_error="",
+    )
+    status = json.loads(
+        (perception.preview_dir / "detection_status.json").read_text(encoding="utf-8")
+    )
+    assert status["stage"] == "completed"
+    assert status["world_pose_ready"] is False
+    assert status["stationary_inspection_ready"] is True
+
+    perception._lock = threading.RLock()
+    perception._latest_frame = None
+    perception._calibration = {}
+    perception._table_surface_z_m = None
+    perception._table_plane_calibration = {}
+    perception._last_error = ""
+    perception._roboflow_model_validated = True
+    perception._detector = SimpleNamespace(
+        settings=SimpleNamespace(model_id="hrc-assembly-gph6m/5")
+    )
+    perception.snapshot_path = tmp_path / "snapshot.json"
+    perception._write_snapshot(
+        [
+            {
+                "part_name": "SG",
+                "frame_id": "assembly_board-v1",
+                "x": -0.1,
+                "y": 0.08,
+                "z": 0.025,
+            }
+        ]
+    )
+    snapshot = json.loads(perception.snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["inspection_only"] is True
+    assert snapshot["calibration"] == {
+        "mode": "inspection_only",
+        "world_pose_required": False,
+        "identity": None,
+    }
+    assert snapshot["table_plane_ready"] is False
+    assert snapshot["table_plane"] is None
+    assert snapshot["detections"][0]["frame_id"] == "assembly_board-v1"
+
+
+def test_stationary_detect_part_explicitly_rejects_pin_parts() -> None:
+    perception = object.__new__(RealSenseRoboflowNode)
+    perception.camera_role = "stationary"
+    response = SimpleNamespace(success=True, message="")
+
+    result = perception._service_result(response, target_part="MCP")
+
+    assert result.success is False
+    assert result.message == "stationary assembly inspection does not support MCP"
 
 
 def test_pose_rejection_clears_executable_detection_rows() -> None:

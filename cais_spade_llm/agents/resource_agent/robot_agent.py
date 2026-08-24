@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import threading
 import time
@@ -26,6 +27,8 @@ from cais_spade_llm.resources.robot import (
 from cais_spade_llm.resources.robot.robot_profile import ROBOT_PROFILE
 from cais_spade_llm.resources.robot.robot_task_runtime import (
     _MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+    complete_place_insert_after_move_insert_trial,
+    execute_place_insert_move_insert_trial,
     execute_robot_task,
 )
 from cais_spade_llm.resources.robot.robot_tasks import (
@@ -246,9 +249,29 @@ class RobotAgent(ResourceAgent):
         pre_execute: Any = None,
         post_staging_acceptance: Any = None,
         /,
+        *,
+        operator_confirmed_held_part: bool = False,
+        operator_confirmed_held_part_handoff: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Execute one Control-page function without the assembly sequence token."""
+        """Execute one Control-page function without the assembly sequence token.
+
+        Args:
+            task_name: Exact registered Robot Function identifier.
+            pre_execute: Optional final bridge-owned readiness callback.
+            post_staging_acceptance: Optional assembly-board acceptance callback.
+            operator_confirmed_held_part: Whether the operator confirms that the
+                exact selected ``part_name`` is physically held for an independent
+                ``place_approach`` commissioning run. This value is passed
+                positionally to the runtime and is not a public task argument.
+            operator_confirmed_held_part_handoff: Bridge-validated complete held-part
+                handoff derived from the confirmed ``pick_approach.descend``
+                recording.
+            **kwargs: Arguments declared by the selected Robot Function.
+
+        Returns:
+            Task completion, block, or failure payload.
+        """
         if not self._robot_motion_lock.acquire(blocking=False):
             return {
                 "status": "blocked",
@@ -282,6 +305,18 @@ class RobotAgent(ResourceAgent):
                         "content": pre_execute_error,
                         "manual_pre_execute_blocked": True,
                     }
+            if (
+                operator_confirmed_held_part
+                or operator_confirmed_held_part_handoff is not None
+            ):
+                return await execute_robot_task(
+                    self,
+                    task_name,
+                    _MANUAL_FUNCTION_EXECUTION_AUTHORITY,
+                    operator_confirmed_held_part,
+                    operator_confirmed_held_part_handoff,
+                    **kwargs,
+                )
             return await execute_robot_task(
                 self,
                 task_name,
@@ -297,6 +332,94 @@ class RobotAgent(ResourceAgent):
                         delattr(controller, callback_name)
                     except AttributeError:
                         pass
+            self._robot_motion_lock.release()
+
+    async def _execute_place_insert_move_insert_trial(
+        self,
+        pre_execute: Any = None,
+        /,
+        *,
+        destination_location: str,
+        part_name: str,
+        trial_id: str,
+    ) -> dict[str, Any]:
+        """Run only the internal move_insert step for supervised qualification."""
+        if not self._robot_motion_lock.acquire(blocking=False):
+            return {
+                "status": "blocked",
+                "content": f"{self.agent_name} is already executing a robot task.",
+                "trial_id": trial_id,
+                "motion_settled": True,
+                "dispatch_attempted": False,
+                "move_insert_result": {
+                    "success": False,
+                    "trial_id": trial_id,
+                    "state_uncertain": False,
+                    "motion_settled": True,
+                    "dispatch_attempted": False,
+                },
+            }
+        try:
+            if callable(pre_execute):
+                pre_execute_error = str(pre_execute() or "").strip()
+                if pre_execute_error:
+                    return {
+                        "status": "blocked",
+                        "content": pre_execute_error,
+                        "manual_pre_execute_blocked": True,
+                        "trial_id": trial_id,
+                        "motion_settled": True,
+                        "dispatch_attempted": False,
+                        "move_insert_result": {
+                            "success": False,
+                            "trial_id": trial_id,
+                            "state_uncertain": False,
+                            "motion_settled": True,
+                            "dispatch_attempted": False,
+                        },
+                    }
+            return await execute_place_insert_move_insert_trial(
+                self,
+                destination_location=destination_location,
+                part_name=part_name,
+                trial_id=trial_id,
+            )
+        finally:
+            self._robot_motion_lock.release()
+
+    async def _complete_place_insert_after_move_insert_trial(
+        self,
+        pre_execute: Any = None,
+        /,
+        *,
+        destination_location: str,
+        part_name: str,
+        expected_move_insert_result_sha256: str,
+    ) -> dict[str, Any]:
+        """Release and lift once after a reviewed move_insert trial."""
+        if not self._robot_motion_lock.acquire(blocking=False):
+            return {
+                "status": "blocked",
+                "content": f"{self.agent_name} is already executing a robot task.",
+            }
+        try:
+            if callable(pre_execute):
+                pre_execute_error = str(pre_execute() or "").strip()
+                if pre_execute_error:
+                    return {
+                        "status": "blocked",
+                        "content": pre_execute_error,
+                        "manual_pre_execute_blocked": True,
+                    }
+            return await complete_place_insert_after_move_insert_trial(
+                self,
+                destination_location=destination_location,
+                part_name=part_name,
+                expected_move_insert_result_sha256=(
+                    expected_move_insert_result_sha256
+                ),
+            )
+        finally:
             self._robot_motion_lock.release()
 
     @staticmethod
@@ -1755,7 +1878,14 @@ class RobotAgent(ResourceAgent):
         part_name = str(
             params.get("part_name") or params.get("model_name") or self._held_part or ""
         ).strip()
-        model_map = {"SG": "gear_small", "MG": "gear_medium", "LG": "gear_large"}
+        model_map = {
+            "SG": "gear_small",
+            "MG": "gear_medium",
+            "LG": "gear_large",
+            "SCP": "circ_pin_small",
+            "MCP": "circ_pin_medium",
+            "LCP": "circ_pin_large",
+        }
         model_name = str(params.get("model_name") or model_map.get(part_name) or "").strip()
         if model_name not in model_map.values():
             return
@@ -1930,6 +2060,549 @@ class RobotAgent(ResourceAgent):
             return False, f"pose outside workspace: {', '.join(violations)}"
         return True, "pose within workspace bounds"
 
+    @staticmethod
+    def _recovery_pose_gripper_reach_error(
+        pose: dict[str, Any],
+        gripper_reach: dict[str, Any],
+    ) -> str:
+        """Return a configured world-frame gripper reachability error."""
+        if not isinstance(gripper_reach, dict) or not gripper_reach:
+            return "gripper_reach capability data is unavailable"
+        if str(gripper_reach.get("frame") or "world").strip() != "world":
+            return "gripper_reach frame must be world"
+        origin_pose = dict(gripper_reach.get("origin_pose") or {})
+        try:
+            x = float(pose["x"])
+            y = float(pose["y"])
+            z = float(pose["z"])
+            origin_x = float(origin_pose["x"])
+            origin_y = float(origin_pose["y"])
+            max_xy_radius_m = float(gripper_reach["max_xy_radius_m"])
+            z_min_m = float(gripper_reach["z_min_m"])
+            z_max_m = float(gripper_reach["z_max_m"])
+            tolerance_m = float(gripper_reach.get("tolerance_m") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            return "gripper_reach capability data is incomplete"
+        values = (
+            x,
+            y,
+            z,
+            origin_x,
+            origin_y,
+            max_xy_radius_m,
+            z_min_m,
+            z_max_m,
+            tolerance_m,
+        )
+        if not all(math.isfinite(value) for value in values):
+            return "gripper_reach capability data is not finite"
+        xy_radius_m = math.hypot(x - origin_x, y - origin_y)
+        if xy_radius_m > max_xy_radius_m + tolerance_m:
+            return (
+                "pose is outside gripper_reach: "
+                f"xy_radius={xy_radius_m:.4f} m, max={max_xy_radius_m:.4f} m"
+            )
+        if z < z_min_m - tolerance_m or z > z_max_m + tolerance_m:
+            return (
+                "pose is outside gripper_reach: "
+                f"z={z:.4f} m, range=[{z_min_m:.4f}, {z_max_m:.4f}] m"
+            )
+        return ""
+
+    def _configured_pick_place_recovery_feasibility(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        *,
+        function_name: str,
+        part_name: str,
+        part_context: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        grounded_action: dict[str, Any],
+        source_ref: dict[str, Any],
+        target_info: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate configured pick/place behavior without taught-function evidence."""
+        if function_name not in {"pick_approach", "place_approach"}:
+            return None
+
+        resource_jid = str(getattr(self, "jid", "") or "")
+
+        def _result(
+            status: str,
+            constraint_code: str,
+            reason: str,
+            *,
+            guard_kind: str,
+            extra_evidence: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "allowed": False,
+                "feasibility_status": status,
+                "constraint_code": constraint_code,
+                "guard": {
+                    "kind": guard_kind,
+                    "resource_jid": resource_jid,
+                    "part_name": part_name,
+                    "function_name": function_name,
+                },
+                "reason": reason,
+                "evidence": {
+                    **evidence,
+                    "recording_history_used": False,
+                    **deepcopy(extra_evidence or {}),
+                },
+            }
+
+        if not part_name:
+            return _result(
+                "NEEDS_CONTEXT",
+                "source_reference_unavailable",
+                f"{function_name} requires an exact part_name",
+                guard_kind="part_name_unavailable",
+            )
+
+        held_part = str(recovery_snapshot.get("held_part") or "").strip()
+        current_holder = str(
+            part_context.get("current_holder_resource_jid") or ""
+        ).strip()
+        if current_holder and current_holder != resource_jid:
+            return _result(
+                "INFEASIBLE",
+                "holder_conflict",
+                f"part '{part_name}' is currently held by '{current_holder}'",
+                guard_kind="part_held_by_other",
+                extra_evidence={"current_holder_resource_jid": current_holder},
+            )
+        if function_name == "pick_approach" and held_part:
+            return _result(
+                "INFEASIBLE",
+                "holder_conflict",
+                f"resource already holds '{held_part}'",
+                guard_kind="resource_holds_part",
+                extra_evidence={"conflicting_part": held_part},
+            )
+        if function_name == "place_approach" and held_part != part_name:
+            return _result(
+                "INFEASIBLE",
+                "required_part_not_held",
+                f"place_approach requires this robot to hold '{part_name}'",
+                guard_kind="required_part_not_held",
+                extra_evidence={"held_part": held_part or None},
+            )
+
+        static_capabilities = dict(getattr(self, "static_capabilities", {}) or {})
+        if static_capabilities.get("supports_manipulator_pick_place") is not True:
+            return _result(
+                "INFEASIBLE",
+                "unsupported_resource_target",
+                "supports_manipulator_pick_place is not exposed as true",
+                guard_kind="manipulator_pick_place_unavailable",
+            )
+
+        executables = getattr(self, "executables", None)
+        configured_function_names = {
+            str(token).strip()
+            for token in (
+                getattr(self, "function_names", None)
+                or recovery_snapshot.get("function_names")
+                or []
+            )
+            if str(token or "").strip()
+        }
+        task_enabled = bool(
+            isinstance(executables, dict)
+            and function_name in executables
+            and callable(executables[function_name])
+        ) or function_name in configured_function_names
+        if not task_enabled:
+            return _result(
+                "INFEASIBLE",
+                "unsupported_resource_target",
+                f"configured robot does not expose enabled task {function_name}",
+                guard_kind="robot_task_unavailable",
+            )
+
+        controller = getattr(self, "_controller", None)
+        controller_config = dict(
+            getattr(self, "controller_config", {})
+            or getattr(controller, "controller_config", {})
+            or {}
+        )
+        move_group = dict(controller_config.get("move_group") or {})
+        frame_id = str(
+            getattr(controller, "frame_id", "")
+            or move_group.get("frame_id")
+        ).strip()
+        ee_link = str(
+            getattr(controller, "ee_link", "")
+            or move_group.get("ee_link")
+        ).strip()
+        tcp_link = str(
+            getattr(controller, "tcp_link", "")
+            or move_group.get("tcp_link")
+        ).strip()
+        services = dict(controller_config.get("services") or {})
+        gripper_config = dict(controller_config.get("gripper") or {})
+        cartesian_behavior = bool(
+            callable(getattr(controller, "move_cartesian", None))
+            or controller_config.get("hardware_cartesian_service")
+            or services.get("cartesian_path")
+        )
+        pose_feedback_behavior = bool(
+            callable(getattr(controller, "get_current_pose", None))
+            or controller_config.get("joint_state_topics")
+        )
+        gripper_behavior = bool(
+            gripper_config
+            and (
+                gripper_config.get("action")
+                or gripper_config.get("hardware_action")
+                or gripper_config.get("hardware_service")
+                or gripper_config.get("topic")
+            )
+        )
+        perception_behavior = bool(
+            callable(getattr(controller, "detect_parts", None))
+            or services.get("detect_all")
+        )
+        configuration_evidence = {
+            "frame_id": frame_id,
+            "ee_link": ee_link,
+            "tcp_link": tcp_link,
+            "cartesian_behavior": cartesian_behavior,
+            "pose_feedback_behavior": pose_feedback_behavior,
+            "gripper_behavior": gripper_behavior,
+            "perception_behavior": perception_behavior,
+        }
+        if (
+            frame_id != "world"
+            or not ee_link
+            or not tcp_link
+            or not cartesian_behavior
+            or not pose_feedback_behavior
+            or not gripper_behavior
+        ):
+            return _result(
+                "INFEASIBLE",
+                "resource_validation_unavailable",
+                "configured Cartesian, pose-feedback, TCP, or gripper behavior is unavailable",
+                guard_kind="controller_behavior_unavailable",
+                extra_evidence=configuration_evidence,
+            )
+        if function_name == "pick_approach" and not perception_behavior:
+            return _result(
+                "INFEASIBLE",
+                "resource_validation_unavailable",
+                "configured part perception behavior is unavailable",
+                guard_kind="perception_unavailable",
+                extra_evidence=configuration_evidence,
+            )
+        for readiness_field in (
+            "controller_ready",
+            "tf_ready",
+            "tcp_ready",
+            "perception_ready" if function_name == "pick_approach" else "destination_localization_ready",
+        ):
+            readiness_value = recovery_snapshot.get(readiness_field)
+            if readiness_value is None:
+                return _result(
+                    "NEEDS_CONTEXT",
+                    "resource_validation_unavailable",
+                    f"current {readiness_field} evidence is unavailable",
+                    guard_kind="runtime_behavior_evidence_unavailable",
+                    extra_evidence={readiness_field: None, **configuration_evidence},
+                )
+            if readiness_value is not True:
+                return _result(
+                    "INFEASIBLE",
+                    "resource_unavailable",
+                    f"{readiness_field} is not ready",
+                    guard_kind="runtime_behavior_unavailable",
+                    extra_evidence={readiness_field: False, **configuration_evidence},
+                )
+
+        product_geometry = dict(
+            grounded_action.get("product_geometry")
+            or grounded_action.get("part_geometry")
+            or part_context.get("product_geometry")
+            or part_context.get("part_geometry")
+            or {}
+        )
+        if not product_geometry:
+            return _result(
+                "NEEDS_CONTEXT",
+                "resource_validation_unavailable",
+                f"product geometry for part '{part_name}' is unavailable",
+                guard_kind="product_geometry_unavailable",
+            )
+
+        try:
+            grasp_width_m = float(product_geometry["grasp_width_m"])
+        except (KeyError, TypeError, ValueError):
+            grasp_width_m = None
+        opening_m: float | None = None
+        try:
+            if gripper_config.get("open_width_mm") is not None:
+                opening_m = float(gripper_config["open_width_mm"]) / 1000.0
+            elif gripper_config.get("open") is not None:
+                opening_m = float(gripper_config["open"])
+        except (TypeError, ValueError):
+            opening_m = None
+        if grasp_width_m is None or not math.isfinite(grasp_width_m):
+            return _result(
+                "NEEDS_CONTEXT",
+                "resource_validation_unavailable",
+                f"grasp_width_m for part '{part_name}' is unavailable",
+                guard_kind="grasp_geometry_unavailable",
+            )
+        if opening_m is None or not math.isfinite(opening_m) or grasp_width_m > opening_m:
+            return _result(
+                "INFEASIBLE",
+                "unsupported_resource_target",
+                (
+                    f"grasp_width_m={grasp_width_m:.4f} exceeds configured gripper "
+                    f"opening_m={opening_m if opening_m is not None else 'unavailable'}"
+                ),
+                guard_kind="gripper_incompatible",
+                extra_evidence={
+                    "grasp_width_m": grasp_width_m,
+                    "gripper_opening_m": opening_m,
+                },
+            )
+
+        required_tooling = str(product_geometry.get("required_tooling") or "").strip()
+        configured_tooling = str(
+            static_capabilities.get("tooling")
+            or gripper_config.get("tooling")
+            or ""
+        ).strip()
+        if required_tooling and required_tooling != configured_tooling:
+            return _result(
+                "INFEASIBLE",
+                "unsupported_resource_target",
+                f"required_tooling '{required_tooling}' is unavailable",
+                guard_kind="tooling_incompatible",
+                extra_evidence={"configured_tooling": configured_tooling},
+            )
+        try:
+            payload_kg = float(
+                product_geometry.get("payload_kg", product_geometry.get("mass_kg"))
+            )
+        except (TypeError, ValueError):
+            payload_kg = None
+        try:
+            max_payload_kg = float(static_capabilities.get("max_payload_kg"))
+        except (TypeError, ValueError):
+            max_payload_kg = None
+        if payload_kg is not None and (
+            max_payload_kg is None or payload_kg > max_payload_kg
+        ):
+            return _result(
+                "INFEASIBLE",
+                "unsupported_resource_target",
+                "configured payload capacity is incompatible with the part",
+                guard_kind="payload_incompatible",
+                extra_evidence={
+                    "payload_kg": payload_kg,
+                    "max_payload_kg": max_payload_kg,
+                },
+            )
+
+        reachability = {
+            str(token).strip()
+            for token in static_capabilities.get("reachability") or []
+            if str(token or "").strip()
+        }
+        relevant_location = str(
+            source_ref.get("location")
+            if function_name == "pick_approach"
+            else target_info.get("destination_location")
+            or grounded_action.get("destination_location")
+            or ""
+        ).strip()
+        pose_only_location = (
+            relevant_location == "observed_pose"
+            or relevant_location.endswith("_observed_pose")
+        )
+        if relevant_location and not pose_only_location:
+            if not reachability:
+                return _result(
+                    "NEEDS_CONTEXT",
+                    "resource_validation_unavailable",
+                    "static_capabilities.reachability is unavailable",
+                    guard_kind="reachability_unavailable",
+                )
+            if relevant_location not in reachability:
+                return _result(
+                    "INFEASIBLE",
+                    "workspace_unreachable",
+                    f"location '{relevant_location}' is outside configured reachability",
+                    guard_kind="location_unreachable",
+                    extra_evidence={"reachability": sorted(reachability)},
+                )
+
+        poses = dict(grounded_action.get("poses") or {})
+        source_pose = dict(
+            poses.get("source_pose")
+            or source_ref.get("pose")
+            or part_context.get("observed_pose")
+            or recovery_snapshot.get("current_pose")
+            or {}
+        )
+        target_pose = dict(
+            poses.get("target_pose")
+            or target_info.get("slot_pose")
+            or target_info.get("pose")
+            or target_info.get("destination_pose")
+            or (source_pose if function_name == "pick_approach" else {})
+        )
+        if not source_pose or not target_pose:
+            return _result(
+                "NEEDS_CONTEXT",
+                "source_reference_unavailable",
+                "fresh source and target pose evidence is unavailable",
+                guard_kind="pose_evidence_unavailable",
+            )
+        captured_at = (
+            source_ref.get("captured_at")
+            if function_name == "pick_approach"
+            else target_info.get("captured_at")
+            or target_info.get("destination_captured_at")
+        )
+        try:
+            pose_age_sec = time.time() - float(captured_at)
+        except (TypeError, ValueError):
+            pose_age_sec = float("inf")
+        if pose_age_sec < -1.0 or pose_age_sec > 8.0:
+            return _result(
+                "NEEDS_CONTEXT",
+                "source_reference_unavailable",
+                "source or destination pose evidence is missing or stale",
+                guard_kind="pose_evidence_stale",
+                extra_evidence={"pose_age_sec": pose_age_sec},
+            )
+
+        try:
+            approach_height_m = float(
+                product_geometry.get(
+                    "approach_height_m",
+                    dict(getattr(self, "motion_config", {}) or {}).get(
+                        "recovery_observed_pick_approach_height_m",
+                        0.06,
+                    ),
+                )
+            )
+            computed_approach = {
+                "x": float(target_pose["x"]),
+                "y": float(target_pose["y"]),
+                "z": float(target_pose["z"]) + approach_height_m,
+            }
+        except (KeyError, TypeError, ValueError):
+            return _result(
+                "NEEDS_CONTEXT",
+                "source_reference_unavailable",
+                "computed approach pose cannot be derived from current geometry",
+                guard_kind="pose_evidence_unavailable",
+            )
+        approach_pose = dict(poses.get("approach_pose") or computed_approach)
+        retreat_pose = dict(poses.get("retreat_pose") or approach_pose)
+        pose_bundle = {
+            "source_pose": source_pose,
+            "approach_pose": approach_pose,
+            "target_pose": target_pose,
+            "retreat_pose": retreat_pose,
+        }
+        gripper_reach = dict(static_capabilities.get("gripper_reach") or {})
+        for pose_name, pose in pose_bundle.items():
+            inside, workspace_reason = self._is_pose_in_workspace(pose)
+            if not inside:
+                status = (
+                    "NEEDS_CONTEXT"
+                    if "capability data is unavailable" in workspace_reason
+                    else "INFEASIBLE"
+                )
+                return _result(
+                    status,
+                    (
+                        "resource_validation_unavailable"
+                        if status == "NEEDS_CONTEXT"
+                        else "workspace_unreachable"
+                    ),
+                    f"{pose_name} {workspace_reason}",
+                    guard_kind="pose_unreachable",
+                    extra_evidence={"checked_poses": pose_bundle},
+                )
+            reach_error = RobotAgent._recovery_pose_gripper_reach_error(
+                pose,
+                gripper_reach,
+            )
+            if reach_error:
+                status = (
+                    "NEEDS_CONTEXT"
+                    if "unavailable" in reach_error or "incomplete" in reach_error
+                    else "INFEASIBLE"
+                )
+                return _result(
+                    status,
+                    (
+                        "resource_validation_unavailable"
+                        if status == "NEEDS_CONTEXT"
+                        else "workspace_unreachable"
+                    ),
+                    f"{pose_name} {reach_error}",
+                    guard_kind="pose_unreachable",
+                    extra_evidence={"checked_poses": pose_bundle},
+                )
+
+        if function_name == "place_approach":
+            destination_support_valid = recovery_snapshot.get(
+                "destination_support_valid",
+                target_info.get("destination_support_valid"),
+            )
+            if destination_support_valid is None:
+                return _result(
+                    "NEEDS_CONTEXT",
+                    "resource_validation_unavailable",
+                    "destination support evidence is unavailable",
+                    guard_kind="destination_support_unavailable",
+                )
+            if destination_support_valid is False:
+                return _result(
+                    "INFEASIBLE",
+                    "unsupported_resource_target",
+                    "destination support is invalid",
+                    guard_kind="destination_support_invalid",
+                )
+            destination_occupied = recovery_snapshot.get(
+                "destination_occupied",
+                target_info.get("destination_occupied"),
+            )
+            if destination_occupied is None:
+                return _result(
+                    "NEEDS_CONTEXT",
+                    "resource_validation_unavailable",
+                    "destination occupancy evidence is unavailable",
+                    guard_kind="destination_occupancy_unavailable",
+                )
+            if destination_occupied is True:
+                return _result(
+                    "INFEASIBLE",
+                    "unsupported_resource_target",
+                    "destination is occupied",
+                    guard_kind="destination_occupied",
+                )
+
+        evidence.update(
+            {
+                "recording_history_used": False,
+                "configured_robot": configuration_evidence,
+                "checked_poses": deepcopy(pose_bundle),
+                "grasp_width_m": grasp_width_m,
+                "gripper_opening_m": opening_m,
+            }
+        )
+        return None
+
     def check_recovery_physical_feasibility(  # noqa: C901
         self,
         *,
@@ -1965,6 +2638,12 @@ class RobotAgent(ResourceAgent):
             .strip()
             .lower()
         )
+        function_name = str(
+            grounded_action.get("function_name")
+            or grounded_action.get("robot_task")
+            or target_info.get("function_name")
+            or ""
+        ).strip()
         part_name = str(part_name or grounded_action.get("part_name") or "").strip() or None
         expected_resource = dict(expected_effect.get("resource") or {})
         expected_part = dict(expected_effect.get("part") or {})
@@ -1987,7 +2666,11 @@ class RobotAgent(ResourceAgent):
             )
             if str(name).strip()
         }
-        if named_pose and not available_named_poses:
+        if (
+            named_pose
+            and function_name not in {"pick_approach", "place_approach"}
+            and not available_named_poses
+        ):
             return {
                 "allowed": False,
                 "constraint_code": "resource_validation_unavailable",
@@ -2003,7 +2686,11 @@ class RobotAgent(ResourceAgent):
                     "available_named_poses": [],
                 },
             }
-        if named_pose and named_pose not in available_named_poses:
+        if (
+            named_pose
+            and function_name not in {"pick_approach", "place_approach"}
+            and named_pose not in available_named_poses
+        ):
             return {
                 "allowed": False,
                 "constraint_code": "named_pose_unavailable",
@@ -2024,6 +2711,7 @@ class RobotAgent(ResourceAgent):
         if availability == "unavailable":
             return {
                 "allowed": False,
+                "feasibility_status": "INFEASIBLE",
                 "constraint_code": "resource_unavailable",
                 "guard": {
                     "kind": "resource_not_available",
@@ -2102,6 +2790,7 @@ class RobotAgent(ResourceAgent):
             if held_part and held_part != str(part_name).strip():
                 return {
                     "allowed": False,
+                    "feasibility_status": "INFEASIBLE",
                     "constraint_code": "holder_conflict",
                     "guard": {
                         "kind": "resource_holds_part",
@@ -2117,6 +2806,7 @@ class RobotAgent(ResourceAgent):
             if current_holder and current_holder != str(getattr(self, "jid", "") or ""):
                 return {
                     "allowed": False,
+                    "feasibility_status": "INFEASIBLE",
                     "constraint_code": "holder_conflict",
                     "guard": {
                         "kind": "part_held_by_other",
@@ -2132,6 +2822,7 @@ class RobotAgent(ResourceAgent):
             if not held_part and gripper_state == "closed":
                 return {
                     "allowed": False,
+                    "feasibility_status": "INFEASIBLE",
                     "constraint_code": "gripper_occupancy_conflict",
                     "guard": {
                         "kind": "gripper_closed_without_target_part",
@@ -2143,6 +2834,7 @@ class RobotAgent(ResourceAgent):
             if not source_ref:
                 return {
                     "allowed": False,
+                    "feasibility_status": "NEEDS_CONTEXT",
                     "constraint_code": "source_reference_unavailable",
                     "guard": {
                         "kind": "source_reference_unavailable",
@@ -2159,6 +2851,7 @@ class RobotAgent(ResourceAgent):
             if held_part != str(part_name).strip() and current_holder != resource_jid:
                 return {
                     "allowed": False,
+                    "feasibility_status": "INFEASIBLE",
                     "constraint_code": "required_part_not_held",
                     "guard": {
                         "kind": "required_part_not_held",
@@ -2171,6 +2864,22 @@ class RobotAgent(ResourceAgent):
                     ),
                     "evidence": evidence,
                 }
+
+        configured_pick_place_result = (
+            RobotAgent._configured_pick_place_recovery_feasibility(
+                self,
+                function_name=function_name,
+                part_name=str(part_name or "").strip(),
+                part_context=part_context,
+                recovery_snapshot=recovery_snapshot,
+                grounded_action=grounded_action,
+                source_ref=source_ref,
+                target_info=target_info,
+                evidence=evidence,
+            )
+        )
+        if configured_pick_place_result is not None:
+            return configured_pick_place_result
 
         target_pose: dict[str, Any] | None = None
         source_location = str(
@@ -2190,6 +2899,7 @@ class RobotAgent(ResourceAgent):
             if requires_part_acquisition and target_pose is None and source_location_is_pose_only:
                 return {
                     "allowed": False,
+                    "feasibility_status": "NEEDS_CONTEXT",
                     "constraint_code": "source_reference_unavailable",
                     "guard": {
                         "kind": "source_reference_unavailable",

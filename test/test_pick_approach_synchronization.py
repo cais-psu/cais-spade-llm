@@ -249,7 +249,12 @@ def test_rtde_cartesian_target_converts_world_tool0_through_live_tcp_offset() ->
     transforms = {
         ("world", "base"): ((0.1, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
     }
-    server._lookup_rigid_transform = lambda target, source: transforms[(target, source)]
+    server._validated_cartesian_world_base = lambda: (
+        transforms[("world", "base")],
+        "ready",
+        0.0,
+        0.0,
+    )
     target = SimpleNamespace(
         header=SimpleNamespace(frame_id="world"),
         pose=SimpleNamespace(
@@ -356,7 +361,14 @@ def test_rtde_interfaces_use_bounded_frequency_and_receive_recipe(
         (
             "192.168.1.172",
             125.0,
-            ["timestamp", "actual_q", "actual_qd", "actual_TCP_pose"],
+            [
+                "timestamp",
+                "actual_q",
+                "actual_qd",
+                "actual_TCP_pose",
+                "actual_TCP_force",
+                "actual_TCP_speed",
+            ],
         )
     ]
     assert control_calls == [("192.168.1.172", 125.0)]
@@ -1285,6 +1297,8 @@ def test_rtde_terminal_diagnostics_survive_primary_status_replacement(
     server.ros_domain_id = 42
     server._status_lock = threading.Lock()
     server._active_lock = threading.Lock()
+    server._insertion_demonstration_lock = threading.Lock()
+    server._active_insertion_demonstration_status = {}
     goal = object()
     server._active_goal = goal
     server._active_goal_status = {}

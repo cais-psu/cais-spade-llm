@@ -17,6 +17,7 @@
     "gazebo": {
       "static_capabilities": {
         "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
         "reachability": [
           "prusa-mk4-1",
           "prusa-mk3",
@@ -91,6 +92,7 @@
           "topic": "/xarm6_xarm_gripper_traj_controller/joint_trajectory",
           "open": 0.0,
           "close": 0.85,
+          "open_width_mm": 85.0,
           "move_time_sec": 0.4,
           "settle_sec": 0.08,
           "feedback_timeout_pad_sec": 0.5,
@@ -160,6 +162,7 @@
     "real": {
       "static_capabilities": {
         "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
         "reachability": [
           "prusa-mk4-1",
           "prusa-mk3",
@@ -226,6 +229,13 @@
         "hardware_cartesian_service": "/xarm6/xarm/set_position",
         "hardware_cartesian_velocity_service": "/xarm6/xarm/vc_set_cartesian_velocity",
         "hardware_robot_states_topic": "/xarm6/xarm/robot_states",
+        "ufactory_six_axis_force_torque_sensor": {
+          "installed": true,
+          "wrench_feedback_exposed_to_cais": false,
+          "zeroing_exposed_to_cais": false,
+          "force_control_exposed_to_cais": false,
+          "move_insert_action": null
+        },
         "hardware_set_mode_service": "/xarm6/xarm/set_mode",
         "hardware_set_state_service": "/xarm6/xarm/set_state",
         "hardware_joint_duration_scale": 3.0769230769,

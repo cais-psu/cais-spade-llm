@@ -1,0 +1,192 @@
+# Identity of the calibrated insertion profile selected by the caller.
+string part_name
+string calibration_id
+string profile_sha256
+string hard_caps_sha256
+# Exact supervised trial identity. Empty only for qualified automatic execution.
+string trial_id
+
+# Complete world -> tool0 poses. The axis points from expected start to target.
+geometry_msgs/PoseStamped expected_start_tool0_pose
+geometry_msgs/PoseStamped target_tool0_pose
+geometry_msgs/Vector3 insertion_axis_world
+
+# Calibrated execution values, each bounded by server-side hard caps.
+float64 contact_speed_m_s
+float64 contact_force_delta_n
+float64 engagement_progress_m
+float64 insertion_force_n
+float64 spiral_radius_m
+float64 spiral_pitch_m
+float64 spiral_speed_m_s
+float64 spiral_acceleration_m_s2
+float64 max_axial_force_n
+float64 max_lateral_force_n
+float64 max_torque_nm
+# Version-9 recipe's preserved filtered envelopes at normalized depths.
+float64[] force_depth_fraction
+float64[] force_depth_axial_upper_n
+float64[] force_depth_lateral_upper_n
+float64[] force_depth_torque_upper_nm
+float64 baseline_force_uncertainty_n
+float64 baseline_torque_uncertainty_nm
+float64 tilt_tolerance_rad
+float64 seated_depth_tolerance_m
+float64 settle_time_sec
+float64 timeout_sec
+---
+# 0 success; -1 busy/not ready; -2 invalid/unsafe; -3 canceled;
+# -4 execution/transport/stop uncertain; -5 search exhausted/no entry;
+# -6 hard force/torque/travel limit; -7 soft overload relief exhausted/disallowed.
+int32 error_code
+string error_string
+string trial_id
+string hard_caps_sha256
+bool state_uncertain
+bool motion_settled
+bool final_tool0_pose_valid
+geometry_msgs/PoseStamped final_tool0_pose
+float64 final_insertion_depth_m
+float64 final_depth_error_m
+float64 final_lateral_offset_m
+float64 final_tilt_error_rad
+float64 final_search_radius_m
+float64 peak_axial_force_n
+float64 peak_lateral_force_n
+float64 peak_torque_nm
+float64 peak_filtered_axial_force_n
+float64 peak_filtered_lateral_force_n
+float64 peak_filtered_torque_nm
+float64 peak_tool_flange_torque_nm
+bool contact_detected
+bool engagement_detected
+bool seated_detected
+bool force_bias_valid
+float64[6] force_bias
+string final_phase
+bool soft_overload_detected
+bool soft_overload_recovered
+bool relief_exhausted
+int32 relief_cycle_count
+string last_soft_overload_reason
+bool relief_load_cleared
+float64 relief_backoff_m
+float64 relief_planned_backoff_m
+float64 total_relief_backoff_m
+string relief_resume_phase
+bool relief_force_mode_stop_acknowledged
+bool relief_stop_l_command_completed
+bool relief_stationary_confirmed
+bool relief_force_mode_restart_acknowledged
+bool hard_limit_detected
+string hard_limit_reason
+string limit_trigger
+float64 limit_trigger_value
+float64 limit_trigger_threshold
+float64[6] limit_trigger_actual_tcp_force
+float64[6] limit_trigger_tared_tcp_force
+bool force_mode_stop_acknowledged
+bool servo_stop_acknowledged
+bool stop_l_command_completed
+bool stationary_confirmed
+string server_trace_id
+string server_trace_path
+string server_trace_sha256
+string server_trace_status
+bool server_trace_complete
+int32 server_trace_sample_count
+bool tactile_center_valid
+geometry_msgs/PoseStamped tactile_center_tool0_pose
+float64 tactile_center_depth_m
+float64 tactile_center_confidence
+string tactile_center_evidence_sha256
+float64 scheduled_search_radius_m
+float64 explored_search_radius_m
+float64 explored_search_angle_rad
+int32 disengagement_cycle_count
+string last_disengagement_reason
+float64 disengagement_withdrawal_m
+bool disengagement_contact_cleared
+bool disengagement_force_mode_stop_acknowledged
+float64 recenter_position_error_m
+bool recenter_command_acknowledged
+bool disengagement_stationary_confirmed
+bool retare_baseline_consistent
+---
+# Exact phases: checking, zeroing_force, searching, expanded_searching,
+# seating, relieving, backing_off, resuming, cocked, disengaging,
+# recentering, retaring, retrying, settling.
+string phase
+string trial_id
+geometry_msgs/PoseStamped actual_tool0_pose
+float64 insertion_depth_m
+float64 depth_error_m
+float64 lateral_offset_m
+float64 search_radius_m
+# Compressive axial load used for contact, engagement, seating, and soft limits.
+float64 axial_force_n
+# Absolute signed-axis load used only for instantaneous hard protection.
+float64 raw_axial_force_n
+float64 lateral_force_n
+# Bias-corrected active-TCP torque magnitude.
+float64 torque_nm
+float64 filtered_axial_force_n
+float64 filtered_lateral_force_n
+float64 filtered_torque_nm
+# Bias-corrected torque magnitude at the tool flange.
+float64 tool_flange_torque_nm
+float64 filtered_tool_flange_torque_nm
+float64 current_force_depth_fraction
+float64 force_depth_axial_upper_n
+float64 force_depth_lateral_upper_n
+float64 force_depth_torque_upper_nm
+bool axial_profile_exceeded
+bool axial_progress_stalled
+bool contact_detected
+bool engagement_detected
+bool seated_detected
+bool force_bias_valid
+float64[6] force_bias
+# Raw payload-compensated RTDE generalized wrench [Fx, Fy, Fz, Tx, Ty, Tz].
+float64[6] actual_tcp_force
+float64[6] tared_tcp_force
+# Raw RTDE base-frame active-TCP speed [vx, vy, vz, wx, wy, wz].
+float64[6] actual_tcp_speed
+bool soft_overload_detected
+string soft_overload_reason
+float64 soft_overload_duration_sec
+int32 relief_cycle_count
+float64 relief_elapsed_sec
+float64 relief_retreat_m
+bool relief_load_cleared
+float64 relief_backoff_m
+float64 relief_planned_backoff_m
+float64 total_relief_backoff_m
+string relief_resume_phase
+float64 commanded_axial_force_n
+float64 commanded_lateral_force_x_n
+float64 commanded_lateral_force_y_n
+bool hard_limit_detected
+string hard_limit_reason
+string limit_trigger
+float64 limit_trigger_value
+float64 limit_trigger_threshold
+float64[6] limit_trigger_actual_tcp_force
+float64[6] limit_trigger_tared_tcp_force
+bool tactile_center_valid
+geometry_msgs/PoseStamped tactile_center_tool0_pose
+float64 tactile_center_depth_m
+float64 tactile_center_confidence
+string tactile_center_evidence_sha256
+float64 scheduled_search_radius_m
+float64 explored_search_radius_m
+float64 explored_search_angle_rad
+int32 disengagement_cycle_count
+string last_disengagement_reason
+float64 disengagement_withdrawal_m
+bool disengagement_contact_cleared
+bool disengagement_force_mode_stop_acknowledged
+float64 recenter_position_error_m
+bool recenter_command_acknowledged
+bool disengagement_stationary_confirmed
+bool retare_baseline_consistent

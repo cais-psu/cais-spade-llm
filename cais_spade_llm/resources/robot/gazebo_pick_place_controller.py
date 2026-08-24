@@ -8,6 +8,7 @@ import the package.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -17,6 +18,9 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +51,126 @@ _PERCEPTION_CAMERA_CONFIG = Path(
     "~/.config/cais-spade-llm/perception_cameras.yaml"
 ).expanduser()
 _PERCEPTION_PREVIEW_ROOT = Path("/tmp/cais_perception_previews")
+_MOVE_INSERT_SUPPORTED_PARTS = frozenset({"SG", "MG", "LG", "SCP", "MCP", "LCP"})
+_MOVE_INSERT_RECTANGULAR_PARTS = frozenset({"SRP", "MRP", "LRP"})
+_MOVE_INSERT_PROFILE_FIELDS = (
+    "pre_insert_offset_m",
+    "contact_speed_m_s",
+    "contact_force_delta_n",
+    "engagement_progress_m",
+    "insertion_force_n",
+    "spiral_radius_m",
+    "spiral_pitch_m",
+    "spiral_speed_m_s",
+    "spiral_acceleration_m_s2",
+    "max_axial_force_n",
+    "max_lateral_force_n",
+    "max_torque_nm",
+    "tilt_tolerance_rad",
+    "seated_depth_tolerance_m",
+    "settle_time_sec",
+)
+_MOVE_INSERT_OVERRIDE_VALUE_FIELDS = frozenset(
+    {"insertion_force_n", "spiral_radius_m"}
+)
+_MOVE_INSERT_OVERRIDE_METADATA_FIELDS = frozenset(
+    {"calibration_id", "generation", "updated_at", "profile_sha256"}
+)
+_MOVE_INSERT_DEMONSTRATION_RECIPE_VERSION = 9
+_MOVE_INSERT_LEARNING_POLICY_VERSION = 12
+_MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS = 16
+_MOVE_INSERT_QUALIFICATION_POLICY_VERSION = 3
+_MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS = 1
+_MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS = (
+    "robot",
+    "tool_frame",
+    "destination_location",
+    "part_name",
+    "profile_sha256",
+    "hard_caps_sha256",
+    "place_approach_recording_sha256",
+    "board_calibration_id",
+    "board_geometry_sha256",
+    "recording_id",
+    "demonstration_sha256",
+)
+_MOVE_INSERT_RELIEF_POLICY_FIELDS = (
+    "insert_max_tool_flange_torque_nm",
+    "insert_soft_filter_window_sec",
+    "insert_soft_overload_hold_sec",
+    "insert_relief_unload_dwell_sec",
+    "insert_relief_clear_dwell_sec",
+    "insert_relief_timeout_sec",
+    "insert_relief_axial_force_ratio",
+    "insert_relief_reverse_force_ratio",
+    "insert_relief_clear_hysteresis_ratio",
+    "insert_relief_resume_ramp_sec",
+    "insert_relief_search_force_ratio",
+    "insert_relief_search_speed_ratio",
+    "insert_relief_backoff_step_m",
+    "insert_max_relief_retreat_m",
+    "insert_relief_stationary_speed_m_s",
+    "insert_relief_stationary_angular_speed_rad_s",
+    "insert_max_relief_cycles",
+)
+_MOVE_INSERT_MG_TACTILE_POLICY_FIELDS = (
+    "tactile_center_policy",
+    "expanded_search_policy",
+    "cocked_recovery_sequence",
+    "disengagement_lateral_clearance_policy",
+    "search_peck_policy",
+    "insert_max_contact_search_radius_m",
+    "insert_max_disengagement_cycles",
+    "insert_search_peck_retreat_m",
+    "insert_search_peck_interval_sec",
+)
+_MOVE_INSERT_LEARNING_POLICY_FIELDS = (
+    "learning_policy_version",
+    "axial_force_sign_convention",
+    "force_filter",
+    "contact_hold_sec",
+    "torque_reference",
+    "limit_policy",
+    "relief_sequence",
+    "hard_limit_policy",
+    "demonstration_speed_policy",
+    "rebound_policy",
+    "force_depth_profile_points",
+    "axial_soft_overload_policy",
+    "engagement_policy",
+    "seating_policy",
+    "force_uncertainty_floor_n",
+    "torque_uncertainty_floor_nm",
+    *_MOVE_INSERT_RELIEF_POLICY_FIELDS,
+)
+_MOVE_INSERT_LEARNING_EVIDENCE_FIELDS = (
+    "recipe_version",
+    "learning_policy_version",
+    "learning_policy_sha256",
+    "demonstration_sha256",
+    "hard_caps_sha256",
+    "baseline_force_uncertainty_n",
+    "baseline_torque_uncertainty_nm",
+    "observed_filtered_axial_force_n",
+    "observed_filtered_lateral_force_n",
+    "observed_filtered_torque_nm",
+    "observed_tool_flange_torque_nm",
+    "observed_raw_axial_force_n",
+    "observed_raw_lateral_force_n",
+    "observed_raw_torque_nm",
+    "observed_raw_tool_flange_torque_nm",
+    "observed_advancing_speed_m_s",
+    "observed_peak_filtered_advancing_speed_m_s",
+    "seated_filtered_axial_force_n",
+    "seated_filtered_lateral_force_n",
+    "seated_filtered_torque_nm",
+    "seated_filtered_tool_flange_torque_nm",
+    "force_depth_profile_sha256",
+)
+_PHYSICAL_XARM6_ASSEMBLY_SLOT_INSERT_ERROR = (
+    "physical xarm6 assembly_board-v1 assembly_slot insertion with a held part "
+    "is blocked: move_insert is available only for ur5e. Select ur5e for Assembly."
+)
 
 
 def _import_linkattacher_srvs():
@@ -131,6 +255,1818 @@ def _pose_from_mapping(value: Any) -> dict[str, float]:
     return pose
 
 
+def _canonical_json_sha256(value: Any) -> tuple[str, str]:
+    try:
+        canonical = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        return "", f"move_insert profile is not canonical JSON: {exc}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), ""
+
+
+def _move_insert_qualification_policy_sha256() -> str:
+    """Hash the protected exact-part supervised qualification policy."""
+    digest, error = _canonical_json_sha256(
+        {
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "required_consecutive_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "failure_resets_confirmed_trials": True,
+            "recovered_soft_overload_may_count": True,
+            "hard_limit_may_count": False,
+            "identity_fields": list(_MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS),
+        }
+    )
+    if error:
+        raise RuntimeError(error)
+    return digest
+
+
+def _move_insert_qualification_evidence_sha256(
+    *,
+    qualification_identity: Mapping[str, Any],
+    trial_ids: list[str],
+    result_sha256s: list[str],
+    trace_sha256s: list[str],
+) -> str:
+    """Hash the complete confirmed-trial qualification evidence."""
+    digest, error = _canonical_json_sha256(
+        {
+            "qualification_policy_sha256": (
+                _move_insert_qualification_policy_sha256()
+            ),
+            "qualification_identity": dict(qualification_identity),
+            "confirmed_trial_ids": list(trial_ids),
+            "confirmed_trial_result_sha256s": list(result_sha256s),
+            "confirmed_trial_trace_sha256s": list(trace_sha256s),
+        }
+    )
+    if error:
+        raise RuntimeError(error)
+    return digest
+
+
+def move_insert_learning_evidence_sha256(
+    raw_recipe: Mapping[str, Any] | None,
+) -> tuple[str, str]:
+    """Hash the exact versioned evidence that produced one learned recipe."""
+    if not isinstance(raw_recipe, Mapping):
+        return "", "move_insert learning evidence recipe is missing or is not an object"
+    recipe = dict(raw_recipe)
+    missing = [
+        field_name
+        for field_name in _MOVE_INSERT_LEARNING_EVIDENCE_FIELDS
+        if field_name not in recipe
+    ]
+    if missing:
+        return "", f"move_insert learning evidence is missing fields: {missing}"
+    return _canonical_json_sha256(
+        {
+            field_name: recipe[field_name]
+            for field_name in _MOVE_INSERT_LEARNING_EVIDENCE_FIELDS
+        }
+    )
+
+
+def move_insert_learning_policy_sha256(  # noqa: C901, PLR0912
+    raw_recipe: Mapping[str, Any] | None,
+) -> tuple[str, str]:
+    """Validate and hash the exact protected learning and relief policy."""
+    if not isinstance(raw_recipe, Mapping):
+        return "", "move_insert learning policy recipe is missing"
+    raw_policy = raw_recipe.get("learning_policy")
+    if not isinstance(raw_policy, Mapping):
+        return "", "move_insert learning_policy is missing or is not an object"
+    policy = dict(raw_policy)
+    recipe_part = raw_recipe.get("part_name")
+    expected_fields = set(_MOVE_INSERT_LEARNING_POLICY_FIELDS)
+    advanced_policy_fields = set(_MOVE_INSERT_MG_TACTILE_POLICY_FIELDS)
+    advanced_hard_cap_fields = {
+        field_name
+        for field_name in _MOVE_INSERT_MG_TACTILE_POLICY_FIELDS
+        if field_name.startswith("insert_")
+    }
+    raw_hard_caps = raw_recipe.get("hard_caps")
+    advanced_recovery_enabled = bool(
+        advanced_policy_fields.intersection(policy)
+        or (
+            isinstance(raw_hard_caps, Mapping)
+            and advanced_hard_cap_fields.intersection(raw_hard_caps)
+        )
+    )
+    if recipe_part in _MOVE_INSERT_SUPPORTED_PARTS and advanced_recovery_enabled:
+        expected_fields.update(_MOVE_INSERT_MG_TACTILE_POLICY_FIELDS)
+    unexpected = sorted(set(policy) - expected_fields)
+    missing = sorted(expected_fields - set(policy))
+    if unexpected or missing:
+        return "", (
+            "move_insert learning_policy fields do not match the protected schema: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    exact_values = {
+        "learning_policy_version": _MOVE_INSERT_LEARNING_POLICY_VERSION,
+        "axial_force_sign_convention": "compression_negative_dot",
+        "force_filter": "time_window_median",
+        "contact_hold_sec": 0.10,
+        "torque_reference": "active_tcp",
+        "limit_policy": "reject_not_clip",
+        "relief_sequence": "unload_then_bounded_micro_backoff",
+        "hard_limit_policy": "immediate_stop",
+        "demonstration_speed_policy": "diagnostic_only",
+        "rebound_policy": (
+            "final_saved_depth_within_tolerance_of_post_contact_maximum"
+        ),
+        "force_depth_profile_points": _MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS,
+        "axial_soft_overload_policy": (
+            "learned_and_profile_exceedance_with_stalled_progress_"
+            "guarded_below_hard_cap"
+        ),
+        "engagement_policy": (
+            "sustained_axial_progress_within_force_depth_profile"
+        ),
+        "seating_policy": (
+            "target_depth_stationary_stable_force_within_force_depth_profile"
+        ),
+        "force_uncertainty_floor_n": 4.0,
+        "torque_uncertainty_floor_nm": 0.05,
+        "insert_max_relief_cycles": 3.0,
+    }
+    if recipe_part in _MOVE_INSERT_SUPPORTED_PARTS and advanced_recovery_enabled:
+        exact_values.update(
+            {
+                "tactile_center_policy": (
+                    "deepest_stable_progress_then_lowest_normalized_lateral_load"
+                ),
+                "expanded_search_policy": (
+                    "local_then_staged_3mm_5mm_10mm_low_preload"
+                ),
+                "cocked_recovery_sequence": (
+                    "unload_then_exact_pre_insert_withdrawal_recenter_retare_retry"
+                ),
+                "disengagement_lateral_clearance_policy": (
+                    "search_boundary_plus_start_position_tolerance"
+                ),
+                "search_peck_policy": (
+                    "stalled_spiral_bounded_axial_unload_then_low_preload_recontact"
+                ),
+            }
+        )
+    for field_name, expected in exact_values.items():
+        if policy.get(field_name) != expected:
+            return "", (
+                f"move_insert learning_policy.{field_name} must be exact {expected!r}"
+            )
+    for field_name in _MOVE_INSERT_RELIEF_POLICY_FIELDS:
+        value = policy.get(field_name)
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            number = math.nan
+        if isinstance(value, bool) or not math.isfinite(number) or number <= 0.0:
+            return "", (
+                f"move_insert learning_policy.{field_name} must be finite and positive"
+            )
+    if recipe_part in _MOVE_INSERT_SUPPORTED_PARTS and advanced_recovery_enabled:
+        if not isinstance(raw_hard_caps, Mapping):
+            return "", "move_insert exact-part recovery hard_caps are missing"
+        for field_name in (
+            "insert_max_contact_search_radius_m",
+            "insert_max_disengagement_cycles",
+            "insert_search_peck_retreat_m",
+            "insert_search_peck_interval_sec",
+        ):
+            value = policy.get(field_name)
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                number = math.nan
+            if isinstance(value, bool) or not math.isfinite(number) or number <= 0.0:
+                return "", (
+                    f"move_insert learning_policy.{field_name} must be finite and positive"
+                )
+            hard_cap_value = raw_hard_caps.get(field_name)
+            try:
+                hard_cap_number = float(hard_cap_value)
+            except (TypeError, ValueError, OverflowError):
+                hard_cap_number = math.nan
+            if (
+                isinstance(hard_cap_value, bool)
+                or not math.isfinite(hard_cap_number)
+                or hard_cap_number <= 0.0
+                or hard_cap_number != number
+            ):
+                return "", (
+                    f"move_insert learning_policy.{field_name} must match the exact "
+                    f"{recipe_part} hard cap"
+                )
+    for field_name in (
+        "insert_relief_axial_force_ratio",
+        "insert_relief_reverse_force_ratio",
+        "insert_relief_clear_hysteresis_ratio",
+        "insert_relief_search_force_ratio",
+        "insert_relief_search_speed_ratio",
+    ):
+        if float(policy[field_name]) >= 1.0:
+            return "", f"move_insert learning_policy.{field_name} must be less than 1"
+    if float(policy["insert_relief_backoff_step_m"]) > float(
+        policy["insert_max_relief_retreat_m"]
+    ):
+        return "", "move_insert learning_policy backoff step exceeds retreat ceiling"
+    for dwell_name in (
+        "insert_relief_unload_dwell_sec",
+        "insert_relief_clear_dwell_sec",
+    ):
+        if float(policy[dwell_name]) >= float(
+            policy["insert_relief_timeout_sec"]
+        ):
+            return "", (
+                f"move_insert learning_policy.{dwell_name} must be below "
+                "insert_relief_timeout_sec"
+            )
+    if float(policy["insert_soft_filter_window_sec"]) > float(
+        policy["insert_soft_overload_hold_sec"]
+    ):
+        return "", "move_insert learning_policy filter window exceeds overload hold"
+    return _canonical_json_sha256(policy)
+
+
+def move_insert_profile_sha256(
+    raw_profile: Mapping[str, Any] | None,
+    part_name: str,
+) -> tuple[str, str]:
+    """Hash the selected shared profile plus only the exact selected override."""
+    if not isinstance(raw_profile, Mapping):
+        return "", "move_insert profile is missing or is not an object"
+    profile = dict(raw_profile)
+    raw_overrides = profile.pop("part_overrides", {})
+    raw_demonstration_recipes = profile.pop("demonstration_recipes", {})
+    # Qualification is operator/workcell state, not part of the calibrated motion
+    # recipe.  Excluding both authorization fields keeps an existing exact-part
+    # qualification stable when another part is confirmed later.
+    profile.pop("validated_parts", None)
+    profile.pop("qualifications", None)
+    if not isinstance(raw_overrides, Mapping):
+        return "", "move_insert part_overrides must be an object"
+    if not isinstance(raw_demonstration_recipes, Mapping):
+        return "", "move_insert demonstration_recipes must be an object"
+    if not isinstance(part_name, str) or not part_name or part_name != part_name.strip():
+        return "", "move_insert requires an exact non-empty part identifier"
+    requested_part = part_name
+    override_present = requested_part in raw_overrides
+    raw_override = raw_overrides.get(requested_part, {})
+    if not isinstance(raw_override, Mapping):
+        return "", f"move_insert override for {requested_part!r} must be an object"
+    selected_override = {
+        key: value
+        for key, value in dict(raw_override).items()
+        if key != "profile_sha256"
+    }
+    raw_demonstration_recipe = raw_demonstration_recipes.get(requested_part, {})
+    if not isinstance(raw_demonstration_recipe, Mapping):
+        return (
+            "",
+            f"move_insert demonstration_recipes.{requested_part} must be an object",
+        )
+    return _canonical_json_sha256(
+        {
+            "shared": profile,
+            "selected_demonstration_recipe": {
+                "part_name": requested_part,
+                "present": requested_part in raw_demonstration_recipes,
+                "values": dict(raw_demonstration_recipe),
+            },
+            "selected_override": {
+                "part_name": requested_part,
+                "present": override_present,
+                "values": selected_override,
+            },
+        }
+    )
+
+
+def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed profile validation.
+    parts_tuning: Mapping[str, Any] | None,
+    part_name: str,
+    *,
+    require_qualification: bool = True,
+) -> dict[str, Any]:
+    """Validate and resolve the exact per-part ``move_insert`` controller profile."""
+    tuning = dict(parts_tuning) if isinstance(parts_tuning, Mapping) else {}
+    raw_profile = tuning.get("move_insert")
+    if not isinstance(raw_profile, Mapping):
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert is missing or is not an object",
+            "missing_fields": [
+                "calibration_id",
+                "validated_parts",
+                *_MOVE_INSERT_PROFILE_FIELDS,
+                "part_overrides",
+            ],
+        }
+    raw_profile = dict(raw_profile)
+    if not isinstance(part_name, str) or not part_name or part_name != part_name.strip():
+        return {
+            "success": False,
+            "message": "move_insert requires an exact non-empty part identifier",
+        }
+    requested_part = part_name
+    profile_sha256, hash_error = move_insert_profile_sha256(
+        raw_profile,
+        requested_part,
+    )
+    if hash_error:
+        return {"success": False, "message": hash_error}
+
+    allowed_fields = {
+        "calibration_id",
+        "validated_parts",
+        "qualifications",
+        "demonstration_recipes",
+        "part_overrides",
+        *_MOVE_INSERT_PROFILE_FIELDS,
+    }
+    unexpected_fields = sorted(set(raw_profile) - allowed_fields)
+    if unexpected_fields:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert contains unsupported fields: "
+                f"{unexpected_fields}"
+            ),
+            "profile_sha256": profile_sha256,
+        }
+
+    raw_validated_parts = raw_profile.get("validated_parts")
+    if not isinstance(raw_validated_parts, list) or any(
+        not isinstance(value, str) or not value for value in raw_validated_parts
+    ):
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert.validated_parts must be a list of exact part identifiers",
+            "profile_sha256": profile_sha256,
+        }
+    validated_parts = list(raw_validated_parts)
+    if len(set(validated_parts)) != len(validated_parts):
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert.validated_parts contains duplicates",
+            "profile_sha256": profile_sha256,
+        }
+    invalid_validated_parts = sorted(
+        set(validated_parts) - _MOVE_INSERT_SUPPORTED_PARTS
+    )
+    if invalid_validated_parts:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.validated_parts contains parts "
+                f"without validated insertion orientation: {invalid_validated_parts}"
+            ),
+            "profile_sha256": profile_sha256,
+        }
+
+    raw_overrides = raw_profile.get("part_overrides")
+    if not isinstance(raw_overrides, Mapping):
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert.part_overrides must be an object",
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+
+    raw_demonstration_recipes = raw_profile.get("demonstration_recipes", {})
+    if not isinstance(raw_demonstration_recipes, Mapping):
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.demonstration_recipes "
+                "must be an object"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    demonstration_recipes = dict(raw_demonstration_recipes)
+    allowed_demonstration_recipe_fields = {
+        "recipe_version",
+        "learning_policy_version",
+        "learning_policy_sha256",
+        "learning_policy",
+        "learning_evidence_sha256",
+        "hard_caps",
+        "hard_caps_sha256",
+        "force_depth_profile",
+        "force_depth_profile_sha256",
+        "baseline_force_uncertainty_n",
+        "baseline_torque_uncertainty_nm",
+        "observed_filtered_axial_force_n",
+        "observed_filtered_lateral_force_n",
+        "observed_filtered_torque_nm",
+        "observed_tool_flange_torque_nm",
+        "observed_raw_axial_force_n",
+        "observed_raw_lateral_force_n",
+        "observed_raw_torque_nm",
+        "observed_raw_tool_flange_torque_nm",
+        "observed_advancing_speed_m_s",
+        "observed_peak_filtered_advancing_speed_m_s",
+        "seated_filtered_axial_force_n",
+        "seated_filtered_lateral_force_n",
+        "seated_filtered_torque_nm",
+        "seated_filtered_tool_flange_torque_nm",
+        "calibration_id",
+        "recording_id",
+        "demonstration_sha256",
+        "updated_at",
+        "robot",
+        "tool_frame",
+        "destination_location",
+        "part_name",
+        "context_sha256",
+        "place_approach_recording_sha256",
+        "board_calibration_id",
+        "board_generation",
+        "aruco_to_seated_held_part",
+        "aruco_insertion_axis",
+        *_MOVE_INSERT_PROFILE_FIELDS,
+    }
+    for recipe_part, raw_recipe in demonstration_recipes.items():
+        if (
+            not isinstance(recipe_part, str)
+            or recipe_part not in _MOVE_INSERT_SUPPORTED_PARTS
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes "
+                    "contains an unsupported exact part identifier: "
+                    f"{recipe_part!r}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        if not isinstance(raw_recipe, Mapping):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part} must be an object"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        unexpected_recipe_fields = sorted(
+            set(raw_recipe) - allowed_demonstration_recipe_fields
+        )
+        if unexpected_recipe_fields:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part} contains unsupported fields: "
+                    f"{unexpected_recipe_fields}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        recipe = dict(raw_recipe)
+        if recipe.get("recipe_version") != _MOVE_INSERT_DEMONSTRATION_RECIPE_VERSION:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part} is legacy or unsafe; install the migrated "
+                    "recipe or use Reanalyze Saved Recording. Another manual "
+                    "demonstration is unnecessary when its preserved trace remains "
+                    "compatible"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        if (
+            recipe.get("learning_policy_version")
+            != _MOVE_INSERT_LEARNING_POLICY_VERSION
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.learning_policy_version is unsupported"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        expected_policy_sha256, policy_hash_error = (
+            move_insert_learning_policy_sha256(recipe)
+        )
+        if (
+            policy_hash_error
+            or recipe.get("learning_policy_sha256")
+            != expected_policy_sha256
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.learning_policy_sha256 does not match the "
+                    "protected learning policy"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        for digest_field in (
+            "learning_evidence_sha256",
+            "learning_policy_sha256",
+            "hard_caps_sha256",
+            "force_depth_profile_sha256",
+        ):
+            digest = recipe.get(digest_field)
+            try:
+                valid_digest = (
+                    isinstance(digest, str)
+                    and len(digest) == 64
+                    and int(digest, 16) >= 0
+                )
+            except ValueError:
+                valid_digest = False
+            if not valid_digest:
+                return {
+                    "success": False,
+                    "message": (
+                        "controller.parts_tuning.move_insert.demonstration_recipes."
+                        f"{recipe_part}.{digest_field} is not a SHA-256 digest"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        raw_hard_caps = recipe.get("hard_caps")
+        if not isinstance(raw_hard_caps, Mapping) or not raw_hard_caps:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.hard_caps must be a nonempty object"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        try:
+            hard_caps = {
+                str(field_name): float(value)
+                for field_name, value in raw_hard_caps.items()
+            }
+        except (TypeError, ValueError, OverflowError):
+            hard_caps = {}
+        if (
+            not hard_caps
+            or set(hard_caps) != set(raw_hard_caps)
+            or any(
+                not field_name
+                or not math.isfinite(value)
+                or value < 0.0
+                for field_name, value in hard_caps.items()
+            )
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.hard_caps contains invalid evidence"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        expected_hard_caps_sha256, hard_caps_hash_error = (
+            _canonical_json_sha256(hard_caps)
+        )
+        if (
+            hard_caps_hash_error
+            or recipe.get("hard_caps_sha256")
+            != expected_hard_caps_sha256
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.hard_caps_sha256 does not match hard_caps"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        for evidence_field in (
+            "baseline_force_uncertainty_n",
+            "baseline_torque_uncertainty_nm",
+            "observed_filtered_axial_force_n",
+            "observed_filtered_lateral_force_n",
+            "observed_filtered_torque_nm",
+            "observed_tool_flange_torque_nm",
+            "observed_raw_axial_force_n",
+            "observed_raw_lateral_force_n",
+            "observed_raw_torque_nm",
+            "observed_raw_tool_flange_torque_nm",
+            "observed_advancing_speed_m_s",
+            "observed_peak_filtered_advancing_speed_m_s",
+            "seated_filtered_axial_force_n",
+            "seated_filtered_lateral_force_n",
+            "seated_filtered_torque_nm",
+            "seated_filtered_tool_flange_torque_nm",
+        ):
+            raw_evidence = recipe.get(evidence_field)
+            try:
+                evidence_value = float(raw_evidence)
+            except (TypeError, ValueError, OverflowError):
+                evidence_value = math.nan
+            if (
+                isinstance(raw_evidence, bool)
+                or not math.isfinite(evidence_value)
+                or evidence_value < 0.0
+            ):
+                return {
+                    "success": False,
+                    "message": (
+                        "controller.parts_tuning.move_insert.demonstration_recipes."
+                        f"{recipe_part}.{evidence_field} must be finite and non-negative"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        raw_force_depth_profile = recipe.get("force_depth_profile")
+        if not isinstance(raw_force_depth_profile, Mapping):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.force_depth_profile must be an object"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        force_depth_profile = dict(raw_force_depth_profile)
+        expected_force_depth_fields = {
+            "depth_fraction",
+            "axial_upper_n",
+            "lateral_upper_n",
+            "torque_upper_nm",
+        }
+        if set(force_depth_profile) != expected_force_depth_fields:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.force_depth_profile fields are invalid"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        try:
+            profile_series = {
+                field_name: [float(value) for value in force_depth_profile[field_name]]
+                for field_name in expected_force_depth_fields
+            }
+        except (TypeError, ValueError, OverflowError):
+            profile_series = {}
+        if (
+            not profile_series
+            or any(
+                len(values) != _MOVE_INSERT_FORCE_DEPTH_PROFILE_POINTS
+                for values in profile_series.values()
+            )
+            or not all(
+                math.isfinite(value)
+                for values in profile_series.values()
+                for value in values
+            )
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.force_depth_profile requires 16 finite points"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        fractions = profile_series["depth_fraction"]
+        if (
+            abs(fractions[0]) > 1e-12
+            or abs(fractions[-1] - 1.0) > 1e-12
+            or any(
+                right <= left
+                for left, right in zip(fractions, fractions[1:])
+            )
+            or any(
+                value <= 0.0
+                for field_name, values in profile_series.items()
+                if field_name != "depth_fraction"
+                for value in values
+            )
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.force_depth_profile is not a protected envelope"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        expected_force_depth_sha256, force_depth_hash_error = (
+            _canonical_json_sha256(force_depth_profile)
+        )
+        if (
+            force_depth_hash_error
+            or recipe.get("force_depth_profile_sha256")
+            != expected_force_depth_sha256
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.force_depth_profile_sha256 does not match"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        expected_evidence_sha256, evidence_hash_error = (
+            move_insert_learning_evidence_sha256(recipe)
+        )
+        if (
+            evidence_hash_error
+            or recipe.get("learning_evidence_sha256")
+            != expected_evidence_sha256
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.learning_evidence_sha256 does not match its "
+                    "versioned learning evidence"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        exact_values = {
+            "robot": "ur5e",
+            "tool_frame": "tool0",
+            "destination_location": "assembly_board-v1",
+            "part_name": recipe_part,
+        }
+        for field_name, expected_value in exact_values.items():
+            if recipe.get(field_name) != expected_value:
+                return {
+                    "success": False,
+                    "message": (
+                        "controller.parts_tuning.move_insert.demonstration_recipes."
+                        f"{recipe_part}.{field_name} must be exact {expected_value}"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        for field_name in (
+            "calibration_id",
+            "recording_id",
+            "demonstration_sha256",
+            "context_sha256",
+            "place_approach_recording_sha256",
+            "board_calibration_id",
+        ):
+            value = recipe.get(field_name)
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+            ):
+                return {
+                    "success": False,
+                    "message": (
+                        "controller.parts_tuning.move_insert.demonstration_recipes."
+                        f"{recipe_part}.{field_name} is missing or is not exact"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        for field_name in (
+            "demonstration_sha256",
+            "context_sha256",
+            "place_approach_recording_sha256",
+        ):
+            digest = str(recipe.get(field_name) or "")
+            try:
+                valid_digest = len(digest) == 64 and int(digest, 16) >= 0
+            except ValueError:
+                valid_digest = False
+            if not valid_digest:
+                return {
+                    "success": False,
+                    "message": (
+                        "controller.parts_tuning.move_insert.demonstration_recipes."
+                        f"{recipe_part}.{field_name} is not a SHA-256 digest"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        try:
+            updated_at = datetime.fromisoformat(
+                str(recipe.get("updated_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            updated_at = None
+        if updated_at is None or updated_at.tzinfo is None:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.updated_at must be a UTC ISO-8601 timestamp"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        board_generation = recipe.get("board_generation")
+        if (
+            isinstance(board_generation, bool)
+            or not isinstance(board_generation, int)
+            or board_generation < 1
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.board_generation must be a positive integer"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        try:
+            _pose_from_mapping(recipe.get("aruco_to_seated_held_part"))
+            axis_values = tuple(
+                float(dict(recipe.get("aruco_insertion_axis") or {})[field])
+                for field in ("x", "y", "z")
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part} geometry is invalid: {exc}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        axis_norm = math.sqrt(sum(value * value for value in axis_values))
+        if not math.isfinite(axis_norm) or axis_norm <= 1e-12:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.demonstration_recipes."
+                    f"{recipe_part}.aruco_insertion_axis is invalid"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+
+    raw_qualifications = raw_profile.get("qualifications", {})
+    if not isinstance(raw_qualifications, Mapping):
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert.qualifications must be an object",
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    qualifications = dict(raw_qualifications)
+    invalid_qualification_parts = sorted(
+        part
+        for part in qualifications
+        if not isinstance(part, str) or part not in _MOVE_INSERT_SUPPORTED_PARTS
+    )
+    if invalid_qualification_parts:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.qualifications contains "
+                f"unsupported exact part identifiers: {invalid_qualification_parts}"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    overrides = dict(raw_overrides)
+    allowed_override_fields = (
+        _MOVE_INSERT_OVERRIDE_VALUE_FIELDS | _MOVE_INSERT_OVERRIDE_METADATA_FIELDS
+    )
+    for override_part, raw_override in overrides.items():
+        if (
+            not isinstance(override_part, str)
+            or override_part not in _MOVE_INSERT_SUPPORTED_PARTS
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides contains an "
+                    f"unsupported exact part identifier: {override_part!r}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        if not isinstance(raw_override, Mapping):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part} must be an object"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        unexpected_override_fields = sorted(
+            set(raw_override) - allowed_override_fields
+        )
+        if unexpected_override_fields:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part} contains unsupported fields: "
+                    f"{unexpected_override_fields}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        override_dict = dict(raw_override)
+        metadata_fields = set(override_dict) & _MOVE_INSERT_OVERRIDE_METADATA_FIELDS
+        if metadata_fields != _MOVE_INSERT_OVERRIDE_METADATA_FIELDS:
+            missing_metadata = sorted(
+                _MOVE_INSERT_OVERRIDE_METADATA_FIELDS - metadata_fields
+            )
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part} is missing server-owned metadata: "
+                    f"{missing_metadata}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        override_calibration_id = override_dict.get("calibration_id")
+        if (
+            not isinstance(override_calibration_id, str)
+            or not override_calibration_id
+            or override_calibration_id != override_calibration_id.strip()
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part}.calibration_id is missing or is not exact"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        generation = override_dict.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part}.generation must be a positive integer"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        updated_at_text = override_dict.get("updated_at")
+        try:
+            updated_at = datetime.fromisoformat(
+                updated_at_text.replace("Z", "+00:00")
+            )
+        except (AttributeError, TypeError, ValueError):
+            updated_at = None
+        if (
+            updated_at is None
+            or updated_at.tzinfo is None
+            or updated_at.utcoffset() != timezone.utc.utcoffset(updated_at)
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part}.updated_at must be a UTC ISO-8601 timestamp"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        stored_hash = override_dict.get("profile_sha256")
+        expected_hash, selected_hash_error = move_insert_profile_sha256(
+            raw_profile,
+            override_part,
+        )
+        if (
+            selected_hash_error
+            or not isinstance(stored_hash, str)
+            or stored_hash != expected_hash
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "controller.parts_tuning.move_insert.part_overrides."
+                    f"{override_part}.profile_sha256 does not match its selected profile"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+
+    if requested_part in _MOVE_INSERT_RECTANGULAR_PARTS:
+        return {
+            "success": False,
+            "message": (
+                f"move_insert for {requested_part} is blocked until rectangular-part "
+                "orientation is measured and validated"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if requested_part not in _MOVE_INSERT_SUPPORTED_PARTS:
+        return {
+            "success": False,
+            "message": f"move_insert does not support exact part identifier {requested_part!r}",
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if requested_part in demonstration_recipes:
+        require_qualification = False
+    if require_qualification and requested_part not in validated_parts:
+        missing_fields = [
+            field_name
+            for field_name in ("calibration_id", *_MOVE_INSERT_PROFILE_FIELDS)
+            if raw_profile.get(field_name) in (None, "")
+        ]
+        missing_detail = (
+            f" Missing required fields: {missing_fields}." if missing_fields else ""
+        )
+        return {
+            "success": False,
+            "message": (
+                f"move_insert for {requested_part} is not commissioned; add the exact "
+                "part identifier to controller.parts_tuning.move_insert.validated_parts "
+                f"only after physical validation.{missing_detail}"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+            "missing_fields": missing_fields,
+        }
+
+    selected_demonstration_recipe = dict(
+        demonstration_recipes.get(requested_part) or {}
+    )
+    shared_calibration_id = selected_demonstration_recipe.get(
+        "calibration_id", raw_profile.get("calibration_id")
+    )
+    if (
+        not isinstance(shared_calibration_id, str)
+        or not shared_calibration_id
+        or shared_calibration_id != shared_calibration_id.strip()
+    ):
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.calibration_id is missing or is not exact"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+
+    effective_values: dict[str, float] = {}
+    selected_override = {
+        key: value
+        for key, value in dict(overrides.get(requested_part) or {}).items()
+        if key in _MOVE_INSERT_OVERRIDE_VALUE_FIELDS
+    }
+    selected_override_metadata = dict(overrides.get(requested_part) or {})
+    override_calibration_id = selected_override_metadata.get("calibration_id")
+    effective_calibration_id = (
+        override_calibration_id
+        if isinstance(override_calibration_id, str) and override_calibration_id
+        else shared_calibration_id
+    )
+    for field_name in _MOVE_INSERT_PROFILE_FIELDS:
+        raw_value = selected_override.get(
+            field_name,
+            selected_demonstration_recipe.get(
+                field_name,
+                raw_profile.get(field_name),
+            ),
+        )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "success": False,
+                "message": (
+                    f"controller.parts_tuning.move_insert.{field_name} is missing or invalid"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        if not math.isfinite(value):
+            return {
+                "success": False,
+                "message": f"controller.parts_tuning.move_insert.{field_name} is not finite",
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        effective_values[field_name] = value
+
+    positive_fields = set(_MOVE_INSERT_PROFILE_FIELDS) - {"spiral_radius_m"}
+    invalid_positive = sorted(
+        field_name
+        for field_name in positive_fields
+        if effective_values[field_name] <= 0.0
+    )
+    if invalid_positive:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert fields must be positive: "
+                f"{invalid_positive}"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["spiral_radius_m"] < 0.0:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.spiral_radius_m must be non-negative"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["engagement_progress_m"] > effective_values["pre_insert_offset_m"]:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.engagement_progress_m must not "
+                "exceed pre_insert_offset_m"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["seated_depth_tolerance_m"] > effective_values["pre_insert_offset_m"]:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.seated_depth_tolerance_m must not "
+                "exceed pre_insert_offset_m"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["insertion_force_n"] >= effective_values["max_axial_force_n"]:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.insertion_force_n must be less "
+                "than max_axial_force_n"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["contact_force_delta_n"] >= effective_values["max_axial_force_n"]:
+        return {
+            "success": False,
+            "message": (
+                "controller.parts_tuning.move_insert.contact_force_delta_n must be less "
+                "than max_axial_force_n"
+            ),
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+    if effective_values["tilt_tolerance_rad"] > math.pi:
+        return {
+            "success": False,
+            "message": "controller.parts_tuning.move_insert.tilt_tolerance_rad must not exceed pi",
+            "profile_sha256": profile_sha256,
+            "validated_parts": validated_parts,
+        }
+
+    qualification: dict[str, Any] = {}
+    if require_qualification:
+        raw_qualification = qualifications.get(requested_part)
+        if not isinstance(raw_qualification, Mapping):
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert for {requested_part} has not been confirmed by a "
+                    "successful supervised move_insert trial"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        qualification = dict(raw_qualification)
+        required_qualification_fields = {
+            "trial_id",
+            "confirmed_at",
+            "robot",
+            "tool_frame",
+            "destination_location",
+            "part_name",
+            "profile_sha256",
+            "hard_caps_sha256",
+            "place_approach_recording_sha256",
+            "board_calibration_id",
+            "board_geometry_sha256",
+            "board_generation",
+            "generation",
+            "recording_id",
+            "demonstration_sha256",
+            "qualification_policy_version",
+            "qualification_policy_sha256",
+            "required_confirmed_trials",
+            "confirmed_trial_count",
+            "confirmed_trial_ids",
+            "confirmed_trial_result_sha256s",
+            "confirmed_trial_trace_sha256s",
+            "qualification_evidence_sha256",
+        }
+        unexpected_qualification_fields = sorted(
+            set(qualification) - required_qualification_fields
+        )
+        missing_qualification_fields = sorted(
+            required_qualification_fields - set(qualification)
+        )
+        if unexpected_qualification_fields or missing_qualification_fields:
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part} has invalid fields; "
+                    f"missing={missing_qualification_fields}, "
+                    f"unsupported={unexpected_qualification_fields}"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        exact_values = {
+            "robot": "ur5e",
+            "tool_frame": "tool0",
+            "destination_location": "assembly_board-v1",
+            "part_name": requested_part,
+            "profile_sha256": profile_sha256,
+        }
+        if selected_demonstration_recipe:
+            exact_values["hard_caps_sha256"] = (
+                selected_demonstration_recipe.get("hard_caps_sha256")
+            )
+            exact_values["recording_id"] = selected_demonstration_recipe.get(
+                "recording_id"
+            )
+            exact_values["demonstration_sha256"] = (
+                selected_demonstration_recipe.get("demonstration_sha256")
+            )
+        for field_name, expected_value in exact_values.items():
+            if qualification.get(field_name) != expected_value:
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}.{field_name} "
+                        "does not match the selected physical profile"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        qualification_hard_caps_sha256 = qualification.get(
+            "hard_caps_sha256"
+        )
+        try:
+            valid_qualification_hard_caps_sha256 = bool(
+                isinstance(qualification_hard_caps_sha256, str)
+                and len(qualification_hard_caps_sha256) == 64
+                and int(qualification_hard_caps_sha256, 16) >= 0
+            )
+        except ValueError:
+            valid_qualification_hard_caps_sha256 = False
+        if not valid_qualification_hard_caps_sha256:
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part}."
+                    "hard_caps_sha256 is not a SHA-256 digest"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        for field_name in (
+            "trial_id",
+            "place_approach_recording_sha256",
+            "board_calibration_id",
+            "board_geometry_sha256",
+            "recording_id",
+            "demonstration_sha256",
+        ):
+            value = qualification.get(field_name)
+            if not isinstance(value, str) or not value or value != value.strip():
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}.{field_name} "
+                        "is missing or is not exact"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        for field_name in (
+            "profile_sha256",
+            "hard_caps_sha256",
+            "place_approach_recording_sha256",
+            "board_geometry_sha256",
+            "demonstration_sha256",
+            "qualification_policy_sha256",
+            "qualification_evidence_sha256",
+        ):
+            value = str(qualification.get(field_name) or "")
+            try:
+                valid_digest = len(value) == 64 and int(value, 16) >= 0
+            except ValueError:
+                valid_digest = False
+            if not valid_digest:
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}.{field_name} "
+                        "is not a SHA-256 digest"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        confirmed_at_text = qualification.get("confirmed_at")
+        try:
+            confirmed_at = datetime.fromisoformat(
+                confirmed_at_text.replace("Z", "+00:00")
+            )
+        except (AttributeError, TypeError, ValueError):
+            confirmed_at = None
+        if (
+            confirmed_at is None
+            or confirmed_at.tzinfo is None
+            or confirmed_at.utcoffset() != timezone.utc.utcoffset(confirmed_at)
+        ):
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part}.confirmed_at "
+                    "must be a UTC ISO-8601 timestamp"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        for field_name in ("board_generation", "generation"):
+            value = qualification.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}.{field_name} "
+                        "must be a positive integer"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+
+        expected_policy_sha256 = _move_insert_qualification_policy_sha256()
+        policy_values = {
+            "qualification_policy_version": (
+                _MOVE_INSERT_QUALIFICATION_POLICY_VERSION
+            ),
+            "qualification_policy_sha256": expected_policy_sha256,
+            "required_confirmed_trials": (
+                _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+            ),
+            "confirmed_trial_count": _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS,
+        }
+        for field_name, expected_value in policy_values.items():
+            if qualification.get(field_name) != expected_value:
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}."
+                        f"{field_name} does not match the protected qualification "
+                        "policy"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+
+        confirmed_trial_ids = qualification.get("confirmed_trial_ids")
+        confirmed_trial_result_sha256s = qualification.get(
+            "confirmed_trial_result_sha256s"
+        )
+        confirmed_trial_trace_sha256s = qualification.get(
+            "confirmed_trial_trace_sha256s"
+        )
+        evidence_lists = {
+            "confirmed_trial_ids": confirmed_trial_ids,
+            "confirmed_trial_result_sha256s": confirmed_trial_result_sha256s,
+            "confirmed_trial_trace_sha256s": confirmed_trial_trace_sha256s,
+        }
+        for field_name, values in evidence_lists.items():
+            if (
+                not isinstance(values, list)
+                or len(values) != _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS
+                or any(
+                    not isinstance(value, str)
+                    or not value
+                    or value != value.strip()
+                    for value in values
+                )
+            ):
+                return {
+                    "success": False,
+                    "message": (
+                        f"move_insert qualification for {requested_part}."
+                        f"{field_name} must contain exactly one exact value"
+                    ),
+                    "profile_sha256": profile_sha256,
+                    "validated_parts": validated_parts,
+                }
+        if len(set(confirmed_trial_ids)) != _MOVE_INSERT_REQUIRED_CONFIRMED_TRIALS:
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part}."
+                    "confirmed_trial_ids must identify one trial"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        if qualification.get("trial_id") != confirmed_trial_ids[-1]:
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part}.trial_id "
+                    "must identify the confirmed trial"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+        for field_name in (
+            "confirmed_trial_result_sha256s",
+            "confirmed_trial_trace_sha256s",
+        ):
+            for value in qualification[field_name]:
+                try:
+                    valid_digest = len(value) == 64 and int(value, 16) >= 0
+                except ValueError:
+                    valid_digest = False
+                if not valid_digest:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"move_insert qualification for {requested_part}."
+                            f"{field_name} contains a non-SHA-256 value"
+                        ),
+                        "profile_sha256": profile_sha256,
+                        "validated_parts": validated_parts,
+                    }
+        qualification_identity = {
+            field_name: qualification.get(field_name)
+            for field_name in _MOVE_INSERT_QUALIFICATION_IDENTITY_FIELDS
+        }
+        expected_evidence_sha256 = _move_insert_qualification_evidence_sha256(
+            qualification_identity=qualification_identity,
+            trial_ids=confirmed_trial_ids,
+            result_sha256s=confirmed_trial_result_sha256s,
+            trace_sha256s=confirmed_trial_trace_sha256s,
+        )
+        if (
+            qualification.get("qualification_evidence_sha256")
+            != expected_evidence_sha256
+        ):
+            return {
+                "success": False,
+                "message": (
+                    f"move_insert qualification for {requested_part}."
+                    "qualification_evidence_sha256 does not match the "
+                    "confirmed trial"
+                ),
+                "profile_sha256": profile_sha256,
+                "validated_parts": validated_parts,
+            }
+
+    return {
+        "success": True,
+        "message": f"move_insert profile resolved for {requested_part}",
+        "part_name": requested_part,
+        "calibration_id": effective_calibration_id,
+        "shared_calibration_id": shared_calibration_id,
+        "override_calibration_id": override_calibration_id,
+        "profile_sha256": profile_sha256,
+        "validated_parts": validated_parts,
+        "qualification": deepcopy(qualification),
+        "demonstration_recipe": deepcopy(selected_demonstration_recipe),
+        **effective_values,
+    }
+
+
+def _validated_frozen_move_insert_profile(
+    profile: Mapping[str, Any] | None,
+    *,
+    part_name: str,
+    profile_sha256: Any,
+) -> dict[str, Any]:
+    if not isinstance(profile, Mapping):
+        return {"success": False, "message": "frozen move_insert_profile is missing"}
+    frozen = dict(profile)
+    frozen_part = frozen.get("part_name", part_name)
+    if frozen_part != part_name:
+        return {
+            "success": False,
+            "message": (
+                "frozen move_insert_profile part_name does not match the held part: "
+                f"expected {part_name!r}, found {frozen_part or '<empty>'!r}"
+            ),
+        }
+    shared_calibration_id = frozen.get("shared_calibration_id")
+    override_calibration_id = frozen.get("override_calibration_id")
+    effective_calibration_id = frozen.get("calibration_id")
+    if (
+        not isinstance(shared_calibration_id, str)
+        or not shared_calibration_id
+        or shared_calibration_id != shared_calibration_id.strip()
+    ):
+        return {
+            "success": False,
+            "message": "frozen move_insert shared_calibration_id is missing or is not exact",
+        }
+    if override_calibration_id is not None and (
+        not isinstance(override_calibration_id, str)
+        or not override_calibration_id
+        or override_calibration_id != override_calibration_id.strip()
+    ):
+        return {
+            "success": False,
+            "message": "frozen move_insert override_calibration_id is not exact",
+        }
+    expected_calibration_id = override_calibration_id or shared_calibration_id
+    if effective_calibration_id != expected_calibration_id:
+        return {
+            "success": False,
+            "message": (
+                "frozen move_insert calibration_id does not match its selected "
+                "shared/override calibration identity"
+            ),
+        }
+    raw_demonstration_recipe = frozen.get("demonstration_recipe", {})
+    if not isinstance(raw_demonstration_recipe, Mapping):
+        return {
+            "success": False,
+            "message": "frozen move_insert_profile demonstration_recipe is not an object",
+        }
+    synthetic_raw = {
+        "calibration_id": effective_calibration_id,
+        "validated_parts": [part_name],
+        **{field: frozen.get(field) for field in _MOVE_INSERT_PROFILE_FIELDS},
+        "part_overrides": {},
+        "demonstration_recipes": (
+            {part_name: deepcopy(dict(raw_demonstration_recipe))}
+            if raw_demonstration_recipe
+            else {}
+        ),
+        "qualifications": {},
+    }
+    validated = resolve_move_insert_profile(
+        {"move_insert": synthetic_raw},
+        part_name,
+        require_qualification=False,
+    )
+    if not validated.get("success"):
+        return validated
+    frozen_hash = str(profile_sha256 or frozen.get("profile_sha256") or "").strip()
+    try:
+        valid_hash = len(frozen_hash) == 64 and int(frozen_hash, 16) >= 0
+    except ValueError:
+        valid_hash = False
+    if not valid_hash:
+        return {
+            "success": False,
+            "message": "frozen move_insert_profile_sha256 is missing or invalid",
+        }
+    supplied_profile_hash = str(frozen.get("profile_sha256") or "").strip()
+    if supplied_profile_hash and supplied_profile_hash != frozen_hash:
+        return {
+            "success": False,
+            "message": "frozen move_insert_profile hash does not match move_insert_profile_sha256",
+        }
+    raw_qualification = frozen.get("qualification", {})
+    if not isinstance(raw_qualification, Mapping):
+        return {
+            "success": False,
+            "message": "frozen move_insert_profile qualification is not an object",
+        }
+    validated["profile_sha256"] = frozen_hash
+    validated["validated_parts"] = list(frozen.get("validated_parts") or [part_name])
+    validated["calibration_id"] = effective_calibration_id
+    validated["shared_calibration_id"] = shared_calibration_id
+    validated["override_calibration_id"] = override_calibration_id
+    validated["qualification"] = deepcopy(dict(raw_qualification))
+    validated["demonstration_recipe"] = deepcopy(
+        dict(raw_demonstration_recipe)
+    )
+    if raw_demonstration_recipe:
+        validated["force_depth_profile"] = deepcopy(
+            dict(raw_demonstration_recipe.get("force_depth_profile") or {})
+        )
+        validated["hard_caps_sha256"] = raw_demonstration_recipe.get(
+            "hard_caps_sha256"
+        )
+    return validated
+
+
+def derive_move_insert_timeout_sec(
+    expected_start_pose: Mapping[str, Any],
+    target_pose: Mapping[str, Any],
+    insertion_axis_world: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    part_name: str = "",
+    insert_max_timeout_sec: Any = None,
+) -> tuple[float, str]:
+    """Derive the insertion action timeout from the frozen motion inputs."""
+    try:
+        delta = tuple(
+            float(target_pose[field]) - float(expected_start_pose[field])
+            for field in ("x", "y", "z")
+        )
+        axis = tuple(float(insertion_axis_world[field]) for field in ("x", "y", "z"))
+        axis_norm = math.sqrt(sum(value * value for value in axis))
+        if not math.isfinite(axis_norm) or axis_norm <= 1e-12:
+            raise ValueError("insertion_axis_world must be a finite nonzero vector")
+        normalized_axis = tuple(value / axis_norm for value in axis)
+        axial_distance = sum(
+            value * direction for value, direction in zip(delta, normalized_axis, strict=True)
+        )
+        contact_speed = float(profile["contact_speed_m_s"])
+        radius = float(profile["spiral_radius_m"])
+        pitch = float(profile["spiral_pitch_m"])
+        spiral_speed = float(profile["spiral_speed_m_s"])
+        spiral_acceleration = float(profile["spiral_acceleration_m_s2"])
+        settle_time = float(profile["settle_time_sec"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return 0.0, f"cannot derive move_insert timeout: {exc}"
+    numeric = (
+        *delta,
+        *normalized_axis,
+        axial_distance,
+        contact_speed,
+        radius,
+        pitch,
+        spiral_speed,
+        spiral_acceleration,
+        settle_time,
+    )
+    if not all(math.isfinite(value) for value in numeric):
+        return 0.0, "cannot derive move_insert timeout from non-finite values"
+    if axial_distance <= 0.0:
+        return 0.0, "move_insert target must have positive progress along insertion_axis_world"
+    if min(contact_speed, pitch, spiral_speed, spiral_acceleration) <= 0.0:
+        return 0.0, "move_insert timeout speeds, pitch, and acceleration must be positive"
+    if radius < 0.0 or settle_time < 0.0:
+        return 0.0, "move_insert timeout radius and settle_time_sec must be non-negative"
+
+    contact_time = axial_distance / contact_speed
+    if radius == 0.0:
+        spiral_time = 0.0
+        ramp_time = 0.0
+    else:
+        b = pitch / (2.0 * math.pi)
+        theta_max = 2.0 * math.pi * radius / pitch
+        arc_length = 0.5 * b * (
+            theta_max * math.sqrt(1.0 + theta_max * theta_max)
+            + math.asinh(theta_max)
+        )
+        spiral_time = arc_length / spiral_speed
+        ramp_time = 2.0 * spiral_speed / spiral_acceleration
+    engagement_hold_sec = max(0.10, min(settle_time, 0.25))
+    stall_hold_sec = max(0.10, min(settle_time, 0.50))
+    seated_hold_sec = max(0.10, settle_time)
+    force_filter_window_sec = max(0.06, min(settle_time, 0.10))
+    contact_hold_sec = max(0.06, min(engagement_hold_sec, 0.10))
+    scheduling_margin_sec = 0.10
+    timeout_sec = (
+        contact_time
+        + spiral_time
+        + ramp_time
+        + force_filter_window_sec
+        + contact_hold_sec
+        + stall_hold_sec
+        + engagement_hold_sec
+        + seated_hold_sec
+        + scheduling_margin_sec
+    )
+    if not math.isfinite(timeout_sec) or timeout_sec <= 0.0:
+        return 0.0, "derived move_insert timeout is not finite and positive"
+    if part_name in _MOVE_INSERT_SUPPORTED_PARTS:
+        try:
+            protected_timeout_sec = float(insert_max_timeout_sec)
+        except (TypeError, ValueError, OverflowError):
+            protected_timeout_sec = math.nan
+        if not math.isfinite(protected_timeout_sec) or protected_timeout_sec <= 0.0:
+            return 0.0, (
+                f"cannot derive {part_name} move_insert recovery timeout without the exact "
+                "insert_max_timeout_sec hard cap"
+            )
+        timeout_sec = protected_timeout_sec
+    return timeout_sec, ""
+
+
+def _quaternion_multiply(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _rotate_vector(
+    quaternion: tuple[float, float, float, float],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    qx, qy, qz, qw = quaternion
+    vx, vy, vz = vector
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + qy * tz - qz * ty,
+        vy + qw * ty + qz * tx - qx * tz,
+        vz + qw * tz + qx * ty - qy * tx,
+    )
+
+
+def _compose_pose(
+    parent: Mapping[str, Any],
+    relative: Mapping[str, Any],
+) -> dict[str, float]:
+    parent_pose = _pose_from_mapping(dict(parent))
+    relative_pose = _pose_from_mapping(dict(relative))
+    parent_quaternion = tuple(
+        parent_pose[field] for field in ("qx", "qy", "qz", "qw")
+    )
+    relative_quaternion = tuple(
+        relative_pose[field] for field in ("qx", "qy", "qz", "qw")
+    )
+    rotated = _rotate_vector(
+        parent_quaternion,
+        tuple(relative_pose[field] for field in ("x", "y", "z")),
+    )
+    quaternion, quaternion_error = _normalized_optional_quaternion(
+        *_quaternion_multiply(parent_quaternion, relative_quaternion)
+    )
+    if quaternion_error or quaternion is None:
+        raise ValueError(quaternion_error or "composed pose quaternion is invalid")
+    return {
+        "x": parent_pose["x"] + rotated[0],
+        "y": parent_pose["y"] + rotated[1],
+        "z": parent_pose["z"] + rotated[2],
+        **dict(zip(("qx", "qy", "qz", "qw"), quaternion, strict=True)),
+    }
+
+
+def _inverse_pose(pose: Mapping[str, Any]) -> dict[str, float]:
+    normalized = _pose_from_mapping(dict(pose))
+    inverse_quaternion = (
+        -normalized["qx"],
+        -normalized["qy"],
+        -normalized["qz"],
+        normalized["qw"],
+    )
+    inverse_translation = _rotate_vector(
+        inverse_quaternion,
+        (-normalized["x"], -normalized["y"], -normalized["z"]),
+    )
+    return {
+        "x": inverse_translation[0],
+        "y": inverse_translation[1],
+        "z": inverse_translation[2],
+        **dict(
+            zip(
+                ("qx", "qy", "qz", "qw"),
+                inverse_quaternion,
+                strict=True,
+            )
+        ),
+    }
+
+
 def _pose_delta(left: dict[str, float], right: dict[str, float]) -> tuple[float, float]:
     translation_m = math.sqrt(
         sum((float(left[field]) - float(right[field])) ** 2 for field in ("x", "y", "z"))
@@ -140,6 +2076,366 @@ def _pose_delta(left: dict[str, float], right: dict[str, float]) -> tuple[float,
     dot = abs(sum(a * b for a, b in zip(left_q, right_q, strict=True)))
     rotation_deg = math.degrees(2.0 * math.acos(max(-1.0, min(1.0, dot))))
     return translation_m, rotation_deg
+
+
+def compute_move_insert_geometry(  # noqa: C901, PLR0912 - fail-closed geometry gates.
+    *,
+    part_name: str,
+    product_geometry: Mapping[str, Any],
+    assembly_board_v1_aruco: Mapping[str, Any],
+    held_part_handoff: Mapping[str, Any],
+    move_insert_profile: Mapping[str, Any],
+    move_insert_profile_sha256: str,
+    z_adjustment_m: float = 0.0,
+) -> dict[str, Any]:
+    """Compute complete physical UR5e insertion poses without commanding motion."""
+    if part_name not in _MOVE_INSERT_SUPPORTED_PARTS:
+        return {
+            "success": False,
+            "message": f"move_insert does not support exact part identifier {part_name!r}",
+        }
+    geometry = dict(product_geometry) if isinstance(product_geometry, Mapping) else {}
+    target_reference = dict(geometry.get("target_reference") or {})
+    if (
+        target_reference.get("target_point") != "inserted_part_origin"
+        or target_reference.get("surface_role") != "assembly_slot"
+    ):
+        return {
+            "success": False,
+            "message": (
+                "move_insert requires target_reference.target_point="
+                "'inserted_part_origin' and surface_role='assembly_slot'"
+            ),
+        }
+    try:
+        marker_pose = _pose_from_mapping(dict(assembly_board_v1_aruco).get("pose"))
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            "success": False,
+            "message": f"assembly_board-v1 ArUco pose is missing or invalid: {exc}",
+        }
+    profile = _validated_frozen_move_insert_profile(
+        move_insert_profile,
+        part_name=part_name,
+        profile_sha256=move_insert_profile_sha256,
+    )
+    if not profile.get("success"):
+        return profile
+    demonstration_recipe = dict(profile.get("demonstration_recipe") or {})
+    if demonstration_recipe:
+        handoff = (
+            dict(held_part_handoff)
+            if isinstance(held_part_handoff, Mapping)
+            else {}
+        )
+        if not handoff:
+            return {
+                "success": False,
+                "missing_held_part_handoff": True,
+                "message": (
+                    "move_insert learned geometry is valid; held_part_handoff is "
+                    "required after pick_grasp to compute complete insertion poses"
+                ),
+            }
+        if (
+            handoff.get("part_name") != part_name
+            or handoff.get("frame_id") != "world"
+            or handoff.get("tool_frame") != "tool0"
+            or handoff.get("part_frame") != "held_part_origin"
+        ):
+            return {"success": False, "message": "held-part SE(3) provenance is invalid"}
+        try:
+            world_tool0_at_grasp = _pose_from_mapping(
+                handoff["world_tool0_pose_at_grasp"]
+            )
+            world_held_part_at_grasp = _pose_from_mapping(
+                handoff["world_held_part_pose_at_grasp"]
+            )
+            tool0_to_held_part = _pose_from_mapping(
+                handoff["tool0_to_held_part"]
+            )
+            recomposed_part = _compose_pose(
+                world_tool0_at_grasp,
+                tool0_to_held_part,
+            )
+            aruco_to_seated_held_part = _pose_from_mapping(
+                demonstration_recipe["aruco_to_seated_held_part"]
+            )
+            aruco_axis = tuple(
+                float(demonstration_recipe["aruco_insertion_axis"][field])
+                for field in ("x", "y", "z")
+            )
+            pre_insert_offset_m = float(profile["pre_insert_offset_m"])
+            z_adjustment = float(z_adjustment_m)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "message": f"learned insertion geometry is incomplete: {exc}",
+            }
+        handoff_delta = _pose_delta(recomposed_part, world_held_part_at_grasp)
+        if handoff_delta[0] > 1e-6 or handoff_delta[1] > 1e-4:
+            return {
+                "success": False,
+                "message": (
+                    "held-part SE(3) handoff does not reconstruct its frozen pick poses"
+                ),
+            }
+        marker_quaternion = tuple(
+            marker_pose[field] for field in ("qx", "qy", "qz", "qw")
+        )
+        insertion_axis_tuple = _rotate_vector(marker_quaternion, aruco_axis)
+        axis_norm = math.sqrt(sum(value * value for value in insertion_axis_tuple))
+        if not math.isfinite(axis_norm) or axis_norm <= 1e-12:
+            return {"success": False, "message": "learned insertion axis is invalid"}
+        insertion_axis_world = dict(
+            zip(
+                ("x", "y", "z"),
+                (value / axis_norm for value in insertion_axis_tuple),
+                strict=True,
+            )
+        )
+        target_part_origin = _compose_pose(
+            marker_pose,
+            aruco_to_seated_held_part,
+        )
+        insert_pose = _compose_pose(
+            target_part_origin,
+            _inverse_pose(tool0_to_held_part),
+        )
+        insert_pose["z"] += z_adjustment
+        pre_insert_pose = {
+            axis: insert_pose[axis]
+            - insertion_axis_world[axis] * pre_insert_offset_m
+            for axis in ("x", "y", "z")
+        }
+        pre_insert_pose.update(
+            {field: insert_pose[field] for field in ("qx", "qy", "qz", "qw")}
+        )
+        approach_pose = {
+            axis: pre_insert_pose[axis] - insertion_axis_world[axis] * 0.05
+            for axis in ("x", "y", "z")
+        }
+        approach_pose.update(
+            {field: insert_pose[field] for field in ("qx", "qy", "qz", "qw")}
+        )
+        timeout_sec, timeout_error = derive_move_insert_timeout_sec(
+            pre_insert_pose,
+            insert_pose,
+            insertion_axis_world,
+            profile,
+            part_name=part_name,
+            insert_max_timeout_sec=dict(
+                demonstration_recipe.get("hard_caps") or {}
+            ).get("insert_max_timeout_sec"),
+        )
+        if timeout_error:
+            return {"success": False, "message": timeout_error}
+        return {
+            "success": True,
+            "part_name": part_name,
+            "assembly_board_v1_pose": marker_pose,
+            "assembly_board_v1_registration": {
+                "calibration_id": str(
+                    demonstration_recipe.get("board_calibration_id") or ""
+                ),
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            },
+            "target_origin_pose": target_part_origin,
+            "approach_pose": approach_pose,
+            "pre_insert_pose": pre_insert_pose,
+            "insert_pose": insert_pose,
+            "insertion_axis_world": insertion_axis_world,
+            "move_insert_profile": {
+                key: deepcopy(value)
+                for key, value in profile.items()
+                if key not in {"success", "message"}
+            },
+            "move_insert_profile_sha256": profile["profile_sha256"],
+            "move_insert_timeout_sec": timeout_sec,
+            "slot_x": target_part_origin["x"],
+            "slot_y": target_part_origin["y"],
+            "board_top_z": target_part_origin["z"],
+            "part_height": float(geometry.get("part_height_m") or 0.0),
+            "place_part_origin_z": target_part_origin["z"],
+            "place_z": insert_pose["z"],
+            "geometry_source": "insertion_demonstration",
+        }
+    try:
+        registration = dict(
+            geometry["assembly_board-v1_aruco_to_assembly_board-v1"]
+        )
+        marker_to_board = _pose_from_mapping(registration)
+        world_board_pose = _compose_pose(marker_pose, marker_to_board)
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            "success": False,
+            "message": (
+                "assembly_board-v1_aruco_to_assembly_board-v1 is missing or invalid: "
+                f"{exc}"
+            ),
+        }
+    registration_calibration_id = registration.get("calibration_id")
+    if (
+        not isinstance(registration_calibration_id, str)
+        or not registration_calibration_id
+        or registration_calibration_id != registration_calibration_id.strip()
+    ):
+        return {
+            "success": False,
+            "message": (
+                "assembly_board-v1_aruco_to_assembly_board-v1.calibration_id "
+                "is missing or is not exact"
+            ),
+        }
+    board_center = dict(geometry.get("board_center") or {})
+    slot_xy = geometry.get("slot_xy")
+    try:
+        local_slot_x = float(slot_xy[0])
+        local_slot_y = float(slot_xy[1])
+        local_slot_floor_z = float(geometry["slot_floor_z_m"]) - float(
+            board_center["z"]
+        )
+        part_height_m = float(geometry["part_height_m"])
+        z_adjustment = float(z_adjustment_m)
+    except (KeyError, IndexError, TypeError, ValueError, OverflowError) as exc:
+        return {"success": False, "message": f"assembly_slot geometry is invalid: {exc}"}
+    if not all(
+        math.isfinite(value)
+        for value in (
+            local_slot_x,
+            local_slot_y,
+            local_slot_floor_z,
+            part_height_m,
+            z_adjustment,
+        )
+    ) or part_height_m <= 0.0:
+        return {"success": False, "message": "assembly_slot geometry is not finite"}
+    handoff = dict(held_part_handoff) if isinstance(held_part_handoff, Mapping) else {}
+    if not handoff:
+        return {
+            "success": False,
+            "missing_held_part_handoff": True,
+            "message": (
+                "move_insert static geometry is valid; held_part_handoff is required "
+                "after pick_grasp to compute complete insertion poses"
+            ),
+        }
+    if (
+        handoff.get("part_name") != part_name
+        or handoff.get("frame_id") != "world"
+        or handoff.get("tool_frame") != "tool0"
+        or handoff.get("part_frame") != "held_part_origin"
+    ):
+        return {"success": False, "message": "held-part SE(3) provenance is invalid"}
+    try:
+        world_tool0_at_grasp = _pose_from_mapping(
+            handoff["world_tool0_pose_at_grasp"]
+        )
+        world_held_part_at_grasp = _pose_from_mapping(
+            handoff["world_held_part_pose_at_grasp"]
+        )
+        tool0_to_held_part = _pose_from_mapping(handoff["tool0_to_held_part"])
+        recomposed_part = _compose_pose(world_tool0_at_grasp, tool0_to_held_part)
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            "success": False,
+            "message": f"held-part SE(3) handoff is incomplete: {exc}",
+        }
+    handoff_delta = _pose_delta(recomposed_part, world_held_part_at_grasp)
+    if handoff_delta[0] > 1e-6 or handoff_delta[1] > 1e-4:
+        return {
+            "success": False,
+            "message": "held-part SE(3) handoff does not reconstruct its frozen pick poses",
+        }
+    board_quaternion = tuple(
+        world_board_pose[field] for field in ("qx", "qy", "qz", "qw")
+    )
+    board_normal = _rotate_vector(board_quaternion, (0.0, 0.0, 1.0))
+    insertion_axis_world = {
+        "x": -board_normal[0],
+        "y": -board_normal[1],
+        "z": -board_normal[2],
+    }
+    local_part_origin = (
+        local_slot_x,
+        local_slot_y,
+        local_slot_floor_z + part_height_m * 0.5,
+    )
+    rotated_part_origin = _rotate_vector(board_quaternion, local_part_origin)
+    target_part_origin = {
+        "x": world_board_pose["x"] + rotated_part_origin[0],
+        "y": world_board_pose["y"] + rotated_part_origin[1],
+        "z": world_board_pose["z"] + rotated_part_origin[2],
+        **{
+            field: world_board_pose[field]
+            for field in ("qx", "qy", "qz", "qw")
+        },
+    }
+    insert_pose = _compose_pose(target_part_origin, _inverse_pose(tool0_to_held_part))
+    insert_pose["z"] += z_adjustment
+    pre_insert_offset_m = float(profile["pre_insert_offset_m"])
+    pre_insert_pose = {
+        axis: insert_pose[axis] - insertion_axis_world[axis] * pre_insert_offset_m
+        for axis in ("x", "y", "z")
+    }
+    pre_insert_pose.update(
+        {field: insert_pose[field] for field in ("qx", "qy", "qz", "qw")}
+    )
+    approach_pose = {
+        axis: pre_insert_pose[axis] - insertion_axis_world[axis] * 0.05
+        for axis in ("x", "y", "z")
+    }
+    approach_pose.update(
+        {field: insert_pose[field] for field in ("qx", "qy", "qz", "qw")}
+    )
+    timeout_sec, timeout_error = derive_move_insert_timeout_sec(
+        pre_insert_pose,
+        insert_pose,
+        insertion_axis_world,
+        profile,
+    )
+    if timeout_error:
+        return {"success": False, "message": timeout_error}
+    return {
+        "success": True,
+        "part_name": part_name,
+        "assembly_board_v1_pose": world_board_pose,
+        "assembly_board_v1_registration": {
+            "calibration_id": registration_calibration_id,
+            **{
+                field: float(registration[field])
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            },
+        },
+        "target_origin_pose": target_part_origin,
+        "approach_pose": approach_pose,
+        "pre_insert_pose": pre_insert_pose,
+        "insert_pose": insert_pose,
+        "insertion_axis_world": insertion_axis_world,
+        "move_insert_profile": {
+            key: deepcopy(value)
+            for key, value in profile.items()
+            if key not in {"success", "message"}
+        },
+        "move_insert_profile_sha256": profile["profile_sha256"],
+        "move_insert_timeout_sec": timeout_sec,
+        "slot_x": target_part_origin["x"],
+        "slot_y": target_part_origin["y"],
+        "board_top_z": world_board_pose["z"]
+        + _rotate_vector(
+            board_quaternion,
+            (local_slot_x, local_slot_y, local_slot_floor_z),
+        )[2],
+        "part_height": part_height_m,
+        "place_part_origin_z": target_part_origin["z"],
+        "place_z": insert_pose["z"],
+    }
 
 
 def _physical_detection_error(
@@ -944,6 +3240,20 @@ class GazeboPickPlaceController:
         )
         if orientation_error:
             return {"success": False, "message": f"move_cartesian {orientation_error}"}
+        try:
+            target_x = float(x)
+            target_y = float(y)
+            target_z = float(z)
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "success": False,
+                "message": "move_cartesian position must contain finite numeric values",
+            }
+        if not all(math.isfinite(value) for value in (target_x, target_y, target_z)):
+            return {
+                "success": False,
+                "message": "move_cartesian position must contain finite numeric values",
+            }
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ee = self._get_ee_pose()
@@ -952,17 +3262,27 @@ class GazeboPickPlaceController:
                 "success": False,
                 "message": self._unavailable_message("cannot read current ee pose"),
             }
-        orientation = ee.orientation
-        if normalized_quaternion is not None:
-            orientation = self._make_orientation(*normalized_quaternion)
-        target_x = float(x)
-        target_y = float(y)
-        target_z = float(z)
+        if normalized_quaternion is None:
+            normalized_quaternion, orientation_error = _normalized_optional_quaternion(
+                getattr(ee.orientation, "x", None),
+                getattr(ee.orientation, "y", None),
+                getattr(ee.orientation, "z", None),
+                getattr(ee.orientation, "w", None),
+            )
+            if orientation_error or normalized_quaternion is None:
+                return {
+                    "success": False,
+                    "message": (
+                        "move_cartesian current end-effector orientation is invalid: "
+                        f"{orientation_error or 'orientation is unavailable'}"
+                    ),
+                }
+        orientation = self._make_orientation(*normalized_quaternion)
         same_xy = math.isclose(float(ee.position.x), target_x, abs_tol=1e-6) and math.isclose(
             float(ee.position.y), target_y, abs_tol=1e-6
         )
         if same_xy:
-            return self._move_pose_direct(
+            result = self._move_pose_direct(
                 target_x,
                 target_y,
                 target_z,
@@ -970,14 +3290,276 @@ class GazeboPickPlaceController:
                 label="move_cartesian",
                 speed=speed,
             )
-        return self._move_xy_at_z(
-            target_x,
-            target_y,
-            target_z,
-            orientation=orientation,
-            label="move_cartesian",
-            speed=speed,
+        else:
+            result = self._move_xy_at_z(
+                target_x,
+                target_y,
+                target_z,
+                orientation=orientation,
+                label="move_cartesian",
+                speed=speed,
+            )
+        if result.get("success"):
+            result["absolute_position"] = {
+                "x": target_x,
+                "y": target_y,
+                "z": target_z,
+                **dict(
+                    zip(
+                        ("qx", "qy", "qz", "qw"),
+                        normalized_quaternion,
+                        strict=True,
+                    )
+                ),
+            }
+        return result
+
+    def move_insert(  # noqa: C901, PLR0913 - mirrors the fixed ROS action contract.
+        self,
+        part_name: str,
+        calibration_id: str,
+        profile_sha256: str,
+        hard_caps_sha256: str,
+        expected_start_pose: dict[str, Any],
+        target_pose: dict[str, Any],
+        insertion_axis_world: dict[str, Any],
+        contact_speed_m_s: float,
+        contact_force_delta_n: float,
+        engagement_progress_m: float,
+        insertion_force_n: float,
+        spiral_radius_m: float,
+        spiral_pitch_m: float,
+        spiral_speed_m_s: float,
+        spiral_acceleration_m_s2: float,
+        max_axial_force_n: float,
+        max_lateral_force_n: float,
+        max_torque_nm: float,
+        force_depth_profile: dict[str, Any],
+        baseline_force_uncertainty_n: float,
+        baseline_torque_uncertainty_nm: float,
+        tilt_tolerance_rad: float,
+        seated_depth_tolerance_m: float,
+        settle_time_sec: float,
+        timeout_sec: float,
+        trial_id: str = "",
+    ) -> dict[str, Any]:
+        """Execute the internal insertion move in simulation without contact search."""
+        requested_part = part_name if isinstance(part_name, str) else ""
+        requested_trial_id = trial_id if isinstance(trial_id, str) else ""
+        if not isinstance(trial_id, str) or requested_trial_id != requested_trial_id.strip():
+            return {
+                "success": False,
+                "message": "move_insert trial_id is invalid",
+                "trial_id": requested_trial_id,
+            }
+        if requested_part not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return {
+                "success": False,
+                "message": f"move_insert does not support exact part identifier {requested_part!r}",
+            }
+        try:
+            start = _pose_from_mapping(expected_start_pose)
+            target = _pose_from_mapping(target_pose)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"success": False, "message": f"move_insert pose is invalid: {exc}"}
+
+        if self.execution_mode == "simulation":
+            if not self.wait_for_services():
+                return {
+                    "success": False,
+                    "message": self._unavailable_message("services not ready"),
+                }
+            ee = self._get_ee_pose()
+            if ee is None:
+                return {
+                    "success": False,
+                    "message": self._unavailable_message("cannot read current ee pose"),
+                }
+            try:
+                current = _pose_from_mapping(
+                    {
+                        "x": ee.position.x,
+                        "y": ee.position.y,
+                        "z": ee.position.z,
+                        "qx": ee.orientation.x,
+                        "qy": ee.orientation.y,
+                        "qz": ee.orientation.z,
+                        "qw": ee.orientation.w,
+                    }
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "message": f"move_insert current tool pose is invalid: {exc}",
+                }
+            translation_error_m, rotation_error_deg = _pose_delta(current, start)
+            if translation_error_m > 0.003 or rotation_error_deg > 3.0:
+                return {
+                    "success": False,
+                    "message": (
+                        "move_insert expected start pose mismatch: "
+                        f"translation={translation_error_m:.4f} m, "
+                        f"rotation={rotation_error_deg:.2f} deg"
+                    ),
+                }
+            orientation = self._make_orientation(
+                target["qx"], target["qy"], target["qz"], target["qw"]
+            )
+            result = self._move_pose_direct(
+                target["x"],
+                target["y"],
+                target["z"],
+                orientation=orientation,
+                label="move_insert:simulation_direct",
+            )
+            if result.get("success"):
+                result.update(
+                    {
+                        "absolute_position": target,
+                        "trial_id": requested_trial_id,
+                        "move_insert_mode": "simulation_direct",
+                        "hard_caps_sha256": str(hard_caps_sha256 or ""),
+                        "message": (
+                            "simulation_direct moved to insert_pose without force or "
+                            "contact search"
+                        ),
+                    }
+                )
+            return result
+
+        if not isinstance(calibration_id, str) or not calibration_id:
+            return {"success": False, "message": "move_insert calibration_id is missing"}
+        supplied_hash = profile_sha256 if isinstance(profile_sha256, str) else ""
+        supplied_hard_caps_hash = (
+            hard_caps_sha256 if isinstance(hard_caps_sha256, str) else ""
         )
+        try:
+            valid_hash = len(supplied_hash) == 64 and int(supplied_hash, 16) >= 0
+            valid_hard_caps_hash = (
+                len(supplied_hard_caps_hash) == 64
+                and int(supplied_hard_caps_hash, 16) >= 0
+            )
+        except ValueError:
+            valid_hash = False
+            valid_hard_caps_hash = False
+        if not valid_hash or not valid_hard_caps_hash:
+            return {
+                "success": False,
+                "message": (
+                    "move_insert profile_sha256 or hard_caps_sha256 is invalid"
+                ),
+            }
+        if not isinstance(force_depth_profile, dict):
+            return {
+                "success": False,
+                "message": "move_insert force_depth_profile must be an object",
+            }
+
+        profile = {
+            "contact_speed_m_s": contact_speed_m_s,
+            "contact_force_delta_n": contact_force_delta_n,
+            "engagement_progress_m": engagement_progress_m,
+            "insertion_force_n": insertion_force_n,
+            "spiral_radius_m": spiral_radius_m,
+            "spiral_pitch_m": spiral_pitch_m,
+            "spiral_speed_m_s": spiral_speed_m_s,
+            "spiral_acceleration_m_s2": spiral_acceleration_m_s2,
+            "max_axial_force_n": max_axial_force_n,
+            "max_lateral_force_n": max_lateral_force_n,
+            "max_torque_nm": max_torque_nm,
+            "tilt_tolerance_rad": tilt_tolerance_rad,
+            "seated_depth_tolerance_m": seated_depth_tolerance_m,
+            "settle_time_sec": settle_time_sec,
+        }
+        derived_timeout, timeout_error = derive_move_insert_timeout_sec(
+            start,
+            target,
+            insertion_axis_world,
+            profile,
+            part_name=requested_part,
+            insert_max_timeout_sec=timeout_sec,
+        )
+        if timeout_error:
+            return {"success": False, "message": timeout_error}
+        try:
+            supplied_timeout = float(timeout_sec)
+        except (TypeError, ValueError, OverflowError):
+            supplied_timeout = math.nan
+        if not math.isfinite(supplied_timeout) or not math.isclose(
+            supplied_timeout,
+            derived_timeout,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return {
+                "success": False,
+                "message": (
+                    "move_insert timeout_sec does not match the timeout derived from "
+                    "the frozen poses and profile"
+                ),
+            }
+        if not self.wait_for_services():
+            return {"success": False, "message": self._unavailable_message("services not ready")}
+        ee = self._get_ee_pose()
+        if ee is None:
+            return {
+                "success": False,
+                "message": self._unavailable_message("cannot read current ee pose"),
+            }
+        try:
+            current = _pose_from_mapping(
+                {
+                    "x": ee.position.x,
+                    "y": ee.position.y,
+                    "z": ee.position.z,
+                    "qx": ee.orientation.x,
+                    "qy": ee.orientation.y,
+                    "qz": ee.orientation.z,
+                    "qw": ee.orientation.w,
+                }
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            return {
+                "success": False,
+                "message": f"move_insert current tool0 pose is invalid: {exc}",
+            }
+        translation_error_m, rotation_error_deg = _pose_delta(current, start)
+        if translation_error_m > 0.003 or rotation_error_deg > 3.0:
+            return {
+                "success": False,
+                "message": (
+                    "move_insert expected start pose mismatch: "
+                    f"translation={translation_error_m:.4f} m, "
+                    f"rotation={rotation_error_deg:.2f} deg"
+                ),
+            }
+        orientation = self._make_orientation(
+            target["qx"], target["qy"], target["qz"], target["qw"]
+        )
+        result = self._move_pose_direct(
+            target["x"],
+            target["y"],
+            target["z"],
+            orientation=orientation,
+            label="move_insert",
+        )
+        if result.get("success"):
+            result.update(
+                {
+                    "absolute_position": target,
+                    "profile_sha256": supplied_hash,
+                    "hard_caps_sha256": supplied_hard_caps_hash,
+                    "contact_detected": False,
+                    "final_insertion_depth_m": math.sqrt(
+                        sum(
+                            (target[field] - start[field]) ** 2
+                            for field in ("x", "y", "z")
+                        )
+                    ),
+                }
+            )
+        result["trial_id"] = requested_trial_id
+        return result
 
     def move_relative(
         self,
@@ -2088,6 +4670,40 @@ class GazeboPickPlaceController:
             f"travel_z={travel_z:.3f} pick_z={pick_z:.3f} tcp_offset_z={ee_tcp_offset_z:.3f}"
         )
 
+        raw_part_pose = target if isinstance(target, dict) else target_pose
+        raw_part_pose = raw_part_pose if isinstance(raw_part_pose, dict) else {}
+        if all(field in raw_part_pose for field in ("qx", "qy", "qz", "qw")):
+            part_quaternion, part_quaternion_error = _normalized_optional_quaternion(
+                raw_part_pose.get("qx"),
+                raw_part_pose.get("qy"),
+                raw_part_pose.get("qz"),
+                raw_part_pose.get("qw"),
+            )
+            if part_quaternion_error or part_quaternion is None:
+                return {
+                    "success": False,
+                    "message": (
+                        "detected part orientation is invalid: "
+                        f"{part_quaternion_error or 'orientation is unavailable'}"
+                    ),
+                }
+            part_orientation_source = target_pose_source_used or "live_detection"
+        else:
+            part_quaternion = (0.0, 0.0, 0.0, 1.0)
+            part_orientation_source = "upright_axial_part_assumption"
+        origin_pose = {
+            "x": tx,
+            "y": ty,
+            "z": tz,
+            **dict(
+                zip(
+                    ("qx", "qy", "qz", "qw"),
+                    part_quaternion,
+                    strict=True,
+                )
+            ),
+        }
+
         result = {
             "success": True,
             "part_name": target_part_name,
@@ -2110,6 +4726,14 @@ class GazeboPickPlaceController:
             "use_global_min_pick_tcp_z": bool(use_global_min_pick_tcp_z)
             and not bool(physical_stl_pick),
             "target_pose_source": target_pose_source_used,
+            "origin_pose": origin_pose,
+            "origin_pose_provenance": {
+                "frame_id": "world",
+                "part_name": target_part_name,
+                "model_name": target_model,
+                "source": target_pose_source_used or "perception",
+                "orientation_source": part_orientation_source,
+            },
             "prefer_live_detection": bool(prefer_live_detection),
             "start_x": ee.position.x,
             "start_y": ee.position.y,
@@ -2561,6 +5185,65 @@ class GazeboPickPlaceController:
             product_geometry=product_geometry,
         )
         frozen_board_pose = dict(assembly_board_v1_aruco or {})
+        world_board_pose: dict[str, float] = {}
+        board_registration: dict[str, Any] = {}
+        move_insert_profile: dict[str, Any] = {}
+        physical_ur5e_board = (
+            self.execution_mode == "physical"
+            and str(self.robot_name or "").strip() == "ur5e"
+            and symbolic_destination == _ASSEMBLY_BOARD_V1
+            and bool(pick_ctx)
+        )
+        if physical_ur5e_board:
+            raw_registration = geo.get(
+                "assembly_board-v1_aruco_to_assembly_board-v1"
+            )
+            registration_ready = False
+            if isinstance(raw_registration, Mapping):
+                registration_calibration_id = str(
+                    raw_registration.get("calibration_id") or ""
+                )
+                try:
+                    _pose_from_mapping(raw_registration)
+                except (KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    registration_ready = bool(
+                        registration_calibration_id
+                        and registration_calibration_id
+                        == registration_calibration_id.strip()
+                    )
+            trial_profile = resolve_move_insert_profile(
+                self.controller_config.get("parts_tuning"),
+                target_part_name,
+                require_qualification=False,
+            )
+            learned_registration_ready = bool(
+                trial_profile.get("success")
+                and dict(trial_profile.get("demonstration_recipe") or {})
+            )
+            if (
+                not trial_profile.get("success")
+                or not (registration_ready or learned_registration_ready)
+            ):
+                # place_approach remains usable without insertion commissioning.
+                # Omitting the profile keeps place_insert and trials fail-closed.
+                physical_ur5e_board = False
+        physical_xarm6_held_part_assembly_slot = (
+            self.execution_mode == "physical"
+            and str(self.robot_name or "").strip() == "xarm6"
+            and symbolic_destination == _ASSEMBLY_BOARD_V1
+            and bool(pick_ctx)
+            and str(
+                dict(geo.get("target_reference") or {}).get("surface_role") or ""
+            )
+            == "assembly_slot"
+        )
+        if physical_xarm6_held_part_assembly_slot:
+            return {
+                "success": False,
+                "message": _PHYSICAL_XARM6_ASSEMBLY_SLOT_INSERT_ERROR,
+            }
         if self.execution_mode == "physical" and symbolic_destination == _ASSEMBLY_BOARD_V1:
             if not frozen_board_pose:
                 return {
@@ -2595,6 +5278,165 @@ class GazeboPickPlaceController:
                     "success": False,
                     "message": "frozen assembly_board-v1 ArUco generation is invalid",
                 }
+        if physical_ur5e_board:
+            configured_trial_profile = resolve_move_insert_profile(
+                self.controller_config.get("parts_tuning"),
+                target_part_name,
+                require_qualification=False,
+            )
+            learned_recipe = dict(
+                configured_trial_profile.get("demonstration_recipe") or {}
+            )
+            raw_registration = geo.get(
+                "assembly_board-v1_aruco_to_assembly_board-v1"
+            )
+            if not learned_recipe and not isinstance(raw_registration, Mapping):
+                return {
+                    "success": False,
+                    "message": (
+                        "physical assembly_board-v1 placement requires calibrated "
+                        "assembly_board-v1_aruco_to_assembly_board-v1 geometry"
+                    ),
+                }
+            try:
+                marker_pose = _pose_from_mapping(frozen_board_pose.get("pose"))
+                if learned_recipe:
+                    board_registration = {
+                        "calibration_id": str(
+                            learned_recipe.get("board_calibration_id") or ""
+                        ),
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0,
+                        "qx": 0.0,
+                        "qy": 0.0,
+                        "qz": 0.0,
+                        "qw": 1.0,
+                    }
+                    world_board_pose = marker_pose
+                else:
+                    board_registration = dict(raw_registration)
+                    registration_calibration_id = str(
+                        board_registration.get("calibration_id") or ""
+                    ).strip()
+                    if not registration_calibration_id:
+                        return {
+                            "success": False,
+                            "message": (
+                                "assembly_board-v1_aruco_to_assembly_board-v1."
+                                "calibration_id is missing"
+                            ),
+                        }
+                    marker_to_board = _pose_from_mapping(board_registration)
+                    world_board_pose = _compose_pose(marker_pose, marker_to_board)
+            except (KeyError, TypeError, ValueError) as exc:
+                return {
+                    "success": False,
+                    "message": (
+                        "assembly_board-v1_aruco_to_assembly_board-v1 is invalid: "
+                        f"{exc}"
+                    ),
+                }
+
+            raw_frozen_profile = geo.get("move_insert_profile")
+            if isinstance(raw_frozen_profile, Mapping):
+                frozen_profile = _validated_frozen_move_insert_profile(
+                    raw_frozen_profile,
+                    part_name=target_part_name,
+                    profile_sha256=geo.get("move_insert_profile_sha256"),
+                )
+                if not frozen_profile.get("success"):
+                    return frozen_profile
+                frozen_qualification = dict(
+                    frozen_profile.get("qualification") or {}
+                )
+                configured_profile = resolve_move_insert_profile(
+                    self.controller_config.get("parts_tuning"),
+                    target_part_name,
+                    require_qualification=bool(frozen_qualification),
+                )
+                if (
+                    not configured_profile.get("success")
+                    or dict(configured_profile.get("qualification") or {})
+                    != frozen_qualification
+                ):
+                    configured_profile = resolve_move_insert_profile(
+                        self.controller_config.get("parts_tuning"),
+                        target_part_name,
+                        require_qualification=False,
+                    )
+                if not configured_profile.get("success"):
+                    return configured_profile
+                frozen_identity_fields = (
+                    "part_name",
+                    "calibration_id",
+                    "shared_calibration_id",
+                    "override_calibration_id",
+                    "profile_sha256",
+                    *_MOVE_INSERT_PROFILE_FIELDS,
+                )
+                mismatched_fields = [
+                    field_name
+                    for field_name in frozen_identity_fields
+                    if frozen_profile.get(field_name)
+                    != configured_profile.get(field_name)
+                ]
+                if mismatched_fields:
+                    return {
+                        "success": False,
+                        "message": (
+                            "frozen move_insert_profile does not match the protected "
+                            "controller profile; changed fields: "
+                            f"{mismatched_fields}"
+                        ),
+                    }
+                move_insert_profile = configured_profile
+            else:
+                move_insert_profile = resolve_move_insert_profile(
+                    self.controller_config.get("parts_tuning"),
+                    target_part_name,
+                )
+                if not move_insert_profile.get("success"):
+                    trial_profile = resolve_move_insert_profile(
+                        self.controller_config.get("parts_tuning"),
+                        target_part_name,
+                        require_qualification=False,
+                    )
+                    if trial_profile.get("success"):
+                        move_insert_profile = trial_profile
+            if not move_insert_profile.get("success"):
+                return {
+                    "success": False,
+                    "message": str(
+                        move_insert_profile.get("message")
+                        or f"move_insert profile is unavailable for {target_part_name}"
+                    ),
+                }
+            qualification = dict(move_insert_profile.get("qualification") or {})
+            if qualification:
+                board_identity = dict(geo)
+                board_identity.pop("move_insert_profile", None)
+                board_identity.pop("move_insert_profile_sha256", None)
+                board_identity.pop("move_insert_hard_caps", None)
+                board_identity.pop("move_insert_hard_caps_sha256", None)
+                board_geometry_sha256, board_hash_error = _canonical_json_sha256(
+                    board_identity
+                )
+                qualification_matches_board = bool(
+                    not board_hash_error
+                    and qualification.get("board_calibration_id")
+                    == str(frozen_board_pose.get("calibration_id") or "")
+                    and qualification.get("board_geometry_sha256")
+                    == board_geometry_sha256
+                )
+                if not qualification_matches_board:
+                    move_insert_profile = resolve_move_insert_profile(
+                        self.controller_config.get("parts_tuning"),
+                        target_part_name,
+                        require_qualification=False,
+                    )
+                    if not move_insert_profile.get("success"):
+                        return move_insert_profile
         if symbolic_destination and not has_place_geometry_fields(geo):
             return {
                 "success": False,
@@ -2644,7 +5486,7 @@ class GazeboPickPlaceController:
         pick_origin_location = str(pick_ctx.get("origin_resource_location") or "").strip()
         requested_destination = str(destination_location or "").strip()
         use_measured_origin_pose = (
-            target_point == "part_origin"
+            target_point in {"part_origin", "inserted_part_origin"}
             and bool(origin_pose)
             and (not requested_destination or requested_destination == pick_origin_location)
             and {"x", "y", "z"} <= set(origin_pose.keys())
@@ -2660,7 +5502,7 @@ class GazeboPickPlaceController:
                 "source": "pick_ctx.origin_pose",
             }
             place_part_origin_z_source = "pick_ctx.origin_pose"
-        if target_point == "part_origin":
+        if target_point in {"part_origin", "inserted_part_origin"}:
             place_part_origin_z = _as_float(reference_z, board_top_z + (target_height * 0.5))
             if place_part_origin_z_source != "pick_ctx.origin_pose":
                 reference_z_value = _as_float(reference_z, math.nan)
@@ -2672,13 +5514,106 @@ class GazeboPickPlaceController:
         else:
             place_gap = self.place_surface_gap_m - self.insertion_depth_m
             place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
-            if target_point != "part_origin":
+            if target_point not in {"part_origin", "inserted_part_origin"}:
                 place_part_origin_z = max(
                     place_part_origin_z,
                     board_top_z + (target_height * 0.5),
                 )
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
         place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
+
+        insertion_axis_world = {"x": 0.0, "y": 0.0, "z": -1.0}
+        pose_orientation: dict[str, float] = {}
+        raw_handoff = pick_ctx.get("held_part_handoff")
+        # A repeated place_approach updates resolved descend; it does not update
+        # the grasp-time tool orientation carried by the held-part handoff.
+        immutable_grasp_pose = (
+            raw_handoff.get("world_tool0_pose_at_grasp")
+            if isinstance(raw_handoff, Mapping)
+            else None
+        )
+        raw_held_pose = (
+            immutable_grasp_pose
+            if isinstance(immutable_grasp_pose, Mapping)
+            else dict(pick_ctx.get("resolved_cartesian_positions") or {}).get(
+                "descend"
+            )
+        )
+        if isinstance(raw_held_pose, dict):
+            try:
+                held_pose = _pose_from_mapping(raw_held_pose)
+            except (KeyError, TypeError, ValueError):
+                held_pose = {}
+            if held_pose:
+                pose_orientation = {
+                    field: held_pose[field] for field in ("qx", "qy", "qz", "qw")
+                }
+
+        insert_pose = {"x": bx, "y": by, "z": place_z, **pose_orientation}
+        pre_insert_pose = dict(insert_pose)
+        approach_pose = {
+            "x": bx,
+            "y": by,
+            "z": place_z + 0.05,
+            **pose_orientation,
+        }
+        move_insert_mode = ""
+        if (
+            self.execution_mode == "simulation"
+            and str(target_reference.get("surface_role") or "") == "assembly_slot"
+        ):
+            if not pose_orientation:
+                pose_orientation = {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+                insert_pose.update(pose_orientation)
+            simulation_offset_m = max(0.0, float(self.insertion_depth_m))
+            pre_insert_pose = {
+                **insert_pose,
+                "z": insert_pose["z"] + simulation_offset_m,
+            }
+            approach_pose = {**pre_insert_pose, "z": pre_insert_pose["z"] + 0.05}
+            move_insert_mode = "simulation_direct"
+        # A learned seated reference is insertion authority only. Physical
+        # place_approach recordings remain corrections of these nominal poses.
+        place_approach_pose = deepcopy(approach_pose)
+        place_target_pose = deepcopy(pre_insert_pose)
+        derived_timeout_sec: float | None = None
+        if physical_ur5e_board:
+            geometry_result = compute_move_insert_geometry(
+                part_name=target_part_name,
+                product_geometry=geo,
+                assembly_board_v1_aruco=frozen_board_pose,
+                held_part_handoff=pick_ctx.get("held_part_handoff"),
+                move_insert_profile=move_insert_profile,
+                move_insert_profile_sha256=str(
+                    move_insert_profile.get("profile_sha256") or ""
+                ),
+                z_adjustment_m=z_adjustment_m,
+            )
+            if not geometry_result.get("success"):
+                return geometry_result
+            world_board_pose = dict(geometry_result["assembly_board_v1_pose"])
+            board_registration = dict(
+                geometry_result["assembly_board_v1_registration"]
+            )
+            move_insert_profile = dict(geometry_result["move_insert_profile"])
+            move_insert_mode = "force_limited"
+            insertion_axis_world = dict(geometry_result["insertion_axis_world"])
+            insert_pose = dict(geometry_result["insert_pose"])
+            pre_insert_pose = dict(geometry_result["pre_insert_pose"])
+            bx = float(geometry_result["slot_x"])
+            by = float(geometry_result["slot_y"])
+            board_top_z = float(geometry_result["board_top_z"])
+            place_part_origin_z = float(geometry_result["place_part_origin_z"])
+            place_part_origin_z_source = (
+                "assembly_board-v1_aruco_to_assembly_board-v1"
+            )
+            place_z = float(geometry_result["place_z"])
+            place_tcp_z = place_z + tcp_offset_z
+            target_origin_pose = {
+                **dict(geometry_result["target_origin_pose"]),
+                "source": "assembly_board-v1_aruco_to_assembly_board-v1",
+            }
+            derived_timeout_sec = float(geometry_result["move_insert_timeout_sec"])
 
         result = {
             "success": True,
@@ -2691,17 +5626,54 @@ class GazeboPickPlaceController:
             "place_tcp_z": place_tcp_z,
             "place_part_origin_z": place_part_origin_z,
             "place_part_origin_z_source": place_part_origin_z_source,
-            "approach_pose": {"x": bx, "y": by, "z": place_z + 0.05},
-            "target_pose": {"x": bx, "y": by, "z": place_z},
+            "approach_pose": place_approach_pose,
+            "target_pose": place_target_pose,
+            "pre_insert_pose": pre_insert_pose,
+            "insert_pose": insert_pose,
+            "insertion_axis_world": insertion_axis_world,
             "part_height": target_height,
             "tcp_offset_z": tcp_offset_z,
             "grasp_tcp_to_part_origin_z": grasp_tcp_to_part_origin_z,
             "target_reference": target_reference,
+            "surface_role": str(target_reference.get("surface_role") or ""),
+            "move_insert_mode": move_insert_mode,
             "target_origin_pose": target_origin_pose,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
         if frozen_board_pose:
             result["assembly_board_v1_aruco"] = frozen_board_pose
+        if world_board_pose:
+            result["assembly_board_v1_pose"] = world_board_pose
+            result["assembly_board_v1_registration"] = {
+                "calibration_id": str(board_registration["calibration_id"]),
+                **{
+                    field: float(board_registration[field])
+                    for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                },
+            }
+        if move_insert_profile:
+            result["move_insert_profile"] = {
+                key: deepcopy(value)
+                for key, value in move_insert_profile.items()
+                if key not in {"success", "message"}
+            }
+            result["move_insert_profile_sha256"] = str(
+                move_insert_profile["profile_sha256"]
+            )
+        if derived_timeout_sec is not None:
+            result["move_insert_timeout_sec"] = derived_timeout_sec
+        raw_move_insert_hard_caps = geo.get("move_insert_hard_caps")
+        if (
+            self.execution_mode == "physical"
+            and str(self.robot_name or "").strip() == "ur5e"
+            and isinstance(raw_move_insert_hard_caps, Mapping)
+        ):
+            result["move_insert_hard_caps"] = deepcopy(
+                dict(raw_move_insert_hard_caps)
+            )
+            result["move_insert_hard_caps_sha256"] = str(
+                geo.get("move_insert_hard_caps_sha256") or ""
+            )
         return result
 
     def get_tcp_offset_z(self) -> float:

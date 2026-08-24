@@ -7,8 +7,10 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MoveUR5eCartesian.action"
+  "action/MoveUR5eInsert.action"
   "action/MoveUR5eJointJog.action"
   "action/MoveUR5eRelativeCartesian.action"
+  "action/RecordUR5eInsertionDemonstration.action"
   "srv/SetUR5eCartesianJog.srv"
   DEPENDENCIES geometry_msgs
 )

@@ -69,6 +69,16 @@
         "SCP": [-0.1, -0.08],
         "MCP": [0.0, -0.08],
         "LCP": [0.1, -0.08]
+      },
+      "assembly_board-v1_aruco_to_assembly_board-v1": {
+        "calibration_id": null,
+        "x": null,
+        "y": null,
+        "z": null,
+        "qx": null,
+        "qy": null,
+        "qz": null,
+        "qw": null
       }
     },
     "parts": {

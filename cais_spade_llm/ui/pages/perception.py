@@ -1,4 +1,4 @@
-"""Multi-camera connection, viewing, calibration, and detection operator page."""
+"""Multi-camera connection, viewing, wrist calibration, and detection page."""
 
 from __future__ import annotations
 
@@ -46,12 +46,10 @@ class _PerceptionPage:
         self.serial_selects: dict[str, Any] = {}
         self.assigned_serials: dict[str, str] = {}
         self.control_buttons: dict[str, Any] = {}
-        self.board_inputs: dict[str, Any] = {}
         self.assembly_board_v1_labels: dict[str, dict[str, Any]] = {}
         self.wsl_rows_by_busid: dict[str, dict[str, str]] = {}
         self.stream_images: list[tuple[Any, str]] = []
         self.image_refresh_sequence = 0
-        self.board_initialized = False
         self.assembly_board_v1_initialized = False
         self.refreshing = False
 
@@ -67,8 +65,9 @@ class _PerceptionPage:
         """Render all Perception page sections."""
         ui.label("Camera & Perception").classes("text-2xl font-bold text-slate-800")
         ui.label(
-            "Start detection and calibrate ur5e, xarm6, and stationary RealSense cameras. "
-            "Viewing, calibration solving, and Test Detection never initiate robot motion."
+            "Start detection for ur5e, xarm6, and stationary RealSense cameras. Calibrate "
+            "only the ur5e and xarm6 wrist cameras. Viewing, calibration solving, and Test "
+            "Detection never initiate robot motion."
         ).classes("text-sm text-slate-600 mb-3")
         self._render_preflight()
         self._render_assignments()
@@ -308,10 +307,11 @@ class _PerceptionPage:
                 "text-lg font-semibold"
             )
             ui.label(
-                "The tag localizes a moveable assembly_board-v1 in world. Locate & Accept Board "
-                "reads the latest stable camera snapshot, replaces that role's accepted baseline, "
-                "and increments its generation. It does not request robot motion. Downstream place "
-                "execution blocks if the board later moves more than 10 mm or 2 deg."
+                "For ur5e and xarm6, ID 70 localizes a moveable assembly_board-v1 in world; "
+                "Locate & Accept Board updates that arm's explicit placement baseline. The "
+                "stationary card is diagnostic only: stationary Test Detection uses ID 70 and "
+                "SG/MG depth from the exact same frame in assembly_board-v1 coordinates. None "
+                "of these controls request robot motion."
             ).classes("text-xs text-slate-500")
             with ui.row().classes("items-end gap-2 flex-wrap"):
                 self.assembly_board_v1_marker_length_mm = ui.number(
@@ -334,10 +334,15 @@ class _PerceptionPage:
                 "position named exactly assembly_board-v1. Physical place_approach moves there "
                 "before collecting its new 10-frame ArUco window."
             ).classes("text-xs text-blue-700")
-            with ui.grid(columns=2).classes("w-full gap-4"):
-                for role in ("ur5e", "xarm6"):
+            with ui.grid(columns=3).classes("w-full gap-4"):
+                for role in CAMERA_ROLES:
                     with ui.card().classes("w-full"):
-                        ui.label(f"{_ROLE_LABELS[role]} board pose").classes("font-semibold")
+                        title = (
+                            "Stationary ID 70 (diagnostic only)"
+                            if role == "stationary"
+                            else f"{_ROLE_LABELS[role]} board pose"
+                        )
+                        ui.label(title).classes("font-semibold")
                         self.assembly_board_v1_labels[role] = {
                             "source": ui.label("Waiting for camera snapshot.").classes(
                                 "text-xs text-slate-600"
@@ -347,29 +352,38 @@ class _PerceptionPage:
                             "pose": ui.label("").classes("text-xs font-mono text-slate-600"),
                             "error": ui.label("").classes("text-xs text-red-700"),
                         }
-                        ui.button(
-                            "Locate & Accept Board",
-                            on_click=lambda camera_role=role: (
-                                self._locate_and_accept_assembly_board_v1(camera_role)
-                            ),
-                            icon="location_on",
-                        ).props("dense color=primary")
+                        if role == "stationary":
+                            ui.label(
+                                "Inspection-only ID 70 evidence comes from the exact inference "
+                                "frame. Test Detection reports movement-tolerant SG/MG results "
+                                "in assembly_board-v1 coordinates and has no world, canonical, "
+                                "or robot-motion authority."
+                            ).classes("text-xs text-blue-700")
+                        else:
+                            ui.button(
+                                "Locate & Accept Board",
+                                on_click=lambda camera_role=role: (
+                                    self._locate_and_accept_assembly_board_v1(camera_role)
+                                ),
+                                icon="location_on",
+                            ).props("dense color=primary")
 
     def _render_calibration(self) -> None:
         with ui.card().classes("w-full mt-3"):
             ui.label("Calibration").classes("text-lg font-semibold")
             ui.label(
-                "For wrist cameras, teach 25 varied poses with Save Pose + Capture. Automatic "
+                "For the ur5e and xarm6 wrist cameras, teach 25 varied poses with Save Pose + "
+                "Capture. Automatic "
                 "replay plans each reviewed pose first and starts only after explicit "
                 "confirmation. "
                 "UR5e Save Pose + Capture supports teach-pendant Local Control through read-only "
                 "RTDE receive and never requests robot motion. It starts its read-only state/TF "
-                "monitor automatically; MoveIt and RG2 control remain stopped."
+                "monitor automatically; MoveIt and RG2 control remain stopped. The stationary "
+                "camera is inspection-only: it does not use this ChArUco calibration workflow "
+                "or require a surveyed world pose."
             ).classes("text-xs text-slate-500")
-            for role in CAMERA_ROLES:
+            for role in ("ur5e", "xarm6"):
                 self._render_calibration_role(role)
-            ui.separator()
-            self._render_stationary_board_pose()
 
     def _render_calibration_role(self, role: str) -> None:
         with ui.expansion(_ROLE_LABELS[role], icon="tune").classes("w-full"):
@@ -393,14 +407,12 @@ class _PerceptionPage:
                 icon="center_focus_strong",
             ).props("dense flat")
             with ui.row().classes("gap-2 flex-wrap"):
-                capture_text = "Capture Sample" if role == "stationary" else "Save Pose + Capture"
                 ui.button(
-                    capture_text,
+                    "Save Pose + Capture",
                     on_click=lambda camera_role=role: self._capture_sample(camera_role),
                     icon="add_a_photo",
                 ).props("dense")
-                if role in {"ur5e", "xarm6"}:
-                    self._render_replay_buttons(role)
+                self._render_replay_buttons(role)
                 ui.button(
                     "Solve Candidate",
                     on_click=lambda camera_role=role: self._solve(camera_role),
@@ -449,33 +461,22 @@ class _PerceptionPage:
                 icon=icon,
             ).props("dense flat")
 
-    def _render_stationary_board_pose(self) -> None:
-        ui.label("Stationary surveyed ChArUco mount pose in world (metres/radians)").classes(
-            "text-sm font-medium"
-        )
-        with ui.row().classes("gap-2 flex-wrap"):
-            for field in ("x", "y", "z", "roll", "pitch", "yaw"):
-                self.board_inputs[field] = ui.number(
-                    label=field,
-                    value=0.0,
-                    format="%.6f",
-                ).classes("w-28")
-            ui.button(
-                "Save Surveyed Pose",
-                on_click=self._save_board_pose,
-                icon="save",
-            ).props("outline")
-
     def _render_detection(self) -> None:
         with ui.card().classes("w-full mt-3"):
             ui.label("Detection").classes("text-lg font-semibold")
             ui.label(
                 "UR5e also owns canonical /detect_all and /detect_part. xArm6 and stationary use "
-                "/perception/<role>/detect_all and remain diagnostic."
+                "/perception/<role>/detect_all and remain diagnostic. Stationary Test Detection "
+                "reports SG/MG slot XY error (10 mm limit), seating error (5 mm limit), and "
+                "exact-frame ID 70 quality; it never changes canonical UR5e detections."
             ).classes("text-xs text-slate-500")
             ui.label("LG unavailable: model has no large_gear class").classes(
                 "text-xs text-amber-700"
             )
+            ui.label(
+                "Stationary assembly inspection supports SG and MG only; LG, SRP, MRP, LRP, "
+                "SCP, MCP, and LCP remain unsupported."
+            ).classes("text-xs text-amber-700")
             for role in CAMERA_ROLES:
                 with ui.expansion(
                     f"{_ROLE_LABELS[role]} Test Detection",
@@ -644,7 +645,13 @@ class _PerceptionPage:
 
     async def _start_detection(self, role: str) -> None:
         error = await asyncio.to_thread(self.bridge.perception_start_detection, role)
-        self._notify_result(error, f"{role} detection started")
+        success = (
+            "stationary detection started; wait for exact-frame ID 70 stability "
+            "(10 frames), then use Test Detection"
+            if role == "stationary"
+            else f"{role} detection started"
+        )
+        self._notify_result(error, success)
 
     async def _stop_detection(self, role: str) -> None:
         await asyncio.to_thread(self.bridge.perception_stop_detection, role)
@@ -766,13 +773,6 @@ class _PerceptionPage:
             return
         ui.notify(f"{role} calibration: {action}", type="info")
 
-    async def _save_board_pose(self) -> None:
-        await asyncio.to_thread(
-            self.bridge.perception_save_stationary_board_pose,
-            {field: float(element.value or 0.0) for field, element in self.board_inputs.items()},
-        )
-        ui.notify("Stationary surveyed board pose saved", type="positive")
-
     async def _save_assembly_board_v1_marker_length(self) -> None:
         try:
             await asyncio.to_thread(
@@ -801,12 +801,20 @@ class _PerceptionPage:
 
     async def _test_detection(self, role: str) -> None:
         result = await asyncio.to_thread(self.bridge.perception_test_detection, role)
-        rows = (
-            result.get("detections", [])
-            if result.get("world_pose_ready")
-            else result.get("visual_detections", [])
-        )
-        self.detection_codes[role].content = json.dumps(rows, indent=2)
+        if role == "stationary":
+            displayed: Any = {
+                "diagnostic_only": True,
+                "canonical_authority": False,
+                "robot_motion_requested": False,
+                "stationary_inspection": result.get("stationary_inspection", {}),
+            }
+        else:
+            displayed = (
+                result.get("detections", [])
+                if result.get("world_pose_ready")
+                else result.get("visual_detections", [])
+            )
+        self.detection_codes[role].content = json.dumps(displayed, indent=2)
         ui.notify(
             str(result.get("message") or ""),
             type="positive" if result.get("success") else "warning",
@@ -843,11 +851,6 @@ class _PerceptionPage:
             self._refresh_comparison(status.get("cross_camera_comparisons", []))
             self._refresh_twin(status.get("digital_twin", {}))
             self._refresh_diagnostics(cameras)
-            if not self.board_initialized:
-                board = status.get("stationary_board_world_pose", {})
-                for field, element in self.board_inputs.items():
-                    element.value = float(board.get(field, 0.0) or 0.0)
-                self.board_initialized = True
             if not self.assembly_board_v1_initialized:
                 self.assembly_board_v1_marker_length_mm.value = 76.0
                 self.assembly_board_v1_initialized = True
@@ -893,6 +896,43 @@ class _PerceptionPage:
             world_pose_state = "not evaluated"
         return detection_state, world_pose_state
 
+    @staticmethod
+    def _refresh_stream_status(
+        role: str,
+        camera: dict[str, Any],
+        preview: dict[str, Any],
+        labels: dict[str, Any],
+    ) -> None:
+        """Show wrist ChArUco or stationary exact-frame ID 70 evidence."""
+        charuco_marker_count = int(preview.get("charuco_marker_count", 0) or 0)
+        charuco_visible = bool(preview.get("charuco_visible", False))
+        if role == "stationary":
+            board = dict(camera.get("assembly_board-v1_aruco") or {})
+            id70_visible = bool(board.get("visible", False))
+            labels["streams"].text = (
+                f"color={float(preview.get('color_average_hz', 0) or 0):.1f} Hz | "
+                f"depth={float(preview.get('depth_average_hz', 0) or 0):.1f} Hz | "
+                f"exact-frame ID 70={'visible' if id70_visible else 'NOT VISIBLE'} | "
+                f"{camera.get('topics', {}).get('color', '')}"
+            )
+            stream_marker_visible = id70_visible
+        else:
+            labels["streams"].text = (
+                f"color={float(preview.get('color_average_hz', 0) or 0):.1f} Hz | "
+                f"depth={float(preview.get('depth_average_hz', 0) or 0):.1f} Hz | "
+                f"ChArUco board={'visible' if charuco_visible else 'NOT VISIBLE'} "
+                f"(markers={charuco_marker_count}) | "
+                f"{camera.get('topics', {}).get('color', '')}"
+            )
+            stream_marker_visible = charuco_visible
+        labels["streams"].classes(
+            replace=(
+                "text-xs text-amber-700"
+                if camera.get("ros_topic_ready") and not stream_marker_visible
+                else "text-xs text-slate-500"
+            )
+        )
+
     def _refresh_camera(self, role: str, camera: dict[str, Any]) -> None:
         assigned_serial = str(camera.get("serial") or "")
         select = self.serial_selects[role]
@@ -907,12 +947,25 @@ class _PerceptionPage:
         detection_preview = camera.get("detection_preview") or {}
         labels = self.role_labels[role]
         detection_state, world_pose_state = self._detection_states(camera)
+        inspection = (
+            dict(camera.get("stationary_inspection") or {})
+            if role == "stationary"
+            else {}
+        )
+        inspection_state = (
+            "PASSED" if inspection.get("success") else "FAILED"
+        ) if inspection.get("available") else "UNAVAILABLE"
+        authority_state = (
+            f"assembly_board-v1 inspection={inspection_state}"
+            if role == "stationary"
+            else f"world pose={world_pose_state}"
+        )
         labels["health"].text = (
             f"camera={camera.get('camera_process', 'stopped')} | "
             f"preview={camera.get('preview_process', 'stopped')} | "
             f"perception={camera.get('perception_process', 'stopped')} | "
             f"topics={'ready' if camera.get('ros_topic_ready') else 'not ready'} | "
-            f"2D detection={detection_state} | world pose={world_pose_state} | "
+            f"2D detection={detection_state} | {authority_state} | "
             f"frame age={_safe_age(camera.get('frame_age_sec'))}"
         )
         labels["identity"].text = (
@@ -925,22 +978,7 @@ class _PerceptionPage:
                 else ""
             )
         )
-        charuco_marker_count = int(preview.get("charuco_marker_count", 0) or 0)
-        charuco_visible = bool(preview.get("charuco_visible", False))
-        labels["streams"].text = (
-            f"color={float(preview.get('color_average_hz', 0) or 0):.1f} Hz | "
-            f"depth={float(preview.get('depth_average_hz', 0) or 0):.1f} Hz | "
-            f"ChArUco board={'visible' if charuco_visible else 'NOT VISIBLE'} "
-            f"(markers={charuco_marker_count}) | "
-            f"{camera.get('topics', {}).get('color', '')}"
-        )
-        labels["streams"].classes(
-            replace=(
-                "text-xs text-amber-700"
-                if camera.get("ros_topic_ready") and not charuco_visible
-                else "text-xs text-slate-500"
-            )
-        )
+        self._refresh_stream_status(role, camera, preview, labels)
         recovery = camera.get("recovery") or {}
         retry_at = recovery.get("next_retry_at")
         retry_text = "n/a"
@@ -978,7 +1016,14 @@ class _PerceptionPage:
         detection_summary += f" | age={_safe_age(detection_preview.get('frame_age_sec'))}"
         if latency is not None:
             detection_summary += f" | latency={float(latency):.0f} ms"
-        if detection_preview.get("world_pose_ready"):
+        if role == "stationary":
+            inspection_message = str(inspection.get("message") or "").strip()
+            detection_summary += (
+                f" | assembly_board-v1 SG/MG inspection={inspection_state}"
+            )
+            if inspection_message:
+                detection_summary += f": {inspection_message}"
+        elif detection_preview.get("world_pose_ready"):
             detection_summary += " | world pose=ready"
         elif detection_preview.get("captured_at"):
             detection_summary += " | 2D detection only — world pose unavailable"
@@ -991,13 +1036,13 @@ class _PerceptionPage:
                 camera.get("perception_process") == "running"
                 and not camera.get("world_pose_ready")
             )
-        self._refresh_calibration(role, camera)
-
         if role in {"ur5e", "xarm6"}:
-            self._refresh_assembly_board_v1_aruco(
-                role,
-                dict(camera.get("assembly_board-v1_aruco") or {}),
-            )
+            self._refresh_calibration(role, camera)
+
+        self._refresh_assembly_board_v1_aruco(
+            role,
+            dict(camera.get("assembly_board-v1_aruco") or {}),
+        )
 
     def _refresh_assembly_board_v1_aruco(
         self,
@@ -1005,12 +1050,6 @@ class _PerceptionPage:
         board: dict[str, Any],
     ) -> None:
         labels = self.assembly_board_v1_labels[role]
-        labels["source"].text = (
-            f"camera role={board.get('camera_role') or role} | "
-            f"calibration={board.get('active_calibration_id') or 'unavailable'} | "
-            f"frame timestamp={_safe_timestamp(board.get('frame_captured_at'))} | "
-            f"age={_safe_age(board.get('frame_age_sec'))}"
-        )
         reprojection = board.get("reprojection_error_px")
         reprojection_text = "n/a"
         with suppress(TypeError, ValueError):
@@ -1023,6 +1062,42 @@ class _PerceptionPage:
         rotation_spread_text = "n/a"
         with suppress(TypeError, ValueError):
             rotation_spread_text = f"{float(board.get('rotation_spread_deg')):.3f} deg"
+        if role == "stationary":
+            labels["source"].text = (
+                f"camera role=stationary | source={board.get('source') or 'unavailable'} | "
+                f"frame timestamp={_safe_timestamp(board.get('frame_captured_at'))} | "
+                f"age={_safe_age(board.get('frame_age_sec'))}"
+            )
+            labels["quality"].text = (
+                f"ID 70={'visible' if board.get('visible') else 'NOT VISIBLE'} | "
+                f"valid={'yes' if board.get('valid') else 'no'} | "
+                f"stability={'stable' if board.get('stable') else 'NOT STABLE'} | "
+                f"samples={int(board.get('sample_count', 0) or 0)}/"
+                f"{int(board.get('required_sample_count', 10) or 10)} | "
+                f"exact frame={'ready' if board.get('exact_frame_evidence') else 'unavailable'} | "
+                f"reprojection={reprojection_text} | "
+                f"translation spread={translation_spread_text} | "
+                f"rotation spread={rotation_spread_text}"
+            )
+            labels["movement"].text = (
+                "inspection-only; no surveyed world pose, accepted baseline, movement latch, "
+                "canonical authority, or robot-motion authority is used."
+            )
+            labels["movement"].classes(replace="text-xs text-blue-700")
+            labels["pose"].text = (
+                "frame=assembly_board-v1 | SG/MG observations are transformed from the exact "
+                "detection frame; world pose and TF readiness are not used."
+            )
+            labels["error"].text = (
+                f"inspection={board.get('inspection_message') or board.get('error') or 'none'}"
+            )
+            return
+        labels["source"].text = (
+            f"camera role={board.get('camera_role') or role} | "
+            f"calibration={board.get('active_calibration_id') or 'unavailable'} | "
+            f"frame timestamp={_safe_timestamp(board.get('frame_captured_at'))} | "
+            f"age={_safe_age(board.get('frame_age_sec'))}"
+        )
         labels["quality"].text = (
             f"visibility={'visible' if board.get('visible') else 'NOT VISIBLE'} | "
             f"stability={'stable' if board.get('stable') else 'NOT STABLE'} | "

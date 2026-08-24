@@ -20,10 +20,33 @@ from cais_spade_llm.resources.robot.hardware_pick_place_controller import (
     XARM6_HARDWARE_JOINT_NAMES,
     XArm6HardwareController,
 )
+from cais_spade_llm.ui import bridge as bridge_module
 from cais_spade_llm.ui import ros2_processes
 from cais_spade_llm.ui.bridge import SystemBridge
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_insertion_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bridge_module,
+        "_MOVE_INSERT_TRIALS_DIR",
+        tmp_path / "operator_move_insert_trials",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_INSERTION_DEMONSTRATIONS_DIR",
+        tmp_path / "operator_move_insert_demonstrations",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_HARDWARE_STATE_DIR",
+        tmp_path / "operator_hardware_state",
+    )
 
 
 def _digital_twin_sync_module() -> Any:
@@ -102,7 +125,7 @@ def test_xarm6_cartesian_service_uses_embedded_driver_namespace() -> None:
     assert runtime_config["xarm6"]["cartesian"]["speed_mm_s"] == 50.0
     assert runtime_config["xarm6"]["cartesian"]["max_speed_mm_s"] == 100.0
     assert runtime_config["xarm6"]["cartesian"]["acceleration_mm_s2"] == 42.25
-    assert runtime_config["ur5e"]["rtde"]["cartesian_speed_m_s"] == 0.05
+    assert runtime_config["ur5e"]["rtde"]["cartesian_speed_m_s"] == 0.10
     assert runtime_config["ur5e"]["rtde"]["cartesian_max_speed_m_s"] == 0.10
     assert 'PushRosNamespace(namespace)' in launch_source
     assert "from xarm_msgs.msg import RobotMsg" in launch_source
@@ -129,6 +152,25 @@ def test_xarm6_cartesian_service_uses_embedded_driver_namespace() -> None:
     assert services["vc_set_cartesian_velocity"] is True
     assert "except KeyboardInterrupt:" in launch_source
     assert "if rclpy.ok():" in launch_source
+
+
+def test_xarm6_force_torque_sensor_is_recorded_but_move_insert_stays_unavailable() -> None:
+    robot_config = json.loads(
+        (ROOT / "cais_spade_llm/initialization/resources/robot_xarm6.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    sensor = robot_config["xarm6"]["real"]["controller"][
+        "ufactory_six_axis_force_torque_sensor"
+    ]
+    assert sensor == {
+        "installed": True,
+        "wrench_feedback_exposed_to_cais": False,
+        "zeroing_exposed_to_cais": False,
+        "force_control_exposed_to_cais": False,
+        "move_insert_action": None,
+    }
 
 
 def test_dual_hardware_stack_uses_only_exact_physical_processes() -> None:
@@ -236,14 +278,16 @@ def _dual_start_bridge() -> tuple[SystemBridge, list[str], list[tuple[str, str]]
     next_pid = {"value": 1000}
     bridge.ros2_proc_status = lambda name: states.get(name, "stopped")
 
+    def _process(pid: int) -> SimpleNamespace:
+        process = SimpleNamespace(pid=pid, return_code=None)
+        process.poll = lambda process=process: process.return_code
+        return process
+
     def _start(name: str) -> None:
         started.append(name)
         states[name] = "running"
         next_pid["value"] += 1
-        bridge._ros2_procs[name] = SimpleNamespace(
-            pid=next_pid["value"],
-            poll=lambda: None,
-        )
+        bridge._ros2_procs[name] = _process(next_pid["value"])
         return None
 
     bridge.ros2_start = _start
@@ -253,17 +297,16 @@ def _dual_start_bridge() -> tuple[SystemBridge, list[str], list[tuple[str, str]]
             started.append(name)
             states[name] = "running"
             next_pid["value"] += 1
-            bridge._ros2_procs[name] = SimpleNamespace(
-                pid=next_pid["value"],
-                poll=lambda: None,
-            )
+            bridge._ros2_procs[name] = _process(next_pid["value"])
         return None
 
     bridge._start_ur5e_rtde_trajectory_server = _start_rtde
     def _stop(name: str, reason: str = "explicit_stop") -> None:
         stopped.append((name, reason))
         states[name] = "stopped"
-        bridge._ros2_procs.pop(name, None)
+        process = bridge._ros2_procs.pop(name, None)
+        if process is not None:
+            process.return_code = 0
 
     bridge.ros2_stop = _stop
     bridge._wait_with_ros2_daemon_retry = lambda _label, callback: callback()
@@ -305,7 +348,21 @@ def _dual_start_bridge() -> tuple[SystemBridge, list[str], list[tuple[str, str]]
         "pose": {},
     }
     bridge._stop_teleop_server = lambda: None
-    bridge._validate_hardware_stationary = lambda *_args, **_kwargs: None
+
+    def _validate_hardware_stationary(
+        robot: str,
+        *,
+        ros_domain_id: int,
+    ) -> None:
+        bridge._hardware_stack_stationary_results[robot] = {
+            "generation": bridge._hardware_stack_lifecycle_generation,
+            "stationary_ready": True,
+            "message": "stationary feedback ready",
+            "diagnostics": {"ros_domain_id": ros_domain_id},
+        }
+        return None
+
+    bridge._validate_hardware_stationary = _validate_hardware_stationary
     bridge._clear_ros_action_service_snapshot = lambda: None
     bridge._default_ros_domain_id = lambda: 0
     return bridge, started, stopped
@@ -323,6 +380,144 @@ def test_xarm6_hardware_start_uses_driver_action_and_state_publisher_only() -> N
     ]
     assert stopped == []
     assert all("moveit" not in process_name for process_name in started)
+
+
+@pytest.mark.parametrize("stack_name", ["ur5e", "dual robots", "xarm6"])
+def test_terminal_ur5e_trial_does_not_control_general_hardware_stack(
+    stack_name: str,
+    tmp_path: Path,
+) -> None:
+    bridge, started, stopped = _dual_start_bridge()
+    bridge._move_insert_trials_dir = tmp_path / "move_insert_trials"
+    bridge._hardware_state_dir = tmp_path / "hardware_state"
+    trial_id = "move-insert-terminal-ur5e-repair"
+    bridge._move_insert_trials = {
+        trial_id: {
+            "target": "ur5e only",
+            "robot": "ur5e",
+            "destination_location": "assembly_board-v1",
+            "part_name": "MG",
+            "trial_id": trial_id,
+            "active": False,
+            "completion_motion_active": False,
+            "review_required": False,
+            "recovery_required": False,
+            "normal_repair_required": True,
+            "hardware_stack_repair_required": True,
+            "part_clamped": True,
+            "released": False,
+            "lifted": False,
+            "completion_eligible": False,
+            "qualified": False,
+            "status": "failed",
+            "message": "Terminal UR5e move_insert requires Repair Hardware Stack.",
+        }
+    }
+    bridge._move_insert_last_trial_by_selection = {}
+    bridge._insertion_demonstration = {
+        "recording_id": "stale-recording-marker",
+        "robot": "ur5e",
+        "part_name": "MG",
+        "active": True,
+    }
+
+    status = bridge.hardware_stack_status(stack_name)
+    assert status["overall"] == "stopped"
+    assert status["lifecycle_state"] == "stopped"
+    assert status["hardware_stack_repair_required"] is False
+    assert status["hardware_stack_repair_reason"] == ""
+    assert status["hardware_stack_operation_blocked_reason"] == ""
+    for operation in ("start", "stop", "repair"):
+        assert bridge._hardware_stack_lifecycle_motion_error(
+            operation,
+            stack_name,
+        ) == ""
+
+    start_error = bridge.ros2_start_hardware_stack(stack_name)
+
+    assert start_error is None
+    assert started
+    assert stopped == []
+    pending = bridge._move_insert_pending_review()
+    if stack_name == "xarm6":
+        assert pending is not None
+        assert pending["trial_id"] == trial_id
+    else:
+        assert pending is None
+        trial = bridge._move_insert_trials[trial_id]
+        assert trial["normal_repair_required"] is False
+        assert trial["hardware_stack_repair_required"] is False
+        assert trial["repair_evidence"]["hardware_stack"] == stack_name
+
+
+@pytest.mark.parametrize("stationary_error", [None, "UR5e is still moving"])
+def test_ur5e_hardware_start_clears_generic_uncertainty_only_after_fresh_readiness(
+    stationary_error: str | None,
+) -> None:
+    bridge, started, _stopped = _dual_start_bridge()
+    assert (
+        bridge._write_ur5e_hardware_state_uncertainty(
+            reason="generic uncertainty",
+            source="hardware",
+            source_id="uncertainty-test",
+        )
+        == ""
+    )
+    bridge._ur5e_robot_function_state_uncertain = False
+    bridge._ur5e_robot_function_state_uncertain_reason = ""
+    bridge._ur5e_cartesian_jog_state_uncertain = False
+    bridge._ur5e_cartesian_jog_state_uncertain_reason = ""
+    stationary_calls: list[tuple[str, int]] = []
+
+    def _stationary(robot: str, *, ros_domain_id: int) -> str | None:
+        stationary_calls.append((robot, ros_domain_id))
+        return stationary_error
+
+    bridge._validate_hardware_stationary = _stationary
+
+    error = bridge.ros2_start_hardware_stack("ur5e")
+
+    assert started
+    assert stationary_calls == [("ur5e", 0)]
+    if stationary_error:
+        assert stationary_error in str(error)
+        assert bridge._hardware_stack_lifecycle_state == "failed"
+        assert bridge._ur5e_robot_function_state_uncertain is True
+        assert bridge._ur5e_cartesian_jog_state_uncertain is True
+        durable, durable_error = bridge._read_ur5e_hardware_state_uncertainty()
+        assert durable_error == ""
+        assert durable is not None
+    else:
+        assert error is None
+        assert bridge._hardware_stack_lifecycle_state == "running"
+        assert bridge._ur5e_robot_function_state_uncertain is False
+        assert bridge._ur5e_cartesian_jog_state_uncertain is False
+        durable, durable_error = bridge._read_ur5e_hardware_state_uncertainty()
+        assert durable_error == ""
+        assert durable is None
+
+
+def test_ur5e_hardware_start_fails_closed_when_uncertainty_cannot_be_cleared() -> None:
+    bridge, started, _stopped = _dual_start_bridge()
+    assert (
+        bridge._write_ur5e_hardware_state_uncertainty(
+            reason="generic uncertainty",
+            source="hardware",
+            source_id="uncertainty-clear-test",
+        )
+        == ""
+    )
+    bridge._clear_ur5e_hardware_state_uncertainty = (
+        lambda: "Could not clear durable UR5e hardware state: storage failed"
+    )
+
+    error = bridge.ros2_start_hardware_stack("ur5e")
+
+    assert started
+    assert "storage failed" in str(error)
+    assert bridge._hardware_stack_lifecycle_state == "failed"
+    assert bridge._ur5e_robot_function_state_uncertain is True
+    assert bridge._ur5e_cartesian_jog_state_uncertain is True
 
 
 def test_dual_hardware_component_start_keeps_warm_teleop_backend(
@@ -391,10 +586,14 @@ def test_xarm6_hardware_start_waits_for_embedded_cartesian_service(
 
 def test_ur5e_hardware_start_uses_rtde_rg2_and_state_publisher_only() -> None:
     bridge, started, stopped = _dual_start_bridge()
+    bridge._ur5e_robot_function_state_uncertain = True
+    bridge._ur5e_robot_function_state_uncertain_reason = "motion result was not observed"
 
     error = bridge.ros2_start_hardware_stack("ur5e")
 
     assert error is None
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
     assert started == [
         "hardware_ur5e_rtde_trajectory_server",
         "hardware_ur5e_rg2_gripper",
@@ -402,6 +601,91 @@ def test_ur5e_hardware_start_uses_rtde_rg2_and_state_publisher_only() -> None:
     ]
     assert stopped == []
     assert all("moveit" not in process_name for process_name in started)
+
+
+@pytest.mark.parametrize("stack_name", ["xarm6", "ur5e", "dual robots"])
+def test_ur5e_hardware_start_stops_calibration_tf_before_and_after_full_publisher(
+    stack_name: str,
+) -> None:
+    bridge, started, stopped = _dual_start_bridge()
+    original_start = bridge.ros2_start
+    before_full_process = (
+        "hardware_ur5e_rg2_gripper"
+        if stack_name == "ur5e"
+        else "hardware_xarm6_driver"
+    )
+    injected_before = False
+    injected_after = False
+
+    def _start_with_calibration_race(process_name: str) -> None:
+        nonlocal injected_before, injected_after
+        error = original_start(process_name)
+        if process_name == before_full_process and not injected_before:
+            injected_before = True
+            assert original_start("ur5e_calibration_state_publisher") is None
+        if process_name == "hardware_robot_state_publisher" and not injected_after:
+            injected_after = True
+            assert original_start("ur5e_calibration_state_publisher") is None
+        return error
+
+    bridge.ros2_start = _start_with_calibration_race
+
+    error = bridge.ros2_start_hardware_stack(stack_name)
+
+    assert error is None
+    assert injected_before is True
+    assert injected_after is True
+    assert bridge.ros2_proc_status("ur5e_calibration_state_publisher") == "stopped"
+    assert stopped == [
+        (
+            "ur5e_calibration_state_publisher",
+            "hardware_robot_state_publisher_authority",
+        ),
+        (
+            "ur5e_calibration_state_publisher",
+            "hardware_robot_state_publisher_authority",
+        ),
+    ]
+    assert started.index(before_full_process) < started.index(
+        "hardware_robot_state_publisher"
+    )
+
+
+@pytest.mark.parametrize("stack_name", ["xarm6", "ur5e", "dual robots"])
+def test_ur5e_hardware_repair_reclaims_full_tf_authority(
+    stack_name: str,
+) -> None:
+    bridge, _started, stopped = _dual_start_bridge()
+    assert bridge.ros2_start_hardware_stack(stack_name) is None
+    bridge._hardware_stack_lifecycle_state = "failed"
+    bridge._hardware_stack_last_error = "repair required"
+    original_start = bridge.ros2_start
+    before_full_process = (
+        "hardware_ur5e_rg2_gripper"
+        if stack_name == "ur5e"
+        else "hardware_xarm6_driver"
+    )
+    calibration_started = False
+
+    def _start_with_calibration_race(process_name: str) -> None:
+        nonlocal calibration_started
+        error = original_start(process_name)
+        if process_name == before_full_process and not calibration_started:
+            calibration_started = True
+            assert original_start("ur5e_calibration_state_publisher") is None
+        return error
+
+    bridge.ros2_start = _start_with_calibration_race
+
+    error = bridge.ros2_repair_hardware_stack(stack_name)
+
+    assert error is None
+    assert calibration_started is True
+    assert bridge.ros2_proc_status("ur5e_calibration_state_publisher") == "stopped"
+    assert (
+        "ur5e_calibration_state_publisher",
+        "hardware_robot_state_publisher_authority",
+    ) in stopped
 
 
 @pytest.mark.parametrize("stack_name", ["ur5e", "dual robots"])
@@ -529,6 +813,83 @@ def test_xarm6_cartesian_frame_validation_waits_for_first_robot_states_sample() 
         "generation": 7,
         "message": "xArm6 Cartesian frame validation ready",
         "diagnostics": {"controller_mode": 1},
+    }
+
+
+def test_ur5e_cartesian_startup_retains_world_base_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process_name = "hardware_ur5e_rtde_trajectory_server"
+    bridge = object.__new__(SystemBridge)
+    bridge._ros2_procs = {
+        process_name: SimpleNamespace(pid=7201, poll=lambda: None),
+    }
+    bridge._hardware_stack_lifecycle_generation = 9
+    bridge._hardware_cartesian_readiness = {}
+    expected = {
+        "x": 0.0,
+        "y": 0.5,
+        "z": 1.021,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+    }
+    observed = {**expected, "y": 0.0}
+    mount_message = (
+        "Cartesian world -> base mount validation failed: observed translation "
+        "differs from protected ur5e.rtde.cartesian_world_base by 0.500000 m"
+    )
+    bridge._ur5e_rtde_trajectory_status = lambda: {
+        "process_id": 7201,
+        "updated_at": time.time(),
+        "cartesian_jog_ready": False,
+        "cartesian_function_ready": False,
+        "cartesian_world_base_ready": False,
+        "relative_cartesian_action_ready": True,
+        "cartesian_jog_service_ready": True,
+        "relative_cartesian_action_name": (
+            "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
+        ),
+        "cartesian_jog_service_name": (
+            "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
+        ),
+        "cartesian_frame_validation_message": mount_message,
+        "cartesian_frame_position_error_m": None,
+        "cartesian_frame_orientation_error_rad": None,
+        "cartesian_world_base_message": mount_message,
+        "cartesian_world_base_expected": expected,
+        "cartesian_world_base_observed": observed,
+        "cartesian_world_base_position_error_m": 0.5,
+        "cartesian_world_base_orientation_error_rad": 0.0,
+    }
+    clock = {"now": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    error = bridge._wait_for_ur5e_cartesian_frame_ready(
+        process_name,
+        timeout_sec=1.0,
+    )
+
+    assert mount_message in str(error)
+    readiness = bridge._hardware_cartesian_readiness["ur5e"]
+    assert readiness["cartesian_jog_ready"] is False
+    assert readiness["cartesian_function_ready"] is False
+    assert readiness["message"].count(mount_message) == 1
+    assert readiness["diagnostics"] == {
+        "position_error_m": None,
+        "orientation_error_rad": None,
+        "cartesian_world_base_ready": False,
+        "cartesian_world_base_message": mount_message,
+        "cartesian_world_base_expected": expected,
+        "cartesian_world_base_observed": observed,
+        "cartesian_world_base_position_error_m": 0.5,
+        "cartesian_world_base_orientation_error_rad": 0.0,
     }
 
 
@@ -1211,7 +1572,7 @@ def test_status_poll_started_before_repair_cannot_relatch_new_rtde_process() -> 
     assert bridge._hardware_stack_last_error == ""
 
 
-def test_successful_repair_clears_only_cartesian_jog_uncertainty() -> None:
+def test_successful_repair_clears_generic_ur5e_uncertainty_after_fresh_readiness() -> None:
     bridge, _started, _stopped = _dual_start_bridge()
     assert bridge.ros2_start_hardware_stack("dual robots") is None
     bridge._hardware_stack_lifecycle_state = "failed"
@@ -1227,8 +1588,8 @@ def test_successful_repair_clears_only_cartesian_jog_uncertainty() -> None:
     assert bridge._hardware_stack_lifecycle_state == "running"
     assert bridge._ur5e_cartesian_jog_state_uncertain is False
     assert bridge._ur5e_cartesian_jog_state_uncertain_reason == ""
-    assert bridge._ur5e_robot_function_state_uncertain is True
-    assert bridge._ur5e_robot_function_state_uncertain_reason == "pick_approach failed"
+    assert bridge._ur5e_robot_function_state_uncertain is False
+    assert bridge._ur5e_robot_function_state_uncertain_reason == ""
     assert "cleared at generation" in (
         bridge._hardware_stack_cartesian_jog_reset_results["ur5e"]
     )
@@ -1265,6 +1626,41 @@ def test_hardware_stack_start_button_enters_loading_before_scheduling() -> None:
         "asyncio.create_task(_start_async())"
     )
     assert 'if operation_state["busy"]:' in row_source
+
+
+def test_stopped_hardware_rows_are_not_coupled_to_move_insert_repair_state() -> None:
+    source = Path("cais_spade_llm/ui/pages/control.py").read_text(encoding="utf-8")
+    launch_source = source.split("def _launch_section(", maxsplit=1)[1].split(
+        "def _proc_row(",
+        maxsplit=1,
+    )[0]
+    row_source = source.split("def _hardware_stack_row(", maxsplit=1)[1].split(
+        "# =====================================================================",
+        maxsplit=1,
+    )[0]
+
+    for field_name in (
+        "hardware_stack_repair_required",
+        "hardware_stack_repair_reason",
+        "hardware_stack_operation_blocked_reason",
+    ):
+        assert field_name not in launch_source
+    assert "hardware_statuses = {" in launch_source
+    assert "signature, statuses, hardware_statuses = await asyncio.to_thread(" in (
+        launch_source
+    )
+    assert "_launch_snapshot" in launch_source
+
+    assert 'repair_needed = lifecycle_state == "failed"' in row_source
+    assert "hardware_stack_repair_required" not in row_source
+    assert "hardware_stack_repair_reason" not in row_source
+    assert "if repair_needed" in row_source
+    assert "bridge.ros2_repair_hardware_stack" in row_source
+    assert '"Repair Hardware Stack" if repair_needed else "Start"' in row_source
+    assert "stop_disabled = repair_needed" in row_source
+    assert 'ui.label(blocked_reason).classes("text-xs text-amber-700")' in (
+        row_source
+    )
 
 
 def test_hardware_connectivity_reports_wrong_same_subnet_route() -> None:

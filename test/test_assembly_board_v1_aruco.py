@@ -23,6 +23,7 @@ from cais_spade_llm.resources.sensor.physical.assembly_board_v1_aruco import (
     estimate_camera_to_aruco,
     load_calibration_provenance,
     ros_stamp_to_epoch_seconds,
+    transform_camera_optical_point_to_assembly_board_v1,
 )
 
 
@@ -50,6 +51,25 @@ def _provenance() -> CalibrationProvenance:
         method="CALIB_HAND_EYE_PARK",
         parent_to_camera=np.eye(4, dtype=np.float64),
     )
+
+
+def _transform(
+    *,
+    translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rotation_deg: float = 0.0,
+) -> np.ndarray:
+    angle = np.deg2rad(rotation_deg)
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    transform[:3, 3] = translation
+    return transform
 
 
 def _marker_image() -> np.ndarray:
@@ -103,6 +123,121 @@ def test_original_dictionary_id_70_is_detected_and_solved_with_ippe() -> None:
     assert estimate.reprojection_error_px <= 1.0
     assert estimate.ambiguity_margin_px >= 0.25
     assert estimate.minimum_corner_depth_m > 0.0
+
+
+def test_camera_motion_keeps_part_point_fixed_in_assembly_board_v1() -> None:
+    board_point = np.array([0.0, 0.08, 0.015], dtype=np.float64)
+    registration = _transform(
+        translation=(0.11, -0.04, 0.006),
+        rotation_deg=12.0,
+    )
+    camera_poses = (
+        _transform(translation=(0.02, -0.01, 0.48), rotation_deg=-8.0),
+        _transform(translation=(-0.035, 0.025, 0.53), rotation_deg=19.0),
+    )
+
+    for camera_to_aruco in camera_poses:
+        camera_point = (
+            camera_to_aruco @ registration @ np.append(board_point, 1.0)
+        )[:3]
+        observed_board_point = transform_camera_optical_point_to_assembly_board_v1(
+            camera_point,
+            point_frame_id="camera_color_optical_frame",
+            camera_frame_id="camera_color_optical_frame",
+            camera_to_aruco=camera_to_aruco,
+            assembly_board_v1_aruco_to_assembly_board_v1=registration,
+        )
+
+        assert observed_board_point == pytest.approx(board_point, abs=1e-12)
+
+
+def test_part_point_requires_exact_realsense_camera_info_frame() -> None:
+    with pytest.raises(ArucoLocalizationError, match="does not exactly match"):
+        transform_camera_optical_point_to_assembly_board_v1(
+            np.array([0.0, 0.0, 0.5], dtype=np.float64),
+            point_frame_id="stationary_camera_color_optical_frame",
+            camera_frame_id="camera_color_optical_frame",
+            camera_to_aruco=np.eye(4, dtype=np.float64),
+            assembly_board_v1_aruco_to_assembly_board_v1=np.eye(
+                4,
+                dtype=np.float64,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("registration", "error"),
+    [
+        (np.eye(3, dtype=np.float64), "must be a 4x4 transform"),
+        (
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, np.nan],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            ),
+            "contains a non-finite value",
+        ),
+        (
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.1, 1.0],
+                ],
+                dtype=np.float64,
+            ),
+            "has an invalid homogeneous row",
+        ),
+        (
+            np.diag([2.0, 1.0, 1.0, 1.0]),
+            "rotation is not orthonormal",
+        ),
+        (
+            np.diag([-1.0, 1.0, 1.0, 1.0]),
+            "rotation is not proper",
+        ),
+    ],
+)
+def test_invalid_assembly_board_v1_registration_fails_closed(
+    registration: np.ndarray,
+    error: str,
+) -> None:
+    with pytest.raises(
+        ArucoLocalizationError,
+        match=f"assembly_board-v1_aruco_to_assembly_board-v1 {error}",
+    ):
+        transform_camera_optical_point_to_assembly_board_v1(
+            np.array([0.0, 0.0, 0.5], dtype=np.float64),
+            point_frame_id="camera_color_optical_frame",
+            camera_frame_id="camera_color_optical_frame",
+            camera_to_aruco=np.eye(4, dtype=np.float64),
+            assembly_board_v1_aruco_to_assembly_board_v1=registration,
+        )
+
+
+def test_nonfinite_camera_to_aruco_fails_closed() -> None:
+    camera_to_aruco = np.eye(4, dtype=np.float64)
+    camera_to_aruco[0, 3] = np.inf
+
+    with pytest.raises(
+        ArucoLocalizationError,
+        match="camera_to_aruco contains a non-finite value",
+    ):
+        transform_camera_optical_point_to_assembly_board_v1(
+            np.array([0.0, 0.0, 0.5], dtype=np.float64),
+            point_frame_id="camera_color_optical_frame",
+            camera_frame_id="camera_color_optical_frame",
+            camera_to_aruco=camera_to_aruco,
+            assembly_board_v1_aruco_to_assembly_board_v1=np.eye(
+                4,
+                dtype=np.float64,
+            ),
+        )
 
 
 def test_ippe_rejects_frontal_pose_ambiguity() -> None:

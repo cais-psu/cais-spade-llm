@@ -197,6 +197,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "x": _step_output("pick_targets", "target_pose", "x"),
                     "y": _step_output("pick_targets", "target_pose", "y"),
                     "z": _step_output("pick_targets", "target_pose", "z"),
+                    "speed": _arg("speed"),
                 },
                 public_params={
                     "x": _step_ref("pick_targets.<PART>", "target_pose.x"),
@@ -280,6 +281,9 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     ),
                     "origin_resource_location": _arg("origin_resource_location"),
                     "origin_pose": _step_output("pick_targets", "origin_pose"),
+                    "origin_pose_provenance": _step_output(
+                        "pick_targets", "origin_pose_provenance"
+                    ),
                     "start_x": _step_output("pick_targets", "start_x"),
                     "start_y": _step_output("pick_targets", "start_y"),
                     "start_z": _step_output("pick_targets", "start_z"),

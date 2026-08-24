@@ -92,6 +92,8 @@ def test_real_mg_geometry_is_derived_from_actual_source_stl_only() -> None:
     )
     gazebo_mg = ProductProfile.geometry_for_part_from_geometry("MG", gazebo_geometry)
 
+    assert real_mg["part_name"] == "MG"
+    assert real_mg["model_name"] == "gear_medium"
     assert real_mg["source_stl"] == str(
         (ROOT / "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL").resolve()
     )

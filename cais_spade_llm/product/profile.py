@@ -236,11 +236,16 @@ class ProductProfile:
         if slot_xy is None:
             return {}
         geometry = {
+            "part_name": part_name,
             "slot_xy": deepcopy(slot_xy),
             "part_height_m": parts.get("heights_m", {}).get(part_name),
             "model_name": parts.get("model_map", {}).get(part_name),
             "slot_floor_z_m": board.get("slot_floor_z_m"),
             "board_center": deepcopy(board.get("center", {})),
+            "assembly_board-v1_aruco_to_assembly_board-v1": deepcopy(
+                board.get("assembly_board-v1_aruco_to_assembly_board-v1", {})
+            ),
+            "target_reference": deepcopy(product_geometry.get("target_reference", {})),
         }
         geometry.update(actual_mg_stl_geometry_for_part(part_name, parts))
         return geometry
@@ -340,6 +345,9 @@ def _load_geometry_for_destination_part(
         "model_name": dict(parts.get("model_map") or {}).get(part_name),
         "slot_floor_z_m": board.get("slot_floor_z_m"),
         "board_center": board.get("center") or {},
+        "assembly_board-v1_aruco_to_assembly_board-v1": dict(
+            board.get("assembly_board-v1_aruco_to_assembly_board-v1") or {}
+        ),
         "target_reference": dict(geometry_doc.get("target_reference") or {}),
     }
 

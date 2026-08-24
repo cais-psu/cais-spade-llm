@@ -7,6 +7,7 @@ import inspect
 import json
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,28 @@ UR5E_JOINT_NAMES = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_insertion_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bridge_module,
+        "_MOVE_INSERT_TRIALS_DIR",
+        tmp_path / "operator_move_insert_trials",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_INSERTION_DEMONSTRATIONS_DIR",
+        tmp_path / "operator_move_insert_demonstrations",
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_HARDWARE_STATE_DIR",
+        tmp_path / "operator_hardware_state",
+    )
 
 
 def _world_base_pose(robot: str = "ur5e") -> dict[str, object]:
@@ -53,7 +76,6 @@ def test_function_templates_come_from_exact_robot_task_steps() -> None:
         ],
         "pick_grasp": [
             ("grasp_part", "grasp_part", False),
-            ("delay_after_grasp", "delay", False),
             ("lift", "move_relative", False),
         ],
         "place_approach": [
@@ -64,9 +86,8 @@ def test_function_templates_come_from_exact_robot_task_steps() -> None:
             ("descend", "move_cartesian", True),
         ],
         "place_insert": [
-            ("delay_before_release", "delay", False),
+            ("move_insert", "move_insert", False),
             ("release_part", "release_part", False),
-            ("delay_after_release", "delay", False),
             ("snap_part_to_slot", "snap_part_to_slot", False),
             ("lift", "move_relative", False),
         ],
@@ -85,13 +106,122 @@ def test_function_templates_come_from_exact_robot_task_steps() -> None:
         for step in pick_template
         if step["step_name"] in {"move_above_part", "descend"}
     } == {
-        "Computed live by compute_pick_targets unless an optional axis source is saved."
+        "Computed live by compute_pick_targets, then adjusted only by an optional "
+        "confirmed robot correction."
     }
     assert {
         (step["step_name"], step["required"])
         for step in pick_template
         if step["recordable"]
     } == {("move_above_part", False), ("descend", False)}
+
+
+def test_migrated_shared_ur5e_approach_corrections_preserve_data_and_insert_gate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    expected = {
+        "pick_approach": {
+            "descend": {
+                "pose": {
+                    "x": 0.29427310944834645,
+                    "y": 0.4265197315195987,
+                    "z": 1.267854010419474,
+                    "qx": 0.6727390249297289,
+                    "qy": 0.7398160539916842,
+                    "qz": -0.006919965278064899,
+                    "qw": 0.006820899744287707,
+                },
+                "correction": {
+                    "x": -0.0003834222081670058,
+                    "y": 0.00019522013582612407,
+                    "z": 0.01158770164919698,
+                },
+                "captured_at": 1786400802.7019255,
+                "computed_at": 1786400758.369992,
+                "reference_captured_at": 1786400757.9368281,
+                "confirmed": True,
+            },
+        },
+    }
+
+    for function_name, expected_steps in {
+        **expected,
+        "place_approach": {
+            "move_above_destination": None,
+            "descend": None,
+        },
+    }.items():
+        path = (
+            root
+            / "cais_spade_llm/resources/robot/taught_functions"
+            / function_name
+            / "default__hardware.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["function_name"] == function_name
+        assert payload["capture_source"] == "hardware"
+        assert set(payload["robots"]) == {"ur5e"}
+        actual_steps = {
+            step["step_name"]: step for step in payload["robots"]["ur5e"]["steps"]
+        }
+        assert set(actual_steps) == set(expected_steps)
+        for step_name, expected_step in expected_steps.items():
+            step = actual_steps[step_name]
+            if function_name == "place_approach":
+                assert step["confirmed"] is True
+                assert "invalid_reason" not in step
+                assert set(step["computed_pose"]) == {
+                    "x",
+                    "y",
+                    "z",
+                    "qx",
+                    "qy",
+                    "qz",
+                    "qw",
+                }
+                assert set(step["relative_pose"]) == {
+                    "x",
+                    "y",
+                    "z",
+                    "qx",
+                    "qy",
+                    "qz",
+                    "qw",
+                }
+                assert step["relative_reference"]["calibration_id"].strip()
+                assert step["waypoint"]["pose"] == {
+                    "frame_id": "world",
+                    "child_frame_id": "tool0",
+                    **step["params"],
+                }
+                assert step["relative_position_m"] == pytest.approx(
+                    {
+                        field: step["params"][field]
+                        - step["computed_position_m"][field]
+                        for field in ("x", "y", "z")
+                    }
+                )
+                if step_name == "descend":
+                    assert (
+                        actual_steps["move_above_destination"]["params"]["z"]
+                        > step["params"]["z"]
+                    )
+                continue
+
+            assert expected_step is not None
+            assert step["confirmed"] is expected_step["confirmed"]
+            assert step["params"] == expected_step["pose"]
+            assert step["relative_position_m"] == expected_step["correction"]
+            assert step["captured_at"] == expected_step["captured_at"]
+            assert step["computed_at"] == expected_step["computed_at"]
+            assert (
+                step["relative_reference"]["captured_at"]
+                == expected_step["reference_captured_at"]
+            )
+            assert step["waypoint"]["pose"] == {
+                "frame_id": "world",
+                "child_frame_id": "tool0",
+                **expected_step["pose"],
+            }
 
 
 def test_capture_readiness_uses_selected_ur5e_domain_without_control() -> None:
@@ -425,12 +555,16 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
         resolution_calls.append(dict(kwargs))
         return {
             "success": True,
-            "computed_position": {
-                "frame_id": "world",
-                "x": 0.4,
-                "y": 0.3,
-                "z": 1.0,
-            },
+                "computed_position": {
+                    "frame_id": "world",
+                    "x": 0.4,
+                    "y": 0.3,
+                    "z": 1.0,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
             "computed_reference": dict(board_reference),
             "computed_source": "capture",
             "computed_at": time.time(),
@@ -485,21 +619,32 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
     assert first["computed_position_m"] == pytest.approx(
         {"x": 0.4, "y": 0.3, "z": 1.0}
     )
+    assert first["computed_pose"] == pytest.approx(
+        {
+            "x": 0.4,
+            "y": 0.3,
+            "z": 1.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        }
+    )
     assert first["current_position_m"] == pytest.approx(
         {"x": 0.41, "y": 0.3, "z": 1.2}
     )
     assert first["relative_position_m"] == pytest.approx(
-        {"x": 0.0, "y": -0.01, "z": 0.2}
+        {"x": 0.01, "y": 0.0, "z": 0.2}
     )
     assert first["relative_pose"] == pytest.approx(
         {
-            "x": 0.0,
-            "y": -0.01,
+            "x": 0.01,
+            "y": 0.0,
             "z": 0.2,
             "qx": 0.0,
             "qy": 0.0,
-            "qz": -0.7071067811865476,
-            "qw": 0.7071067811865476,
+            "qz": 0.0,
+            "qw": 1.0,
         }
     )
     buffered = bridge.digital_twin_list_function_buffer_steps(
@@ -509,6 +654,7 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
         "assembly_board-v1",
         part_name="MG",
     )
+    assert buffered[0]["computed_pose"] == pytest.approx(first["computed_pose"])
     assert len(buffered) == 1
     assert buffered[0]["step_name"] == "move_above_destination"
     assert buffered[0]["primitive"] == "move_cartesian"
@@ -521,8 +667,138 @@ def test_capture_upserts_exact_step_with_world_pose_and_joints() -> None:
         "z": "captured_relative",
     }
     assert buffered[0]["relative_position_m"] == pytest.approx(
-        {"x": 0.0, "y": -0.02, "z": 0.2}
+        {"x": 0.02, "y": 0.0, "z": 0.2}
     )
+
+
+def test_operator_confirmed_mg_capture_uses_and_restores_exact_handoff_context() -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge._digital_twin_function_steps = {}
+    bridge._digital_twin_record_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_lock = threading.Lock()
+    bridge._ur5e_robot_function_preflight_lock = threading.Lock()
+    bridge._ur5e_robot_function_execution_active = None
+    bridge._robot_function_validate_request = lambda *_args: ({}, "")
+    bridge._robot_function_capture_source = lambda *_args: "hardware"
+    original_task_context = {"preserved": True}
+    resource_agent = SimpleNamespace(
+        execution_mode="physical",
+        _controller=object(),
+        _held_part=None,
+        _task_ctx=original_task_context,
+        _robot_motion_lock=threading.Lock(),
+    )
+    bridge._physical_ur5e_robot_agent = lambda: resource_agent
+    bridge._robot_function_product_geometry_for_part = lambda _part_name: {
+        "part_name": "MG",
+        "model_name": "gear_medium",
+    }
+    handoff = {
+        "origin_resource_location": "prusa-mk4-2",
+        "world_held_part_pose_at_grasp": {
+            "x": 0.30,
+            "y": 0.40,
+            "z": 1.10,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
+        "origin_pose_provenance": {"source": "confirmed recording"},
+        "world_tool0_pose_at_grasp": {
+            "x": 0.30,
+            "y": 0.40,
+            "z": 1.20,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
+        "tool0_to_held_part": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": -0.10,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
+        "pick_approach_recording_path": "/tmp/pick_approach.json",
+        "pick_approach_recording_sha256": "a" * 64,
+    }
+    bridge._operator_confirmed_mg_held_part_handoff = (
+        lambda *_args, **_kwargs: (
+            handoff,
+            {"held_part_handoff_ready": True},
+            "",
+        )
+    )
+    bridge._robot_function_capture_snapshot = lambda *_args: {
+        "success": True,
+        "waypoint": {
+            "world_base_pose": _world_base_pose(),
+            "joint_names": list(UR5E_JOINT_NAMES),
+            "positions": [0.0] * 6,
+            "pose": {
+                "frame_id": "world",
+                "child_frame_id": "tool0",
+                "x": 0.41,
+                "y": 0.30,
+                "z": 1.20,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            },
+        },
+    }
+
+    def _resolve(*_args: object, **_kwargs: object) -> dict[str, object]:
+        task_context = dict(resource_agent._task_ctx)
+        assert task_context["part_name"] == "MG"
+        assert task_context["held_part_handoff"] == handoff
+        assert task_context["operator_confirmed_held_part"] is True
+        return {
+            "success": True,
+                "computed_position": {
+                    "x": 0.40,
+                    "y": 0.30,
+                    "z": 1.00,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
+            "computed_reference": {
+                "kind": "destination_target",
+                "frame_id": "world",
+                "name": "assembly_board-v1",
+                "position_m": {"x": 0.40, "y": 0.30, "z": 1.00},
+                "source": "assembly_board-v1_aruco",
+                "captured_at": time.time(),
+            },
+            "computed_source": "capture",
+            "computed_at": time.time(),
+            "resolved_position": {"x": 0.40, "y": 0.30, "z": 1.00},
+        }
+
+    bridge._resolve_robot_function_position = _resolve
+
+    result = bridge.digital_twin_capture_function_step(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "move_above_destination",
+        "move_cartesian",
+        part_name="MG",
+        operator_confirmed_held_part=True,
+        operator_handoff_origin_resource_location="prusa-mk4-2",
+    )
+
+    assert result["success"] is True
+    assert resource_agent._task_ctx is original_task_context
+    assert result["readiness"]["held_part_handoff_ready"] is True
 
 
 def test_hardware_stack_generation_clears_computed_pose_cache() -> None:
@@ -598,7 +874,15 @@ def test_capture_resolves_without_preview_cache_and_does_not_move() -> None:
         resolution_calls.append(dict(kwargs))
         return {
             "success": True,
-            "computed_position": {"x": 0.4, "y": 0.3, "z": 1.2},
+                "computed_position": {
+                    "x": 0.4,
+                    "y": 0.3,
+                    "z": 1.2,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
             "computed_reference": {
                 "kind": "detected_part",
                 "frame_id": "world",
@@ -668,7 +952,15 @@ def test_capture_rejects_staging_pose_far_from_computed_pose_without_buffering()
     }
     bridge._resolve_robot_function_position = lambda *_args, **_kwargs: {
         "success": True,
-        "computed_position": {"x": 0.323193, "y": 0.373448, "z": 1.256266},
+        "computed_position": {
+            "x": 0.323193,
+            "y": 0.373448,
+            "z": 1.256266,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
         "computed_reference": {
             "kind": "detected_part",
             "frame_id": "world",
@@ -810,7 +1102,7 @@ def test_place_reference_uses_accepted_pose_when_tag_is_occluded() -> None:
             "calibration_id": "",
             "ready_to_accept": False,
             "visible": False,
-            "movement_blocked": True,
+            "movement_blocked": False,
             "marker_length_m": 0.076,
             "dictionary": "DICT_ARUCO_ORIGINAL",
             "marker_id": 70,
@@ -836,7 +1128,207 @@ def test_place_reference_uses_accepted_pose_when_tag_is_occluded() -> None:
     assert frozen["observation_source"] == "accepted"
 
 
-def test_capture_resolution_allows_an_older_accepted_pose_when_tag_is_occluded() -> None:
+def test_capture_resolution_uses_accepted_pose_instead_of_unaccepted_cross_view_pose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
+    bridge = object.__new__(SystemBridge)
+    bridge._robot_function_validate_request = lambda *_args: ({}, "")
+    bridge._physical_robot_function_cartesian_error = lambda _robot: ""
+    bridge._robot_function_product_geometry_for_part = lambda _part_name: {}
+    bridge._robot_function_computed_pose_provenance = lambda **_kwargs: {}
+    bridge._cache_robot_function_computed_pose = lambda **kwargs: {
+        "computed_pose": dict(kwargs["computed_position"]),
+        "relative_reference": dict(kwargs["relative_reference"]),
+    }
+    accepted_pose = {
+        "x": 0.4,
+        "y": 0.3,
+        "z": 1.0,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+    }
+    unaccepted_cross_view_pose = {
+        **accepted_pose,
+        "qz": 0.03053851320982266,
+        "qw": 0.999533590836713,
+    }
+    bridge.perception_manager = SimpleNamespace(
+        assembly_board_v1_aruco_status=lambda role: {
+            "camera_role": role,
+            "accepted": True,
+            "accepted_baseline_ready": True,
+            "accepted_generation": 8,
+            "accepted_pose": dict(accepted_pose),
+            "accepted_at": time.time() - 60.0,
+            "accepted_frame_captured_at": time.time() - 61.0,
+            "accepted_calibration_id": "ur5e-calibration",
+            "active_calibration_id": "ur5e-calibration",
+            "calibration_id": "ur5e-calibration",
+            "calibration_changed": False,
+            "ready_to_accept": True,
+            "visible": True,
+            "valid": True,
+            "movement_evidence_valid": True,
+            "excessive_movement": True,
+            "movement_blocked": False,
+            "pose": dict(unaccepted_cross_view_pose),
+            "frame_captured_at": time.time(),
+            "marker_length_m": 0.076,
+            "dictionary": "DICT_ARUCO_ORIGINAL",
+            "marker_id": 70,
+            "sample_count": 10,
+        }
+    )
+    compute_arguments: list[dict[str, object]] = []
+
+    def _compute_place_targets(**kwargs: object) -> dict[str, object]:
+        compute_arguments.append(dict(kwargs))
+        frozen = dict(kwargs["assembly_board_v1_aruco"])
+        pose = dict(frozen["pose"])
+        return {
+            "success": True,
+            "destination_location": "assembly_board-v1",
+            "approach_pose": {"x": pose["x"], "y": pose["y"], "z": 1.2},
+            "target_pose": {"x": pose["x"], "y": pose["y"], "z": 1.1},
+        }
+
+    motion_calls: list[str] = []
+    resource_agent = SimpleNamespace(
+        agent_name="ur5e",
+        execution_mode="physical",
+        _task_ctx={},
+        _controller=SimpleNamespace(
+            _last_start_pose=None,
+            compute_place_targets=_compute_place_targets,
+            move_cartesian=lambda **_kwargs: motion_calls.append("move_cartesian"),
+            move_to_named_pose=lambda *_args, **_kwargs: motion_calls.append(
+                "move_to_named_pose"
+            ),
+        ),
+    )
+
+    result = bridge._resolve_robot_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "descend",
+        part_name="MG",
+        readiness={"success": True},
+        resource_agent=resource_agent,
+        computed_source="capture",
+    )
+
+    assert result["success"] is True, result
+    assert result["computed_source"] == "capture"
+    assert result["computed_reference"]["pose"] == pytest.approx(accepted_pose)
+    assert result["computed_reference"]["observation_source"] == "accepted"
+    assert len(compute_arguments) == 1
+    frozen = dict(compute_arguments[0]["assembly_board_v1_aruco"])
+    assert frozen["pose"] == pytest.approx(accepted_pose)
+    assert frozen["pose"] != pytest.approx(unaccepted_cross_view_pose)
+    assert frozen["observation_source"] == "accepted"
+    assert motion_calls == []
+
+
+def test_test_position_rejects_unaccepted_cross_view_pose_before_target_computation() -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge._robot_function_product_geometry_for_part = lambda _part_name: {}
+    compute_calls: list[dict[str, object]] = []
+    motion_calls: list[str] = []
+    controller = SimpleNamespace(
+        _last_start_pose=None,
+        compute_place_targets=lambda **kwargs: compute_calls.append(dict(kwargs)),
+        move_cartesian=lambda **_kwargs: motion_calls.append("move_cartesian"),
+        move_to_named_pose=lambda *_args, **_kwargs: motion_calls.append(
+            "move_to_named_pose"
+        ),
+    )
+    bridge.perception_manager = SimpleNamespace(
+        assembly_board_v1_aruco_status=lambda _role: {
+            "accepted": True,
+            "accepted_baseline_ready": True,
+            "accepted_calibration_id": "ur5e-calibration",
+            "active_calibration_id": "ur5e-calibration",
+            "calibration_identity_matches": True,
+            "calibration_changed": False,
+            "ready_to_accept": True,
+            "movement_evidence_valid": True,
+            "excessive_movement": True,
+            "movement_blocked": False,
+        }
+    )
+
+    result = bridge._robot_function_relative_reference(
+        resource_agent=SimpleNamespace(
+            agent_name="ur5e",
+            _task_ctx={},
+            _controller=controller,
+        ),
+        function_name="place_approach",
+        name="assembly_board-v1",
+        step_name="descend",
+        part_name="MG",
+        robot="ur5e",
+        computed_source="test_position",
+    )
+
+    assert result["success"] is False
+    assert "Test Position is blocked" in result["message"]
+    assert "confirmed Run place_approach" in result["message"]
+    assert compute_calls == []
+    assert motion_calls == []
+
+
+def test_capture_rejects_a_persisted_board_movement_block_before_computation() -> None:
+    bridge = object.__new__(SystemBridge)
+    bridge._robot_function_product_geometry_for_part = lambda _part_name: {}
+    compute_calls: list[dict[str, object]] = []
+    bridge.perception_manager = SimpleNamespace(
+        assembly_board_v1_aruco_status=lambda _role: {
+            "accepted": True,
+            "accepted_baseline_ready": False,
+            "accepted_baseline_error": (
+                "assembly_board-v1 moved more than 10 mm or 2 deg from the accepted "
+                "ur5e pose; use Locate & Accept Board again."
+            ),
+            "movement_blocked": True,
+        }
+    )
+
+    result = bridge._robot_function_relative_reference(
+        resource_agent=SimpleNamespace(
+            agent_name="ur5e",
+            _task_ctx={},
+            _controller=SimpleNamespace(
+                _last_start_pose=None,
+                compute_place_targets=lambda **kwargs: compute_calls.append(
+                    dict(kwargs)
+                ),
+            ),
+        ),
+        function_name="place_approach",
+        name="assembly_board-v1",
+        step_name="descend",
+        part_name="MG",
+        robot="ur5e",
+        computed_source="capture",
+    )
+
+    assert result["success"] is False
+    assert "moved more than 10 mm or 2 deg" in result["message"]
+    assert compute_calls == []
+
+
+def test_capture_resolution_allows_an_older_accepted_pose_when_tag_is_occluded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
     bridge = object.__new__(SystemBridge)
     bridge._robot_function_validate_request = lambda *_args: ({}, "")
     bridge._physical_robot_function_cartesian_error = lambda _robot: ""
@@ -1080,7 +1572,15 @@ def test_xarm6_capture_uses_world_link_eef_relative_xyz() -> None:
     }
     bridge._resolve_robot_function_position = lambda *_args, **_kwargs: {
         "success": True,
-        "computed_position": {"x": 0.30, "y": -0.40, "z": 1.05},
+        "computed_position": {
+            "x": 0.30,
+            "y": -0.40,
+            "z": 1.05,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
         "computed_reference": {
             "kind": "detected_part",
             "frame_id": "world",
@@ -1111,7 +1611,7 @@ def test_xarm6_capture_uses_world_link_eef_relative_xyz() -> None:
     )
 
 
-def test_pick_capture_persists_exact_context_axis_sources_and_hardware_evidence(
+def test_pick_capture_persists_robot_correction_without_runtime_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1131,7 +1631,15 @@ def test_pick_capture_persists_exact_context_axis_sources_and_hardware_evidence(
     )
     bridge._resolve_robot_function_position = lambda *_args, **_kwargs: {
         "success": True,
-        "computed_position": {"x": 0.36, "y": 0.30, "z": 1.10},
+        "computed_position": {
+            "x": 0.36,
+            "y": 0.30,
+            "z": 1.10,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
         "computed_reference": {
             "kind": "detected_part",
             "frame_id": "world",
@@ -1203,11 +1711,13 @@ def test_pick_capture_persists_exact_context_axis_sources_and_hardware_evidence(
     )
     assert saved["success"] is True
     assert recaptured["success"] is True
-    path = tmp_path / "ur5e/pick_approach/prusa-mk4-2__MG__hardware.json"
+    path = tmp_path / "pick_approach/default__hardware.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["name"] == "prusa-mk4-2"
-    assert payload["part_name"] == "MG"
-    step = payload["steps"][0]
+    assert "name" not in payload
+    assert "part_name" not in payload
+    assert set(payload["robots"]) == {"ur5e"}
+    step = payload["robots"]["ur5e"]["steps"][0]
+    assert step["confirmed"] is True
     assert step["position_sources"] == {
         "x": "captured_relative",
         "y": "captured_relative",
@@ -1251,8 +1761,12 @@ def test_save_position_replaces_same_step_in_hardware_file(
                     "qz": 0.0,
                     "qw": 1.0,
                 },
-                "waypoint": {
-                    "pose": {"frame_id": "world", "x": 0.5},
+                    "waypoint": {
+                        "pose": {
+                            "frame_id": "world",
+                            "child_frame_id": "tool0",
+                            "x": 0.5,
+                        },
                     "joint_names": list(UR5E_JOINT_NAMES),
                     "joint_positions": [1.0] * 6,
                     "source": "hardware",
@@ -1263,20 +1777,28 @@ def test_save_position_replaces_same_step_in_hardware_file(
     bridge._robot_function_validate_request = lambda *_args: ({}, "")
     bridge._robot_function_storage_source = lambda *_args: "hardware"
     bridge._robot_function_capture_source = lambda *_args: "hardware"
-    path = tmp_path / "ur5e/place_approach/assembly_board-v1__MG__hardware.json"
+    bridge._robot_function_capture_source = lambda *_args: "hardware"
+    path = tmp_path / "place_approach/default__hardware.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
-            {
-                "name": "assembly_board-v1",
-                "part_name": "MG",
-                "steps": [
-                    {
-                        "step_name": "move_above_destination",
-                        "primitive": "move_cartesian",
-                        "params": {"x": 0.1},
-                    }
-                ],
+                {
+                    "function_name": "place_approach",
+                    "capture_source": "hardware",
+                    "robots": {
+                        "ur5e": {
+                            "frame_id": "world",
+                            "ee_link": "tool0",
+                            "tcp_link": "ur5e_rg2_gripper_tcp",
+                            "steps": [
+                                {
+                                    "step_name": "move_above_destination",
+                                    "primitive": "move_cartesian",
+                                    "params": {"x": 0.1},
+                                }
+                            ],
+                        }
+                    },
             }
         ),
         encoding="utf-8",
@@ -1293,10 +1815,12 @@ def test_save_position_replaces_same_step_in_hardware_file(
 
     assert result["success"] is True
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert len(payload["steps"]) == 1
-    assert payload["steps"][0]["params"]["x"] == pytest.approx(0.5)
-    assert payload["name"] == "assembly_board-v1"
-    assert payload["part_name"] == "MG"
+    steps = payload["robots"]["ur5e"]["steps"]
+    assert len(steps) == 1
+    assert steps[0]["params"]["x"] == pytest.approx(0.5)
+    assert steps[0]["confirmed"] is True
+    assert "name" not in payload
+    assert "part_name" not in payload
     assert bridge._digital_twin_function_steps == {}
 
 
@@ -1321,6 +1845,10 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
             return {"success": True, "message": "moved"}
 
     controller = _Controller()
+    controller.frame_id = "world"
+    controller.ee_link = "tool0"
+    controller.tcp_link = "ur5e_rg2_gripper_tcp"
+    controller.arm_joint_names = list(UR5E_JOINT_NAMES)
     bridge = object.__new__(SystemBridge)
     bridge._ur5e_robot_function_execution_lock = threading.Lock()
     bridge._ur5e_robot_function_execution_active = None
@@ -1348,6 +1876,7 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
             "captured_at": time.time(),
             "camera_role": "ur5e",
             "generation": 1,
+            "calibration_id": "ur5e-calibration",
         },
         "computed": {
             "success": True,
@@ -1428,6 +1957,7 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
             "primitive": "move_cartesian",
             "params": dict(params),
             "capture_source": "hardware",
+            "confirmed": True,
             "position_sources": {
                 "x": "captured_relative",
                 "y": "captured_relative",
@@ -1438,6 +1968,18 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
                 "y": 0.0,
                 "z": z - 1.1,
             },
+                "computed_position_m": {"x": 0.4, "y": 0.3, "z": 1.1},
+                "computed_pose": {
+                    "x": 0.4,
+                    "y": 0.3,
+                    "z": 1.1,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
+            "computed_source": "test",
+            "computed_at": time.time(),
             "relative_pose": {
                 "x": 0.0,
                 "y": 0.0,
@@ -1465,6 +2007,7 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
                 "captured_at": time.time(),
                 "camera_role": "ur5e",
                 "generation": 1,
+                "calibration_id": "ur5e-calibration",
             },
             "waypoint": {
                 "pose": {
@@ -1478,20 +2021,24 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
             },
         }
 
-    path = tmp_path / "ur5e/place_approach/assembly_board-v1__MG__hardware.json"
+    path = tmp_path / "place_approach/default__hardware.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
             {
-                "robot": "ur5e",
                 "function_name": "place_approach",
-                "name": "assembly_board-v1",
-                "part_name": "MG",
                 "capture_source": "hardware",
-                "steps": [
-                    _recorded_step("move_above_destination", 1.2),
-                    _recorded_step("descend", 1.1),
-                ],
+                "robots": {
+                    "ur5e": {
+                        "frame_id": "world",
+                        "ee_link": "tool0",
+                        "tcp_link": "ur5e_rg2_gripper_tcp",
+                        "steps": [
+                            _recorded_step("move_above_destination", 1.2),
+                            _recorded_step("descend", 1.1),
+                        ],
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -1538,7 +2085,8 @@ def test_test_position_uses_runtime_validated_move_cartesian_and_requires_confir
         part_name="MG",
     )
     invalid_payload = json.loads(path.read_text(encoding="utf-8"))
-    invalid_payload["steps"].append(dict(invalid_payload["steps"][0]))
+    invalid_steps = invalid_payload["robots"]["ur5e"]["steps"]
+    invalid_steps.append(dict(invalid_steps[0]))
     path.write_text(json.dumps(invalid_payload), encoding="utf-8")
     invalid_recording = bridge.digital_twin_test_function_position(
         "ur5e only",
@@ -1703,7 +2251,7 @@ def test_mg_preview_resolves_live_xyz_with_captured_orientation_and_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(robot_task_runtime, "_TAUGHT_FUNCTIONS_ROOT", tmp_path)
-    path = tmp_path / "ur5e/pick_approach/prusa-mk4-2__MG__hardware.json"
+    path = tmp_path / "pick_approach/default__hardware.json"
     path.parent.mkdir(parents=True)
     captured_quaternion = {
         "qx": 0.6728028804150565,
@@ -1714,47 +2262,73 @@ def test_mg_preview_resolves_live_xyz_with_captured_orientation_and_diagnostics(
     captured_pose = {
         "frame_id": "world",
         "child_frame_id": "tool0",
-        "x": 9.0,
-        "y": 8.0,
-        "z": 1.2657060858127773,
+        "x": 0.1,
+        "y": 0.2,
+        "z": 0.4,
         **captured_quaternion,
     }
     path.write_text(
         json.dumps(
             {
-                "robot": "ur5e",
                 "function_name": "pick_approach",
-                "name": "prusa-mk4-2",
-                "part_name": "MG",
                 "capture_source": "hardware",
-                "steps": [
-                    {
-                        "step_name": "descend",
-                        "primitive": "move_cartesian",
-                        "params": captured_pose,
-                        "capture_source": "hardware",
-                        "position_sources": {
-                            "x": "captured_relative",
-                            "y": "captured_relative",
-                            "z": "captured_relative",
-                        },
-                        "relative_position_m": {"x": 0.0, "y": 0.0, "z": 0.1},
-                        "relative_reference": {
-                            "kind": "detected_part",
-                            "frame_id": "world",
-                            "name": "MG",
-                            "position_m": {"x": 0.1, "y": 0.2, "z": 0.3},
-                            "source": "live_detection",
-                            "captured_at": time.time(),
-                        },
-                        "waypoint": {
-                            "pose": captured_pose,
-                            "joint_names": list(UR5E_JOINT_NAMES),
-                            "joint_positions": [0.0] * 6,
-                            "source": "hardware",
-                        },
-                    }
-                ],
+                "robots": {
+                    "ur5e": {
+                        "frame_id": "world",
+                        "ee_link": "tool0",
+                        "tcp_link": "ur5e_rg2_gripper_tcp",
+                        "steps": [
+                            {
+                                "step_name": "descend",
+                                "primitive": "move_cartesian",
+                                "params": captured_pose,
+                                "capture_source": "hardware",
+                                "confirmed": True,
+                                "position_sources": {
+                                    "x": "captured_relative",
+                                    "y": "captured_relative",
+                                    "z": "captured_relative",
+                                },
+                                "relative_position_m": {
+                                    "x": 0.0,
+                                    "y": 0.0,
+                                    "z": 0.0,
+                                },
+                                "relative_pose": {
+                                    "x": 0.0,
+                                    "y": 0.0,
+                                    "z": 0.0,
+                                    **captured_quaternion,
+                                },
+                                "computed_position_m": {
+                                    "x": 0.1,
+                                    "y": 0.2,
+                                    "z": 0.4,
+                                },
+                                "computed_source": "test",
+                                "computed_at": time.time(),
+                                "relative_reference": {
+                                    "kind": "detected_part",
+                                    "frame_id": "world",
+                                    "name": "MG",
+                                    "position_m": {
+                                        "x": 0.1,
+                                        "y": 0.2,
+                                        "z": 0.3,
+                                    },
+                                    "source": "live_detection",
+                                    "captured_at": time.time(),
+                                },
+                                "waypoint": {
+                                    "pose": captured_pose,
+                                    "joint_names": list(UR5E_JOINT_NAMES),
+                                    "joint_positions": [0.0] * 6,
+                                    "source": "hardware",
+                                },
+                            },
+                        ],
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -1763,6 +2337,14 @@ def test_mg_preview_resolves_live_xyz_with_captured_orientation_and_diagnostics(
         agent_name="ur5e",
         execution_mode="physical",
         _controller=object(),
+        controller_config={
+            "arm_joint_names": list(UR5E_JOINT_NAMES),
+            "move_group": {
+                "frame_id": "world",
+                "ee_link": "tool0",
+                "tcp_link": "ur5e_rg2_gripper_tcp",
+            },
+        },
         static_capabilities={
             "gripper_reach": {
                 "frame": "world",
@@ -1878,6 +2460,272 @@ def test_position_file_operations_reject_empty_pick_place_location() -> None:
     assert test == {"success": False, "message": "origin_resource_location is empty"}
 
 
+def test_save_replaced_place_approach_descend_refreshes_running_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bridge_module, "_ROBOT_TAUGHT_FUNCTIONS_DIR", tmp_path)
+    bridge = object.__new__(SystemBridge)
+    bridge._digital_twin_record_lock = threading.Lock()
+    bridge._digital_twin_function_steps = {}
+    bridge._robot_function_validate_request = lambda *_args: ({}, "")
+    bridge._robot_function_storage_source = lambda *_args: "hardware"
+    bridge._robot_function_capture_source = lambda *_args: "hardware"
+
+    old_descend = {
+        "x": 0.1,
+        "y": 0.2,
+        "z": 1.3,
+        "qx": 0.0,
+        "qy": 0.0,
+        "qz": 0.0,
+        "qw": 1.0,
+    }
+    new_descend = {
+        "x": 0.103,
+        "y": 0.201,
+        "z": 1.302,
+        "qx": 2.0**-0.5,
+        "qy": 2.0**-0.5,
+        "qz": 0.0,
+        "qw": 0.0,
+    }
+    held_part_handoff = {"immutable": "held_part_handoff"}
+    agent = SimpleNamespace(
+        execution_mode="physical",
+        _current_state="positioned",
+        _held_part="MG",
+        _gripper_state="closed",
+        _task_ctx={
+            "destination_location": "assembly_board-v1",
+            "part_name": "MG",
+            "held_part_handoff": deepcopy(held_part_handoff),
+            "resolved_cartesian_positions": {
+                "descend": deepcopy(old_descend),
+                "move_insert": {**old_descend, "z": 1.25},
+            },
+            "assembly_board_v1_aruco": {"generation": 7},
+            "assembly_board_v1_aruco_generation": 7,
+            "move_insert_mode": "force_limited_trial",
+            "move_insert_profile": {"part_name": "MG"},
+            "move_insert_profile_sha256": "a" * 64,
+            "insert_pose": {**old_descend, "z": 1.25},
+            "insertion_axis_world": {"x": 0.0, "y": 0.0, "z": -1.0},
+            "move_insert_boundary_ready": True,
+        },
+        controller_config={
+            "move_group": {
+                "frame_id": "world",
+                "ee_link": "tool0",
+                "tcp_link": "ur5e_rg2_gripper_tcp",
+            }
+        },
+    )
+    bridge._physical_ur5e_robot_agent = lambda: agent
+    bridge._physical_robot_agent = lambda robot: agent if robot == "ur5e" else None
+    bridge._physical_ur5e_place_approach_handoff_error = (
+        lambda *_args, **_kwargs: ""
+    )
+
+    captured = {
+        "step_name": "descend",
+        "primitive": "move_cartesian",
+        "params": deepcopy(new_descend),
+        "capture_source": "hardware",
+        "captured_at": time.time(),
+        "position_sources": {
+            "x": "captured_relative",
+            "y": "captured_relative",
+            "z": "captured_relative",
+        },
+        "relative_position_m": {"x": 0.003, "y": 0.001, "z": 0.002},
+        "relative_pose": {
+            "x": 0.003,
+            "y": 0.001,
+            "z": 0.002,
+            "qx": 2.0**-0.5,
+            "qy": 2.0**-0.5,
+            "qz": 0.0,
+            "qw": 0.0,
+        },
+        "relative_reference": {},
+        "computed_position_m": {"x": 0.1, "y": 0.2, "z": 1.3},
+        "computed_pose": deepcopy(old_descend),
+        "computed_source": "capture",
+        "computed_at": time.time(),
+        "confirmed": False,
+        "waypoint": {
+            "source": "hardware",
+            "pose": {
+                "frame_id": "world",
+                "child_frame_id": "tool0",
+                **new_descend,
+            }
+        },
+    }
+    key = bridge._robot_function_buffer_key(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "MG",
+    )
+    bridge._digital_twin_function_steps[key] = [captured]
+
+    result = bridge.digital_twin_save_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "descend",
+        part_name="MG",
+    )
+
+    assert result["success"] is True
+    assert result["retained_descend_refreshed"] is True
+    assert "Run place_approach before place_insert" in result["message"]
+    retained = agent._task_ctx
+    assert retained["resolved_cartesian_positions"] == {
+        "descend": pytest.approx(new_descend)
+    }
+    assert retained["pre_insert_pose"] == pytest.approx(new_descend)
+    assert retained["held_part_handoff"] == held_part_handoff
+    for stale_field in (
+        "assembly_board_v1_aruco",
+        "assembly_board_v1_aruco_generation",
+        "move_insert_mode",
+        "move_insert_profile",
+        "move_insert_profile_sha256",
+        "insert_pose",
+        "insertion_axis_world",
+        "move_insert_boundary_ready",
+    ):
+        assert stale_field not in retained
+
+
+def test_clear_and_new_full_pose_capture_replace_unsafe_place_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bridge_module, "_ROBOT_TAUGHT_FUNCTIONS_DIR", tmp_path)
+    bridge = object.__new__(SystemBridge)
+    bridge._digital_twin_record_lock = threading.Lock()
+    bridge._digital_twin_function_steps = {}
+    bridge._robot_function_validate_request = lambda *_args: ({}, "")
+    bridge._robot_function_storage_source = lambda *_args: "hardware"
+    bridge._robot_function_capture_source = lambda *_args: "hardware"
+    path = tmp_path / "place_approach/default__hardware.json"
+    path.parent.mkdir(parents=True)
+    legacy_step = {
+        "step_name": "move_above_destination",
+        "primitive": "move_cartesian",
+        "confirmed": False,
+        "invalid_reason": (
+            "Unsafe legacy place_approach correction: computed_pose is missing; "
+            "use Locate & Accept Board, Capture Pose, and Save/Replace Pose again."
+        ),
+        "waypoint": {"pose": {"x": 0.4, "y": 0.3, "z": 1.2}},
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "function_name": "place_approach",
+                "capture_source": "hardware",
+                "robots": {
+                    "ur5e": {
+                        "frame_id": "world",
+                        "ee_link": "tool0",
+                        "tcp_link": "ur5e_rg2_gripper_tcp",
+                        "steps": [legacy_step],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cleared = bridge.digital_twin_clear_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "move_above_destination",
+        part_name="MG",
+    )
+
+    assert cleared["success"] is True
+    assert not path.exists()
+
+    computed_pose = {
+        "x": 0.4,
+        "y": 0.3,
+        "z": 1.2,
+        "qx": 0.0,
+        "qy": 2.0**-0.5,
+        "qz": 0.0,
+        "qw": 2.0**-0.5,
+    }
+    captured = {
+        "step_name": "move_above_destination",
+        "primitive": "move_cartesian",
+        "params": deepcopy(computed_pose),
+        "position_sources": {
+            "x": "captured_relative",
+            "y": "captured_relative",
+            "z": "captured_relative",
+        },
+        "relative_position_m": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "relative_pose": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        },
+        "relative_reference": {},
+        "computed_position_m": {
+            field: computed_pose[field] for field in ("x", "y", "z")
+        },
+        "computed_pose": deepcopy(computed_pose),
+        "computed_source": "capture",
+        "computed_at": time.time(),
+        "confirmed": False,
+        "waypoint": {
+            "pose": {
+                "frame_id": "world",
+                "child_frame_id": "tool0",
+                **computed_pose,
+            }
+        },
+    }
+    key = bridge._robot_function_buffer_key(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "MG",
+    )
+    bridge._digital_twin_function_steps[key] = [captured]
+    saved = bridge.digital_twin_save_function_position(
+        "ur5e only",
+        "ur5e",
+        "place_approach",
+        "assembly_board-v1",
+        "move_above_destination",
+        part_name="MG",
+    )
+
+    assert saved["success"] is True
+    saved_step = json.loads(path.read_text(encoding="utf-8"))["robots"]["ur5e"][
+        "steps"
+    ][0]
+    assert saved_step["confirmed"] is True
+    assert saved_step["computed_pose"] == pytest.approx(computed_pose)
+    assert "invalid_reason" not in saved_step
+
+
 def test_predefined_ui_has_no_free_form_function_or_step_inputs() -> None:
     source = inspect.getsource(control._predefined_function_record_body)
 
@@ -1896,14 +2744,18 @@ def test_predefined_ui_has_no_free_form_function_or_step_inputs() -> None:
     assert "Apply and Save Z Offset" not in source
     assert "Capture Orientation" not in source
     assert "Saved calibration XYZ offset" in source
-    assert "Recapture required" not in source
+    assert "Recapture required" in source
+    assert "place_approach_recording_blocked" in source
+    assert 'step.get("invalid_reason")' in source
+    assert "and not place_approach_recording_blocked" in source
     assert "This legacy position has no captured_relative XYZ" not in source
     assert 'label="origin_resource_location"' in source
     assert 'label="destination_location"' in source
     assert 'label="part_name"' in source
     assert "digital_twin_robot_function_execution_readiness" in source
     assert "digital_twin_prepare_function_position" in source
-    assert "keeps the captured quaternion unchanged" in source
+    assert "Raw waypoint " in source
+    assert "Replay is disabled" in source
     assert "_prepare_function_execution_runtime" not in source
     assert "digital_twin_execute_robot_function" in source
     assert 'or execution.get("preparing")' in source
@@ -1911,7 +2763,7 @@ def test_predefined_ui_has_no_free_form_function_or_step_inputs() -> None:
     assert "Check Capture Readiness" not in source
 
 
-def test_place_recording_requires_exact_part_name_and_validates_payload(
+def test_place_runtime_requires_part_name_but_recording_has_no_part_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1928,16 +2780,21 @@ def test_place_recording_requires_exact_part_name_and_validates_payload(
     )
     assert missing == {"success": False, "message": "part_name is empty"}
 
-    path = tmp_path / "ur5e/place_approach/assembly_board-v1__MG__hardware.json"
+    path = tmp_path / "place_approach/default__hardware.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
-            {
-                "robot": "ur5e",
-                "function_name": "place_approach",
-                "name": "assembly_board-v1",
-                "part_name": "SG",
-                "steps": [],
+                {
+                    "function_name": "place_approach",
+                    "capture_source": "hardware",
+                    "robots": {
+                        "ur5e": {
+                            "frame_id": "world",
+                            "ee_link": "tool0",
+                            "tcp_link": "ur5e_rg2_gripper_tcp",
+                            "steps": [],
+                        }
+                    },
             }
         ),
         encoding="utf-8",
@@ -1951,12 +2808,14 @@ def test_place_recording_requires_exact_part_name_and_validates_payload(
         part_name="MG",
     )
 
-    assert payload is None
+    assert payload is not None
     assert loaded_path == path
-    assert error == "part_name mismatch in taught function file"
+    assert error == ""
+    assert "part_name" not in payload
+    assert "name" not in payload
 
 
-def test_place_recording_paths_and_buffers_are_isolated_by_exact_part_name(
+def test_place_recording_path_and_buffer_are_shared_across_runtime_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1978,31 +2837,29 @@ def test_place_recording_paths_and_buffers_are_isolated_by_exact_part_name(
         "SG",
     )
     bridge._digital_twin_function_steps = {
-        mg_key: [{"step_name": "move_above_destination", "primitive": "move_cartesian"}],
-        sg_key: [{"step_name": "descend", "primitive": "move_cartesian"}],
+        mg_key: [
+            {"step_name": "move_above_destination", "primitive": "move_cartesian"},
+            {"step_name": "descend", "primitive": "move_cartesian"},
+        ],
     }
 
-    assert mg_key != sg_key
-    assert (
-        bridge._robot_function_path(
+    assert mg_key == sg_key
+    mg_path = bridge._robot_function_path(
             "ur5e",
             "place_approach",
             "assembly_board-v1",
             "hardware",
             "MG",
-        ).name
-        == "assembly_board-v1__MG__hardware.json"
-    )
-    assert (
-        bridge._robot_function_path(
+        )
+    sg_path = bridge._robot_function_path(
             "ur5e",
             "place_approach",
             "assembly_board-v1",
             "hardware",
             "SG",
-        ).name
-        == "assembly_board-v1__SG__hardware.json"
-    )
+        )
+    assert mg_path == sg_path
+    assert mg_path.name == "default__hardware.json"
     assert [
         step["step_name"]
         for step in bridge.digital_twin_list_function_buffer_steps(
@@ -2012,7 +2869,7 @@ def test_place_recording_paths_and_buffers_are_isolated_by_exact_part_name(
             "assembly_board-v1",
             part_name="MG",
         )
-    ] == ["move_above_destination"]
+    ] == ["move_above_destination", "descend"]
     assert [
         step["step_name"]
         for step in bridge.digital_twin_list_function_buffer_steps(
@@ -2022,10 +2879,110 @@ def test_place_recording_paths_and_buffers_are_isolated_by_exact_part_name(
             "assembly_board-v1",
             part_name="SG",
         )
-    ] == ["descend"]
+    ] == ["move_above_destination", "descend"]
 
 
-def test_place_delete_and_replay_apis_thread_exact_part_name(
+def test_configured_future_robot_can_save_generalized_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bridge_module, "_ROBOT_TAUGHT_FUNCTIONS_DIR", tmp_path)
+    bridge = object.__new__(SystemBridge)
+    bridge._digital_twin_record_lock = threading.Lock()
+    bridge._digital_twin_target = lambda _target: {
+        "robot": "dual robots",
+        "hardware": ("future_robot",),
+    }
+    bridge._robot_function_capture_source = lambda *_args: "hardware"
+    bridge._robot_function_storage_source = lambda *_args: "hardware"
+    controller = SimpleNamespace(
+        frame_id="world",
+        ee_link="future_ee",
+        tcp_link="future_tcp",
+    )
+    bridge.resource_agents = [
+        SimpleNamespace(
+            agent_name="future_robot",
+            jid="future_robot@localhost",
+            execution_mode="physical",
+            _controller=controller,
+            controller_config={
+                "arm_joint_names": [f"future_joint_{index}" for index in range(6)],
+                "move_group": {
+                    "frame_id": "world",
+                    "ee_link": "future_ee",
+                    "tcp_link": "future_tcp",
+                },
+            },
+        )
+    ]
+    key = bridge._robot_function_buffer_key(
+        "configured robots",
+        "future_robot",
+        "pick_approach",
+        "prusa-mk4-2",
+        "MG",
+    )
+    bridge._digital_twin_function_steps = {
+        key: [
+            {
+                "step_name": "descend",
+                "primitive": "move_cartesian",
+                "capture_source": "hardware",
+                "confirmed": False,
+                "relative_position_m": {"x": 0.01, "y": 0.0, "z": 0.0},
+                "relative_pose": {
+                    "x": 0.01,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                },
+                "waypoint": {
+                    "pose": {
+                        "frame_id": "world",
+                        "child_frame_id": "future_ee",
+                        "x": 0.11,
+                        "y": 0.2,
+                        "z": 0.4,
+                        "qx": 0.0,
+                        "qy": 0.0,
+                        "qz": 0.0,
+                        "qw": 1.0,
+                    },
+                    "joint_names": [f"future_joint_{index}" for index in range(6)],
+                    "joint_positions": [0.0] * 6,
+                    "source": "hardware",
+                },
+            }
+        ]
+    }
+
+    result = bridge.digital_twin_save_function_position(
+        "configured robots",
+        "future_robot",
+        "pick_approach",
+        "prusa-mk4-2",
+        "descend",
+        part_name="MG",
+    )
+
+    assert result["success"] is True
+    assert bridge.digital_twin_target_robots("configured robots") == ["future_robot"]
+    payload = json.loads(
+        (tmp_path / "pick_approach/default__hardware.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(payload["robots"]) == {"future_robot"}
+    assert payload["robots"]["future_robot"]["ee_link"] == "future_ee"
+    assert payload["robots"]["future_robot"]["tcp_link"] == "future_tcp"
+    assert payload["robots"]["future_robot"]["steps"][0]["confirmed"] is True
+
+
+def test_place_delete_removes_robot_entry_and_raw_replay_is_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2033,16 +2990,21 @@ def test_place_delete_and_replay_apis_thread_exact_part_name(
     bridge = object.__new__(SystemBridge)
     bridge._digital_twin_target = lambda _target: {"hardware": ("ur5e",)}
     bridge._robot_function_storage_source = lambda *_args: "hardware"
-    path = tmp_path / "ur5e/place_approach/assembly_board-v1__MG__hardware.json"
+    path = tmp_path / "place_approach/default__hardware.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
             {
-                "robot": "ur5e",
                 "function_name": "place_approach",
-                "name": "assembly_board-v1",
-                "part_name": "MG",
-                "steps": [],
+                "capture_source": "hardware",
+                "robots": {
+                    "ur5e": {
+                        "frame_id": "world",
+                        "ee_link": "tool0",
+                        "tcp_link": "ur5e_rg2_gripper_tcp",
+                        "steps": [],
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -2088,9 +3050,11 @@ def test_place_delete_and_replay_apis_thread_exact_part_name(
         part_name="MG",
     )
 
-    assert replay == {"success": False, "message": "expected test stop"}
-    assert replay_step == {"success": False, "message": "expected test stop"}
-    assert seen == [("place_approach", "MG"), ("place_approach", "MG")]
+    assert replay["success"] is False
+    assert replay_step["success"] is False
+    assert "Raw waypoint Replay is disabled" in replay["message"]
+    assert "Raw waypoint Replay is disabled" in replay_step["message"]
+    assert seen == []
 
 
 def test_preview_pick_target_is_read_only_and_uses_only_selected_detection() -> None:

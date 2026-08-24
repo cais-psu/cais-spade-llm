@@ -719,21 +719,39 @@ Capture**. **Preview Automatic Calibration** first plans every reviewed pose
 without motion. Only after that preview succeeds can the operator explicitly
 confirm **Run Automatic Calibration**, the only calibration control that moves
 a robot. Replay rechecks each plan before execution and provides Pause, Resume,
-Skip, and Abort. The stationary camera uses a measured fixed ChArUco `world`
-pose. Its live view remains available until that pose is configured, but
-world-pose comparison stays blocked.
+Skip, and Abort.
 
-Calibration activates only when median reprojection error is at most 1 px,
-fixed-board translation RMS is at most 5 mm, and rotation RMS is at most 1
-degree. The UR5e **Calibrate Table Plane** action collects 10 `/detect_all`
-results and rejects table-plane MAD above 2 mm or SG/MG median disagreement
-above 5 mm. Restart that perception instance and passive Gazebo after activating
-a calibration.
+Stationary `SG`/`MG` inspection does not use the ChArUco calibration workflow:
+do not survey a fixed ChArUco `world` pose, collect **Capture Sample**
+observations, or solve and activate a stationary-camera extrinsic. Leave the
+stationary camera in a useful view of the complete assembly and the existing
+`assembly_board-v1` ArUco ID 70. Its board-relative inspection uses the exact
+frame's RealSense `CameraInfo`, aligned depth, and ID 70 pose instead of a
+stationary camera-to-`world` transform.
+
+The `ur5e` and `xarm6` wrist-camera calibration activates only when median
+reprojection error is at most 1 px, fixed-board translation RMS is at most 5
+mm, and rotation RMS is at most 1 degree. The UR5e **Calibrate Table Plane**
+action collects 10 `/detect_all` results and rejects table-plane MAD above 2 mm
+or SG/MG median disagreement above 5 mm. Restart that wrist-camera perception
+instance and passive Gazebo after activating a calibration.
 
 UR5e retains canonical `/detect_all` and `/detect_part`. The diagnostic services
 are `/perception/ur5e/detect_all`, `/perception/xarm6/detect_all`, and
 `/perception/stationary/detect_all`, with corresponding `/detect_part` services.
 xArm6 and stationary never replace or average the executable UR5e world pose.
+Stationary `SG`/`MG` inspection uses the single 76 mm
+`assembly_board-v1` ArUco ID 70 visible in the exact detection frame. It checks
+the raw depth observation against the configured `assembly_board-v1` slot and
+seating geometry in board coordinates, so a small settled camera-mount shift
+does not change the inspection result. After a shift, let the mount settle and
+allow a fresh stable 10-frame ID 70 window to form. Inspection remains
+unavailable when the tag is missing, duplicated, stale, unstable, or ambiguous.
+The only fixed physical registration it requires is
+`assembly_board-v1_aruco_to_assembly_board-v1`; inspection remains unavailable
+while that registration is unconfigured. Do not place a second ID 70 in the
+camera view. `LG` and the pin parts remain unsupported by the current Roboflow
+model.
 
 | Mode | Pose authority | Gazebo gear behavior |
 | --- | --- | --- |

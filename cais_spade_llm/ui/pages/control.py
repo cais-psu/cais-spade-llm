@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 
 from nicegui import context, ui
 from nicegui.client import Client
@@ -50,6 +53,7 @@ _HARDWARE_PROC_NAMES = (
     "hardware_dual_robots_moveit",
     "hardware_robot_state_publisher",
 )
+_MOVE_INSERT_SUPPORTED_PARTS = ("SG", "MG", "LG", "SCP", "MCP", "LCP")
 
 
 def _assembly_board_v1_tag_currently_visible(status: dict) -> bool:
@@ -61,6 +65,65 @@ def _assembly_board_v1_tag_currently_visible(status: dict) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
     return math.isfinite(frame_age_sec) and 0.0 <= frame_age_sec <= 2.0
+
+
+def _move_insert_expected_start_diagnostic(status: dict) -> str:
+    """Format the no-motion pre-insertion pose comparison for Control."""
+    raw_delta = status.get("expected_start_delta_m")
+    details: list[str] = []
+    if isinstance(raw_delta, dict):
+        try:
+            delta = {
+                field: float(raw_delta[field])
+                for field in ("x", "y", "z")
+            }
+        except (KeyError, TypeError, ValueError, OverflowError):
+            delta = {}
+        if delta and all(math.isfinite(value) for value in delta.values()):
+            details.append(
+                "Current to retained pre-insertion pose: "
+                f"ΔX {1000.0 * delta['x']:+.2f} mm, "
+                f"ΔY {1000.0 * delta['y']:+.2f} mm, "
+                f"ΔZ {1000.0 * delta['z']:+.2f} mm."
+            )
+
+    try:
+        position_error_m = float(status["expected_start_position_error_m"])
+        position_tolerance_m = float(
+            status["expected_start_position_tolerance_m"]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        position_error_m = math.nan
+        position_tolerance_m = math.nan
+    if math.isfinite(position_error_m) and math.isfinite(position_tolerance_m):
+        details.append(
+            f"Distance {1000.0 * position_error_m:.2f} mm / "
+            f"limit {1000.0 * position_tolerance_m:.2f} mm."
+        )
+
+    try:
+        rotation_error_rad = float(status["expected_start_rotation_error_rad"])
+        rotation_tolerance_rad = float(
+            status["expected_start_orientation_tolerance_rad"]
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        rotation_error_rad = math.nan
+        rotation_tolerance_rad = math.nan
+    if math.isfinite(rotation_error_rad) and math.isfinite(rotation_tolerance_rad):
+        details.append(
+            f"Rotation {math.degrees(rotation_error_rad):.2f} deg / "
+            f"limit {math.degrees(rotation_tolerance_rad):.2f} deg."
+        )
+
+    try:
+        tf_age_sec = float(status["expected_start_tf_age_sec"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        tf_age_sec = math.nan
+    if math.isfinite(tf_age_sec):
+        details.append(f"TF age {tf_age_sec:.2f} s.")
+    if details and status.get("dispatch_attempted") is False:
+        details.append("Readiness only: move_insert was not dispatched.")
+    return " ".join(details)
 
 
 def _assembly_board_v1_readiness(status: dict) -> dict[str, object]:
@@ -452,26 +515,49 @@ def _launch_section(bridge: SystemBridge) -> None:
         launch_container = ui.column().classes("w-full gap-3")
         refresh_state = {"signature": None, "busy": False}
 
-        def _launch_signature() -> tuple:
+        def _launch_snapshot() -> tuple[tuple, dict[str, str], dict[str, dict]]:
             statuses = bridge.ros2_all_statuses()
-            return (
-                tuple((name, statuses.get(name, "stopped")) for name in _GAZEBO_VARIANTS),
-                tuple((name, statuses.get(name, "stopped")) for name in _HARDWARE_PROC_NAMES),
+            hardware_statuses = {
+                robot: bridge.hardware_stack_status(robot)
+                for robot in _HARDWARE_STACKS
+            }
+            signature = (
+                tuple(
+                    (name, statuses.get(name, "stopped"))
+                    for name in _GAZEBO_VARIANTS
+                ),
+                tuple(
+                    (name, statuses.get(name, "stopped"))
+                    for name in _HARDWARE_PROC_NAMES
+                ),
+                tuple(
+                    (
+                        robot,
+                        str(status.get("overall") or "stopped"),
+                        str(status.get("lifecycle_state") or "stopped"),
+                        status.get("lifecycle_generation"),
+                        str(status.get("selected_stack") or ""),
+                        str(status.get("last_error") or ""),
+                    )
+                    for robot, status in hardware_statuses.items()
+                ),
             )
+            return signature, statuses, hardware_statuses
 
-        def _refresh(*, force: bool = False):
+        async def _refresh_async(*, force: bool = False) -> None:
             if not _client_alive(launch_container):
                 return
             if refresh_state["busy"]:
                 return
             refresh_state["busy"] = True
             try:
-                signature = _launch_signature()
+                signature, statuses, hardware_statuses = await asyncio.to_thread(
+                    _launch_snapshot
+                )
                 if not force and signature == refresh_state["signature"]:
                     asyncio.create_task(_refresh_ping_async())
                     return
                 refresh_state["signature"] = signature
-                statuses = dict(signature[0] + signature[1])
             finally:
                 refresh_state["busy"] = False
 
@@ -506,7 +592,7 @@ def _launch_section(bridge: SystemBridge) -> None:
                 ui.label("Hardware Launch").classes("text-sm font-semibold text-slate-600")
                 for robot, (label, desc) in _HARDWARE_STACKS.items():
                     blocked_reason = None
-                    stack_status = bridge.hardware_stack_status(robot)
+                    stack_status = hardware_statuses[robot]
                     if any_gazebo_running and stack_status.get("overall") != "running":
                         blocked_reason = "Blocked: Gazebo is running. Stop Gazebo first."
                     else:
@@ -515,7 +601,7 @@ def _launch_section(bridge: SystemBridge) -> None:
                                 other_robot
                                 for other_robot in _HARDWARE_STACKS
                                 if other_robot != robot
-                                and bridge.hardware_stack_status(other_robot).get("overall")
+                                and hardware_statuses[other_robot].get("overall")
                                 == "running"
                             ),
                             "",
@@ -576,6 +662,9 @@ def _launch_section(bridge: SystemBridge) -> None:
                     ui.button("Cleanup", on_click=_cleanup, icon="cleaning_services").props(
                         "flat dense"
                     ).classes("text-amber-700")
+
+        def _refresh(*, force: bool = False) -> None:
+            asyncio.create_task(_refresh_async(force=force))
 
         _refresh(force=True)
         ui.timer(3.0, _refresh)
@@ -699,18 +788,23 @@ def _hardware_stack_row(
             last_error = str(status.get("last_error") or "").strip()
             if last_error:
                 ui.label(last_error).classes("text-xs text-red-700")
+            if blocked_reason:
+                ui.label(blocked_reason).classes("text-xs text-amber-700")
             if robot in {"ur5e", "dual robots"}:
                 _render_ur5e_rtde_and_rg2_status(status)
 
         repair_needed = lifecycle_state == "failed"
         selected_stack = str(status.get("selected_stack") or "")
-        another_stack_selected = bool(selected_stack and selected_stack != robot)
-        start_blocked = bool(blocked_reason) or another_stack_selected or lifecycle_state in {
-            "starting",
-            "running",
-            "stopping",
-        }
-        stop_disabled = another_stack_selected or (
+        another_stack_selected = bool(
+            selected_stack and selected_stack != robot and not repair_needed
+        )
+        start_blocked = (
+            bool(blocked_reason)
+            or another_stack_selected
+            or lifecycle_state in {"starting", "stopping"}
+            or (lifecycle_state == "running" and not repair_needed)
+        )
+        stop_disabled = repair_needed or another_stack_selected or (
             lifecycle_state == "stopped" and overall == "stopped"
         )
         operation_state = {"busy": False}
@@ -908,13 +1002,20 @@ def _digital_twin_active_target(rows: dict[str, dict]) -> str:
     return ""
 
 
-def _hardware_stack_robot_function_target(bridge: SystemBridge) -> str:
+def _hardware_stack_robot_function_target(
+    bridge: SystemBridge,
+    statuses: dict[str, dict] | None = None,
+) -> str:
     for stack, target in (
         ("dual robots", "dual robots"),
         ("xarm6", "xarm only"),
         ("ur5e", "ur5e only"),
     ):
-        status = bridge.hardware_stack_status(stack)
+        status = (
+            dict(statuses.get(stack) or {})
+            if statuses is not None
+            else bridge.hardware_stack_status(stack)
+        )
         selected_stack = str(status.get("selected_stack") or "")
         lifecycle_state = str(status.get("lifecycle_state") or "")
         if selected_stack == stack and lifecycle_state in {
@@ -1133,7 +1234,7 @@ def _digital_twin_row(
             # Function execution and position recording live in Robot Functions.
 
 
-def _function_record_panel(
+def _function_record_panel(  # noqa: C901 - refresh and cleanup share panel state.
     bridge: SystemBridge,
     refresh_callbacks: dict[str, Callable[[], None]],
 ) -> None:
@@ -1167,14 +1268,20 @@ def _function_record_panel(
                 target_select.disable()
 
         body = ui.column().classes("w-full gap-2")
+        body_cleanup: dict[str, Callable[[], None]] = {"callback": lambda: None}
 
         def _refresh_body(_e=None) -> None:
+            body_cleanup["callback"]()
+            body_cleanup["callback"] = lambda: None
             body.clear()
             target = str(target_select.value or "").strip()
             if not target:
                 return
             with body:
-                _predefined_function_record_body(bridge, target)
+                body_cleanup["callback"] = _predefined_function_record_body(
+                    bridge,
+                    target,
+                )
 
         target_select.on_value_change(_refresh_body)
         _refresh_body()
@@ -1259,7 +1366,7 @@ def _function_record_panel(
 def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks share selection state.
     bridge: SystemBridge,
     target: str,
-) -> None:
+) -> Callable[[], None]:
     robots = bridge.digital_twin_target_robots(target)
     functions = bridge.digital_twin_function_names()
     execution: dict[str, object] = {
@@ -1268,8 +1375,48 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         "preparing": False,
         "active_function": "",
         "selection_revision": 0,
+        "assembly_selection_revision": 0,
+        "assembly_task": None,
     }
-    pending_execution: dict[str, str] = {}
+    move_insert_trial: dict[str, object] = {
+        "loading": False,
+        "active": False,
+        "stop_requested": False,
+        "selection": (),
+        "status": {},
+        "trial_id": "",
+        "trial_task": None,
+        "readiness_revision": 0,
+        "readiness_task": None,
+        "background_readiness_key": (),
+    }
+    insertion_demonstration: dict[str, object] = {
+        "loading": False,
+        "selection": (),
+        "status": {},
+        "recording_id": "",
+    }
+    selection_update: dict[str, object] = {
+        "active": False,
+        "readiness_task": None,
+        "readiness_selection": (),
+    }
+    hardware_status_cache: dict[str, object] = {
+        "updated_at": 0.0,
+        "target": "",
+        "statuses": {},
+    }
+    pending_execution: dict[str, object] = {}
+    pending_assembly: dict[str, str] = {}
+    pending_move_insert_trial: dict[str, str] = {}
+    pending_move_insert_recovery: dict[str, str] = {}
+    assembly_functions = (
+        "pick_approach",
+        "pick_grasp",
+        "place_approach",
+        "place_insert",
+        "move_home",
+    )
 
     def _current_client() -> Client | None:
         try:
@@ -1322,7 +1469,10 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         "Run executes only the exact selected function. This is manual commissioning and does "
         "not require the assembly sequence resource_state or advance ProductAgent/CCA workflow "
         "state. Held-part, gripper, task-context, readiness, and confirmation checks still "
-        "apply. Start System is not required for manual Function Execution."
+        "apply when a pick/place context is active. Independent place_approach may run with "
+        "held_part empty. place_insert at assembly_board-v1 requires the held part and a "
+        "confirmed supervised move_insert trial. Start System is not required for manual "
+        "Function Execution."
     ).classes("text-xs text-slate-500")
 
     ui.label("Function Execution").classes("text-sm font-semibold mt-2")
@@ -1332,6 +1482,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         "status": {},
         "named_position_exists": False,
         "last_failure": "",
+        "accept_message": "",
+        "accept_success": None,
         "selection": (),
     }
     with ui.card().classes("w-full p-3") as assembly_board_v1_panel:
@@ -1345,7 +1497,19 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         assembly_board_v1_observation = ui.label("").classes("text-xs text-slate-600")
         assembly_board_v1_movement = ui.label("").classes("text-xs text-slate-600")
         assembly_board_v1_failure = ui.label("").classes("text-xs text-red-700")
-        assembly_board_v1_insert_guidance = ui.label(
+        with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+            assembly_board_v1_accept_button = ui.button(
+                "Locate & Accept Board",
+                on_click=lambda: _locate_and_accept_assembly_board_v1(),
+                icon="location_on",
+            ).props("dense outline color=primary")
+            assembly_board_v1_accept_guidance = ui.label("").classes(
+                "text-xs text-slate-500"
+            )
+        assembly_board_v1_accept_result = ui.label("").classes(
+            "text-xs font-semibold"
+        )
+        assembly_board_v1_frozen_pose_guidance = ui.label(
             "Using the assembly_board-v1 pose frozen by place_approach. Do not move or "
             "re-accept the board."
         ).classes("text-xs font-semibold text-amber-700")
@@ -1365,6 +1529,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     execution_blocker = ui.label("").classes("text-xs text-amber-700")
     execution_blocker.set_visibility(False)
     execution_controls = ui.row().classes("items-center gap-2 w-full flex-wrap")
+    assembly_container = ui.column().classes("w-full gap-2 mt-2")
 
     ui.label("Function Definition").classes("text-sm font-semibold mt-2")
     definition_summary = ui.label("").classes("text-xs text-slate-500")
@@ -1400,6 +1565,70 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     def _current_part_name() -> str:
         return str(part_select.value or "").strip()
 
+    def _robot_function_hardware_snapshot() -> tuple[str, dict[str, dict]]:
+        now = time.monotonic()
+        cached_statuses = hardware_status_cache.get("statuses")
+        if (
+            isinstance(cached_statuses, dict)
+            and now - float(hardware_status_cache.get("updated_at") or 0.0) <= 0.35
+        ):
+            return str(hardware_status_cache.get("target") or ""), cached_statuses
+        statuses = {
+            stack: bridge.hardware_stack_status(stack)
+            for stack in ("dual robots", "xarm6", "ur5e")
+        }
+        hardware_target = _hardware_stack_robot_function_target(
+            bridge,
+            statuses,
+        )
+        hardware_status_cache.update(
+            {
+                "updated_at": now,
+                "target": hardware_target,
+                "statuses": statuses,
+            }
+        )
+        return hardware_target, statuses
+
+    def _physical_function_execution_selected() -> bool:
+        hardware_target, _hardware_statuses = _robot_function_hardware_snapshot()
+        return bool(
+            str(getattr(bridge, "execution_mode", "") or "").strip().lower()
+            == "physical"
+            or str(getattr(bridge, "robot_env", "") or "").strip().lower()
+            == "real"
+            or hardware_target
+        )
+
+    def _operator_held_part_option_visible() -> bool:
+        return bool(
+            _physical_function_execution_selected()
+            and _current_robot() == "ur5e"
+            and _current_function() == "place_approach"
+            and _current_destination_location() == "assembly_board-v1"
+            and _current_part_name() in _MOVE_INSERT_SUPPORTED_PARTS
+            and not bridge.digital_twin_function_held_part("ur5e")
+        )
+
+    def _operator_confirmed_held_part() -> bool:
+        return _operator_held_part_option_visible()
+
+    def _operator_held_part_origin_resource_location() -> str:
+        try:
+            options = bridge.digital_twin_function_location_options(
+                _current_robot(),
+                "pick_approach",
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            log.exception(
+                "failed to resolve operator-confirmed %s pick recording origin",
+                _current_part_name(),
+            )
+            return ""
+        if "prusa-mk4-2" in options:
+            return "prusa-mk4-2"
+        return str(options[0] if options else "")
+
     def _assembly_board_v1_selected() -> bool:
         return bool(
             _current_function() in {"place_approach", "place_insert"}
@@ -1430,6 +1659,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             return
         robot = _current_robot()
         function_name = _current_function()
+        accept_visible = function_name == "place_approach"
+        assembly_board_v1_accept_button.set_visibility(accept_visible)
+        assembly_board_v1_accept_guidance.set_visibility(accept_visible)
+        assembly_board_v1_accept_result.set_visibility(
+            bool(accept_visible and assembly_board_v1_state.get("accept_message"))
+        )
         state_matches = bool(
             assembly_board_v1_state.get("status_loaded")
             and assembly_board_v1_state.get("selection") == _assembly_board_v1_selection()
@@ -1509,6 +1744,39 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             f"stable: {bool(status.get('stable'))} | "
             f"samples: {sample_count}/{required_sample_count}"
         )
+        ready_to_accept = bool(state_matches and status.get("ready_to_accept"))
+        accept_controls_idle = bool(
+            not execution.get("busy")
+            and not execution.get("checking")
+            and not execution.get("preparing")
+            and not assembly_board_v1_state.get("refreshing")
+        )
+        assembly_board_v1_accept_button.set_enabled(
+            bool(accept_visible and ready_to_accept and accept_controls_idle)
+        )
+        assembly_board_v1_accept_guidance.set_text(
+            "Ready to accept the current stable 10-frame ArUco ID 70 pose. "
+            "This does not move the robot."
+            if ready_to_accept
+            else (
+                "Make ArUco ID 70 visible and wait for a fresh stable "
+                f"{required_sample_count}/{required_sample_count}-sample pose before "
+                "accepting it for Capture Pose."
+                if state_matches
+                else "Checking whether ArUco ID 70 is ready to accept..."
+            )
+        )
+        accept_message = str(
+            assembly_board_v1_state.get("accept_message") or ""
+        ).strip()
+        assembly_board_v1_accept_result.set_text(accept_message)
+        assembly_board_v1_accept_result.classes(
+            replace=(
+                "text-xs font-semibold text-green-700"
+                if assembly_board_v1_state.get("accept_success") is True
+                else "text-xs font-semibold text-red-700"
+            )
+        )
         translation_delta_m = status.get("translation_delta_m")
         rotation_delta_deg = status.get("rotation_delta_deg")
         if (
@@ -1533,10 +1801,29 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 f"Movement from accepted pose: {float(translation_delta_m) * 1000.0:.2f} mm, "
                 f"{float(rotation_delta_deg):.2f} deg (limits: 10 mm, 2 deg)."
             )
+            if status.get("excessive_movement") and not status.get(
+                "movement_blocked"
+            ):
+                movement_text += (
+                    " This cross-view difference is diagnostic and does not replace the "
+                    "accepted board pose. Use Locate & Accept Board if the board actually "
+                    "moved."
+                )
         assembly_board_v1_movement.set_text(movement_text)
         movement_is_blocked = bool(status.get("movement_blocked"))
+        movement_is_diagnostic = bool(
+            status.get("excessive_movement") and not movement_is_blocked
+        )
         assembly_board_v1_movement.classes(
-            replace=("text-xs text-red-700" if movement_is_blocked else "text-xs text-slate-600")
+            replace=(
+                "text-xs text-red-700"
+                if movement_is_blocked
+                else (
+                    "text-xs text-amber-700"
+                    if movement_is_diagnostic
+                    else "text-xs text-slate-600"
+                )
+            )
         )
 
         accepted_usable = bool(readiness["usable"])
@@ -1572,7 +1859,9 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             )
         )
         assembly_board_v1_failure.set_visibility(bool(failure_text))
-        assembly_board_v1_insert_guidance.set_visibility(function_name == "place_insert")
+        assembly_board_v1_frozen_pose_guidance.set_visibility(
+            function_name == "place_insert"
+        )
         if function_name == "place_insert":
             automatic_text = ""
         elif accepted_usable:
@@ -1610,6 +1899,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             bool(assembly_board_v1_state.get("named_position_exists")),
         )
         assembly_board_v1_state["refreshing"] = True
+        _render_assembly_board_v1_readiness()
         try:
             status_result, named_positions = await asyncio.gather(
                 asyncio.to_thread(
@@ -1656,6 +1946,119 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             _render_execution()
             _render_steps()
 
+    async def _locate_and_accept_assembly_board_v1() -> None:
+        client = _current_client()
+        if not (
+            _current_function() == "place_approach"
+            and _current_destination_location() == "assembly_board-v1"
+        ):
+            return
+        if (
+            execution.get("busy")
+            or execution.get("checking")
+            or execution.get("preparing")
+        ):
+            _notify(
+                "Locate & Accept Board is unavailable during another check or execution.",
+                type="warning",
+                client=client,
+            )
+            return
+        selection = _assembly_board_v1_selection()
+        status = dict(assembly_board_v1_state.get("status") or {})
+        if (
+            not assembly_board_v1_state.get("status_loaded")
+            or assembly_board_v1_state.get("selection") != selection
+            or not status.get("ready_to_accept")
+        ):
+            _notify(
+                "ArUco ID 70 needs a fresh stable 10-frame pose before acceptance.",
+                type="warning",
+                client=client,
+            )
+            return
+        robot = selection[0]
+        part_name = _current_part_name()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": "Locate & Accept Board",
+            }
+        )
+        assembly_board_v1_accept_button.props("loading")
+        assembly_board_v1_state.update(
+            {
+                "accept_message": "Accepting the current ArUco ID 70 pose...",
+                "accept_success": None,
+            }
+        )
+        _render_execution()
+        try:
+            result = await asyncio.to_thread(
+                bridge.perception_locate_and_accept_assembly_board_v1,
+                robot,
+            )
+            if selection != _assembly_board_v1_selection():
+                _notify(
+                    str(result.get("message") or "Board pose accepted."),
+                    type="positive",
+                    timeout=6000,
+                    client=client,
+                )
+                return
+            if not result.get("success"):
+                raise RuntimeError(
+                    str(result.get("message") or "Board pose was not accepted.")
+                )
+            bridge.digital_twin_clear_function_steps(
+                target,
+                robot,
+                "place_approach",
+                "assembly_board-v1",
+                part_name=part_name,
+            )
+            execution["selection_revision"] = int(
+                execution["selection_revision"]
+            ) + 1
+            execution["assembly_selection_revision"] = int(
+                execution["assembly_selection_revision"]
+            ) + 1
+            pending_execution.clear()
+            pending_assembly.clear()
+            run_confirm.close()
+            assembly_confirm.close()
+            _invalidate_move_insert_trial()
+            message = str(result.get("message") or "Board pose accepted.")
+            assembly_board_v1_state.update(
+                {
+                    "status_loaded": True,
+                    "status": dict(result),
+                    "last_failure": "",
+                    "accept_message": message,
+                    "accept_success": True,
+                    "selection": selection,
+                }
+            )
+            _notify(message, type="positive", timeout=6000, client=client)
+            await _refresh_assembly_board_v1_readiness()
+            await _load_move_insert_trial_readiness()
+            _render_steps()
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if selection == _assembly_board_v1_selection():
+                assembly_board_v1_state.update(
+                    {
+                        "accept_message": str(exc),
+                        "accept_success": False,
+                    }
+                )
+            _notify(str(exc), type="warning", timeout=7000, client=client)
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(assembly_board_v1_accept_button):
+                assembly_board_v1_accept_button.props(remove="loading")
+                _render_execution()
+                _render_steps()
+
     def _default_location(function_name: str, options: list[str]) -> str:
         if function_name in {"pick_approach", "pick_grasp"} and "prusa-mk4-2" in options:
             return "prusa-mk4-2"
@@ -1664,46 +2067,79 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         return options[0] if options else ""
 
     def _sync_location() -> None:
-        function_name = _current_function()
-        location_argument = bridge.digital_twin_function_location_argument(function_name)
-        options = bridge.digital_twin_function_location_options(
-            _current_robot(),
-            function_name,
-        )
-        selected = _default_location(function_name, options)
-        origin_select.options = options if location_argument == "origin_resource_location" else []
-        if origin_select.value not in origin_select.options:
-            origin_select.value = (
-                selected if location_argument == "origin_resource_location" else ""
+        previous_active = bool(selection_update["active"])
+        selection_update["active"] = True
+        try:
+            function_name = _current_function()
+            location_argument = bridge.digital_twin_function_location_argument(
+                function_name
             )
-        origin_select.set_visibility(location_argument == "origin_resource_location")
-        origin_select.update()
-        destination_select.options = options if location_argument == "destination_location" else []
-        if destination_select.value not in destination_select.options:
-            destination_select.value = (
-                selected if location_argument == "destination_location" else ""
+            options = bridge.digital_twin_function_location_options(
+                _current_robot(),
+                function_name,
             )
-        destination_select.set_visibility(location_argument == "destination_location")
-        destination_select.update()
+            selected = _default_location(function_name, options)
+            origin_select.options = (
+                options if location_argument == "origin_resource_location" else []
+            )
+            if origin_select.value not in origin_select.options:
+                origin_select.value = (
+                    selected
+                    if location_argument == "origin_resource_location"
+                    else ""
+                )
+            origin_select.set_visibility(
+                location_argument == "origin_resource_location"
+            )
+            origin_select.update()
+            destination_select.options = (
+                options if location_argument == "destination_location" else []
+            )
+            if destination_select.value not in destination_select.options:
+                destination_select.value = (
+                    selected
+                    if location_argument == "destination_location"
+                    else ""
+                )
+            destination_select.set_visibility(
+                location_argument == "destination_location"
+            )
+            destination_select.update()
+        finally:
+            selection_update["active"] = previous_active
 
     def _sync_part_name() -> None:
-        function_name = _current_function()
-        visible = function_name in {
-            "pick_approach",
-            "pick_grasp",
-            "place_approach",
-            "place_insert",
-        }
+        previous_active = bool(selection_update["active"])
+        selection_update["active"] = True
         try:
-            options = bridge.digital_twin_function_part_options(function_name)
-        except (OSError, TypeError, ValueError):
-            log.exception("failed to load part_name options for %s", function_name)
-            options = []
-        part_select.options = options
-        if part_select.value not in options:
-            part_select.value = "MG" if "MG" in options else (options[0] if options else "")
-        part_select.set_visibility(visible)
-        part_select.update()
+            function_name = _current_function()
+            visible = function_name in {
+                "pick_approach",
+                "pick_grasp",
+                "place_approach",
+                "place_insert",
+            }
+            try:
+                options = bridge.digital_twin_function_part_options(function_name)
+            except (OSError, TypeError, ValueError):
+                log.exception("failed to load part_name options for %s", function_name)
+                options = []
+            part_select.options = options
+            held_part = (
+                bridge.digital_twin_function_held_part(_current_robot())
+                if function_name in {"place_approach", "place_insert"}
+                else ""
+            )
+            if held_part in options:
+                part_select.value = held_part
+            elif part_select.value not in options:
+                part_select.value = (
+                    "MG" if "MG" in options else (options[0] if options else "")
+                )
+            part_select.set_visibility(visible)
+            part_select.update()
+        finally:
+            selection_update["active"] = previous_active
 
     def _execution_kwargs() -> dict[str, str]:
         return {
@@ -1721,9 +2157,15 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             _current_part_name(),
         )
 
-    def _confirmation_description(function_name: str, values: dict[str, str]) -> str:
+    def _confirmation_description(
+        function_name: str,
+        values: dict[str, object],
+        *,
+        operator_confirmed_held_part: bool = False,
+        operator_handoff_origin_resource_location: str = "",
+    ) -> str:
         robot = _current_robot()
-        part_name = values.get("part_name", "")
+        part_name = str(values.get("part_name") or "")
         if function_name == "pick_approach":
             if robot == "ur5e" and part_name == "MG":
                 return (
@@ -1746,27 +2188,256 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 )
             return f"The {robot} will grasp and lift {part_name}."
         if function_name == "place_approach":
-            destination_location = values.get("destination_location", "")
+            destination_location = str(values.get("destination_location") or "")
+            if operator_confirmed_held_part:
+                return (
+                    f"This standalone place_approach run assumes {part_name} is physically "
+                    "clamped in "
+                    "the UR5e gripper. The UR5e will verify the confirmed "
+                    "pick_approach.descend handoff and fresh robot TF using the confirmed "
+                    "pick recording "
+                    f"from {operator_handoff_origin_resource_location or 'unavailable'} before "
+                    f"motion. It will then rerun place_approach and retain the exact {part_name} "
+                    "handoff. On success, return to place_insert and use Supervised Test "
+                    f"move_insert. This does not insert, release, or qualify {part_name}, and Assembly "
+                    "never uses this custody recovery."
+                )
+            if not bridge.digital_twin_function_held_part(robot):
+                if destination_location == "assembly_board-v1":
+                    return (
+                        f"The {robot} will run place_approach independently with held_part "
+                        "empty. It will use the configured assembly_board-v1 observation "
+                        "position, collect ten fresh ArUco ID 70 observations, and then move "
+                        "through freshly computed approach and descend targets without a part."
+                    )
+                return (
+                    f"The {robot} will run place_approach independently with held_part "
+                    f"empty and move through computed targets for {destination_location} "
+                    "without a part."
+                )
             if destination_location == "assembly_board-v1":
                 return (
-                    f"The {robot} will first move {part_name} to the saved "
+                    f"The {robot} will first stage {part_name} at the configured "
                     "assembly_board-v1 observation position, collect ten fresh ArUco ID 70 "
                     "observations, and automatically accept or reaccept the current board "
-                    "pose if needed. It will then use that frozen pose for the saved approach "
-                    "and descend positions. If localization fails, it remains at the "
+                    "pose if needed. It will then use that frozen pose for freshly computed "
+                    "approach and descend targets. If localization fails, it remains at the "
                     "observation position and does not approach the board."
                 )
             return (
-                f"The {robot} will move {part_name} to the saved approach and descend positions "
+                f"The {robot} will move {part_name} to computed approach and descend targets "
                 f"for {destination_location}."
             )
         if function_name == "place_insert":
+            if not bridge.digital_twin_function_held_part(robot):
+                if values.get("destination_location") == "assembly_board-v1":
+                    return (
+                        f"The {robot} cannot run place_insert at assembly_board-v1 with "
+                        "held_part empty because Function Execution has no retained "
+                        "pick_grasp handoff. Operator-confirmed place_approach transport "
+                        "does not authorize Supervised Test move_insert."
+                    )
+                return (
+                    f"The {robot} will run place_insert independently with held_part empty. "
+                    "It will open the empty gripper and retreat 0.08 m without advancing "
+                    "the pick/place sequence."
+                )
             return (
-                f"The {robot} will release {part_name} at "
-                f"{values.get('destination_location', '')} and lift away. "
-                "Releasing the part is irreversible."
+                f"The {robot} will keep {part_name} clamped while the internal move_insert "
+                f"step searches and seats it at {values.get('destination_location', '')}. "
+                "Only after move_insert succeeds will place_insert release the part "
+                "and lift away. Releasing the part is irreversible."
             )
         return f"The {robot} will move to the configured home named position."
+
+    def _current_assembly_origin_resource_location() -> str:
+        return str(assembly_origin_select.value or "").strip()
+
+    def _current_assembly_destination_location() -> str:
+        return str(assembly_destination_select.value or "").strip()
+
+    def _current_assembly_part_name() -> str:
+        return str(assembly_part_select.value or "").strip()
+
+    def _assembly_kwargs() -> dict[str, str]:
+        return {
+            "origin_resource_location": _current_assembly_origin_resource_location(),
+            "destination_location": _current_assembly_destination_location(),
+            "part_name": _current_assembly_part_name(),
+        }
+
+    def _assembly_selection_signature() -> tuple[str, str, str, str]:
+        return (
+            _current_robot(),
+            _current_assembly_origin_resource_location(),
+            _current_assembly_destination_location(),
+            _current_assembly_part_name(),
+        )
+
+    def _assembly_correction_states(
+        function_name: str,
+        name: str,
+    ) -> tuple[str, str]:
+        robot = _current_robot()
+        part_name = _current_assembly_part_name()
+        buffered_steps = {
+            str(step.get("step_name") or "<unnamed>"): dict(step)
+            for step in bridge.digital_twin_list_function_buffer_steps(
+                target,
+                robot,
+                function_name,
+                name,
+                part_name=part_name,
+            )
+        }
+        saved_steps = {
+            str(step.get("step_name") or "<unnamed>"): dict(step)
+            for step in bridge.digital_twin_list_function_file_steps(
+                target,
+                robot,
+                function_name,
+                name,
+                part_name=part_name,
+            )
+        }
+        template_step_names = [
+            str(step.get("step_name") or "")
+            for step in bridge.digital_twin_function_template(function_name)
+            if bool(step.get("recordable")) and str(step.get("step_name") or "")
+        ]
+        extra_step_names = sorted(
+            (set(buffered_steps) | set(saved_steps)) - set(template_step_names)
+        )
+        step_states: list[tuple[str, str]] = []
+        for step_name in [*template_step_names, *extra_step_names]:
+            if step_name in buffered_steps:
+                state = "buffered"
+            elif (
+                step_name in saved_steps
+                and saved_steps[step_name].get("confirmed") is not True
+            ):
+                state = "unconfirmed"
+            elif step_name in saved_steps:
+                state = "active"
+            else:
+                state = "missing"
+            step_states.append((step_name, state))
+
+        states = {state for _step_name, state in step_states}
+        if "buffered" in states:
+            overall_state = "buffered"
+        elif "unconfirmed" in states:
+            overall_state = "unconfirmed"
+        elif states == {"active"}:
+            overall_state = "active"
+        else:
+            overall_state = "missing"
+        message = " | ".join(
+            f"{function_name}.{step_name}: {state}"
+            for step_name, state in step_states
+        )
+        if states & {"buffered", "unconfirmed"}:
+            message += (
+                ". Assembly is blocked; use Save/Replace Pose or Clear Position."
+            )
+        elif "missing" in states:
+            message += ". Missing optional robot corrections are allowed."
+        else:
+            message += "."
+        return overall_state, message
+
+    def _refresh_assembly_correction_status() -> None:
+        rows = (
+            (
+                "pick_approach",
+                _current_assembly_origin_resource_location(),
+                assembly_pick_approach_correction_status,
+            ),
+            (
+                "place_approach",
+                _current_assembly_destination_location(),
+                assembly_place_approach_correction_status,
+            ),
+        )
+        state_classes = {
+            "active": "text-xs text-green-700",
+            "missing": "text-xs text-blue-700",
+            "buffered": "text-xs text-amber-700",
+            "unconfirmed": "text-xs text-amber-700",
+        }
+        for function_name, name, label in rows:
+            try:
+                state, message = _assembly_correction_states(function_name, name)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                log.exception("failed to load %s Assembly correction state", function_name)
+                state = "unconfirmed"
+                message = (
+                    f"{function_name}: correction state unavailable ({exc}); Assembly "
+                    "readiness remains authoritative."
+                )
+            label.set_text(message)
+            label.classes(replace=state_classes[state])
+
+    def _sync_assembly_options() -> None:
+        previous_active = bool(selection_update["active"])
+        selection_update["active"] = True
+        try:
+            robot = _current_robot()
+            try:
+                origin_options = bridge.digital_twin_function_location_options(
+                    robot,
+                    "pick_approach",
+                )
+                destination_options = bridge.digital_twin_function_location_options(
+                    robot,
+                    "place_approach",
+                )
+                part_options = bridge.digital_twin_function_part_options(
+                    "pick_approach"
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                log.exception("failed to load Assembly options for %s", robot)
+                origin_options = []
+                destination_options = []
+                part_options = []
+
+            assembly_origin_select.options = origin_options
+            if assembly_origin_select.value not in origin_options:
+                assembly_origin_select.value = (
+                    "prusa-mk4-2"
+                    if "prusa-mk4-2" in origin_options
+                    else (origin_options[0] if origin_options else "")
+                )
+            assembly_origin_select.update()
+
+            assembly_destination_select.options = destination_options
+            if assembly_destination_select.value not in destination_options:
+                assembly_destination_select.value = (
+                    "assembly_board-v1"
+                    if "assembly_board-v1" in destination_options
+                    else (destination_options[0] if destination_options else "")
+                )
+            assembly_destination_select.update()
+
+            assembly_part_select.options = part_options
+            if assembly_part_select.value not in part_options:
+                assembly_part_select.value = (
+                    "MG"
+                    if "MG" in part_options
+                    else (part_options[0] if part_options else "")
+                )
+            assembly_part_select.update()
+            _refresh_assembly_correction_status()
+        finally:
+            selection_update["active"] = previous_active
+
+    def _reset_assembly_status() -> None:
+        assembly_status.set_text("Assembly readiness is checked automatically without motion.")
+        assembly_status.classes(replace="text-xs text-slate-500")
+        assembly_progress_status.set_text(
+            "No Assembly is active. Completed functions: none."
+        )
+        assembly_progress_status.classes(replace="text-xs text-slate-500")
 
     with execution_controls:
         with ui.dialog() as run_confirm, ui.card().classes("gap-3 max-w-xl"):
@@ -1792,6 +2463,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     values = dict(pending_execution)
                     function_name = values.pop("function_name")
                     robot = values.pop("robot")
+                    operator_confirmed_held_part = bool(
+                        values.pop("operator_confirmed_held_part", False)
+                    )
+                    operator_handoff_origin_resource_location = str(
+                        values.pop("operator_handoff_origin_resource_location", "") or ""
+                    )
                     execution.update({"busy": True, "active_function": function_name})
                     run_button.props("loading")
                     _render_execution()
@@ -1818,9 +2495,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             target,
                             robot,
                             function_name,
-                            origin_resource_location=values["origin_resource_location"],
+                            origin_resource_location=(
+                                operator_handoff_origin_resource_location
+                                if operator_confirmed_held_part
+                                else values["origin_resource_location"]
+                            ),
                             destination_location=values["destination_location"],
                             part_name=values["part_name"],
+                            operator_confirmed_held_part=(
+                                operator_confirmed_held_part
+                            ),
                             confirmed=True,
                         )
                         message = str(result.get("message") or f"{function_name} completed.")
@@ -1873,7 +2557,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 return
             function_name = _current_function()
             robot = _current_robot()
+            _sync_part_name()
             values = _execution_kwargs()
+            operator_confirmed_held_part = _operator_confirmed_held_part()
+            operator_handoff_origin_resource_location = (
+                _operator_held_part_origin_resource_location()
+                if operator_confirmed_held_part
+                else ""
+            )
             selection_signature = _selection_signature()
             selection_revision = int(execution["selection_revision"])
             execution.update({"checking": True, "active_function": function_name})
@@ -1893,9 +2584,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     target,
                     robot,
                     function_name,
-                    origin_resource_location=values["origin_resource_location"],
+                    origin_resource_location=(
+                        operator_handoff_origin_resource_location
+                        if operator_confirmed_held_part
+                        else values["origin_resource_location"]
+                    ),
                     destination_location=values["destination_location"],
                     part_name=values["part_name"],
+                    operator_confirmed_held_part=operator_confirmed_held_part,
                 )
                 if not _client_alive(execution_status):
                     return
@@ -1925,11 +2621,24 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     {
                         "function_name": function_name,
                         "robot": robot,
+                        "operator_confirmed_held_part": operator_confirmed_held_part,
+                        "operator_handoff_origin_resource_location": (
+                            operator_handoff_origin_resource_location
+                        ),
                         **values,
                     }
                 )
                 run_confirm_title.set_text(f"Run {function_name} on the physical {robot}?")
-                run_confirm_text.set_text(_confirmation_description(function_name, values))
+                run_confirm_text.set_text(
+                    _confirmation_description(
+                        function_name,
+                        values,
+                        operator_confirmed_held_part=operator_confirmed_held_part,
+                        operator_handoff_origin_resource_location=(
+                            operator_handoff_origin_resource_location
+                        ),
+                    )
+                )
                 confirm_run_button.set_text(f"Confirm Run {function_name}")
                 run_confirm.open()
             except Exception as exc:
@@ -2065,7 +2774,1708 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             "to reopen the RG2."
         ).classes("text-xs text-amber-700")
 
-    def _render_execution() -> None:
+    def _insertion_demonstration_selection() -> tuple[str, str, str, str, str]:
+        return (
+            target,
+            _current_robot(),
+            _current_destination_location(),
+            _current_part_name(),
+            str(getattr(bridge, "execution_mode", "") or ""),
+        )
+
+    def _apply_insertion_demonstration_status(
+        result: dict[str, object],
+        selection: tuple[str, str, str, str, str],
+    ) -> None:
+        if selection != _insertion_demonstration_selection():
+            return
+        insertion_demonstration["selection"] = selection
+        insertion_demonstration["status"] = dict(result)
+        insertion_demonstration["recording_id"] = str(
+            result.get("recording_id")
+            or insertion_demonstration.get("recording_id")
+            or ""
+        )
+
+    async def _load_insertion_demonstration_readiness() -> None:
+        if _current_function() != "place_insert":
+            return
+        selection = _insertion_demonstration_selection()
+        insertion_demonstration["loading"] = True
+        _render_insertion_demonstration()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_insertion_recording_status,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                recording_id=str(
+                    insertion_demonstration.get("recording_id") or ""
+                ),
+            )
+            if selection == _insertion_demonstration_selection():
+                _apply_insertion_demonstration_status(dict(result), selection)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            log.exception("insertion demonstration readiness failed")
+            if selection == _insertion_demonstration_selection():
+                _apply_insertion_demonstration_status(
+                    {
+                        "success": False,
+                        "ready": False,
+                        "active": False,
+                        "state": "not_recorded",
+                        "message": f"Insertion demonstration readiness failed: {exc}",
+                    },
+                    selection,
+                )
+        finally:
+            insertion_demonstration["loading"] = False
+            if _client_alive(insertion_demonstration_container):
+                _render_insertion_demonstration()
+                _render_execution()
+
+    async def _start_insertion_recording() -> None:
+        client = _current_client()
+        selection = _insertion_demonstration_selection()
+        insertion_demonstration["loading"] = True
+        start_insertion_recording_button.props("loading")
+        _render_insertion_demonstration()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_start_insertion_recording,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                confirmed=True,
+            )
+            _apply_insertion_demonstration_status(dict(result), selection)
+            _notify(
+                str(result.get("message") or "Insertion recording start processed."),
+                type="positive" if result.get("success") else "negative",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            insertion_demonstration["loading"] = False
+            if _client_alive(start_insertion_recording_button):
+                start_insertion_recording_button.props(remove="loading")
+                _render_insertion_demonstration()
+                _render_execution()
+
+    async def _save_insertion_recording() -> None:
+        client = _current_client()
+        selection = _insertion_demonstration_selection()
+        save_insertion_recording_button.props("loading")
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_save_insertion_recording,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                recording_id=str(insertion_demonstration.get("recording_id") or ""),
+            )
+            _apply_insertion_demonstration_status(dict(result), selection)
+            if (
+                result.get("success")
+                and str(result.get("state") or "")
+                == "recording_saved_return_to_pre_insertion"
+            ):
+                _invalidate_move_insert_trial()
+                await _load_move_insert_trial_readiness()
+            _notify(
+                str(result.get("message") or "Save Recording processed."),
+                type="positive" if result.get("success") else "warning",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            if _client_alive(save_insertion_recording_button):
+                save_insertion_recording_button.props(remove="loading")
+                _render_insertion_demonstration()
+                _render_execution()
+
+    async def _cancel_insertion_recording() -> None:
+        client = _current_client()
+        selection = _insertion_demonstration_selection()
+        cancel_insertion_recording_button.props("loading")
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_cancel_insertion_recording,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                recording_id=str(insertion_demonstration.get("recording_id") or ""),
+                note="",
+            )
+            _apply_insertion_demonstration_status(dict(result), selection)
+            _notify(
+                str(result.get("message") or "Cancel Recording processed."),
+                type="warning",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            if _client_alive(cancel_insertion_recording_button):
+                cancel_insertion_recording_button.props(remove="loading")
+                _render_insertion_demonstration()
+                _render_execution()
+
+    async def _delete_insertion_recording() -> None:
+        client = _current_client()
+        selection = _insertion_demonstration_selection()
+        delete_insertion_recording_confirm.close()
+        delete_insertion_recording_button.props("loading")
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_delete_insertion_recording,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                confirmed=True,
+            )
+            _apply_insertion_demonstration_status(dict(result), selection)
+            _notify(
+                str(result.get("message") or "Delete Previous Recording processed."),
+                type="positive" if result.get("success") else "negative",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            if _client_alive(delete_insertion_recording_button):
+                delete_insertion_recording_button.props(remove="loading")
+                _render_insertion_demonstration()
+                _render_execution()
+
+    async def _reanalyze_insertion_recording() -> None:
+        client = _current_client()
+        selection = _insertion_demonstration_selection()
+        reanalyze_insertion_recording_button.props("loading")
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_reanalyze_insertion_recording,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                recording_id=str(
+                    insertion_demonstration.get("recording_id") or ""
+                ),
+            )
+            _apply_insertion_demonstration_status(dict(result), selection)
+            if (
+                result.get("success")
+                and str(result.get("state") or "")
+                == "recording_saved_return_to_pre_insertion"
+            ):
+                _invalidate_move_insert_trial()
+                await _load_move_insert_trial_readiness()
+            _notify(
+                str(
+                    result.get("message")
+                    or "Reanalyze Saved Recording processed."
+                ),
+                type="positive" if result.get("success") else "warning",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            if _client_alive(reanalyze_insertion_recording_button):
+                reanalyze_insertion_recording_button.props(remove="loading")
+                _render_insertion_demonstration()
+                _render_execution()
+
+    def _download_insertion_recording_bundle() -> None:
+        status = dict(insertion_demonstration.get("status") or {})
+        raw_path = str(
+            status.get("download_path")
+            or status.get("diagnostic_bundle_path")
+            or ""
+        ).strip()
+        allowed_root = (
+            Path("~/.local/share/cais-spade-llm/move_insert_demonstrations")
+            .expanduser()
+            .resolve()
+        )
+        try:
+            bundle_path = Path(raw_path).expanduser().resolve(strict=True)
+            bundle_path.relative_to(allowed_root)
+        except (OSError, RuntimeError, ValueError):
+            _notify("The insertion recording bundle path is unavailable or unsafe.", type="negative")
+            return
+        if bundle_path.name != "diagnostic_bundle.zip":
+            _notify("The insertion recording bundle is invalid.", type="negative")
+            return
+        recording_id = str(
+            insertion_demonstration.get("recording_id") or "insertion_demonstration"
+        )
+        ui.download(bundle_path, f"{recording_id}-diagnostic_bundle.zip")
+
+    def _move_insert_trial_selection() -> tuple[str, str, str, str, str]:
+        return (
+            target,
+            _current_robot(),
+            _current_destination_location(),
+            _current_part_name(),
+            str(getattr(bridge, "execution_mode", "") or ""),
+        )
+
+    def _move_insert_trial_state() -> str:
+        status = dict(move_insert_trial.get("status") or {})
+        state = str(
+            status.get("state")
+            or status.get("qualification_state")
+            or "not_confirmed"
+        ).strip()
+        if state not in {
+            "not_confirmed",
+            "ready_to_test",
+            "testing",
+            "awaiting_visual_confirmation",
+            "confirmation_progress",
+            "confirmed",
+            "failure_recorded",
+        }:
+            return "not_confirmed"
+        if state == "testing" and not bool(
+            move_insert_trial.get("active") or status.get("active")
+        ):
+            return "not_confirmed"
+        return state
+
+    def _move_insert_trial_is_current() -> bool:
+        return bool(
+            move_insert_trial.get("selection") == _move_insert_trial_selection()
+        )
+
+    def _move_insert_trial_is_qualified() -> bool:
+        status = dict(move_insert_trial.get("status") or {})
+        return bool(_move_insert_trial_is_current() and status.get("qualified"))
+
+    def _apply_move_insert_trial_status(
+        result: dict[str, object],
+        selection: tuple[str, str, str, str, str],
+    ) -> bool:
+        if selection != _move_insert_trial_selection():
+            return False
+        previous = (
+            move_insert_trial.get("selection"),
+            dict(move_insert_trial.get("status") or {}),
+            str(move_insert_trial.get("trial_id") or ""),
+            bool(move_insert_trial.get("active")),
+        )
+        move_insert_trial["selection"] = selection
+        move_insert_trial["status"] = dict(result)
+        trial_id = str(result.get("trial_id") or move_insert_trial.get("trial_id") or "")
+        move_insert_trial["trial_id"] = trial_id
+        move_insert_trial["active"] = bool(result.get("active"))
+        current = (
+            move_insert_trial.get("selection"),
+            dict(move_insert_trial.get("status") or {}),
+            str(move_insert_trial.get("trial_id") or ""),
+            bool(move_insert_trial.get("active")),
+        )
+        return current != previous
+
+    def _move_insert_trial_progress_message(status: dict[str, object]) -> str:
+        phase_status = dict(status.get("controller_status") or {})
+        phase = str(
+            status.get("insert_phase")
+            or status.get("phase")
+            or phase_status.get("insert_phase")
+            or phase_status.get("phase")
+            or ""
+        ).strip()
+        try:
+            relief_cycle = int(
+                status.get("relief_cycle_count")
+                or phase_status.get("relief_cycle_count")
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            relief_cycle = 0
+        try:
+            disengagement_cycle = int(
+                status.get("disengagement_cycle_count")
+                or phase_status.get("disengagement_cycle_count")
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            disengagement_cycle = 0
+        cycle_text = f" (cycle {max(1, relief_cycle)}/3)"
+        disengagement_cycle_text = (
+            f" (cycle {max(1, disengagement_cycle)}/6)"
+        )
+        tactile_center_valid = bool(
+            status.get("tactile_center_valid")
+            or phase_status.get("tactile_center_valid")
+        )
+        search_peck_state = str(
+            status.get("search_peck_state")
+            or status.get("insert_search_peck_state")
+            or phase_status.get("search_peck_state")
+            or phase_status.get("insert_search_peck_state")
+            or ""
+        )
+        phase_messages = {
+            "searching": (
+                "Searching for pin center — local spiral. The part remains clamped."
+            ),
+            "expanded_searching": (
+                "No entry detected — expanding touch search through 3 mm, 5 mm, "
+                "then 10 mm. The part remains clamped."
+            ),
+            "cocked": (
+                f"{_current_part_name()} appears cocked — withdrawing completely"
+                f"{disengagement_cycle_text}. The part remains clamped."
+            ),
+            "disengaging": (
+                f"{_current_part_name()} appears cocked — withdrawing completely"
+                f"{disengagement_cycle_text}. The part remains clamped."
+            ),
+            "recentering": (
+                "Returning above tactile center"
+                f"{disengagement_cycle_text}. The part remains clamped."
+            ),
+            "retaring": (
+                "Returning above tactile center and retaring"
+                f"{disengagement_cycle_text}. The part remains clamped."
+            ),
+            "retrying": (
+                "Alignment normal — retrying insertion"
+                f"{disengagement_cycle_text}. The part remains clamped."
+            ),
+            "relieving": (
+                "Soft load limit detected — unloading force first"
+                f"{cycle_text}. The part remains clamped."
+            ),
+            "backing_off": (
+                "Load persisted — performing the bounded micro-backoff"
+                f"{cycle_text}. The part remains clamped."
+            ),
+            "resuming": (
+                "Load cleared — retrying direct insertion"
+                f"{cycle_text}. The part remains clamped."
+            ),
+            "seating": (
+                "Checking engagement and seating. The part remains clamped."
+            ),
+            "settling": (
+                "Checking engagement and stable seating. The part remains clamped."
+            ),
+        }
+        if phase == "seating" and tactile_center_valid:
+            return (
+                "Pin capture detected — inserting straight. The part remains clamped."
+            )
+        if phase in {"searching", "expanded_searching"}:
+            if search_peck_state == "unloading":
+                return (
+                    "Pin entry stalled — lifting slightly while advancing the "
+                    "spiral. The part remains clamped."
+                )
+            if search_peck_state == "descending":
+                return (
+                    "Trying the next spiral position with low downward preload. "
+                    "The part remains clamped."
+                )
+        return phase_messages.get(phase, str(status.get("message") or ""))
+
+    async def _load_move_insert_trial_readiness(  # noqa: C901 - exact pending recovery states.
+        *,
+        open_confirmation: bool = False,
+        background: bool = False,
+    ) -> dict[str, object]:
+        client = _current_client()
+        selection = _move_insert_trial_selection()
+        if _current_function() != "place_insert":
+            return {}
+        readiness_revision = int(move_insert_trial["readiness_revision"]) + 1
+        move_insert_trial["readiness_revision"] = readiness_revision
+        status_changed = False
+        if not background:
+            move_insert_trial["loading"] = True
+            _render_move_insert_trial()
+        try:
+            current_status = await asyncio.to_thread(
+                bridge.digital_twin_move_insert_trial_status,
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                trial_id=str(move_insert_trial.get("trial_id") or ""),
+            )
+            if (
+                selection != _move_insert_trial_selection()
+                or readiness_revision != move_insert_trial["readiness_revision"]
+            ):
+                return {}
+            current_state = str(
+                current_status.get("state")
+                or current_status.get("qualification_state")
+                or "not_confirmed"
+            )
+            pending_review = bool(
+                current_status.get("active")
+                or current_status.get("review_required")
+                or current_status.get("recovery_required")
+                or current_status.get("hardware_stack_repair_required")
+                or current_status.get("normal_repair_required")
+                or current_state == "awaiting_visual_confirmation"
+            )
+            if current_status.get("qualified") or pending_review:
+                status_changed = _apply_move_insert_trial_status(
+                    dict(current_status), selection
+                )
+                if open_confirmation:
+                    _notify(
+                        str(
+                            current_status.get("message")
+                            or "Finish the current move_insert review before another test."
+                        ),
+                        type="warning",
+                        timeout=7000,
+                        client=client,
+                    )
+                return dict(current_status)
+            result = await bridge.digital_twin_move_insert_trial_readiness(
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+            )
+            if (
+                selection != _move_insert_trial_selection()
+                or readiness_revision != move_insert_trial["readiness_revision"]
+            ):
+                return {}
+            status_changed = _apply_move_insert_trial_status(
+                dict(result), selection
+            )
+            message = str(result.get("message") or "")
+            if not result.get("ready"):
+                pending_move_insert_trial.clear()
+                move_insert_trial_confirm.close()
+            if open_confirmation:
+                if not result.get("success") or not result.get("ready"):
+                    _notify(message, type="warning", timeout=7000, client=client)
+                else:
+                    pending_move_insert_trial.clear()
+                    pending_move_insert_trial.update(
+                        {
+                            "robot": _current_robot(),
+                            "destination_location": _current_destination_location(),
+                            "part_name": _current_part_name(),
+                        }
+                    )
+                    move_insert_trial_confirm_title.set_text(
+                        "Run Supervised Test move_insert on the physical "
+                        f"{_current_robot()}?"
+                    )
+                    move_insert_trial_confirm.open()
+            return dict(result)
+        except Exception as exc:
+            log.exception("move_insert trial readiness check failed")
+            result = {
+                "success": False,
+                "ready": False,
+                "state": "not_confirmed",
+                "qualified": False,
+                "message": f"move_insert trial readiness failed: {exc}",
+            }
+            if (
+                selection == _move_insert_trial_selection()
+                and readiness_revision == move_insert_trial["readiness_revision"]
+            ):
+                status_changed = _apply_move_insert_trial_status(result, selection)
+            if open_confirmation:
+                _notify(
+                    result["message"],
+                    type="negative",
+                    timeout=7000,
+                    client=client,
+                )
+            return result
+        finally:
+            if readiness_revision == move_insert_trial["readiness_revision"]:
+                if not background:
+                    move_insert_trial["loading"] = False
+                if (
+                    _client_alive(move_insert_trial_container)
+                    and (not background or status_changed)
+                ):
+                    _render_move_insert_trial()
+                    _render_execution()
+
+    async def _check_move_insert_trial_readiness() -> None:
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        execution.update({"checking": True, "active_function": "move_insert trial readiness"})
+        supervised_move_insert_button.props("loading")
+        _render_execution()
+        try:
+            await _load_move_insert_trial_readiness(open_confirmation=True)
+        finally:
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(supervised_move_insert_button):
+                supervised_move_insert_button.props(remove="loading")
+                _render_execution()
+
+    async def _confirmed_execute_move_insert_trial() -> None:
+        client = _current_client()
+        move_insert_trial_confirm.close()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        values = dict(pending_move_insert_trial)
+        if not values or values != {
+            "robot": _current_robot(),
+            "destination_location": _current_destination_location(),
+            "part_name": _current_part_name(),
+        }:
+            _notify(
+                "The move_insert selection changed. Check readiness again.",
+                type="warning",
+                client=client,
+            )
+            return
+        selection = _move_insert_trial_selection()
+        execution.update({"busy": True, "active_function": "move_insert trial"})
+        move_insert_trial.update(
+            {
+                "active": True,
+                "stop_requested": False,
+                "selection": selection,
+            }
+        )
+        status = dict(move_insert_trial.get("status") or {})
+        status.update(
+            {
+                "state": "testing",
+                "qualification_state": "testing",
+                "active": True,
+                "message": "Supervised move_insert is running; the part remains clamped.",
+            }
+        )
+        move_insert_trial["status"] = status
+        supervised_move_insert_button.props("loading")
+        _render_execution()
+        task: asyncio.Task | None = None
+        backend_may_be_active = True
+        try:
+            task = asyncio.create_task(
+                bridge.digital_twin_execute_move_insert_trial(
+                    target,
+                    values["robot"],
+                    destination_location=values["destination_location"],
+                    part_name=values["part_name"],
+                    confirmed=True,
+                )
+            )
+            move_insert_trial["trial_task"] = task
+            result = await task
+            backend_may_be_active = bool(result.get("active"))
+            if selection == _move_insert_trial_selection():
+                _apply_move_insert_trial_status(dict(result), selection)
+                message = str(result.get("message") or "move_insert trial completed.")
+                _notify(
+                    message,
+                    type=(
+                        "positive"
+                        if result.get("success") and result.get("completion_eligible")
+                        else "warning"
+                    ),
+                    timeout=7000,
+                    client=client,
+                )
+        except asyncio.CancelledError:
+            # The bridge shields an accepted physical goal and retains its lock until
+            # settlement. Do not make the UI claim that the trial became terminal.
+            backend_may_be_active = True
+            raise
+        except Exception as exc:
+            log.exception("Supervised move_insert UI execution failed")
+            if selection == _move_insert_trial_selection():
+                try:
+                    status = await asyncio.to_thread(
+                        bridge.digital_twin_move_insert_trial_status,
+                        target,
+                        values["robot"],
+                        destination_location=values["destination_location"],
+                        part_name=values["part_name"],
+                        trial_id=str(move_insert_trial.get("trial_id") or ""),
+                    )
+                except Exception:  # noqa: BLE001 - UI must remain fail-closed.
+                    log.exception(
+                        "Could not refresh supervised move_insert after UI failure"
+                    )
+                    status = {
+                        **dict(move_insert_trial.get("status") or {}),
+                        "success": False,
+                        "state": "testing",
+                        "qualification_state": "testing",
+                        "qualified": False,
+                        "active": True,
+                        "trial_id": str(move_insert_trial.get("trial_id") or ""),
+                        "message": (
+                            f"Supervised move_insert UI failed: {exc}. Backend "
+                            "settlement is unknown; use Stop Supervised move_insert "
+                            "and inspect the robot."
+                        ),
+                    }
+                backend_may_be_active = bool(status.get("active"))
+                _apply_move_insert_trial_status(status, selection)
+                _notify(
+                    str(status.get("message") or f"Supervised move_insert failed: {exc}"),
+                    type="negative",
+                    timeout=7000,
+                    client=client,
+                )
+        finally:
+            if move_insert_trial.get("trial_task") is task:
+                move_insert_trial["trial_task"] = None
+            pending_move_insert_trial.clear()
+            current_status = dict(move_insert_trial.get("status") or {})
+            move_insert_trial["active"] = bool(
+                backend_may_be_active or current_status.get("active")
+            )
+            execution.update({"busy": False, "active_function": ""})
+            if _client_alive(supervised_move_insert_button):
+                supervised_move_insert_button.props(remove="loading")
+                _render_execution()
+                _render_steps()
+
+    async def _stop_move_insert_trial() -> None:
+        client = _current_client()
+        selection = _move_insert_trial_selection()
+        move_insert_trial["stop_requested"] = True
+        stop_move_insert_button.props("loading")
+        _render_move_insert_trial()
+        try:
+            task = move_insert_trial.get("trial_task")
+            deadline = asyncio.get_running_loop().time() + 15.0
+            while True:
+                status = await asyncio.to_thread(
+                    bridge.digital_twin_move_insert_trial_status,
+                    target,
+                    _current_robot(),
+                    destination_location=_current_destination_location(),
+                    part_name=_current_part_name(),
+                    trial_id="",
+                )
+                if bool(status.get("active")):
+                    break
+                if not isinstance(task, asyncio.Task) or task.done():
+                    _apply_move_insert_trial_status(dict(status), selection)
+                    _notify(
+                        "Supervised move_insert is already terminal; no active "
+                        "force or search motion remains to stop.",
+                        type="warning",
+                        client=client,
+                    )
+                    return
+                if asyncio.get_running_loop().time() >= deadline:
+                    _notify(
+                        "Stop Supervised move_insert is waiting for the locked "
+                        "readiness check to either finish without dispatch or publish "
+                        "the exact active trial. Use the physical emergency stop if "
+                        "motion is unsafe.",
+                        type="negative",
+                        timeout=7000,
+                        client=client,
+                    )
+                    return
+                await asyncio.sleep(0.1)
+            trial_id = str(status.get("trial_id") or "")
+            _apply_move_insert_trial_status(dict(status), selection)
+            result = await bridge.digital_twin_cancel_move_insert_trial(
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                trial_id=trial_id,
+            )
+            _apply_move_insert_trial_status(dict(result), selection)
+            _notify(
+                str(
+                    result.get("message")
+                    or "Supervised move_insert cancellation requested."
+                ),
+                type="warning" if result.get("success") else "negative",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            move_insert_trial["stop_requested"] = False
+            if _client_alive(stop_move_insert_button):
+                stop_move_insert_button.props(remove="loading")
+                _render_move_insert_trial()
+
+    def _open_move_insert_recovery_confirmation() -> None:
+        status = (
+            dict(move_insert_trial.get("status") or {})
+            if _move_insert_trial_is_current()
+            else {}
+        )
+        trial_id = str(status.get("trial_id") or move_insert_trial.get("trial_id") or "")
+        if (
+            not status.get("recovery_required")
+            or status.get("active")
+            or status.get("completion_motion_active")
+            or not trial_id
+        ):
+            _notify(
+                "Confirm Physical Recovery is available only for the exact inactive "
+                "current supervised move_insert trial with recovery_required.",
+                type="warning",
+            )
+            return
+        pending_move_insert_recovery.clear()
+        pending_move_insert_recovery.update(
+            {
+                "target": target,
+                "robot": _current_robot(),
+                "destination_location": _current_destination_location(),
+                "part_name": _current_part_name(),
+                "trial_id": trial_id,
+            }
+        )
+        move_insert_recovery_confirm_title.set_text(
+            f"Confirm Physical Recovery for {_current_part_name()}?"
+        )
+        move_insert_recovery_confirm.open()
+
+    async def _confirmed_move_insert_recovery() -> None:
+        client = _current_client()
+        move_insert_recovery_confirm.close()
+        if execution.get("busy") or execution.get("checking"):
+            _notify(
+                "A robot function check or execution is already active.",
+                type="warning",
+            )
+            return
+        values = dict(pending_move_insert_recovery)
+        expected_values = {
+            "target": target,
+            "robot": _current_robot(),
+            "destination_location": _current_destination_location(),
+            "part_name": _current_part_name(),
+            "trial_id": str(move_insert_trial.get("trial_id") or ""),
+        }
+        if not values or values != expected_values:
+            _notify(
+                "The exact move_insert recovery selection changed. Open Confirm "
+                "Physical Recovery again.",
+                type="warning",
+                client=client,
+            )
+            return
+        selection = _move_insert_trial_selection()
+        execution.update(
+            {
+                "checking": True,
+                "active_function": "move_insert physical recovery confirmation",
+            }
+        )
+        confirm_move_insert_recovery_button.props("loading")
+        _render_execution()
+        try:
+            result = await asyncio.to_thread(
+                bridge.digital_twin_confirm_move_insert_recovery,
+                values["target"],
+                values["robot"],
+                destination_location=values["destination_location"],
+                part_name=values["part_name"],
+                trial_id=values["trial_id"],
+                confirmed=True,
+            )
+            _apply_move_insert_trial_status(dict(result), selection)
+            recovery_confirmed = bool(
+                result.get("recovery_confirmed_at")
+                and not result.get("recovery_required")
+            )
+            _notify(
+                str(
+                    result.get("message")
+                    or "move_insert physical recovery confirmation was processed."
+                ),
+                type="positive" if recovery_confirmed else "warning",
+                timeout=7000,
+                client=client,
+            )
+        except Exception as exc:
+            log.exception("move_insert physical recovery confirmation failed")
+            _notify(
+                f"move_insert physical recovery confirmation failed: {exc}",
+                type="negative",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            pending_move_insert_recovery.clear()
+            execution.update({"checking": False, "active_function": ""})
+            if _client_alive(confirm_move_insert_recovery_button):
+                confirm_move_insert_recovery_button.props(remove="loading")
+                _render_execution()
+                _render_steps()
+
+    async def _confirmed_move_insert_completion() -> None:
+        client = _current_client()
+        move_insert_completion_confirm.close()
+        if execution.get("busy") or execution.get("checking"):
+            _notify("A robot function check or execution is already active.", type="warning")
+            return
+        trial_id = str(move_insert_trial.get("trial_id") or "")
+        selection = _move_insert_trial_selection()
+        execution.update({"busy": True, "active_function": "move_insert completion"})
+        confirm_move_insert_completion_button.props("loading")
+        _render_execution()
+        try:
+            result = await bridge.digital_twin_confirm_move_insert_completion(
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                trial_id=trial_id,
+                confirmed=True,
+            )
+            _apply_move_insert_trial_status(dict(result), selection)
+            message = str(result.get("message") or "move_insert completion processed.")
+            _notify(
+                message,
+                type="positive" if result.get("success") else "negative",
+                timeout=7000,
+                client=client,
+            )
+        except Exception as exc:
+            log.exception("move_insert completion confirmation failed")
+            _notify(
+                f"move_insert completion confirmation failed: {exc}",
+                type="negative",
+                timeout=7000,
+                client=client,
+            )
+        finally:
+            execution.update({"busy": False, "active_function": ""})
+            if _client_alive(confirm_move_insert_completion_button):
+                confirm_move_insert_completion_button.props(remove="loading")
+                _render_execution()
+                _render_steps()
+
+    def _download_move_insert_diagnostic_bundle() -> None:
+        status = dict(move_insert_trial.get("status") or {})
+        raw_path = str(
+            status.get("download_path")
+            or status.get("diagnostic_bundle_path")
+            or ""
+        ).strip()
+        if not raw_path:
+            _notify("No move_insert diagnostic bundle is available.", type="warning")
+            return
+        allowed_root = (
+            Path("~/.local/share/cais-spade-llm/move_insert_trials")
+            .expanduser()
+            .resolve()
+        )
+        try:
+            bundle_path = Path(raw_path).expanduser().resolve(strict=True)
+            bundle_path.relative_to(allowed_root)
+        except (OSError, RuntimeError, ValueError):
+            _notify(
+                "The move_insert diagnostic bundle path is unavailable or unsafe.",
+                type="negative",
+                timeout=7000,
+            )
+            return
+        if not bundle_path.is_file() or bundle_path.name != "diagnostic_bundle.zip":
+            _notify(
+                "The move_insert diagnostic bundle is missing or invalid.",
+                type="negative",
+                timeout=7000,
+            )
+            return
+        trial_id = str(move_insert_trial.get("trial_id") or "move_insert_trial")
+        ui.download(bundle_path, f"{trial_id}-diagnostic_bundle.zip")
+
+    with (
+        ui.column().classes("w-full gap-2 mt-2") as insertion_demonstration_container,
+        ui.card().classes("w-full p-3"),
+    ):
+        ui.label("Insertion Demonstration").classes("text-sm font-semibold")
+        ui.label(
+            "Record one manually guided insertion with CAIS Cartesian jog. Manual jog "
+            "speed is retained as diagnostic evidence but does not set the automatic "
+            "insertion speed; the jog trace is never replayed as robot motion."
+        ).classes("text-xs text-slate-500")
+        insertion_demonstration_selection_label = ui.label("").classes(
+            "text-xs text-slate-600"
+        )
+        insertion_demonstration_state_label = ui.label("Not recorded").classes(
+            "text-xs font-semibold text-amber-700"
+        )
+        insertion_demonstration_message = ui.label("").classes(
+            "text-xs text-slate-600"
+        )
+        insertion_demonstration_path = ui.label("").classes(
+            "text-xs text-slate-500 break-all"
+        )
+        with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+            start_insertion_recording_button = ui.button(
+                "Start Recording",
+                on_click=_start_insertion_recording,
+                icon="fiber_manual_record",
+            ).props("outline dense")
+            save_insertion_recording_button = ui.button(
+                "Save Recording",
+                on_click=_save_insertion_recording,
+                icon="save",
+            ).props("outline dense")
+            cancel_insertion_recording_button = (
+                ui.button(
+                    "Cancel Recording",
+                    on_click=_cancel_insertion_recording,
+                    icon="cancel",
+                )
+                .props("outline dense")
+                .classes("text-red-700")
+            )
+            download_insertion_recording_button = ui.button(
+                "Download Recording Bundle",
+                on_click=_download_insertion_recording_bundle,
+                icon="download",
+            ).props("flat dense")
+            reanalyze_insertion_recording_button = ui.button(
+                "Reanalyze Saved Recording",
+                on_click=_reanalyze_insertion_recording,
+                icon="analytics",
+            ).props("outline dense")
+            delete_insertion_recording_button = ui.button(
+                "Delete Previous Recording",
+                on_click=lambda: delete_insertion_recording_confirm.open(),
+                icon="delete",
+            ).props("outline dense color=red")
+
+    with ui.dialog() as delete_insertion_recording_confirm, ui.card().classes(
+        "gap-3 max-w-xl"
+    ):
+        ui.label("Delete previous insertion recording?").classes("font-semibold")
+        ui.label(
+            "This permanently deletes the exact selected part's recording bundle and "
+            "learned recipe, and revokes its qualification. It cannot be recovered."
+        ).classes("text-sm text-red-700")
+        ui.label(
+            "No robot motion is commanded and the physical part remains clamped."
+        ).classes("text-xs text-slate-600")
+        with ui.row().classes("justify-end gap-2 w-full"):
+            ui.button(
+                "Cancel",
+                on_click=delete_insertion_recording_confirm.close,
+            ).props("flat")
+            ui.button(
+                "Delete Previous Recording",
+                on_click=_delete_insertion_recording,
+                icon="delete",
+            ).props("color=red")
+
+    def _render_insertion_demonstration() -> None:
+        selected = _current_function() == "place_insert"
+        insertion_demonstration_container.set_visibility(selected)
+        if not selected:
+            return
+        current = bool(
+            insertion_demonstration.get("selection")
+            == _insertion_demonstration_selection()
+        )
+        status = (
+            dict(insertion_demonstration.get("status") or {}) if current else {}
+        )
+        state = str(status.get("state") or "not_recorded")
+        trial_current = bool(
+            move_insert_trial.get("selection")
+            == _move_insert_trial_selection()
+        )
+        trial_status = (
+            dict(move_insert_trial.get("status") or {}) if trial_current else {}
+        )
+        if (
+            state == "recording_saved_return_to_pre_insertion"
+            and bool(trial_status.get("ready"))
+        ):
+            state = "ready_for_supervised_test"
+        state_labels = {
+            "not_recorded": "Not recorded",
+            "recording_baseline": "Preparing force baseline",
+            "recording_insertion": "Recording insertion — Cartesian jog ready",
+            "saving_recording": "Saving recording",
+            "cancelling": "Cancelling",
+            "recording_saved_return_to_pre_insertion": (
+                "Recording saved — return to pre-insertion"
+            ),
+            "recording_saved_mg_hard_cap_review_required": (
+                f"Recording saved — {_current_part_name()} hard-cap review required"
+            ),
+            "ready_for_supervised_test": "Ready for supervised test",
+        }
+        if state not in state_labels:
+            state = "not_recorded"
+        state_class = (
+            "text-xs font-semibold text-green-700"
+            if state == "ready_for_supervised_test"
+            else "text-xs font-semibold text-blue-700"
+            if state in {
+                "recording_baseline",
+                "recording_insertion",
+                "saving_recording",
+                "cancelling",
+            }
+            else "text-xs font-semibold text-amber-700"
+        )
+        insertion_demonstration_selection_label.set_text(
+            f"Selected: robot {_current_robot()}; destination "
+            f"{_current_destination_location()}; part {_current_part_name()}."
+        )
+        insertion_demonstration_state_label.set_text(state_labels[state])
+        insertion_demonstration_state_label.classes(replace=state_class)
+        insertion_demonstration_message.set_text(
+            "Checking insertion demonstration readiness without motion..."
+            if insertion_demonstration.get("loading")
+            else str(
+                status.get("message")
+                or "Run place_approach, then Start Recording."
+            )
+        )
+        bundle_path = str(
+            status.get("download_path")
+            or status.get("diagnostic_bundle_path")
+            or ""
+        )
+        insertion_demonstration_path.set_text(
+            f"Recording bundle: {bundle_path}" if bundle_path else ""
+        )
+        insertion_demonstration_path.set_visibility(bool(bundle_path))
+        active = bool(status.get("active"))
+        controls_idle = bool(
+            not execution.get("busy")
+            and not execution.get("checking")
+            and not execution.get("preparing")
+            and not insertion_demonstration.get("loading")
+        )
+        start_insertion_recording_button.set_enabled(
+            bool(status.get("ready") and controls_idle and not active)
+        )
+        save_insertion_recording_button.set_enabled(
+            bool(
+                active
+                and state == "recording_insertion"
+                and controls_idle
+            )
+        )
+        cancel_insertion_recording_button.set_enabled(active)
+        download_insertion_recording_button.set_visibility(bool(bundle_path))
+        download_insertion_recording_button.set_enabled(bool(bundle_path))
+        reanalyze_visible = bool(
+            bundle_path
+            and (
+                status.get("hard_cap_review_required")
+                or status.get("reanalyze_available")
+            )
+            and not status.get("candidate_recipe")
+        )
+        reanalyze_insertion_recording_button.set_visibility(reanalyze_visible)
+        reanalyze_insertion_recording_button.set_enabled(
+            bool(reanalyze_visible and controls_idle and not active)
+        )
+        delete_insertion_recording_button.set_visibility(
+            bool(bundle_path or status.get("candidate_recipe"))
+        )
+        delete_insertion_recording_button.set_enabled(
+            bool(controls_idle and not active)
+        )
+
+    with (
+        ui.column().classes("w-full gap-2 mt-2") as move_insert_trial_container,
+        ui.card().classes("w-full p-3"),
+    ):
+            ui.label("Supervised move_insert").classes("text-sm font-semibold")
+            ui.label(
+                "move_insert remains internal to place_insert. There are no operator tuning "
+                "values: complete one supervised automatic insertion and visually confirm "
+                "it. "
+                "A failed test saves diagnostics automatically; delete the previous recording "
+                "only when you want to relearn it."
+            ).classes("text-xs text-slate-500")
+            move_insert_trial_selection_label = ui.label("").classes(
+                "text-xs text-slate-600"
+            )
+            move_insert_trial_state_label = ui.label("Not confirmed").classes(
+                "text-xs font-semibold text-amber-700"
+            )
+            move_insert_trial_message = ui.label("").classes("text-xs text-slate-600")
+            move_insert_missing_handoff = ui.label(
+                "Function Execution has no retained selected-part handoff. Select "
+                "place_approach, then Confirm Run place_approach once. That standalone "
+                "run assumes the selected part is "
+                "already physically clamped. Then return to place_insert; "
+                "Supervised Test move_insert will recheck readiness."
+            ).classes("text-xs font-semibold text-amber-700")
+            move_insert_trial_diagnostic = ui.label("").classes(
+                "text-xs text-slate-500 break-all"
+            )
+            with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+                supervised_move_insert_button = ui.button(
+                    "Supervised Test move_insert",
+                    on_click=_check_move_insert_trial_readiness,
+                    icon="precision_manufacturing",
+                ).props("outline dense")
+                stop_move_insert_button = (
+                    ui.button(
+                        "Stop Supervised move_insert",
+                        on_click=_stop_move_insert_trial,
+                        icon="stop",
+                    )
+                    .props("outline dense color=red")
+                    .classes("text-red-700")
+                )
+                ui.label(
+                    "Stop cancels active force/search motion, waits for stationary "
+                    "feedback, and keeps the selected part clamped. It does not withdraw "
+                    "the selected part or run place_approach."
+                ).classes("text-xs text-slate-500")
+                confirm_move_insert_recovery_button = ui.button(
+                    "Confirm Physical Recovery",
+                    on_click=_open_move_insert_recovery_confirmation,
+                    icon="verified_user",
+                ).props("outline dense color=red")
+                confirm_move_insert_recovery_button.set_visibility(False)
+                confirm_move_insert_completion_button = ui.button(
+                    "Confirm Completion",
+                    on_click=lambda: move_insert_completion_confirm.open(),
+                    icon="check_circle",
+                ).props("outline dense")
+                download_move_insert_diagnostic_button = ui.button(
+                    "Download Diagnostic Bundle",
+                    on_click=_download_move_insert_diagnostic_bundle,
+                    icon="download",
+                ).props("flat dense")
+
+    with ui.dialog() as move_insert_trial_confirm, ui.card().classes("gap-3 max-w-xl"):
+        move_insert_trial_confirm_title = ui.label("").classes("font-semibold")
+        ui.label(
+            "The UR5e will automatically attempt direct compliant insertion and use its "
+            "bounded spiral search only if axial progress stalls. Recoverable binding first "
+            "unloads force and may use at most three protected micro-backoff cycles before "
+            "retrying insertion. The part remains clamped: this test never releases, lifts, "
+            "or runs move_home."
+        ).classes("text-sm")
+        ui.label(
+            "Clear the workcell, switch the pendant to Remote Control, and keep the emergency "
+            "stop available before continuing."
+        ).classes("text-xs text-red-700")
+        with ui.row().classes("justify-end gap-2 w-full"):
+            ui.button("Cancel", on_click=move_insert_trial_confirm.close).props("flat")
+            ui.button(
+                "Confirm Supervised Test move_insert",
+                on_click=_confirmed_execute_move_insert_trial,
+                icon="play_arrow",
+            ).props("color=red")
+
+    with ui.dialog() as move_insert_recovery_confirm, ui.card().classes(
+        "gap-3 max-w-xl"
+    ):
+        move_insert_recovery_confirm_title = ui.label("").classes("font-semibold")
+        ui.label(
+            "Confirm only after the operator physically moved the part clear using "
+            "approved manual recovery and verified that the part is still clamped. "
+            "This action commands no robot motion: it does not jog, run place_approach, "
+            "release_part, lift, or run move_home."
+        ).classes("text-sm text-red-700")
+        ui.label(
+            "The action uses your inspected physical-recovery confirmation and the exact "
+            "terminal trial record. It does not require live RTDE feedback or a reconstructed "
+            "RobotAgent. It clears only recovery_required; the insertion remains "
+            "unsuccessful and unqualified."
+        ).classes("text-xs text-slate-600")
+        with ui.row().classes("justify-end gap-2 w-full"):
+            ui.button("Cancel", on_click=move_insert_recovery_confirm.close).props("flat")
+            ui.button(
+                "Confirm Physical Recovery",
+                on_click=_confirmed_move_insert_recovery,
+                icon="verified_user",
+            ).props("color=red")
+
+    with ui.dialog() as move_insert_completion_confirm, ui.card().classes(
+        "gap-3 max-w-xl"
+    ):
+        ui.label("Confirm completed move_insert?").classes("font-semibold")
+        ui.label(
+            "Confirm only after visually checking that the selected part is correctly seated. "
+            "The UR5e will release the part irreversibly and lift exactly once; it will not "
+            "rerun move_insert. One successful release and lift confirms the selected exact "
+            "part for the identical protected identities."
+        ).classes("text-sm text-red-700")
+        with ui.row().classes("justify-end gap-2 w-full"):
+            ui.button("Cancel", on_click=move_insert_completion_confirm.close).props("flat")
+            ui.button(
+                "Confirm Completion and Release",
+                on_click=_confirmed_move_insert_completion,
+                icon="lock_open",
+            ).props("color=red")
+
+    def _render_move_insert_trial() -> None:
+        selected = _current_function() == "place_insert"
+        move_insert_trial_container.set_visibility(
+            _current_function() == "place_insert"
+        )
+        if not selected:
+            return
+        status = (
+            dict(move_insert_trial.get("status") or {})
+            if _move_insert_trial_is_current()
+            else {}
+        )
+        state = _move_insert_trial_state() if status else "not_confirmed"
+        state_labels = {
+            "not_confirmed": "Not confirmed",
+            "ready_to_test": "Ready to test",
+            "testing": "Testing",
+            "awaiting_visual_confirmation": "Awaiting visual confirmation",
+            "confirmation_progress": "Confirmation progress",
+            "confirmed": "Confirmed",
+            "failure_recorded": "Not confirmed",
+        }
+        state_classes = {
+            "not_confirmed": "text-xs font-semibold text-amber-700",
+            "ready_to_test": "text-xs font-semibold text-blue-700",
+            "testing": "text-xs font-semibold text-blue-700",
+            "awaiting_visual_confirmation": "text-xs font-semibold text-amber-700",
+            "confirmation_progress": "text-xs font-semibold text-blue-700",
+            "confirmed": "text-xs font-semibold text-green-700",
+            "failure_recorded": "text-xs font-semibold text-red-700",
+        }
+        move_insert_trial_selection_label.set_text(
+            f"Selected: robot {_current_robot()}; destination "
+            f"{_current_destination_location()}; part {_current_part_name()}."
+        )
+        if state == "confirmation_progress":
+            confirmed_trial_count = int(
+                status.get("confirmed_trial_count", 0) or 0
+            )
+            required_confirmed_trials = int(
+                status.get("required_confirmed_trials", 1) or 1
+            )
+            move_insert_trial_state_label.set_text(
+                f"Confirmed {confirmed_trial_count} of "
+                f"{required_confirmed_trials}"
+            )
+        else:
+            move_insert_trial_state_label.set_text(state_labels[state])
+        move_insert_trial_state_label.classes(replace=state_classes[state])
+        progress_message = (
+            "Stopping supervised move_insert — waiting for force/search motion "
+            f"to settle. {_current_part_name()} remains clamped."
+            if move_insert_trial.get("stop_requested")
+            else (
+                _move_insert_trial_progress_message(status)
+                if state == "testing"
+                else str(status.get("message") or "")
+            )
+        )
+        move_insert_trial_message.set_text(
+            "Checking supervised move_insert readiness without motion..."
+            if move_insert_trial.get("loading")
+            else (
+                progress_message
+                or "Complete pick_grasp and place_approach before testing move_insert."
+            )
+        )
+        missing_handoff = bool(
+            _physical_function_execution_selected()
+            and _current_robot() == "ur5e"
+            and _current_destination_location() == "assembly_board-v1"
+            and _current_part_name() in _MOVE_INSERT_SUPPORTED_PARTS
+            and not bridge.digital_twin_function_held_part("ur5e")
+        )
+        move_insert_missing_handoff.set_text(
+            "Function Execution has no retained "
+            f"{_current_part_name()} handoff. Select place_approach, then Confirm Run "
+            "place_approach once. That standalone run assumes "
+            f"{_current_part_name()} is already physically clamped. Then return to "
+            "place_insert; Supervised Test move_insert will recheck readiness."
+        )
+        move_insert_missing_handoff.set_visibility(missing_handoff)
+        failure_id = str(status.get("failure_id") or "")
+        bundle_path = str(
+            status.get("download_path")
+            or status.get("diagnostic_bundle_path")
+            or ""
+        )
+        diagnostic_bits = []
+        if failure_id:
+            diagnostic_bits.append(f"Failure ID: {failure_id}.")
+        if bundle_path:
+            diagnostic_bits.append(f"Diagnostic bundle: {bundle_path}")
+        expected_start_diagnostic = _move_insert_expected_start_diagnostic(status)
+        if expected_start_diagnostic:
+            diagnostic_bits.append(expected_start_diagnostic)
+        insertion_depth_diagnostic = str(
+            status.get("insertion_depth_diagnostic") or ""
+        ).strip()
+        if insertion_depth_diagnostic:
+            diagnostic_bits.append(insertion_depth_diagnostic)
+        hard_limit_reason = str(status.get("hard_limit_reason") or "").strip()
+        if hard_limit_reason:
+            diagnostic_bits.append(f"Hard limit: {hard_limit_reason}")
+        soft_overload_reason = str(
+            status.get("last_soft_overload_reason") or ""
+        ).strip()
+        if soft_overload_reason:
+            diagnostic_bits.append(f"Last soft overload: {soft_overload_reason}")
+        if status.get("hardware_stack_repair_required"):
+            diagnostic_bits.append(
+                "Normal Repair Hardware Stack is required before Cartesian motion."
+            )
+        move_insert_trial_diagnostic.set_text(" ".join(diagnostic_bits))
+        move_insert_trial_diagnostic.set_visibility(bool(diagnostic_bits))
+        download_move_insert_diagnostic_button.set_visibility(bool(bundle_path))
+        download_move_insert_diagnostic_button.set_enabled(bool(bundle_path))
+
+        local_active = bool(move_insert_trial.get("active"))
+        move_insert_active = bool(local_active or status.get("active"))
+        completion_motion_active = bool(status.get("completion_motion_active"))
+        active = bool(move_insert_active or completion_motion_active)
+        controls_idle = bool(
+            not execution.get("busy")
+            and not execution.get("checking")
+            and not execution.get("preparing")
+            and not move_insert_trial.get("loading")
+        )
+        supervised_move_insert_button.set_enabled(
+            bool(
+                controls_idle
+                and not active
+                and state != "confirmed"
+                and state == "ready_to_test"
+                and status.get("ready")
+            )
+        )
+        stop_move_insert_button.set_visibility(True)
+        stop_move_insert_button.set_enabled(
+            bool(move_insert_active and not move_insert_trial.get("stop_requested"))
+        )
+        recovery_required = bool(status.get("recovery_required"))
+        confirm_move_insert_recovery_button.set_visibility(recovery_required)
+        confirm_move_insert_recovery_button.set_enabled(
+            bool(
+                recovery_required
+                and controls_idle
+                and not active
+                and move_insert_trial.get("trial_id")
+            )
+        )
+        confirm_move_insert_completion_button.set_enabled(
+            bool(
+                controls_idle
+                and state == "awaiting_visual_confirmation"
+                and status.get("completion_eligible")
+                and move_insert_trial.get("trial_id")
+            )
+        )
+
+    with assembly_container:  # noqa: SIM117 - preserve the Assembly card's UI slot.
+        with ui.card().classes("w-full p-3"):
+            ui.label("Assembly").classes("text-sm font-semibold")
+            assembly_target_robot_status = ui.label("").classes("text-xs text-slate-600")
+            ui.label(
+                "Run Assembly is a manual commissioning action that executes these five "
+                "functions in this exact order:"
+            ).classes("text-xs text-slate-500")
+            ui.label(
+                "pick_approach → pick_grasp → place_approach → place_insert → move_home"
+            ).classes("text-xs font-semibold text-blue-700")
+            with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+                assembly_origin_select = (
+                    ui.select([], label="origin_resource_location")
+                    .props("dense")
+                    .classes("w-60")
+                )
+                assembly_destination_select = (
+                    ui.select([], label="destination_location")
+                    .props("dense")
+                    .classes("w-60")
+                )
+                assembly_part_select = (
+                    ui.select([], label="part_name").props("dense").classes("w-36")
+                )
+            assembly_status = ui.label(
+                "Assembly readiness is checked automatically without motion."
+            ).classes("text-xs text-slate-500")
+            assembly_progress_status = ui.label(
+                "No Assembly is active. Completed functions: none."
+            ).classes("text-xs text-slate-500")
+            ui.label(
+                "Assembly is blocked while the CAIS system is running, starting, or stopping. "
+                "The Hardware Stack may remain running."
+            ).classes("text-xs text-amber-700")
+            ui.label(
+                "The robot must begin in idle with an empty gripper. Missing optional robot "
+                "corrections are allowed. Buffered or saved-unconfirmed robot corrections "
+                "block Assembly until you use Save/Replace Pose or Clear Position."
+            ).classes("text-xs text-slate-500")
+            ui.label("Assembly Robot Corrections").classes("text-xs font-semibold")
+            ui.label(
+                "Shows pick_approach.descend, place_approach.move_above_destination, and "
+                "place_approach.descend as active, missing, buffered, or unconfirmed."
+            ).classes("text-xs text-slate-500")
+            assembly_pick_approach_correction_status = ui.label("").classes(
+                "text-xs text-slate-500"
+            )
+            assembly_place_approach_correction_status = ui.label("").classes(
+                "text-xs text-slate-500"
+            )
+
+            async def _check_assembly_readiness() -> None:
+                client = _current_client()
+                if execution.get("busy") or execution.get("checking"):
+                    _notify(
+                        "A robot function check or execution is already active.",
+                        type="warning",
+                        client=client,
+                    )
+                    return
+                _sync_assembly_options()
+                robot = _current_robot()
+                values = _assembly_kwargs()
+                selection_signature = _assembly_selection_signature()
+                selection_revision = int(execution["assembly_selection_revision"])
+                execution.update({"checking": True, "active_function": "Assembly"})
+                pending_assembly.clear()
+                assembly_run_button.props("loading")
+                _render_execution()
+                _render_steps()
+                assembly_status.set_text("Checking Assembly readiness without motion...")
+                assembly_status.classes(replace="text-xs text-amber-700")
+                try:
+                    result = await bridge.digital_twin_assembly_readiness(
+                        target,
+                        robot,
+                        origin_resource_location=values["origin_resource_location"],
+                        destination_location=values["destination_location"],
+                        part_name=values["part_name"],
+                    )
+                    if not _client_alive(assembly_status):
+                        return
+                    if (
+                        selection_revision
+                        != int(execution["assembly_selection_revision"])
+                        or selection_signature != _assembly_selection_signature()
+                    ):
+                        _notify(
+                            "Assembly selection changed during readiness; the old result was "
+                            "discarded.",
+                            type="warning",
+                            client=client,
+                        )
+                        return
+                    message = str(result.get("message") or "")
+                    assembly_status.set_text(message)
+                    assembly_status.classes(
+                        replace=(
+                            "text-xs text-green-700"
+                            if result.get("success")
+                            else "text-xs text-red-700"
+                        )
+                    )
+                    if not result.get("success"):
+                        _notify(message, type="warning", timeout=7000, client=client)
+                        return
+                    pending_assembly.update({"robot": robot, **values})
+                    assembly_confirm_title.set_text(
+                        f"Run Assembly on the physical {robot}?"
+                    )
+                    assembly_confirm_move_insert_status.set_text(
+                        "Assembly readiness verified the protected move_insert recipe and "
+                        f"qualification for exact part {values['part_name']}. No operator "
+                        "tuning values are required."
+                    )
+                    assembly_confirm.open()
+                except Exception as exc:
+                    log.exception("Assembly readiness check failed")
+                    message = f"Assembly readiness check failed: {exc}"
+                    if _client_alive(assembly_status):
+                        assembly_status.set_text(message)
+                        assembly_status.classes(replace="text-xs text-red-700")
+                    _notify(message, type="negative", timeout=7000, client=client)
+                finally:
+                    execution.update({"checking": False, "active_function": ""})
+                    if _client_alive(assembly_run_button):
+                        assembly_run_button.props(remove="loading")
+                        _render_execution()
+                        _render_steps()
+
+            with ui.dialog() as assembly_confirm, ui.card().classes("gap-3 max-w-xl"):
+                assembly_confirm_title = ui.label("").classes("font-semibold")
+                ui.label("The Assembly runs all five functions in this exact order:").classes(
+                    "text-sm"
+                )
+                ui.label(
+                    "pick_approach → pick_grasp → place_approach → place_insert → move_home"
+                ).classes("text-sm font-semibold")
+                ui.label(
+                    "place_insert.move_insert keeps the part gripped while it searches and "
+                    "inserts. place_insert releases the part irreversibly "
+                    "only after move_insert succeeds. Assembly stops immediately if any "
+                    "function fails "
+                    "and never retries or continues automatically."
+                ).classes("text-xs text-red-700")
+                assembly_confirm_move_insert_status = ui.label("").classes(
+                    "text-xs text-slate-600 break-all"
+                )
+                ui.label(
+                    "This commands physical robot motion. Clear the workcell and switch the "
+                    "pendant to Remote Control before continuing."
+                ).classes("text-xs text-red-700")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Cancel", on_click=assembly_confirm.close).props("flat")
+
+                    async def _confirmed_assembly() -> None:
+                        client = _current_client()
+                        assembly_confirm.close()
+                        if (
+                            execution.get("busy")
+                            or execution.get("checking")
+                            or not pending_assembly
+                        ):
+                            _notify(
+                                "Assembly readiness must complete before confirmation.",
+                                type="warning",
+                                client=client,
+                            )
+                            return
+                        values = dict(pending_assembly)
+                        robot = values.pop("robot")
+                        execution.update({"busy": True, "active_function": "Assembly"})
+                        assembly_run_button.props("loading")
+                        _render_execution()
+                        _render_steps()
+                        assembly_status.set_text(
+                            "Dispatching Assembly after fresh physical readiness checks."
+                        )
+                        assembly_status.classes(replace="text-xs text-amber-700")
+                        assembly_progress_status.set_text(
+                            "Assembly is starting. Completed functions: none."
+                        )
+                        assembly_progress_status.classes(replace="text-xs text-amber-700")
+                        assembly_task: asyncio.Task | None = None
+                        try:
+                            assembly_task = asyncio.create_task(
+                                bridge.digital_twin_execute_assembly(
+                                    target,
+                                    robot,
+                                    origin_resource_location=values[
+                                        "origin_resource_location"
+                                    ],
+                                    destination_location=values[
+                                        "destination_location"
+                                    ],
+                                    part_name=values["part_name"],
+                                    confirmed=True,
+                                )
+                            )
+                            execution["assembly_task"] = assembly_task
+                            result = await assembly_task
+                            message = str(
+                                result.get("message") or "Assembly completed."
+                            )
+                            completed_functions = [
+                                str(function_name)
+                                for function_name in result.get("completed_functions", []) or []
+                            ]
+                            failed_function = str(
+                                result.get("failed_function") or ""
+                            ).strip()
+                            progress_text = (
+                                "Completed functions: "
+                                + (", ".join(completed_functions) or "none")
+                                + "."
+                            )
+                            if failed_function:
+                                progress_text += f" Failed function: {failed_function}."
+                            if _client_alive(assembly_status):
+                                assembly_status.set_text(message)
+                                assembly_status.classes(
+                                    replace=(
+                                        "text-xs text-green-700"
+                                        if result.get("success")
+                                        else "text-xs text-red-700"
+                                    )
+                                )
+                                assembly_progress_status.set_text(progress_text)
+                                assembly_progress_status.classes(
+                                    replace=(
+                                        "text-xs text-green-700"
+                                        if result.get("success")
+                                        else "text-xs text-red-700"
+                                    )
+                                )
+                            _notify(
+                                message,
+                                type=(
+                                    "positive" if result.get("success") else "negative"
+                                ),
+                                timeout=7000,
+                                client=client,
+                            )
+                        except Exception as exc:
+                            log.exception("Assembly UI execution failed")
+                            message = f"Assembly failed: {exc}"
+                            if _client_alive(assembly_status):
+                                assembly_status.set_text(message)
+                                assembly_status.classes(replace="text-xs text-red-700")
+                                assembly_progress_status.set_text(
+                                    "Assembly stopped. See the failure above; no later function "
+                                    "was requested by the UI."
+                                )
+                                assembly_progress_status.classes(
+                                    replace="text-xs text-red-700"
+                                )
+                            _notify(
+                                message,
+                                type="negative",
+                                timeout=7000,
+                                client=client,
+                            )
+                        finally:
+                            if execution.get("assembly_task") is assembly_task:
+                                execution["assembly_task"] = None
+                            pending_assembly.clear()
+                            execution.update({"busy": False, "active_function": ""})
+                            if _client_alive(assembly_run_button):
+                                assembly_run_button.props(remove="loading")
+                                _render_execution()
+                                _render_steps()
+
+                    ui.button(
+                        "Confirm Run Assembly",
+                        on_click=_confirmed_assembly,
+                        icon="play_arrow",
+                    ).props("color=red")
+
+            assembly_run_button = (
+                ui.button(
+                    "Run Assembly",
+                    on_click=_check_assembly_readiness,
+                    icon="precision_manufacturing",
+                )
+                .props("outline dense")
+                .classes("text-red-600")
+            )
+
+    def _render_execution() -> None:  # noqa: C901 - one render owns every motion gate.
         function_name = _current_function()
         run_button.set_text(f"Run {function_name}" if function_name else "Run")
         controls_enabled = (
@@ -2079,8 +4489,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             origin_select,
             destination_select,
             part_select,
+            assembly_origin_select,
+            assembly_destination_select,
+            assembly_part_select,
         ):
             selector.set_enabled(bool(controls_enabled))
+        assembly_target_robot_status.set_text(
+            f"Assembly target: {target} | robot: {_current_robot()}"
+        )
         needs_part = function_name in {
             "pick_approach",
             "pick_grasp",
@@ -2096,14 +4512,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             else True
         )
         blocker = ""
-        hardware_target = _hardware_stack_robot_function_target(bridge)
+        hardware_target, hardware_statuses = _robot_function_hardware_snapshot()
         if hardware_target:
             stack = {
                 "xarm only": "xarm6",
                 "ur5e only": "ur5e",
                 "dual robots": "dual robots",
             }[hardware_target]
-            stack_status = bridge.hardware_stack_status(stack)
+            stack_status = dict(hardware_statuses.get(stack) or {})
             if hardware_target != target:
                 blocker = (
                     f"Selected Function Execution target is {target}, but "
@@ -2138,14 +4554,43 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     and str(robot_status.get("gripper_action") or "") != "ready"
                 ):
                     blocker = "UR5e RG2 gripper action is not ready."
-        teleop_readiness = bridge.teleop_cartesian_readiness(_current_robot())
-        if teleop_readiness.get("smooth_hold_active"):
+        if bridge.teleop_cartesian_smooth_active(_current_robot()):
             blocker = "Release Cartesian Smooth Hold before Function Execution."
+        demonstration_status = (
+            dict(insertion_demonstration.get("status") or {})
+            if insertion_demonstration.get("selection")
+            == _insertion_demonstration_selection()
+            else {}
+        )
+        demonstration_blocks_functions = bool(
+            demonstration_status.get("active")
+            or demonstration_status.get("recovery_required")
+        )
+        if demonstration_blocks_functions:
+            blocker = str(
+                demonstration_status.get("message")
+                or "Insertion Demonstration blocks Robot Functions until it is stopped."
+            )
         board_run_blocked = False
+        place_approach_recording_blocked = False
         if (
             function_name == "place_approach"
             and _current_destination_location() == "assembly_board-v1"
         ):
+            invalid_recordings = [
+                str(step.get("invalid_reason") or "").strip()
+                for step in bridge.digital_twin_list_function_file_steps(
+                    target,
+                    _current_robot(),
+                    function_name,
+                    _current_recording_name(),
+                    part_name=_current_part_name(),
+                )
+                if str(step.get("invalid_reason") or "").strip()
+            ]
+            place_approach_recording_blocked = bool(invalid_recordings)
+            if invalid_recordings:
+                blocker = f"{blocker} {' '.join(invalid_recordings)}".strip()
             board_status = dict(assembly_board_v1_state.get("status") or {})
             post_staging_acceptance_allowed = bool(
                 board_status.get("post_staging_acceptance_allowed")
@@ -2172,6 +4617,52 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         _assembly_board_v1_readiness(board_status)["message"]
                     )
                 blocker = f"{blocker} {board_blocker}".strip()
+        place_insert_run_blocked = False
+        if (
+            (
+                str(getattr(bridge, "execution_mode", "") or "").strip().lower()
+                == "physical"
+                or str(getattr(bridge, "robot_env", "") or "").strip().lower()
+                == "real"
+                or bool(hardware_target)
+            )
+            and function_name == "place_insert"
+            and _current_destination_location() == "assembly_board-v1"
+        ):
+            place_insert_run_blocked = True
+            held_part = str(
+                bridge.digital_twin_function_held_part(_current_robot()) or ""
+            ).strip()
+            if _current_robot() == "xarm6":
+                place_insert_blocker = (
+                    "Physical xarm6 move_insert remains blocked in this version. The "
+                    "installed UFactory six-axis force/torque sensor still requires "
+                    "verified CAIS wrench feedback, zeroing, force control, cancellation, "
+                    "and a serialized xarm6 insertion action."
+                )
+            elif not held_part:
+                if _current_part_name() in _MOVE_INSERT_SUPPORTED_PARTS:
+                    place_insert_blocker = (
+                        "Standalone Run place_insert is blocked because Function Execution "
+                        "has no retained held_part context. Select place_approach and Confirm "
+                        "Run place_approach once; that standalone run assumes exact part "
+                        f"{_current_part_name()} is already "
+                        "physically clamped. Then test move_insert."
+                    )
+                else:
+                    place_insert_blocker = (
+                        f"Standalone Run place_insert for exact part {_current_part_name()} "
+                        "requires its retained pick_grasp and place_approach context."
+                    )
+            elif not _move_insert_trial_is_qualified():
+                place_insert_blocker = (
+                    f"Run place_insert is blocked until Supervised Test move_insert for exact "
+                    f"part {_current_part_name()} finishes and you use Confirm Completion."
+                )
+            else:
+                place_insert_run_blocked = False
+                place_insert_blocker = ""
+            blocker = f"{blocker} {place_insert_blocker}".strip()
         execution_blocker.set_text(blocker)
         execution_blocker.set_visibility(bool(blocker))
         enabled = bool(
@@ -2181,8 +4672,21 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             and (not needs_part or _current_part_name())
             and controls_enabled
             and not board_run_blocked
+            and not place_approach_recording_blocked
+            and not place_insert_run_blocked
+            and not demonstration_blocks_functions
         )
         run_button.set_enabled(enabled)
+        assembly_run_button.set_enabled(
+            bool(
+                _current_robot() in {"xarm6", "ur5e"}
+                and _current_assembly_origin_resource_location()
+                and _current_assembly_destination_location()
+                and _current_assembly_part_name()
+                and controls_enabled
+                and not demonstration_blocks_functions
+            )
+        )
         show_gripper_close_test = bool(
             _current_robot() == "ur5e"
             and bool(_current_part_name())
@@ -2198,6 +4702,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             )
         )
         _render_assembly_board_v1_readiness()
+        _render_insertion_demonstration()
+        _render_move_insert_trial()
 
     async def _capture_position(step_name: str, primitive: str) -> None:
         client = _current_client()
@@ -2208,6 +4714,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         function_name = _current_function()
         recording_name = _current_recording_name()
         part_name = _current_part_name()
+        operator_confirmed_held_part = _operator_confirmed_held_part()
+        operator_handoff_origin_resource_location = (
+            _operator_held_part_origin_resource_location()
+            if operator_confirmed_held_part
+            else ""
+        )
         execution.update(
             {
                 "checking": True,
@@ -2239,6 +4751,10 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 step_name,
                 primitive,
                 part_name=part_name,
+                operator_confirmed_held_part=operator_confirmed_held_part,
+                operator_handoff_origin_resource_location=(
+                    operator_handoff_origin_resource_location
+                ),
             )
             _notify(
                 str(result.get("message") or ""),
@@ -2404,6 +4920,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 _render_steps()
 
     def _render_steps() -> None:  # noqa: C901, PLR0912, PLR0915 - operator states stay local.
+        _refresh_assembly_correction_status()
         function_name = _current_function()
         name = _current_recording_name()
         controls_blocked = bool(
@@ -2461,9 +4978,10 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 1
                 for step in recordable_steps
                 if str(step.get("step_name") or "") in saved_steps
+                and saved_steps[str(step.get("step_name") or "")].get("confirmed")
             )
             recording_summary.set_text(
-                f"{saved_count}/{len(recordable_steps)} optional Cartesian positions saved"
+                f"{saved_count}/{len(recordable_steps)} optional robot corrections confirmed"
             )
         info = bridge.digital_twin_function_info(
             target,
@@ -2473,7 +4991,10 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             _current_part_name(),
         )
         recording_info.set_text(
-            f"Saving as: {info.get('display_path')}"
+            (
+                f"Saving as: {info.get('display_path')} — one {function_name} file for "
+                f"{_current_robot()} across all part_name and location inputs"
+            )
             if info.get("success") and recordable_steps
             else ""
         )
@@ -2532,8 +5053,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         ui.space()
                         if buffered:
                             ui.label("Captured pose; not saved").classes("text-xs text-amber-700")
-                        elif saved:
+                        elif saved and saved.get("confirmed"):
                             ui.label("Pose saved").classes("text-xs text-green-700")
+                        elif saved and saved.get("invalid_reason"):
+                            ui.label("Recapture required").classes("text-xs text-red-700")
+                        elif saved:
+                            ui.label("Unconfirmed correction; ignored").classes(
+                                "text-xs text-amber-700"
+                            )
                         elif not position_required:
                             ui.label("Computed live; override optional").classes(
                                 "text-xs text-slate-500"
@@ -2541,9 +5068,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         else:
                             ui.label("Position required").classes("text-xs text-red-700")
                     pose = dict(position.get("pose") or {}) if position else {}
+                    invalid_reason = str(
+                        (saved or {}).get("invalid_reason") or ""
+                    ).strip()
+                    if invalid_reason:
+                        ui.label(invalid_reason).classes("text-xs text-red-700")
                     if pose:
                         ui.label(
-                            f"world → {'tool0' if _current_robot() == 'ur5e' else 'link_eef'}: "
+                            f"world → {pose.get('child_frame_id') or 'ee_link'}: "
                             f"x={float(pose.get('x', 0.0)):.9f}, "
                             f"y={float(pose.get('y', 0.0)):.9f}, "
                             f"z={float(pose.get('z', 0.0)):.9f}, "
@@ -2555,7 +5087,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                         relative_position = dict(
                             position.get("relative_position_m") or {}
                         )
-                        relative_pose = dict(position.get("relative_pose") or {})
                         relative_reference = dict(
                             position.get("relative_reference") or {}
                         )
@@ -2589,22 +5120,11 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                                 f"z={float(reference_position.get('z', 0.0)):.9f}; "
                                 f"source={relative_reference.get('source')}"
                             ).classes("text-xs text-slate-600")
-                            if (
-                                relative_reference.get("source")
-                                == "assembly_board-v1_aruco"
-                                and relative_pose
-                            ):
-                                ui.label(
-                                    "Replay composes the current ArUco ID 70 world pose with "
-                                    "this saved full relative SE(3) pose, applying board "
-                                    "translation and rotation."
-                                ).classes("text-xs text-slate-500")
-                            else:
-                                ui.label(
-                                    "Replay adds this saved world-axis XYZ calibration to the "
-                                    "current computed pose and "
-                                    "keeps the captured quaternion unchanged."
-                                ).classes("text-xs text-slate-500")
+                            ui.label(
+                                "Preview, Test Position, and Function Run resolve current "
+                                "geometry first, then apply this robot correction. Raw waypoint "
+                                "Replay is disabled."
+                            ).classes("text-xs text-slate-500")
                     with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
                         capture_button = ui.button(
                             "Capture Pose",
@@ -2684,7 +5204,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                             .props("outline dense")
                             .classes("text-red-600")
                         )
-                        if controls_blocked or not saved:
+                        if controls_blocked or not saved or invalid_reason:
                             test_button.disable()
 
     def _reset_execution_status() -> None:
@@ -2693,54 +5213,293 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         execution_status.set_text(message)
         execution_status.classes(replace=classes)
 
+    def _invalidate_move_insert_trial() -> None:
+        readiness_task = move_insert_trial.get("readiness_task")
+        if isinstance(readiness_task, asyncio.Task) and not readiness_task.done():
+            readiness_task.cancel()
+        move_insert_trial.update(
+            {
+                "loading": False,
+                "active": False,
+                "stop_requested": False,
+                "selection": (),
+                "status": {},
+                "trial_id": "",
+                "readiness_revision": int(
+                    move_insert_trial.get("readiness_revision") or 0
+                )
+                + 1,
+                "readiness_task": None,
+                "background_readiness_key": (),
+            }
+        )
+        pending_move_insert_trial.clear()
+        pending_move_insert_recovery.clear()
+        move_insert_trial_confirm.close()
+        move_insert_recovery_confirm.close()
+        move_insert_completion_confirm.close()
+        _render_move_insert_trial()
+
+    def _schedule_selection_readiness_refresh() -> None:
+        selection = _selection_signature()
+        current_task = selection_update.get("readiness_task")
+        if (
+            isinstance(current_task, asyncio.Task)
+            and not current_task.done()
+            and selection_update.get("readiness_selection") == selection
+        ):
+            return
+        if isinstance(current_task, asyncio.Task) and not current_task.done():
+            current_task.cancel()
+
+        selection_revision = int(execution["selection_revision"])
+
+        async def _refresh_current_selection() -> None:
+            await asyncio.sleep(0.05)
+            if (
+                selection_revision != int(execution["selection_revision"])
+                or selection != _selection_signature()
+            ):
+                return
+            await asyncio.gather(
+                _refresh_assembly_board_v1_readiness(),
+                _load_insertion_demonstration_readiness(),
+                _load_move_insert_trial_readiness(),
+            )
+
+        task = asyncio.create_task(_refresh_current_selection())
+        selection_update.update(
+            {
+                "readiness_task": task,
+                "readiness_selection": selection,
+            }
+        )
+
+        def _clear_selection_readiness_task(completed: asyncio.Task) -> None:
+            if selection_update.get("readiness_task") is completed:
+                selection_update["readiness_task"] = None
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Robot Function selection readiness refresh failed")
+
+        task.add_done_callback(_clear_selection_readiness_task)
+
     def _selection_changed(_e=None) -> None:
+        if selection_update.get("active"):
+            return
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
+        execution["assembly_selection_revision"] = (
+            int(execution["assembly_selection_revision"]) + 1
+        )
         pending_execution.clear()
+        pending_assembly.clear()
         run_confirm.close()
+        assembly_confirm.close()
+        _invalidate_move_insert_trial()
         assembly_board_v1_state.update(
             {
                 "last_failure": "",
+                "accept_message": "",
+                "accept_success": None,
             }
         )
         _sync_location()
         _sync_part_name()
+        _sync_assembly_options()
         _reset_execution_status()
+        _reset_assembly_status()
         _render_execution()
         _render_steps()
-        asyncio.create_task(_refresh_assembly_board_v1_readiness())
+        _schedule_selection_readiness_refresh()
 
     def _part_name_changed(_e=None) -> None:
+        if selection_update.get("active"):
+            return
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
         pending_execution.clear()
         run_confirm.close()
+        _invalidate_move_insert_trial()
         _reset_execution_status()
         _render_execution()
         _render_steps()
+        _schedule_selection_readiness_refresh()
 
     def _location_changed(_e=None) -> None:
+        if selection_update.get("active"):
+            return
         execution["selection_revision"] = int(execution["selection_revision"]) + 1
         pending_execution.clear()
         run_confirm.close()
+        _invalidate_move_insert_trial()
         assembly_board_v1_state.update(
             {
                 "last_failure": "",
+                "accept_message": "",
+                "accept_success": None,
             }
         )
         _reset_execution_status()
         _render_execution()
         _render_steps()
-        asyncio.create_task(_refresh_assembly_board_v1_readiness())
+        _schedule_selection_readiness_refresh()
+
+    def _assembly_selection_changed(_e=None) -> None:
+        if selection_update.get("active"):
+            return
+        execution["assembly_selection_revision"] = (
+            int(execution["assembly_selection_revision"]) + 1
+        )
+        pending_assembly.clear()
+        assembly_confirm.close()
+        _reset_assembly_status()
+        _refresh_assembly_correction_status()
+        _render_execution()
 
     robot_select.on_value_change(_selection_changed)
     function_select.on_value_change(_selection_changed)
     origin_select.on_value_change(_location_changed)
     destination_select.on_value_change(_location_changed)
     part_select.on_value_change(_part_name_changed)
+    assembly_origin_select.on_value_change(_assembly_selection_changed)
+    assembly_destination_select.on_value_change(_assembly_selection_changed)
+    assembly_part_select.on_value_change(_assembly_selection_changed)
     _sync_location()
     _sync_part_name()
+    _sync_assembly_options()
     _reset_execution_status()
+    _reset_assembly_status()
     _render_execution()
     _render_steps()
+    _schedule_selection_readiness_refresh()
+
+    def _refresh_insertion_demonstration_status() -> None:
+        if (
+            _current_function() != "place_insert"
+            or insertion_demonstration.get("selection")
+            != _insertion_demonstration_selection()
+            or not dict(insertion_demonstration.get("status") or {}).get("active")
+        ):
+            return
+        selection = _insertion_demonstration_selection()
+        try:
+            result = bridge.digital_twin_insertion_recording_status(
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                recording_id=str(
+                    insertion_demonstration.get("recording_id") or ""
+                ),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            log.exception("failed to refresh insertion demonstration status")
+            return
+        if selection != _insertion_demonstration_selection():
+            return
+        _apply_insertion_demonstration_status(dict(result), selection)
+        _render_insertion_demonstration()
+        _render_execution()
+
+    def _refresh_move_insert_trial_status() -> None:
+        if (
+            _current_function() != "place_insert"
+            or not _move_insert_trial_is_current()
+            or not (
+                move_insert_trial.get("active")
+                or _move_insert_trial_state()
+                in {"testing", "awaiting_visual_confirmation"}
+            )
+        ):
+            return
+        selection = _move_insert_trial_selection()
+        try:
+            result = bridge.digital_twin_move_insert_trial_status(
+                target,
+                _current_robot(),
+                destination_location=_current_destination_location(),
+                part_name=_current_part_name(),
+                trial_id=str(move_insert_trial.get("trial_id") or ""),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            log.exception("failed to refresh move_insert trial status")
+            return
+        if selection != _move_insert_trial_selection():
+            return
+        was_qualified = _move_insert_trial_is_qualified()
+        _apply_move_insert_trial_status(dict(result), selection)
+        _render_move_insert_trial()
+        if was_qualified != _move_insert_trial_is_qualified():
+            _render_execution()
+
+    def _refresh_move_insert_trial_readiness_after_recording() -> None:
+        if _current_function() != "place_insert":
+            return
+        if (
+            insertion_demonstration.get("selection")
+            != _insertion_demonstration_selection()
+        ):
+            return
+        demonstration_status = dict(insertion_demonstration.get("status") or {})
+        if (
+            str(demonstration_status.get("state") or "")
+            != "recording_saved_return_to_pre_insertion"
+        ):
+            return
+        trial_status = (
+            dict(move_insert_trial.get("status") or {})
+            if _move_insert_trial_is_current()
+            else {}
+        )
+        trial_state = str(
+            trial_status.get("state")
+            or trial_status.get("qualification_state")
+            or ""
+        )
+        if (
+            move_insert_trial.get("loading")
+            or move_insert_trial.get("active")
+            or trial_status.get("active")
+            or trial_status.get("review_required")
+            or trial_status.get("qualified")
+            or execution.get("busy")
+            or execution.get("checking")
+            or execution.get("preparing")
+            or trial_status.get("ready")
+            or trial_state == "ready_to_test"
+        ):
+            return
+        readiness_task = move_insert_trial.get("readiness_task")
+        if isinstance(readiness_task, asyncio.Task) and not readiness_task.done():
+            return
+        background_key = (
+            *_move_insert_trial_selection(),
+            str(demonstration_status.get("recording_id") or ""),
+            str(
+                demonstration_status.get("demonstration_sha256")
+                or demonstration_status.get("trace_sha256")
+                or ""
+            ),
+        )
+        move_insert_trial["background_readiness_key"] = background_key
+        task = asyncio.create_task(
+            _load_move_insert_trial_readiness(background=True)
+        )
+        move_insert_trial["readiness_task"] = task
+
+        def _clear_readiness_task(completed: asyncio.Task) -> None:
+            if move_insert_trial.get("readiness_task") is completed:
+                move_insert_trial["readiness_task"] = None
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("automatic supervised move_insert readiness failed")
+
+        task.add_done_callback(_clear_readiness_task)
 
     def _refresh_function_execution_progress() -> None:
         if not execution.get("busy"):
@@ -2749,17 +5508,100 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         if not progress.get("active"):
             return
         message = str(progress.get("message") or "").strip()
+        if execution.get("active_function") == "Assembly":
+            assembly_step_index = int(progress.get("assembly_step_index", 0) or 0)
+            assembly_step_count = int(
+                progress.get("assembly_step_count", len(assembly_functions))
+                or len(assembly_functions)
+            )
+            completed_functions = [
+                str(function_name)
+                for function_name in progress.get("completed_functions", []) or []
+            ]
+            failed_function = str(progress.get("failed_function") or "").strip()
+            progress_bits = []
+            if assembly_step_index:
+                progress_bits.append(
+                    f"Assembly step {assembly_step_index}/{assembly_step_count}."
+                )
+            active_step = str(progress.get("active_step") or "").strip()
+            insert_phase = str(progress.get("insert_phase") or "").strip()
+            if active_step:
+                progress_bits.append(f"Active internal step: {active_step}.")
+            if active_step == "place_insert.move_insert" and insert_phase:
+                progress_bits.append(f"Insertion phase: {insert_phase}.")
+            progress_bits.append(
+                "Completed functions: "
+                + (", ".join(completed_functions) or "none")
+                + "."
+            )
+            if failed_function:
+                progress_bits.append(f"Failed function: {failed_function}.")
+            if _client_alive(assembly_progress_status):
+                assembly_progress_status.set_text(" ".join(progress_bits))
+                assembly_progress_status.classes(replace="text-xs text-amber-700")
+            if message and _client_alive(assembly_status):
+                assembly_status.set_text(message)
+                assembly_status.classes(replace="text-xs text-amber-700")
+            return
         if message and _client_alive(execution_status):
             execution_status.set_text(message)
             execution_status.classes(replace="text-xs text-amber-700")
 
     ui.timer(0.2, _refresh_function_execution_progress)
+    ui.timer(0.2, _refresh_insertion_demonstration_status)
+    ui.timer(0.2, _refresh_move_insert_trial_status)
+    ui.timer(1.0, _refresh_move_insert_trial_readiness_after_recording)
     ui.timer(2.0, _refresh_assembly_board_v1_readiness, immediate=True)
     ui.label(
         "Capture checks read-only readiness automatically. Run and Test Position are separate "
         "physical motion actions requiring the selected robot's remote-control mode and "
         "explicit confirmation."
     ).classes("text-xs text-amber-700 mt-2")
+
+    def _cancel_body_tasks(*_args: object) -> None:
+        readiness_task = selection_update.get("readiness_task")
+        if isinstance(readiness_task, asyncio.Task) and not readiness_task.done():
+            readiness_task.cancel()
+        task = execution.get("assembly_task")
+        if isinstance(task, asyncio.Task) and not task.done():
+            # The bridge shields only the in-flight function, then aborts the remainder.
+            task.cancel()
+        trial_task = move_insert_trial.get("trial_task")
+        if isinstance(trial_task, asyncio.Task) and not trial_task.done():
+            # The bridge keeps its motion lock until the in-flight trial settles.
+            trial_task.cancel()
+        pending_assembly.clear()
+        pending_move_insert_trial.clear()
+        pending_move_insert_recovery.clear()
+
+    def _cancel_active_assembly(*_args: object) -> None:
+        _cancel_body_tasks()
+        recording_status = dict(insertion_demonstration.get("status") or {})
+        if bool(recording_status.get("active")):
+            threading.Thread(
+                target=bridge.digital_twin_cancel_insertion_recording,
+                kwargs={
+                    "target": str(recording_status.get("target") or target),
+                    "robot": str(recording_status.get("robot") or "ur5e"),
+                    "destination_location": str(
+                        recording_status.get("destination_location")
+                        or "assembly_board-v1"
+                    ),
+                    "part_name": str(recording_status.get("part_name") or ""),
+                    "recording_id": str(
+                        recording_status.get("recording_id") or ""
+                    ),
+                    "note": "Control client disconnected during recording.",
+                },
+                daemon=True,
+            ).start()
+
+    client = _current_client()
+    if client is not None:
+        client.on_disconnect(_cancel_active_assembly)
+        client.on_delete(_cancel_active_assembly)
+    return _cancel_body_tasks
 
 
 # =====================================================================
@@ -2813,14 +5655,7 @@ def _teleop_section(
         rtde_reset_progress_label = ui.label("").classes("text-xs text-amber-700")
 
         # Robot selector.
-        xarm6_initial_target = bridge.teleop_target("xarm6", "state")
-        ur5e_initial_target = bridge.teleop_target("ur5e", "state")
-        initial_robot = (
-            "ur5e"
-            if bool(ur5e_initial_target.get("ready"))
-            and not bool(xarm6_initial_target.get("ready"))
-            else "xarm6"
-        )
+        initial_robot = "ur5e"
         selected_robot_state = {"robot": initial_robot, "changing": False}
         with ui.row().classes("items-center gap-4 mb-4"):
             ui.label("Robot:").classes("font-semibold text-sm")
@@ -2830,7 +5665,7 @@ def _teleop_section(
 
         mode_state = {"mode": "cartesian"}  # cartesian | gripper | joint
         cartesian_jog_mode = {
-            "mode": "step",
+            "mode": "smooth",
             "preparing": False,
             "updating_toggle": False,
         }  # step | smooth
@@ -2840,6 +5675,7 @@ def _teleop_section(
             "pressed": False,
             "active": False,
             "stopping": False,
+            "stop_requested": False,
             "robot": "",
             "axis": "",
             "speed_mm_s": 0.0,
@@ -2847,6 +5683,7 @@ def _teleop_section(
             "task": None,
         }
         cartesian_jog_buttons = []
+        joint_jog_buttons = []
         cartesian_jog_controls = {"toggle": None, "readiness": None}
         axis_state = {"axis": "y"}  # x | y | z
         joint_state = {"idx": 1}  # 1..6
@@ -2892,6 +5729,13 @@ def _teleop_section(
         save_env_label = {"label": None}
         state_refresh = {"busy": False}
         state_labels = {"status": None, "xyz": None, "rpy": None, "joints": []}
+        cartesian_readiness_refresh = {
+            "busy": False,
+            "revision": 0,
+            "robot": "",
+            "readiness": None,
+            "target": None,
+        }
 
         def _refresh_rtde_reset_enabled() -> None:
             robot = str(robot_select.value or "xarm6").strip().lower()
@@ -2937,6 +5781,7 @@ def _teleop_section(
                 )
                 if ok:
                     _refresh_teleop_status()
+                    _schedule_cartesian_readiness_refresh(invalidate=True)
                     await _refresh_teleop_state_async()
                     refresh_named_positions = named_position_refresh["callback"]
                     if refresh_named_positions is not None:
@@ -3197,6 +6042,15 @@ def _teleop_section(
                     step,
                 )
             motion_speed_state[robot_key][value_key] = requested
+            if (
+                key == "cartesian"
+                and requested == 0.0
+                and robot_key == str(robot_select.value or "xarm6")
+            ):
+                _request_smooth_stop(
+                    reason="Cartesian speed set to 0",
+                    expected=True,
+                )
             if robot_key == str(robot_select.value or "xarm6"):
                 motion_speed_sync["busy"] = True
                 try:
@@ -3211,6 +6065,13 @@ def _teleop_section(
                 finally:
                     motion_speed_sync["busy"] = False
             _refresh_motion_speed_labels()
+            _refresh_cartesian_controls()
+
+        def _motion_speed_slider_release_value(event) -> object:
+            values = event.args
+            if isinstance(values, (list, tuple)) and len(values) == 1:
+                return values[0]
+            return values
 
         def _configure_motion_speed_controls(robot: str) -> None:
             robot_key = str(robot or "xarm6").strip().lower()
@@ -3239,9 +6100,9 @@ def _teleop_section(
                     for control in (slider, number):
                         if control is None:
                             continue
-                        control.props(
-                            f"min={minimum:.6f} max={maximum:.6f} step={step:.6f}"
-                        )
+                        control._props["min"] = minimum
+                        control._props["max"] = maximum
+                        control._props["step"] = step
                         control.set_value(value)
                         control.update()
                 simulation_scale = motion_speed_controls["simulation_scale"]
@@ -3369,6 +6230,34 @@ def _teleop_section(
             generation: int,
         ) -> None:
             speed_mm_s = _smooth_speed_mm_s(direction)
+            if speed_mm_s == 0.0:
+                smooth_hold["pressed"] = False
+                if _client_alive(teleop_warning_label):
+                    ui.notify(
+                        f"{robot}: Cartesian speed is 0; no motion was commanded.",
+                        type="warning",
+                        position="bottom-right",
+                        timeout=2500,
+                    )
+                return
+            if robot == "xarm6":
+                readiness = cartesian_readiness_refresh["readiness"]
+                if not (
+                    isinstance(readiness, dict)
+                    and str(readiness.get("cartesian_mode") or "off") == "smooth"
+                    and readiness.get("cartesian_mode_ready") is True
+                ):
+                    prepared = await _apply_cartesian_mode("Smooth Hold")
+                    if not prepared:
+                        smooth_hold["pressed"] = False
+                        return
+            if (
+                not smooth_hold["pressed"]
+                or int(smooth_hold["generation"]) != generation
+                or cartesian_jog_mode["mode"] != "smooth"
+                or str(robot_select.value or "") != robot
+            ):
+                return
             ok, message = await asyncio.to_thread(
                 bridge.teleop_cartesian_smooth,
                 robot,
@@ -3431,15 +6320,43 @@ def _teleop_section(
             if smooth_hold["pressed"] or smooth_hold["active"]:
                 return
             smooth_hold["pressed"] = True
+            smooth_hold["stop_requested"] = False
             smooth_hold["generation"] = int(smooth_hold["generation"]) + 1
             generation = int(smooth_hold["generation"])
             robot = str(robot_select.value or "xarm6")
+            label = cartesian_status["label"]
+            if label is not None:
+                label.set_text(
+                    f"Starting World {axis.upper()}{'+' if direction > 0 else '-'} "
+                    "Smooth Hold..."
+                )
+                label.classes(replace="text-xs text-blue-700 mb-2")
             smooth_hold["task"] = asyncio.create_task(
                 _run_smooth_hold(robot, axis, direction, generation)
             )
 
-        def _request_smooth_stop(_event=None) -> None:
+        def _request_smooth_stop(
+            _event=None,
+            *,
+            reason: str = "browser pointer or focus event",
+            expected: bool = False,
+        ) -> None:
+            was_holding = bool(smooth_hold["pressed"] or smooth_hold["active"])
+            already_requested = bool(smooth_hold["stop_requested"])
             smooth_hold["pressed"] = False
+            smooth_hold["stop_requested"] = True
+            if (
+                was_holding
+                and not already_requested
+                and not expected
+                and _client_alive(teleop_warning_label)
+            ):
+                ui.notify(
+                    f"Smooth Hold stopped by {reason}.",
+                    type="warning",
+                    position="bottom-right",
+                    timeout=5000,
+                )
             if smooth_hold["active"] and not smooth_hold["stopping"]:
                 asyncio.create_task(_stop_smooth_hold())
 
@@ -3465,7 +6382,10 @@ def _teleop_section(
                 return False
             robot = str(robot_select.value or "xarm6").strip().lower()
             if requested == "smooth":
-                readiness = bridge.teleop_cartesian_readiness(robot)
+                readiness = await asyncio.to_thread(
+                    bridge.teleop_cartesian_readiness,
+                    robot,
+                )
                 if str(readiness.get("environment") or "") != "real":
                     _set_cartesian_toggle_value("Step")
                     cartesian_jog_mode["mode"] = "step"
@@ -3522,7 +6442,7 @@ def _teleop_section(
             finally:
                 cartesian_jog_mode["preparing"] = False
                 cartesian_command_state["pending"] = False
-                _refresh_cartesian_controls()
+                _schedule_cartesian_readiness_refresh(invalidate=True)
 
         def _refresh_cartesian_controls() -> None:
             label = cartesian_jog_controls["readiness"]
@@ -3530,8 +6450,9 @@ def _teleop_section(
             if label is None or toggle is None or not _client_alive(label):
                 return
             if smooth_hold["pressed"] or smooth_hold["active"] or smooth_hold["stopping"]:
-                for button in cartesian_jog_buttons:
-                    button.disable()
+                # Disabling the pointer-capturing button can make the browser emit
+                # pointercancel and silently end an otherwise healthy hold. The
+                # guarded start handler already rejects every concurrent axis.
                 for button in conflicting_motion_buttons:
                     button.disable()
                 toggle.disable()
@@ -3546,22 +6467,35 @@ def _teleop_section(
                 robot_select.disable()
                 return
             robot = str(robot_select.value or "xarm6")
-            readiness = bridge.teleop_cartesian_readiness(robot)
+            readiness = cartesian_readiness_refresh["readiness"]
+            target = cartesian_readiness_refresh["target"]
+            if (
+                str(cartesian_readiness_refresh["robot"] or "") != robot
+                or not isinstance(readiness, dict)
+            ):
+                label.set_text("Cartesian frame validation: checking...")
+                label.classes(replace="text-xs text-slate-500 mb-2")
+                for button in cartesian_jog_buttons:
+                    button.disable()
+                for button in conflicting_motion_buttons:
+                    button.enable()
+                joint_speed_ready = bool(
+                    float(_joint_speed_deg_s(robot) or 0.0) > 0.0
+                )
+                for button in joint_jog_buttons:
+                    button.set_enabled(joint_speed_ready)
+                toggle.enable()
+                robot_select.enable()
+                return
             environment = str(readiness.get("environment") or "")
             selected_mode = str(cartesian_jog_mode["mode"] or "step")
             if environment == "real":
                 base_ready = bool(readiness.get("cartesian_jog_ready"))
+                cartesian_speed_ready = bool(
+                    float(_cartesian_speed_mm_s(robot) or 0.0) > 0.0
+                )
                 message = str(readiness.get("message") or "")
                 reported_mode = str(readiness.get("cartesian_mode") or "off")
-                if (
-                    robot == "xarm6"
-                    and selected_mode == "smooth"
-                    and reported_mode == "off"
-                    and not cartesian_jog_mode["preparing"]
-                ):
-                    selected_mode = "step"
-                    cartesian_jog_mode["mode"] = "step"
-                    _set_cartesian_toggle_value("Step")
                 mode_ready = bool(
                     selected_mode in {"step", "smooth"}
                     and readiness.get("cartesian_mode_ready") is True
@@ -3578,6 +6512,11 @@ def _teleop_section(
                 if state_uncertain:
                     label.set_text(f"Cartesian motion blocked: {message}")
                     label.classes(replace="text-xs text-red-700 mb-2")
+                elif not cartesian_speed_ready:
+                    label.set_text(
+                        "Cartesian jog disabled: set Cartesian speed above 0 mm/s."
+                    )
+                    label.classes(replace="text-xs text-amber-700 mb-2")
                 elif ready:
                     mode_text = (
                         "Mode 0" if selected_mode == "step" else "Mode 5"
@@ -3599,13 +6538,26 @@ def _teleop_section(
                         "Step selected. First World move prepares Cartesian motion."
                     )
                     label.classes(replace="text-xs text-amber-700 mb-2")
+                elif base_ready and selected_mode == "smooth":
+                    preparation = (
+                        "Mode 5"
+                        if robot == "xarm6"
+                        else "UR5e Cartesian Smooth Hold"
+                    )
+                    label.set_text(
+                        f"Smooth Hold selected. Press and hold a World arrow; the first "
+                        f"press prepares {preparation}."
+                    )
+                    label.classes(replace="text-xs text-amber-700 mb-2")
                 else:
                     label.set_text(f"Cartesian frame validation failed: {message}")
                     label.classes(replace="text-xs text-red-700 mb-2")
-                smooth_available = bool(base_ready)
+                smooth_available = True
             else:
-                target = bridge.teleop_target(robot, "cartesian")
+                if not isinstance(target, dict):
+                    target = {}
                 base_ready = bool(target.get("ready"))
+                cartesian_speed_ready = True
                 smooth_available = False
                 ready = bool(base_ready and selected_mode == "step")
                 label.set_text("Simulation uses Step Cartesian jog with velocity scaling.")
@@ -3613,11 +6565,12 @@ def _teleop_section(
             if not smooth_available and selected_mode == "smooth":
                 cartesian_jog_mode["mode"] = "step"
                 _set_cartesian_toggle_value("Step")
-                _request_smooth_stop()
+                _request_smooth_stop(reason="Cartesian mode change", expected=True)
                 selected_mode = "step"
                 ready = bool(base_ready)
             controls_enabled = bool(
-                (ready or (base_ready and selected_mode == "step"))
+                (ready or (base_ready and selected_mode in {"step", "smooth"}))
+                and cartesian_speed_ready
                 and not (
                     environment == "real"
                     and bool(
@@ -3632,11 +6585,81 @@ def _teleop_section(
                 button.set_enabled(controls_enabled)
             for button in conflicting_motion_buttons:
                 button.enable()
+            joint_speed_ready = bool(
+                environment != "real"
+                or float(_joint_speed_deg_s(robot) or 0.0) > 0.0
+            )
+            for button in joint_jog_buttons:
+                button.set_enabled(joint_speed_ready)
             toggle.set_enabled(
                 not cartesian_jog_mode["preparing"]
                 and not cartesian_command_state["pending"]
             )
             robot_select.enable()
+
+        async def _refresh_cartesian_readiness_async(
+            robot: str,
+            revision: int,
+        ) -> None:
+            try:
+                def _load() -> tuple[dict, dict | None]:
+                    readiness = dict(bridge.teleop_cartesian_readiness(robot))
+                    target = None
+                    if str(readiness.get("environment") or "") != "real":
+                        target = dict(bridge.teleop_target(robot, "cartesian"))
+                    return readiness, target
+
+                readiness, target = await asyncio.to_thread(_load)
+            except Exception as exc:
+                readiness = {
+                    "environment": "",
+                    "cartesian_jog_ready": False,
+                    "message": f"readiness check failed: {type(exc).__name__}: {exc}",
+                }
+                target = None
+            finally:
+                cartesian_readiness_refresh["busy"] = False
+
+            if not _client_alive(cartesian_jog_controls["readiness"]):
+                return
+            if (
+                int(cartesian_readiness_refresh["revision"]) != revision
+                or str(robot_select.value or "xarm6") != robot
+            ):
+                _schedule_cartesian_readiness_refresh()
+                return
+            cartesian_readiness_refresh["robot"] = robot
+            cartesian_readiness_refresh["readiness"] = readiness
+            cartesian_readiness_refresh["target"] = target
+            _refresh_cartesian_controls()
+
+        def _schedule_cartesian_readiness_refresh(
+            *,
+            invalidate: bool = False,
+        ) -> None:
+            if invalidate:
+                cartesian_readiness_refresh["revision"] = (
+                    int(cartesian_readiness_refresh["revision"]) + 1
+                )
+                cartesian_readiness_refresh["robot"] = ""
+                cartesian_readiness_refresh["readiness"] = None
+                cartesian_readiness_refresh["target"] = None
+                _refresh_cartesian_controls()
+            if (
+                cartesian_readiness_refresh["busy"]
+                or smooth_hold["pressed"]
+                or smooth_hold["active"]
+                or smooth_hold["stopping"]
+                or cartesian_jog_mode["preparing"]
+                or cartesian_command_state["pending"]
+            ):
+                return
+            robot = str(robot_select.value or "xarm6")
+            revision = int(cartesian_readiness_refresh["revision"])
+            cartesian_readiness_refresh["busy"] = True
+            asyncio.create_task(
+                _refresh_cartesian_readiness_async(robot, revision)
+            )
 
         def _apply_profile_steps(mode: str) -> None:
             settings = _TELEOP_PROFILE_STEPS.get(mode)
@@ -3698,7 +6721,7 @@ def _teleop_section(
                     return
                 changed = profile_state["mode"] != mode
                 if changed:
-                    _request_smooth_stop()
+                    _request_smooth_stop(reason="Teleop Profile change", expected=True)
                 profile_state["mode"] = mode
                 _apply_profile_steps(mode)
                 _apply_profile_speeds(mode)
@@ -3723,6 +6746,10 @@ def _teleop_section(
                 "Physical speeds are sent as exact values. xArm6 and UR5e retain "
                 "independent page-session settings."
             ).classes("text-xs text-slate-500")
+            ui.label(
+                "Set a jog speed to 0 to disable that jog type. Existing robot-specific "
+                "maximums remain unchanged."
+            ).classes("text-xs text-slate-500")
             with ui.column().classes("w-full gap-2") as physical_speed_group:
                 with ui.row().classes("w-full items-end gap-3 flex-wrap"):
                     with ui.column().classes("gap-0 grow min-w-64"):
@@ -3743,12 +6770,14 @@ def _teleop_section(
                             step=_PHYSICAL_CARTESIAN_SPEED_STEP_MM_S,
                             value=motion_speed_state[initial_robot]["cartesian_mm_s"],
                         ).classes("w-full")
+                        cartesian_speed_slider.LOOPBACK = False
+                        cartesian_speed_slider._props["loopback"] = False
                         cartesian_speed_slider.on(
                             "change",
                             lambda event: _set_motion_speed(
                                 str(robot_select.value or "xarm6"),
                                 "cartesian",
-                                event.args,
+                                _motion_speed_slider_release_value(event),
                                 source="slider",
                             ),
                         )
@@ -3795,12 +6824,14 @@ def _teleop_section(
                             step=_PHYSICAL_JOINT_SPEED_STEP_DEG_S,
                             value=motion_speed_state[initial_robot]["joint_deg_s"],
                         ).classes("w-full")
+                        joint_speed_slider.LOOPBACK = False
+                        joint_speed_slider._props["loopback"] = False
                         joint_speed_slider.on(
                             "change",
                             lambda event: _set_motion_speed(
                                 str(robot_select.value or "xarm6"),
                                 "joint",
-                                event.args,
+                                _motion_speed_slider_release_value(event),
                                 source="slider",
                             ),
                         )
@@ -3865,6 +6896,11 @@ def _teleop_section(
                     "Commands translation only along the displayed World X, World Y, or "
                     "World Z axis. Rotation is never requested."
                 ).classes("text-xs text-amber-700 mb-2")
+                ui.label(
+                    "Smooth Hold is the Hardware Stack default: press and keep holding an "
+                    "arrow for continuous motion, then release to stop. Step moves one "
+                    "finite Step (mm) distance per click."
+                ).classes("text-xs text-slate-500 mb-2")
 
                 def _set_cartesian_jog_mode(value: str) -> None:
                     if cartesian_jog_mode["updating_toggle"]:
@@ -3873,7 +6909,7 @@ def _teleop_section(
 
                 cartesian_jog_controls["toggle"] = ui.toggle(
                     ["Step", "Smooth Hold"],
-                    value="Step",
+                    value="Smooth Hold",
                     on_change=lambda event: _set_cartesian_jog_mode(event.value),
                 ).props("dense")
                 cartesian_jog_controls["readiness"] = ui.label(
@@ -3895,9 +6931,10 @@ def _teleop_section(
                     if cartesian_jog_mode["mode"] != "step":
                         return
                     robot = str(robot_select.value or "xarm6")
-                    readiness = bridge.teleop_cartesian_readiness(robot)
+                    readiness = cartesian_readiness_refresh["readiness"]
                     if not (
-                        str(readiness.get("cartesian_mode") or "off") == "step"
+                        isinstance(readiness, dict)
+                        and str(readiness.get("cartesian_mode") or "off") == "step"
                         and readiness.get("cartesian_mode_ready") is True
                     ):
                         prepared = await _apply_cartesian_mode("Step")
@@ -3932,7 +6969,7 @@ def _teleop_section(
                         )
                     finally:
                         cartesian_command_state["pending"] = False
-                        _refresh_cartesian_controls()
+                        _schedule_cartesian_readiness_refresh(invalidate=True)
 
                 def _cartesian_jog_button(
                     label: str,
@@ -4037,15 +7074,17 @@ def _teleop_section(
                             )
                         )
 
-                    conflicting_motion_buttons.append(
-                        ui.button("-", on_click=_joint_minus, icon="remove").props(
-                            "outline"
-                        )
+                    joint_minus_button = ui.button(
+                        "-", on_click=_joint_minus, icon="remove"
+                    ).props("outline")
+                    joint_plus_button = ui.button(
+                        "+", on_click=_joint_plus, icon="add"
+                    ).props("outline")
+                    joint_jog_buttons.extend(
+                        (joint_minus_button, joint_plus_button)
                     )
-                    conflicting_motion_buttons.append(
-                        ui.button("+", on_click=_joint_plus, icon="add").props(
-                            "outline"
-                        )
+                    conflicting_motion_buttons.extend(
+                        (joint_minus_button, joint_plus_button)
                     )
 
             # ── Gripper Control ──────────────────────────────────────
@@ -4384,12 +7423,12 @@ def _teleop_section(
                 selected_robot_state["robot"] = selected_robot
                 selected_robot_state["changing"] = False
                 cartesian_jog_mode["preparing"] = False
-                cartesian_jog_mode["mode"] = "step"
-                _set_cartesian_toggle_value("Step")
+                cartesian_jog_mode["mode"] = "smooth"
+                _set_cartesian_toggle_value("Smooth Hold")
                 _configure_motion_speed_controls(selected_robot)
                 _refresh_motion_speed_labels()
                 _refresh_effective_labels()
-                _refresh_cartesian_controls()
+                _schedule_cartesian_readiness_refresh(invalidate=True)
 
         def _robot_selection_changed(_event=None) -> None:
             selected_robot = str(robot_select.value or "xarm6")
@@ -4411,8 +7450,6 @@ def _teleop_section(
             if (!window.__caisCartesianSmoothStopInstalled) {
               window.__caisCartesianSmoothStopInstalled = true;
               const stop = () => emitEvent('cais_cartesian_smooth_stop');
-              window.addEventListener('pointerup', stop);
-              window.addEventListener('pointercancel', stop);
               window.addEventListener('blur', stop);
               document.addEventListener('visibilitychange', () => {
                 if (document.hidden) stop();
@@ -4433,8 +7470,9 @@ def _teleop_section(
 
         _refresh_teleop_status()
         _refresh_cartesian_controls()
+        _schedule_cartesian_readiness_refresh(invalidate=True)
         ui.timer(1.0, _refresh_teleop_status)
-        ui.timer(0.5, _refresh_cartesian_controls)
+        ui.timer(0.5, _schedule_cartesian_readiness_refresh)
         asyncio.create_task(_refresh_teleop_state_async())
         ui.timer(1.0, _refresh_teleop_state_async)
 
@@ -4469,7 +7507,7 @@ def _teleop_section(
                     "PageUp",
                     "PageDown",
                 }:
-                    _request_smooth_stop()
+                    _request_smooth_stop(reason="keyboard release", expected=True)
                 return
             if e.action.keydown and not e.action.repeat:
                 robot = robot_select.value
@@ -4637,7 +7675,10 @@ def _jog_btn(
         for event_name in ("pointerup", "pointercancel"):
             button.on(
                 event_name,
-                smooth_stop,
+                lambda _event=None, event_name=event_name: smooth_stop(
+                    reason=event_name,
+                    expected=event_name == "pointerup",
+                ),
                 js_handler=(
                     "(event) => { event.preventDefault(); "
                     "if (event.currentTarget.hasPointerCapture(event.pointerId)) "
@@ -4660,6 +7701,10 @@ async def _send_jog(
     speed_mm_s: float | None = None,
 ) -> tuple[bool, str]:
     """Send one Cartesian jog command through the ROS2 teleop backend."""
+    if speed_mm_s is not None and float(speed_mm_s) == 0.0:
+        msg = f"{robot} Cartesian speed is 0; no motion was commanded"
+        ui.notify(msg, type="warning", position="bottom-right", timeout=2500)
+        return False, msg
     ok, msg = await asyncio.to_thread(
         bridge.teleop_jog,
         robot,
@@ -4748,6 +7793,10 @@ async def _send_joint(
     speed_deg_s: float | None = None,
 ) -> tuple[bool, str]:
     """Send one joint jog command through the ROS2 teleop backend."""
+    if speed_deg_s is not None and float(speed_deg_s) == 0.0:
+        msg = f"{robot} joint jog speed is 0; no motion was commanded"
+        ui.notify(msg, type="warning", position="bottom-right", timeout=2500)
+        return False, msg
     ok, msg = await asyncio.to_thread(
         bridge.teleop_joint,
         robot,

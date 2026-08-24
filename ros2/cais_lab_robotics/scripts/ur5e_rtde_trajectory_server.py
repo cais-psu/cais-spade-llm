@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -20,12 +23,13 @@ import yaml
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionServer, CancelResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformException, TransformListener
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 try:
@@ -33,13 +37,20 @@ try:
         MoveUR5eCartesian,
         MoveUR5eJointJog,
         MoveUR5eRelativeCartesian,
+        RecordUR5eInsertionDemonstration,
     )
     from cais_lab_robotics.srv import SetUR5eCartesianJog
 except ImportError:  # Installed ROS interfaces may not be rebuilt yet.
     MoveUR5eCartesian = None
     MoveUR5eJointJog = None
     MoveUR5eRelativeCartesian = None
+    RecordUR5eInsertionDemonstration = None
     SetUR5eCartesianJog = None
+
+try:
+    from cais_lab_robotics.action import MoveUR5eInsert
+except ImportError:  # Installed ROS interfaces may not be rebuilt yet.
+    MoveUR5eInsert = None
 
 ARM_JOINTS = [
     "shoulder_pan_joint",
@@ -51,14 +62,30 @@ ARM_JOINTS = [
 ]
 ACTION_NAME = "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory"
 CARTESIAN_ACTION_NAME = "/cais_ur5e_rtde_cartesian_controller/move_cartesian"
-RELATIVE_CARTESIAN_ACTION_NAME = (
-    "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
+INSERT_ACTION_NAME = "/cais_ur5e_rtde_cartesian_controller/move_insert"
+INSERT_DEMONSTRATION_ACTION_NAME = (
+    "/cais_ur5e_rtde_cartesian_controller/record_insertion_demonstration"
 )
-CARTESIAN_JOG_SERVICE_NAME = (
-    "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
+INSERT_SUPPORTED_PART_NAMES = ("SG", "MG", "LG", "SCP", "MCP", "LCP")
+INSERT_FORCE_DEPTH_PROFILE_POINTS = 16
+INSERT_MG_HARD_CAP_FIELDS = (
+    "insert_max_insertion_force_n",
+    "insert_max_axial_force_n",
+    "insert_max_lateral_force_n",
+    "insert_max_torque_nm",
+    "insert_max_tool_flange_torque_nm",
+    "insert_max_relief_retreat_m",
+    "insert_max_contact_search_radius_m",
+    "insert_max_disengagement_cycles",
+    "insert_search_peck_retreat_m",
+    "insert_search_peck_interval_sec",
 )
+RELATIVE_CARTESIAN_ACTION_NAME = "/cais_ur5e_rtde_cartesian_controller/move_relative_cartesian"
+CARTESIAN_JOG_SERVICE_NAME = "/cais_ur5e_rtde_cartesian_controller/set_cartesian_jog"
 JOINT_JOG_ACTION_NAME = "/cais_ur5e_rtde_trajectory_controller/move_joint_jog"
 DEFAULT_STATUS_FILE = Path("/tmp") / "cais_ur5e_rtde_trajectory_status.json"
+INSERT_DEMONSTRATION_TRACE_ROOT = Path("/tmp") / "cais_ur5e_insertion_demonstrations"
+INSERT_TRIAL_TRACE_ROOT = Path("/tmp") / "cais_ur5e_insert_trials"
 DEFAULT_CONFIG_FILE = (
     Path(__file__).resolve().parents[1]
     / "config"
@@ -95,15 +122,52 @@ def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
     return value or str(default)
 
 
-def _apply_hardware_arms_config(config_path: Path) -> None:
+def _optional_float(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+) -> float | None:
+    value = _nested(config, keys, None)
+    if isinstance(value, bool):
+        return None
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _required_finite_float(
+    config: dict[str, Any],
+    keys: tuple[str, ...],
+) -> float:
+    value = _nested(config, keys, None)
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{'.'.join(keys)} is missing or is not a finite number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{'.'.join(keys)} is missing or is not a finite number"
+        ) from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{'.'.join(keys)} is missing or is not a finite number")
+    return parsed
+
+
+def _apply_hardware_arms_config(config_path: Path) -> None:  # noqa: PLR0915
     """Load UR5e RTDE runtime limits from xarm6_ur5e_hardware_runtime.yaml."""
     global ACTION_NAME
     global CARTESIAN_ACTION_NAME
+    global INSERT_ACTION_NAME
+    global INSERT_DEMONSTRATION_ACTION_NAME
     global RELATIVE_CARTESIAN_ACTION_NAME
     global CARTESIAN_JOG_SERVICE_NAME
     global UR5E_RTDE_MAX_JOINT_VEL_RAD_S
     global UR5E_RTDE_MAX_JOINT_ACCEL_RAD_S2
     global UR5E_RTDE_MAX_JOINT_JERK_RAD_S3
+    global UR5E_RTDE_GOAL_TOLERANCE_RAD
     global UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE
     global UR5E_RTDE_MOVEJ_SPEED_RAD_S
     global UR5E_RTDE_MOVEJ_ACCEL_RAD_S2
@@ -122,9 +186,56 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
     global UR5E_RTDE_CARTESIAN_ACCEL_M_S2
     global UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
     global UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+    global UR5E_RTDE_CARTESIAN_WORLD_BASE
+    global UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR
     global UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
     global UR5E_RTDE_CARTESIAN_REACH_ORIGIN
     global UR5E_RTDE_CARTESIAN_REACH_RADIUS_M
+    global UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S
+    global UR5E_RTDE_INSERT_MAX_CONTACT_FORCE_DELTA_N
+    global UR5E_RTDE_INSERT_MAX_ENGAGEMENT_PROGRESS_M
+    global UR5E_RTDE_INSERT_MAX_INSERTION_FORCE_N
+    global UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M
+    global UR5E_RTDE_INSERT_MAX_SPIRAL_PITCH_M
+    global UR5E_RTDE_INSERT_MAX_SPIRAL_SPEED_M_S
+    global UR5E_RTDE_INSERT_MAX_SPIRAL_ACCELERATION_M_S2
+    global UR5E_RTDE_INSERT_MAX_AXIAL_FORCE_N
+    global UR5E_RTDE_INSERT_MAX_LATERAL_FORCE_N
+    global UR5E_RTDE_INSERT_MAX_TORQUE_NM
+    global UR5E_RTDE_INSERT_MAX_TOOL_FLANGE_TORQUE_NM
+    global UR5E_RTDE_INSERT_SG_HARD_CAPS
+    global UR5E_RTDE_INSERT_MG_HARD_CAPS
+    global UR5E_RTDE_INSERT_LG_HARD_CAPS
+    global UR5E_RTDE_INSERT_SCP_HARD_CAPS
+    global UR5E_RTDE_INSERT_MCP_HARD_CAPS
+    global UR5E_RTDE_INSERT_LCP_HARD_CAPS
+    global UR5E_RTDE_INSERT_SOFT_FILTER_WINDOW_SEC
+    global UR5E_RTDE_INSERT_SOFT_OVERLOAD_HOLD_SEC
+    global UR5E_RTDE_INSERT_RELIEF_UNLOAD_DWELL_SEC
+    global UR5E_RTDE_INSERT_RELIEF_CLEAR_DWELL_SEC
+    global UR5E_RTDE_INSERT_RELIEF_CLEAR_HYSTERESIS_RATIO
+    global UR5E_RTDE_INSERT_RELIEF_TIMEOUT_SEC
+    global UR5E_RTDE_INSERT_RELIEF_AXIAL_FORCE_RATIO
+    global UR5E_RTDE_INSERT_RELIEF_REVERSE_FORCE_RATIO
+    global UR5E_RTDE_INSERT_RELIEF_RESUME_RAMP_SEC
+    global UR5E_RTDE_INSERT_RELIEF_SEARCH_FORCE_RATIO
+    global UR5E_RTDE_INSERT_RELIEF_SEARCH_SPEED_RATIO
+    global UR5E_RTDE_INSERT_RELIEF_BACKOFF_STEP_M
+    global UR5E_RTDE_INSERT_MAX_RELIEF_RETREAT_M
+    global UR5E_RTDE_INSERT_RELIEF_STATIONARY_SPEED_M_S
+    global UR5E_RTDE_INSERT_RELIEF_STATIONARY_ANGULAR_SPEED_RAD_S
+    global UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES
+    global UR5E_RTDE_INSERT_MAX_TILT_TOLERANCE_RAD
+    global UR5E_RTDE_INSERT_MAX_SEATED_DEPTH_TOLERANCE_M
+    global UR5E_RTDE_INSERT_MAX_SETTLE_TIME_SEC
+    global UR5E_RTDE_INSERT_MAX_TIMEOUT_SEC
+    global UR5E_RTDE_INSERT_MAX_TRAVEL_M
+    global UR5E_RTDE_INSERT_START_POSITION_TOLERANCE_M
+    global UR5E_RTDE_INSERT_START_ORIENTATION_TOLERANCE_RAD
+    global UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC
+    global UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC
+    global UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S
+    global UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S
     global HARDWARE_ARMS_CONFIG_FILE
 
     HARDWARE_ARMS_CONFIG_FILE = str(Path(config_path).expanduser())
@@ -138,6 +249,16 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
         config,
         ("ur5e", "hardware_cartesian_action"),
         CARTESIAN_ACTION_NAME,
+    )
+    INSERT_ACTION_NAME = _str(
+        config,
+        ("ur5e", "hardware_insert_action"),
+        INSERT_ACTION_NAME,
+    )
+    INSERT_DEMONSTRATION_ACTION_NAME = _str(
+        config,
+        ("ur5e", "hardware_insertion_demonstration_action"),
+        INSERT_DEMONSTRATION_ACTION_NAME,
     )
     RELATIVE_CARTESIAN_ACTION_NAME = _str(
         config,
@@ -163,6 +284,14 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
         config,
         ("ur5e", "rtde", "max_joint_jerk_rad_s3"),
         UR5E_RTDE_MAX_JOINT_JERK_RAD_S3,
+    )
+    UR5E_RTDE_GOAL_TOLERANCE_RAD = max(
+        1e-6,
+        _float(
+            config,
+            ("ur5e", "rtde", "joint_goal_tolerance_rad"),
+            UR5E_RTDE_GOAL_TOLERANCE_RAD,
+        ),
     )
     UR5E_RTDE_SHOULDER_PAN_EXTRA_SCALE = _float(
         config,
@@ -302,6 +431,26 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
             UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD,
         ),
     )
+    cartesian_world_base_keys = (
+        "x_m",
+        "y_m",
+        "z_m",
+        "roll_rad",
+        "pitch_rad",
+        "yaw_rad",
+    )
+    try:
+        UR5E_RTDE_CARTESIAN_WORLD_BASE = tuple(
+            _required_finite_float(
+                config,
+                ("ur5e", "rtde", "cartesian_world_base", field_name),
+            )
+            for field_name in cartesian_world_base_keys
+        )
+        UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR = ""
+    except ValueError as exc:
+        UR5E_RTDE_CARTESIAN_WORLD_BASE = None
+        UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR = str(exc)
     bounds = _nested(config, ("ur5e", "rtde", "cartesian_workspace_bounds"), {})
     if isinstance(bounds, dict):
         UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
@@ -327,6 +476,224 @@ def _apply_hardware_arms_config(config_path: Path) -> None:
                 UR5E_RTDE_CARTESIAN_REACH_RADIUS_M,
             ),
         )
+    UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_contact_speed_m_s"),
+    )
+    UR5E_RTDE_INSERT_MAX_CONTACT_FORCE_DELTA_N = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_contact_force_delta_n"),
+    )
+    UR5E_RTDE_INSERT_MAX_ENGAGEMENT_PROGRESS_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_engagement_progress_m"),
+    )
+    UR5E_RTDE_INSERT_MAX_INSERTION_FORCE_N = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_insertion_force_n"),
+    )
+    UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_spiral_radius_m"),
+    )
+    UR5E_RTDE_INSERT_MAX_SPIRAL_PITCH_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_spiral_pitch_m"),
+    )
+    UR5E_RTDE_INSERT_MAX_SPIRAL_SPEED_M_S = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_spiral_speed_m_s"),
+    )
+    UR5E_RTDE_INSERT_MAX_SPIRAL_ACCELERATION_M_S2 = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_spiral_acceleration_m_s2"),
+    )
+    UR5E_RTDE_INSERT_MAX_AXIAL_FORCE_N = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_axial_force_n"),
+    )
+    UR5E_RTDE_INSERT_MAX_LATERAL_FORCE_N = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_lateral_force_n"),
+    )
+    UR5E_RTDE_INSERT_MAX_TORQUE_NM = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_torque_nm"),
+    )
+    UR5E_RTDE_INSERT_MAX_TOOL_FLANGE_TORQUE_NM = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_tool_flange_torque_nm"),
+    )
+    mg_hard_caps = _nested(config, ("ur5e", "rtde", "MG"), {})
+    UR5E_RTDE_INSERT_MG_HARD_CAPS = {
+        field_name: _optional_float(mg_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(mg_hard_caps, dict) and field_name in mg_hard_caps
+    }
+    sg_hard_caps = _nested(config, ("ur5e", "rtde", "SG"), {})
+    UR5E_RTDE_INSERT_SG_HARD_CAPS = {
+        field_name: _optional_float(sg_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(sg_hard_caps, dict) and field_name in sg_hard_caps
+    }
+    lg_hard_caps = _nested(config, ("ur5e", "rtde", "LG"), {})
+    UR5E_RTDE_INSERT_LG_HARD_CAPS = {
+        field_name: _optional_float(lg_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(lg_hard_caps, dict) and field_name in lg_hard_caps
+    }
+    scp_hard_caps = _nested(config, ("ur5e", "rtde", "SCP"), {})
+    UR5E_RTDE_INSERT_SCP_HARD_CAPS = {
+        field_name: _optional_float(scp_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(scp_hard_caps, dict) and field_name in scp_hard_caps
+    }
+    mcp_hard_caps = _nested(config, ("ur5e", "rtde", "MCP"), {})
+    UR5E_RTDE_INSERT_MCP_HARD_CAPS = {
+        field_name: _optional_float(mcp_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(mcp_hard_caps, dict) and field_name in mcp_hard_caps
+    }
+    lcp_hard_caps = _nested(config, ("ur5e", "rtde", "LCP"), {})
+    UR5E_RTDE_INSERT_LCP_HARD_CAPS = {
+        field_name: _optional_float(lcp_hard_caps, (field_name,))
+        for field_name in INSERT_MG_HARD_CAP_FIELDS
+        if isinstance(lcp_hard_caps, dict) and field_name in lcp_hard_caps
+    }
+    UR5E_RTDE_INSERT_SOFT_FILTER_WINDOW_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_soft_filter_window_sec"),
+    )
+    UR5E_RTDE_INSERT_SOFT_OVERLOAD_HOLD_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_soft_overload_hold_sec"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_UNLOAD_DWELL_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_unload_dwell_sec"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_CLEAR_DWELL_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_clear_dwell_sec"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_CLEAR_HYSTERESIS_RATIO = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_clear_hysteresis_ratio"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_TIMEOUT_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_timeout_sec"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_AXIAL_FORCE_RATIO = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_axial_force_ratio"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_REVERSE_FORCE_RATIO = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_reverse_force_ratio"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_RESUME_RAMP_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_resume_ramp_sec"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_SEARCH_FORCE_RATIO = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_search_force_ratio"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_SEARCH_SPEED_RATIO = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_search_speed_ratio"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_BACKOFF_STEP_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_backoff_step_m"),
+    )
+    UR5E_RTDE_INSERT_MAX_RELIEF_RETREAT_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_relief_retreat_m"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_STATIONARY_SPEED_M_S = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_stationary_speed_m_s"),
+    )
+    UR5E_RTDE_INSERT_RELIEF_STATIONARY_ANGULAR_SPEED_RAD_S = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_relief_stationary_angular_speed_rad_s"),
+    )
+    relief_cycles = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_relief_cycles"),
+    )
+    UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES = (
+        int(relief_cycles)
+        if relief_cycles is not None and relief_cycles.is_integer()
+        else None
+    )
+    UR5E_RTDE_INSERT_MAX_TILT_TOLERANCE_RAD = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_tilt_tolerance_rad"),
+    )
+    UR5E_RTDE_INSERT_MAX_SEATED_DEPTH_TOLERANCE_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_seated_depth_tolerance_m"),
+    )
+    UR5E_RTDE_INSERT_MAX_SETTLE_TIME_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_settle_time_sec"),
+    )
+    UR5E_RTDE_INSERT_MAX_TIMEOUT_SEC = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_timeout_sec"),
+    )
+    UR5E_RTDE_INSERT_MAX_TRAVEL_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_max_travel_m"),
+    )
+    UR5E_RTDE_INSERT_START_POSITION_TOLERANCE_M = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_start_position_tolerance_m"),
+    )
+    UR5E_RTDE_INSERT_START_ORIENTATION_TOLERANCE_RAD = _optional_float(
+        config,
+        ("ur5e", "rtde", "insert_start_orientation_tolerance_rad"),
+    )
+    UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC = max(
+        1.0,
+        _float(
+            config,
+            ("ur5e", "rtde", "insert_demonstration_max_duration_sec"),
+            UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC,
+        ),
+    )
+    UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC = max(
+        0.25,
+        _float(
+            config,
+            ("ur5e", "rtde", "insert_demonstration_baseline_sec"),
+            UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC,
+        ),
+    )
+    UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S = max(
+        1e-5,
+        _float(
+            config,
+            ("ur5e", "rtde", "insert_demonstration_stationary_speed_m_s"),
+            UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S,
+        ),
+    )
+    UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S = max(
+        1e-5,
+        _float(
+            config,
+            (
+                "ur5e",
+                "rtde",
+                "insert_demonstration_stationary_angular_speed_rad_s",
+            ),
+            UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S,
+        ),
+    )
+
 
 UR5E_RTDE_CURRENT_HOLD_SEC = 0.25
 UR5E_RTDE_MIN_POINT_SPACING_SEC = 0.10
@@ -354,6 +721,8 @@ UR5E_RTDE_RECEIVE_VARIABLES = (
     "actual_q",
     "actual_qd",
     "actual_TCP_pose",
+    "actual_TCP_force",
+    "actual_TCP_speed",
 )
 UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = 0.5
 UR5E_RTDE_INTERMEDIATE_BLEND_RAD = 0.005
@@ -361,11 +730,22 @@ UR5E_RTDE_STOP_ACCEL_RAD_S2 = 0.50
 UR5E_RTDE_FEEDBACK_STALE_SEC = 2.0
 UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING = 8.0
 UR5E_RTDE_RESULT_MARGIN_SEC = 20.0
-UR5E_RTDE_CARTESIAN_SPEED_M_S = 0.05
+UR5E_RTDE_CARTESIAN_SPEED_M_S = 0.08
 UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S = 0.10
 UR5E_RTDE_CARTESIAN_ACCEL_M_S2 = 0.10
 UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M = 0.002
 UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD = math.radians(2.0)
+UR5E_RTDE_CARTESIAN_WORLD_BASE: tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+] | None = None
+UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR = (
+    "ur5e.rtde.cartesian_world_base has not been loaded"
+)
 UR5E_RTDE_CARTESIAN_FRAME_POSITION_TOLERANCE_M = 0.005
 UR5E_RTDE_CARTESIAN_FRAME_ORIENTATION_TOLERANCE_RAD = math.radians(3.0)
 UR5E_RTDE_CARTESIAN_JOG_ORIENTATION_DRIFT_RAD = math.radians(1.0)
@@ -382,6 +762,53 @@ UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
 }
 UR5E_RTDE_CARTESIAN_REACH_ORIGIN = (0.0, 0.5, 1.021)
 UR5E_RTDE_CARTESIAN_REACH_RADIUS_M = 0.7
+UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S: float | None = None
+UR5E_RTDE_INSERT_MAX_CONTACT_FORCE_DELTA_N: float | None = None
+UR5E_RTDE_INSERT_MAX_ENGAGEMENT_PROGRESS_M: float | None = None
+UR5E_RTDE_INSERT_MAX_INSERTION_FORCE_N: float | None = None
+UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M: float | None = None
+UR5E_RTDE_INSERT_MAX_SPIRAL_PITCH_M: float | None = None
+UR5E_RTDE_INSERT_MAX_SPIRAL_SPEED_M_S: float | None = None
+UR5E_RTDE_INSERT_MAX_SPIRAL_ACCELERATION_M_S2: float | None = None
+UR5E_RTDE_INSERT_MAX_AXIAL_FORCE_N: float | None = None
+UR5E_RTDE_INSERT_MAX_LATERAL_FORCE_N: float | None = None
+UR5E_RTDE_INSERT_MAX_TORQUE_NM: float | None = None
+UR5E_RTDE_INSERT_MAX_TOOL_FLANGE_TORQUE_NM: float | None = None
+UR5E_RTDE_INSERT_MG_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_SG_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_LG_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_SCP_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_MCP_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_LCP_HARD_CAPS: dict[str, float | None] = {}
+UR5E_RTDE_INSERT_SOFT_FILTER_WINDOW_SEC: float | None = None
+UR5E_RTDE_INSERT_SOFT_OVERLOAD_HOLD_SEC: float | None = None
+UR5E_RTDE_INSERT_RELIEF_UNLOAD_DWELL_SEC: float | None = None
+UR5E_RTDE_INSERT_RELIEF_CLEAR_DWELL_SEC: float | None = None
+UR5E_RTDE_INSERT_RELIEF_CLEAR_HYSTERESIS_RATIO: float | None = None
+UR5E_RTDE_INSERT_RELIEF_TIMEOUT_SEC: float | None = None
+UR5E_RTDE_INSERT_RELIEF_AXIAL_FORCE_RATIO: float | None = None
+UR5E_RTDE_INSERT_RELIEF_REVERSE_FORCE_RATIO: float | None = None
+UR5E_RTDE_INSERT_RELIEF_RESUME_RAMP_SEC: float | None = None
+UR5E_RTDE_INSERT_RELIEF_SEARCH_FORCE_RATIO: float | None = None
+UR5E_RTDE_INSERT_RELIEF_SEARCH_SPEED_RATIO: float | None = None
+UR5E_RTDE_INSERT_RELIEF_BACKOFF_STEP_M: float | None = None
+UR5E_RTDE_INSERT_MAX_RELIEF_RETREAT_M: float | None = None
+UR5E_RTDE_INSERT_RELIEF_STATIONARY_SPEED_M_S: float | None = None
+UR5E_RTDE_INSERT_RELIEF_STATIONARY_ANGULAR_SPEED_RAD_S: float | None = None
+UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES: int | None = None
+UR5E_RTDE_INSERT_MAX_TILT_TOLERANCE_RAD: float | None = None
+UR5E_RTDE_INSERT_MAX_SEATED_DEPTH_TOLERANCE_M: float | None = None
+UR5E_RTDE_INSERT_MAX_SETTLE_TIME_SEC: float | None = None
+UR5E_RTDE_INSERT_MAX_TIMEOUT_SEC: float | None = None
+UR5E_RTDE_INSERT_MAX_TRAVEL_M: float | None = None
+UR5E_RTDE_INSERT_START_POSITION_TOLERANCE_M: float | None = None
+UR5E_RTDE_INSERT_START_ORIENTATION_TOLERANCE_RAD: float | None = None
+UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC = 300.0
+UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC = 1.0
+UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S = 0.001
+UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S = 0.02
+UR5E_RTDE_INSERT_MG_LEARNED_AXIAL_LIMIT_SCALE = 1.50
+UR5E_RTDE_INSERT_MG_DEPTH_AXIAL_LIMIT_SCALE = 1.75
 
 _apply_hardware_arms_config(DEFAULT_CONFIG_FILE)
 
@@ -390,11 +817,440 @@ Quaternion = tuple[float, float, float, float]
 RigidTransform = tuple[Vector3, Quaternion]
 
 
+class _InsertCanceled(RuntimeError):
+    pass
+
+
+class _InsertSearchExhausted(RuntimeError):
+    pass
+
+
+class _InsertForceLimit(RuntimeError):
+    pass
+
+
+class _InsertSoftOverload(RuntimeError):
+    pass
+
+
+def _bounded_insert_value(
+    field_name: str,
+    value: Any,
+    hard_cap: float | None,
+    *,
+    allow_zero: bool = False,
+) -> float:
+    parsed = float(value)
+    lower_bound_ok = parsed >= 0.0 if allow_zero else parsed > 0.0
+    if not math.isfinite(parsed) or not lower_bound_ok:
+        interval = "[0" if allow_zero else "(0"
+        raise ValueError(f"{field_name} must be finite and within {interval}, hard cap]")
+    if hard_cap is None or not math.isfinite(hard_cap):
+        raise RuntimeError(f"{field_name} hard cap is not configured")
+    if parsed > hard_cap:
+        raise ValueError(f"{field_name}={parsed:.9g} exceeds configured hard cap {hard_cap:.9g}")
+    return parsed
+
+
+def _insert_hard_caps(part_name: str = "") -> dict[str, float | int | None]:
+    """Return shared caps plus values for the selected exact part name."""
+    caps: dict[str, float | int | None] = {
+        "insert_max_contact_speed_m_s": UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S,
+        "insert_max_contact_force_delta_n": (UR5E_RTDE_INSERT_MAX_CONTACT_FORCE_DELTA_N),
+        "insert_max_engagement_progress_m": (UR5E_RTDE_INSERT_MAX_ENGAGEMENT_PROGRESS_M),
+        "insert_max_insertion_force_n": UR5E_RTDE_INSERT_MAX_INSERTION_FORCE_N,
+        "insert_max_spiral_radius_m": UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M,
+        "insert_max_spiral_pitch_m": UR5E_RTDE_INSERT_MAX_SPIRAL_PITCH_M,
+        "insert_max_spiral_speed_m_s": UR5E_RTDE_INSERT_MAX_SPIRAL_SPEED_M_S,
+        "insert_max_spiral_acceleration_m_s2": (UR5E_RTDE_INSERT_MAX_SPIRAL_ACCELERATION_M_S2),
+        "insert_max_axial_force_n": UR5E_RTDE_INSERT_MAX_AXIAL_FORCE_N,
+        "insert_max_lateral_force_n": UR5E_RTDE_INSERT_MAX_LATERAL_FORCE_N,
+        "insert_max_torque_nm": UR5E_RTDE_INSERT_MAX_TORQUE_NM,
+        "insert_max_tool_flange_torque_nm": (
+            UR5E_RTDE_INSERT_MAX_TOOL_FLANGE_TORQUE_NM
+        ),
+        "insert_soft_filter_window_sec": UR5E_RTDE_INSERT_SOFT_FILTER_WINDOW_SEC,
+        "insert_soft_overload_hold_sec": UR5E_RTDE_INSERT_SOFT_OVERLOAD_HOLD_SEC,
+        "insert_relief_unload_dwell_sec": UR5E_RTDE_INSERT_RELIEF_UNLOAD_DWELL_SEC,
+        "insert_relief_clear_dwell_sec": UR5E_RTDE_INSERT_RELIEF_CLEAR_DWELL_SEC,
+        "insert_relief_clear_hysteresis_ratio": (
+            UR5E_RTDE_INSERT_RELIEF_CLEAR_HYSTERESIS_RATIO
+        ),
+        "insert_relief_timeout_sec": UR5E_RTDE_INSERT_RELIEF_TIMEOUT_SEC,
+        "insert_relief_axial_force_ratio": UR5E_RTDE_INSERT_RELIEF_AXIAL_FORCE_RATIO,
+        "insert_relief_reverse_force_ratio": (
+            UR5E_RTDE_INSERT_RELIEF_REVERSE_FORCE_RATIO
+        ),
+        "insert_relief_resume_ramp_sec": UR5E_RTDE_INSERT_RELIEF_RESUME_RAMP_SEC,
+        "insert_relief_search_force_ratio": (
+            UR5E_RTDE_INSERT_RELIEF_SEARCH_FORCE_RATIO
+        ),
+        "insert_relief_search_speed_ratio": (
+            UR5E_RTDE_INSERT_RELIEF_SEARCH_SPEED_RATIO
+        ),
+        "insert_relief_backoff_step_m": UR5E_RTDE_INSERT_RELIEF_BACKOFF_STEP_M,
+        "insert_max_relief_retreat_m": UR5E_RTDE_INSERT_MAX_RELIEF_RETREAT_M,
+        "insert_relief_stationary_speed_m_s": (
+            UR5E_RTDE_INSERT_RELIEF_STATIONARY_SPEED_M_S
+        ),
+        "insert_relief_stationary_angular_speed_rad_s": (
+            UR5E_RTDE_INSERT_RELIEF_STATIONARY_ANGULAR_SPEED_RAD_S
+        ),
+        "insert_max_relief_cycles": UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES,
+        "insert_max_tilt_tolerance_rad": (UR5E_RTDE_INSERT_MAX_TILT_TOLERANCE_RAD),
+        "insert_max_seated_depth_tolerance_m": (UR5E_RTDE_INSERT_MAX_SEATED_DEPTH_TOLERANCE_M),
+        "insert_max_settle_time_sec": UR5E_RTDE_INSERT_MAX_SETTLE_TIME_SEC,
+        "insert_max_timeout_sec": UR5E_RTDE_INSERT_MAX_TIMEOUT_SEC,
+        "insert_max_travel_m": UR5E_RTDE_INSERT_MAX_TRAVEL_M,
+        "insert_start_position_tolerance_m": (UR5E_RTDE_INSERT_START_POSITION_TOLERANCE_M),
+        "insert_start_orientation_tolerance_rad": (
+            UR5E_RTDE_INSERT_START_ORIENTATION_TOLERANCE_RAD
+        ),
+    }
+    if part_name == "SG":
+        caps.update(UR5E_RTDE_INSERT_SG_HARD_CAPS)
+    elif part_name == "MG":
+        caps.update(UR5E_RTDE_INSERT_MG_HARD_CAPS)
+    elif part_name == "LG":
+        caps.update(UR5E_RTDE_INSERT_LG_HARD_CAPS)
+    elif part_name == "SCP":
+        caps.update(UR5E_RTDE_INSERT_SCP_HARD_CAPS)
+    elif part_name == "MCP":
+        caps.update(UR5E_RTDE_INSERT_MCP_HARD_CAPS)
+    elif part_name == "LCP":
+        caps.update(UR5E_RTDE_INSERT_LCP_HARD_CAPS)
+    return caps
+
+
+def _insert_hard_caps_sha256(caps: dict[str, float | int | None]) -> str:
+    """Hash the exact finite hard-cap mapping selected for one insert goal."""
+    payload = {
+        key: float(value)
+        for key, value in sorted(caps.items())
+        if value is not None
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _insert_axial_soft_limit_scales(part_name: str) -> tuple[float, float]:
+    if part_name == "MG":
+        return (
+            UR5E_RTDE_INSERT_MG_LEARNED_AXIAL_LIMIT_SCALE,
+            UR5E_RTDE_INSERT_MG_DEPTH_AXIAL_LIMIT_SCALE,
+        )
+    return 1.0, 1.0
+
+
+def _insert_hard_cap_error(part_name: str = "") -> str | None:
+    caps = _insert_hard_caps(part_name)
+    invalid = [
+        name
+        for name, value in caps.items()
+        if value is None
+        or not math.isfinite(value)
+        or (
+            value < 0.0
+            if name == "insert_max_spiral_radius_m"
+            else value <= 0.0
+        )
+    ]
+    if invalid:
+        return "Insertion hard caps are missing or invalid: " + ", ".join(invalid)
+    ratios = (
+        "insert_relief_axial_force_ratio",
+        "insert_relief_reverse_force_ratio",
+        "insert_relief_search_force_ratio",
+        "insert_relief_search_speed_ratio",
+        "insert_relief_clear_hysteresis_ratio",
+    )
+    invalid_ratios = [name for name in ratios if float(caps[name]) >= 1.0]
+    if invalid_ratios:
+        return "Insertion relief ratios must be less than 1: " + ", ".join(
+            invalid_ratios
+        )
+    if int(caps["insert_max_relief_cycles"]) != 3:
+        return "insert_max_relief_cycles must equal the protected policy value 3"
+    advanced_recovery_fields = (
+        "insert_max_contact_search_radius_m",
+        "insert_max_disengagement_cycles",
+        "insert_search_peck_retreat_m",
+        "insert_search_peck_interval_sec",
+    )
+    configured_advanced_recovery_fields = tuple(
+        name for name in advanced_recovery_fields if name in caps
+    )
+    if configured_advanced_recovery_fields:
+        missing_advanced_recovery_fields = tuple(
+            name for name in advanced_recovery_fields if name not in caps
+        )
+        if missing_advanced_recovery_fields:
+            return (
+                f"{part_name or 'Insertion'} protected advanced recovery policy is "
+                "incomplete: "
+                + ", ".join(missing_advanced_recovery_fields)
+            )
+        disengagement_cycles = float(caps["insert_max_disengagement_cycles"])
+        if not disengagement_cycles.is_integer():
+            return "insert_max_disengagement_cycles must be an integer"
+        if float(caps["insert_max_contact_search_radius_m"]) < float(
+            caps["insert_max_spiral_radius_m"]
+        ):
+            return (
+                "insert_max_contact_search_radius_m is below "
+                "insert_max_spiral_radius_m"
+            )
+        if float(caps["insert_search_peck_retreat_m"]) >= float(
+            caps["insert_max_travel_m"]
+        ):
+            return "insert_search_peck_retreat_m must be below insert_max_travel_m"
+        if float(caps["insert_search_peck_interval_sec"]) >= float(
+            caps["insert_max_timeout_sec"]
+        ):
+            return "insert_search_peck_interval_sec must be below insert_max_timeout_sec"
+    if float(caps["insert_relief_backoff_step_m"]) > float(
+        caps["insert_max_relief_retreat_m"]
+    ):
+        return "insert_relief_backoff_step_m exceeds insert_max_relief_retreat_m"
+    if float(caps["insert_relief_unload_dwell_sec"]) >= float(
+        caps["insert_relief_timeout_sec"]
+    ):
+        return "insert_relief_unload_dwell_sec must be below insert_relief_timeout_sec"
+    if float(caps["insert_relief_clear_dwell_sec"]) >= float(
+        caps["insert_relief_timeout_sec"]
+    ):
+        return "insert_relief_clear_dwell_sec must be below insert_relief_timeout_sec"
+    if float(caps["insert_soft_filter_window_sec"]) > float(
+        caps["insert_soft_overload_hold_sec"]
+    ):
+        return "insert_soft_filter_window_sec exceeds insert_soft_overload_hold_sec"
+    return None
+
+
+def _validated_force_depth_profile(
+    request: Any,
+    *,
+    hard_caps: dict[str, float | int | None],
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Validate one version-3 force-depth profile against selected hard caps."""
+    raw_series = (
+        list(request.force_depth_fraction),
+        list(request.force_depth_axial_upper_n),
+        list(request.force_depth_lateral_upper_n),
+        list(request.force_depth_torque_upper_nm),
+    )
+    if any(len(series) != INSERT_FORCE_DEPTH_PROFILE_POINTS for series in raw_series):
+        raise ValueError(
+            "force_depth_profile requires exactly "
+            f"{INSERT_FORCE_DEPTH_PROFILE_POINTS} synchronized points"
+        )
+    try:
+        fractions, axial, lateral, torque = (
+            [float(value) for value in series] for series in raw_series
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("force_depth_profile contains a nonnumeric value") from exc
+    if not all(
+        math.isfinite(value)
+        for series in (fractions, axial, lateral, torque)
+        for value in series
+    ):
+        raise ValueError("force_depth_profile contains a nonfinite value")
+    if abs(fractions[0]) > 1e-12 or abs(fractions[-1] - 1.0) > 1e-12:
+        raise ValueError("force_depth_fraction must start at 0 and end at 1")
+    if any(
+        right <= left
+        for left, right in zip(fractions, fractions[1:])
+    ):
+        raise ValueError("force_depth_fraction must increase strictly")
+    for field_name, values, cap_name in (
+        ("force_depth_axial_upper_n", axial, "insert_max_axial_force_n"),
+        ("force_depth_lateral_upper_n", lateral, "insert_max_lateral_force_n"),
+        ("force_depth_torque_upper_nm", torque, "insert_max_torque_nm"),
+    ):
+        hard_cap = float(hard_caps[cap_name] or math.nan)
+        if any(value <= 0.0 or value >= hard_cap for value in values):
+            raise ValueError(
+                f"{field_name} values must be positive and strictly below "
+                f"{cap_name}"
+            )
+    return fractions, axial, lateral, torque
+
+
+def _force_depth_upper(
+    fractions: list[float],
+    values: list[float],
+    depth_fraction: float,
+) -> float:
+    """Linearly interpolate one protected force-depth upper envelope."""
+    selected = min(1.0, max(0.0, float(depth_fraction)))
+    for index in range(1, len(fractions)):
+        if selected <= fractions[index]:
+            left_fraction = fractions[index - 1]
+            right_fraction = fractions[index]
+            span = right_fraction - left_fraction
+            ratio = (selected - left_fraction) / span
+            return values[index - 1] + ratio * (values[index] - values[index - 1])
+    return values[-1]
+
+
+def _vector_dot(left: Vector3, right: Vector3) -> float:
+    return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+def _vector_norm(value: Vector3) -> float:
+    return math.sqrt(_vector_dot(value, value))
+
+
+def _normalize_vector(value: Vector3) -> Vector3:
+    norm = _vector_norm(value)
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("insertion_axis_world must contain a nonzero finite vector")
+    return tuple(component / norm for component in value)  # type: ignore[return-value]
+
+
+def _vector_cross(left: Vector3, right: Vector3) -> Vector3:
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def _insertion_basis(axis: Vector3) -> tuple[Vector3, Vector3, Vector3]:
+    """Return a deterministic right-handed frame whose z-axis is insertion_axis_world."""
+    z_axis = _normalize_vector(axis)
+    reference = (1.0, 0.0, 0.0) if abs(z_axis[0]) < 0.9 else (0.0, 1.0, 0.0)
+    y_axis = _normalize_vector(_vector_cross(z_axis, reference))
+    x_axis = _normalize_vector(_vector_cross(y_axis, z_axis))
+    return x_axis, y_axis, z_axis
+
+
+def _quaternion_from_basis(
+    x_axis: Vector3,
+    y_axis: Vector3,
+    z_axis: Vector3,
+) -> Quaternion:
+    """Convert the column vectors of a rotation matrix to a quaternion."""
+    m00, m10, m20 = x_axis
+    m01, m11, m21 = y_axis
+    m02, m12, m22 = z_axis
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        return _normalize_quaternion(
+            ((m21 - m12) / scale, (m02 - m20) / scale, (m10 - m01) / scale, 0.25 * scale)
+        )
+    if m00 > m11 and m00 > m22:
+        scale = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        return _normalize_quaternion(
+            (0.25 * scale, (m01 + m10) / scale, (m02 + m20) / scale, (m21 - m12) / scale)
+        )
+    if m11 > m22:
+        scale = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        return _normalize_quaternion(
+            ((m01 + m10) / scale, 0.25 * scale, (m12 + m21) / scale, (m02 - m20) / scale)
+        )
+    scale = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+    return _normalize_quaternion(
+        ((m02 + m20) / scale, (m12 + m21) / scale, 0.25 * scale, (m10 - m01) / scale)
+    )
+
+
+def _insertion_pose_metrics(
+    actual_world_tool0: RigidTransform,
+    expected_start_world_tool0: RigidTransform,
+    target_world_tool0: RigidTransform,
+    insertion_axis_world: Vector3,
+) -> tuple[float, float, float, float]:
+    """Return depth, absolute depth error, lateral offset, and tilt error."""
+    actual_translation, _actual_rotation = actual_world_tool0
+    start_translation, _start_rotation = expected_start_world_tool0
+    displacement = tuple(actual_translation[index] - start_translation[index] for index in range(3))
+    depth = _vector_dot(displacement, insertion_axis_world)
+    target_displacement = tuple(
+        target_world_tool0[0][index] - start_translation[index] for index in range(3)
+    )
+    target_depth = _vector_dot(target_displacement, insertion_axis_world)
+    lateral = tuple(displacement[index] - depth * insertion_axis_world[index] for index in range(3))
+    _unused_position_error, tilt_error = _pose_errors(
+        actual_world_tool0,
+        target_world_tool0,
+    )
+    return depth, abs(target_depth - depth), _vector_norm(lateral), tilt_error
+
+
+def _insertion_force_metrics(
+    actual_tcp_force: list[float],
+    force_bias: list[float],
+    insertion_axis_base: Vector3,
+    tool0_tcp_offset_base: Vector3,
+) -> tuple[float, float, float, float, float, list[float]]:
+    """Return raw/compressive axial force and active-TCP/tool-flange evidence."""
+    corrected = [
+        float(value) - float(bias) for value, bias in zip(actual_tcp_force, force_bias, strict=True)
+    ]
+    force = (corrected[0], corrected[1], corrected[2])
+    axial_signed = _vector_dot(force, insertion_axis_base)
+    lateral = tuple(force[index] - axial_signed * insertion_axis_base[index] for index in range(3))
+    tool_flange_torque = (corrected[3], corrected[4], corrected[5])
+    offset_moment = _vector_cross(tool0_tcp_offset_base, force)
+    active_tcp_torque = tuple(
+        tool_flange_torque[index] - offset_moment[index] for index in range(3)
+    )
+    return (
+        abs(axial_signed),
+        max(0.0, -axial_signed),
+        _vector_norm(lateral),
+        _vector_norm(active_tcp_torque),
+        _vector_norm(tool_flange_torque),
+        corrected,
+    )
+
+
+def _protected_relief_retreat_m(
+    total_relief_backoff_m: float,
+    relief_backoff_m: float,
+    *,
+    relief_backoff_committed: bool,
+) -> float:
+    """Return protected cumulative retreat without double-counting a committed cycle."""
+    if relief_backoff_committed:
+        return float(total_relief_backoff_m)
+    return float(total_relief_backoff_m) + float(relief_backoff_m)
+
+
 def _normalize_quaternion(value: Quaternion) -> Quaternion:
     norm = math.sqrt(sum(component * component for component in value))
     if not math.isfinite(norm) or norm <= 1e-12:
         raise ValueError("quaternion norm is zero or non-finite")
     return tuple(component / norm for component in value)  # type: ignore[return-value]
+
+
+def _quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> Quaternion:
+    half_roll = roll / 2.0
+    half_pitch = pitch / 2.0
+    half_yaw = yaw / 2.0
+    cr = math.cos(half_roll)
+    sr = math.sin(half_roll)
+    cp = math.cos(half_pitch)
+    sp = math.sin(half_pitch)
+    cy = math.cos(half_yaw)
+    sy = math.sin(half_yaw)
+    return _normalize_quaternion(
+        (
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
+        )
+    )
 
 
 def _quaternion_multiply(left: Quaternion, right: Quaternion) -> Quaternion:
@@ -433,10 +1289,7 @@ def _compose_transform(left: RigidTransform, right: RigidTransform) -> RigidTran
     right_translation, right_rotation = right
     rotated = _rotate_vector(left_rotation, right_translation)
     return (
-        tuple(
-            left_translation[index] + rotated[index]
-            for index in range(3)
-        ),  # type: ignore[arg-type]
+        tuple(left_translation[index] + rotated[index] for index in range(3)),  # type: ignore[arg-type]
         _quaternion_multiply(left_rotation, right_rotation),
     )
 
@@ -512,9 +1365,7 @@ def _transform_from_rtde_pose(values: list[float]) -> RigidTransform:
         raise ValueError("RTDE pose must contain six finite values")
     return (
         (float(values[0]), float(values[1]), float(values[2])),
-        _quaternion_from_rotvec(
-            (float(values[3]), float(values[4]), float(values[5]))
-        ),
+        _quaternion_from_rotvec((float(values[3]), float(values[4]), float(values[5]))),
     )
 
 
@@ -528,14 +1379,42 @@ def _pose_errors(actual: RigidTransform, target: RigidTransform) -> tuple[float,
     actual_translation, actual_rotation = actual
     target_translation, target_rotation = target
     position_error = math.sqrt(
-        sum(
-            (actual_translation[index] - target_translation[index]) ** 2
-            for index in range(3)
-        )
+        sum((actual_translation[index] - target_translation[index]) ** 2 for index in range(3))
     )
     dot = abs(sum(a * b for a, b in zip(actual_rotation, target_rotation, strict=True)))
     orientation_error = 2.0 * math.acos(max(-1.0, min(1.0, dot)))
     return position_error, orientation_error
+
+
+def _configured_cartesian_world_base() -> RigidTransform:
+    values = UR5E_RTDE_CARTESIAN_WORLD_BASE
+    if values is None:
+        detail = UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR or (
+            "ur5e.rtde.cartesian_world_base is missing or invalid"
+        )
+        raise RuntimeError(
+            "protected ur5e.rtde.cartesian_world_base is unavailable: " + detail
+        )
+    x_m, y_m, z_m, roll_rad, pitch_rad, yaw_rad = values
+    return (
+        (x_m, y_m, z_m),
+        _quaternion_from_rpy(roll_rad, pitch_rad, yaw_rad),
+    )
+
+
+def _transform_status_payload(value: RigidTransform | None) -> dict[str, float] | None:
+    if value is None:
+        return None
+    translation, rotation = value
+    return {
+        "x": float(translation[0]),
+        "y": float(translation[1]),
+        "z": float(translation[2]),
+        "qx": float(rotation[0]),
+        "qy": float(rotation[1]),
+        "qz": float(rotation[2]),
+        "qw": float(rotation[3]),
+    }
 
 
 def _workspace_error(target_world_tool0: RigidTransform) -> str | None:
@@ -547,8 +1426,7 @@ def _workspace_error(target_world_tool0: RigidTransform) -> str | None:
         maximum = float(bounds[f"{axis}_max_m"])
         if not minimum <= value <= maximum:
             return (
-                f"world -> tool0 {axis}={value:.6f} m is outside "
-                f"[{minimum:.6f}, {maximum:.6f}] m"
+                f"world -> tool0 {axis}={value:.6f} m is outside [{minimum:.6f}, {maximum:.6f}] m"
             )
     origin_x, origin_y, _origin_z = UR5E_RTDE_CARTESIAN_REACH_ORIGIN
     xy_radius = math.hypot(x - origin_x, y - origin_y)
@@ -595,14 +1473,12 @@ def _trajectory_result_timeout_sec(
 ) -> float:
     """Return a server deadline that cannot precede MoveIt's configured allowance."""
     allowed_execution_sec = (
-        max(0.0, float(requested_final_time_sec))
-        * UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
+        max(0.0, float(requested_final_time_sec)) * UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
     )
     guarded_execution_sec = max(0.0, float(guarded_final_time_sec))
     return max(
         5.0,
-        max(allowed_execution_sec, guarded_execution_sec)
-        + UR5E_RTDE_RESULT_MARGIN_SEC,
+        max(allowed_execution_sec, guarded_execution_sec) + UR5E_RTDE_RESULT_MARGIN_SEC,
     )
 
 
@@ -736,9 +1612,9 @@ def _max_segment_acceleration(
                 if invalid_segment:
                     acceleration = math.inf
                 else:
-                    acceleration = abs(
-                        float(velocities[joint]) - float(previous_velocities[joint])
-                    ) / dt
+                    acceleration = (
+                        abs(float(velocities[joint]) - float(previous_velocities[joint])) / dt
+                    )
                 if acceleration > max_acceleration:
                     max_acceleration = acceleration
                     max_joint = str(joint)
@@ -789,10 +1665,10 @@ def _max_segment_jerk(
                     if invalid_segment:
                         jerk = math.inf
                     else:
-                        jerk = abs(
-                            float(accelerations[joint])
-                            - float(previous_accelerations[joint])
-                        ) / dt
+                        jerk = (
+                            abs(float(accelerations[joint]) - float(previous_accelerations[joint]))
+                            / dt
+                        )
                     if jerk > max_jerk:
                         max_jerk = jerk
                         max_joint = str(joint)
@@ -1055,25 +1931,169 @@ def prepare_guarded_trajectory(
 
 
 def _status_base() -> dict[str, Any]:
+    try:
+        configured_world_base = _configured_cartesian_world_base()
+        configured_world_base_message = (
+            "protected ur5e.rtde.cartesian_world_base loaded; live TF has not been validated"
+        )
+    except RuntimeError as exc:
+        configured_world_base = None
+        configured_world_base_message = str(exc)
+    mg_hard_caps = _insert_hard_caps("MG")
+    mg_hard_caps_error = _insert_hard_cap_error("MG") or ""
+    exact_part_hard_caps = {
+        part_name: _insert_hard_caps(part_name)
+        for part_name in INSERT_SUPPORTED_PART_NAMES
+    }
+    exact_part_hard_caps_error = {
+        part_name: _insert_hard_cap_error(part_name) or ""
+        for part_name in INSERT_SUPPORTED_PART_NAMES
+    }
+    exact_part_hard_caps_sha256 = {
+        part_name: (
+            ""
+            if exact_part_hard_caps_error[part_name]
+            else _insert_hard_caps_sha256(exact_part_hard_caps[part_name])
+        )
+        for part_name in INSERT_SUPPORTED_PART_NAMES
+    }
     return {
         "updated_at": time.time(),
         "action": ACTION_NAME,
         "action_name": ACTION_NAME,
         "cartesian_action": CARTESIAN_ACTION_NAME,
         "cartesian_action_name": CARTESIAN_ACTION_NAME,
+        "insert_action_name": INSERT_ACTION_NAME,
+        "insertion_demonstration_action_name": INSERT_DEMONSTRATION_ACTION_NAME,
         "relative_cartesian_action_name": RELATIVE_CARTESIAN_ACTION_NAME,
         "cartesian_jog_service_name": CARTESIAN_JOG_SERVICE_NAME,
         "joint_jog_action_name": JOINT_JOG_ACTION_NAME,
         "joint_action_ready": True,
         "joint_jog_action_ready": MoveUR5eJointJog is not None,
         "cartesian_action_ready": MoveUR5eCartesian is not None,
+        "insert_action_ready": MoveUR5eInsert is not None,
+        "insertion_demonstration_action_ready": (
+            RecordUR5eInsertionDemonstration is not None
+        ),
+        "insertion_demonstration_active": False,
+        "insertion_demonstration_recording_id": "",
+        "insertion_demonstration_phase": "",
+        "insertion_demonstration_sample_count": 0,
+        "insert_supported_part_names": list(INSERT_SUPPORTED_PART_NAMES),
+        "insert_MG_hard_caps": mg_hard_caps,
+        "insert_MG_hard_caps_error": mg_hard_caps_error,
+        "insert_MG_hard_caps_sha256": (
+            ""
+            if mg_hard_caps_error
+            else _insert_hard_caps_sha256(mg_hard_caps)
+        ),
+        "insert_exact_part_hard_caps": exact_part_hard_caps,
+        "insert_exact_part_hard_caps_error": exact_part_hard_caps_error,
+        "insert_exact_part_hard_caps_sha256": exact_part_hard_caps_sha256,
+        "insert_selected_part_name": "",
+        "insert_selected_hard_caps": {},
+        "insert_selected_hard_caps_error": "",
+        "insert_selected_hard_caps_sha256": "",
+        "part_name": "",
+        "calibration_id": "",
+        "profile_sha256": "",
+        "trial_id": "",
         "relative_cartesian_action_ready": MoveUR5eRelativeCartesian is not None,
         "cartesian_jog_service_ready": SetUR5eCartesianJog is not None,
         "cartesian_jog_ready": False,
         "cartesian_function_ready": False,
+        "tcp_force_feedback_ready": False,
+        "tcp_speed_feedback_ready": False,
+        "insert_function_ready": False,
+        "insert_readiness_message": (
+            _insert_hard_cap_error()
+            or "Insertion interface and TCP force/speed feedback validation have not completed"
+        ),
+        "insert_phase": "",
+        "insert_insertion_depth_m": None,
+        "insert_depth_error_m": None,
+        "insert_lateral_offset_m": None,
+        "insert_search_radius_m": None,
+        "insert_search_peck_state": "",
+        "insert_search_peck_cycle_count": 0,
+        "insert_search_peck_retreat_m": 0.0,
+        "insert_axial_force_n": None,
+        "insert_raw_axial_force_n": None,
+        "insert_lateral_force_n": None,
+        "insert_torque_nm": None,
+        "insert_filtered_axial_force_n": None,
+        "insert_filtered_lateral_force_n": None,
+        "insert_filtered_torque_nm": None,
+        "insert_tool_flange_torque_nm": None,
+        "insert_filtered_tool_flange_torque_nm": None,
+        "insert_axial_profile_exceeded": False,
+        "insert_lateral_profile_exceeded": False,
+        "insert_torque_profile_exceeded": False,
+        "insert_tared_tcp_force": None,
+        "insert_contact_detected": False,
+        "insert_engagement_detected": False,
+        "insert_seated_detected": False,
+        "insert_soft_overload_detected": False,
+        "insert_soft_overload_reason": "",
+        "insert_soft_overload_duration_sec": 0.0,
+        "insert_soft_overload_recovered": False,
+        "insert_relief_exhausted": False,
+        "insert_relief_cycle_count": 0,
+        "insert_relief_elapsed_sec": 0.0,
+        "insert_relief_retreat_m": 0.0,
+        "insert_relief_load_cleared": False,
+        "insert_relief_backoff_m": 0.0,
+        "insert_relief_planned_backoff_m": 0.0,
+        "insert_total_relief_backoff_m": 0.0,
+        "insert_relief_resume_phase": "",
+        "insert_relief_force_mode_stop_acknowledged": False,
+        "insert_relief_stop_l_command_completed": False,
+        "insert_relief_stationary_confirmed": False,
+        "insert_relief_force_mode_restart_acknowledged": False,
+        "insert_commanded_axial_force_n": 0.0,
+        "insert_commanded_lateral_force_x_n": 0.0,
+        "insert_commanded_lateral_force_y_n": 0.0,
+        "insert_hard_limit_detected": False,
+        "insert_hard_limit_reason": "",
+        "insert_limit_trigger": "",
+        "insert_limit_trigger_value": None,
+        "insert_limit_trigger_threshold": None,
+        "insert_limit_trigger_actual_tcp_force": None,
+        "insert_limit_trigger_tared_tcp_force": None,
+        "insert_force_mode_stop_acknowledged": False,
+        "insert_servo_stop_acknowledged": False,
+        "insert_stop_l_command_completed": False,
+        "insert_stationary_confirmed": False,
+        "server_trace_id": "",
+        "server_trace_path": "",
+        "server_trace_sha256": "",
+        "server_trace_status": "not_started",
+        "server_trace_complete": False,
+        "server_trace_sample_count": 0,
+        "insert_motion_settled": True,
+        "target_insertion_depth_m": None,
+        "force_bias_valid": False,
+        "force_bias": None,
+        "peak_axial_force_n": None,
+        "peak_lateral_force_n": None,
+        "peak_torque_nm": None,
+        "peak_filtered_axial_force_n": None,
+        "peak_filtered_lateral_force_n": None,
+        "peak_filtered_torque_nm": None,
+        "peak_tool_flange_torque_nm": None,
+        "actual_tcp_force": None,
+        "actual_tcp_speed": None,
         "cartesian_frame_validation_message": "Cartesian frame validation has not completed",
         "cartesian_frame_position_error_m": None,
         "cartesian_frame_orientation_error_rad": None,
+        "cartesian_world_base_ready": False,
+        "cartesian_world_base_message": configured_world_base_message,
+        "cartesian_world_base_expected": _transform_status_payload(
+            configured_world_base
+        ),
+        "cartesian_world_base_observed": None,
+        "cartesian_world_base_position_error_m": None,
+        "cartesian_world_base_orientation_error_rad": None,
         "state": "checking",
         "message": "",
         "blocked_reason": "",
@@ -1098,10 +2118,9 @@ def _status_base() -> dict[str, Any]:
         "trajectory_guarded_final_time_sec": None,
         "trajectory_result_timeout_sec": None,
         "trajectory_elapsed_sec": None,
-        "allowed_execution_duration_scaling": (
-            UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
-        ),
+        "allowed_execution_duration_scaling": (UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING),
         "allowed_goal_duration_margin_sec": UR5E_RTDE_RESULT_MARGIN_SEC,
+        "joint_goal_tolerance_rad": UR5E_RTDE_GOAL_TOLERANCE_RAD,
         "final_joint_error_rad": None,
         "final_joint_error_joint": "",
         "max_actual_joint_velocity_rad_s": None,
@@ -1122,6 +2141,7 @@ def _status_base() -> dict[str, Any]:
         "rtde_failure_kind": "",
         "rtde_failure_feedback_gap_sec": None,
         "rtde_last_receive_timestamp": None,
+        "rtde_feedback_timestamp_sec": None,
         "rtde_receive_reported_connected_before_reset": None,
         "rtde_control_reported_connected_before_reset": None,
         "rtde_result": "",
@@ -1137,11 +2157,10 @@ def _status_base() -> dict[str, Any]:
         "cartesian_speed_limit_m_s": UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S,
         "cartesian_acceleration_limit_m_s2": UR5E_RTDE_CARTESIAN_ACCEL_M_S2,
         "cartesian_position_tolerance_m": UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M,
-        "cartesian_orientation_tolerance_rad": (
-            UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
-        ),
+        "cartesian_orientation_tolerance_rad": (UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD),
         "hardware_runtime_config": HARDWARE_ARMS_CONFIG_FILE,
         "hardware_arms_config": HARDWARE_ARMS_CONFIG_FILE,
+        **_insert_hard_caps(),
     }
 
 
@@ -1209,9 +2228,7 @@ def rtde_movej_path(
 ) -> list[list[float]]:
     speed = UR5E_RTDE_MOVEJ_SPEED_RAD_S if speed_rad_s is None else float(speed_rad_s)
     acceleration = (
-        UR5E_RTDE_MOVEJ_ACCEL_RAD_S2
-        if acceleration_rad_s2 is None
-        else float(acceleration_rad_s2)
+        UR5E_RTDE_MOVEJ_ACCEL_RAD_S2 if acceleration_rad_s2 is None else float(acceleration_rad_s2)
     )
     joint_names = [str(name) for name in list(getattr(trajectory, "joint_names", []) or [])]
     points = list(getattr(trajectory, "points", []) or [])
@@ -1222,10 +2239,7 @@ def rtde_movej_path(
         q = [float(positions[index_by_joint[joint]]) for joint in ARM_JOINTS]
         blend = 0.0 if point_index == len(points) - 1 else max(0.0, float(blend_rad))
         duplicate_delta = (
-            max(
-                abs(current - previous)
-                for current, previous in zip(q, path[-1][:6], strict=True)
-            )
+            max(abs(current - previous) for current, previous in zip(q, path[-1][:6], strict=True))
             if path
             else math.inf
         )
@@ -1237,7 +2251,7 @@ def rtde_movej_path(
 
 
 class UR5eRTDETrajectoryServer(Node):
-    def __init__(
+    def __init__(  # noqa: PLR0915
         self,
         *,
         robot_ip: str,
@@ -1262,6 +2276,8 @@ class UR5eRTDETrajectoryServer(Node):
         self.current_positions: list[float] | None = None
         self.current_positions_monotonic: float | None = None
         self._last_receive_timestamp: float | None = None
+        self._last_actual_tcp_force: list[float] | None = None
+        self._last_actual_tcp_speed: list[float] | None = None
         self._receive_watch_started_monotonic = time.monotonic()
         self._idle_receive_reconnect_count = 0
         self._receive_lock = threading.Lock()
@@ -1288,12 +2304,47 @@ class UR5eRTDETrajectoryServer(Node):
         self._cartesian_frame_ready = False
         self._cartesian_jog_ready = False
         self._cartesian_function_ready = False
+        self._tcp_force_feedback_ready = False
+        self._tcp_speed_feedback_ready = False
+        self._insert_function_ready = False
+        self._insert_readiness_message = (
+            _insert_hard_cap_error()
+            or "Insertion interface and TCP force/speed feedback validation have not completed"
+        )
+        self._insert_force_mode_active = False
+        self._insert_force_mode_command: (
+            tuple[list[float], list[int], list[float], int, list[float]] | None
+        ) = None
+        self._insert_servo_active = False
+        self._insert_force_mode_stop_acknowledged = False
+        self._insert_servo_stop_acknowledged = False
+        self._insert_stop_l_command_completed = False
+        self._insert_motion_started = False
+        self._insertion_demonstration_lock = threading.Lock()
+        self._active_insertion_demonstration_goal: Any | None = None
+        self._active_insertion_demonstration_status: dict[str, Any] = {}
         self._cartesian_frame_message = "Cartesian frame validation has not completed"
         self._cartesian_frame_position_error_m = math.inf
         self._cartesian_frame_orientation_error_rad = math.inf
+        self._cartesian_world_base_ready = False
+        self._cartesian_world_base_message = (
+            "protected ur5e.rtde.cartesian_world_base has not been validated against live TF"
+        )
+        try:
+            self._cartesian_world_base_expected: RigidTransform | None = (
+                _configured_cartesian_world_base()
+            )
+        except RuntimeError as exc:
+            self._cartesian_world_base_expected = None
+            self._cartesian_world_base_message = str(exc)
+        self._cartesian_world_base_observed: RigidTransform | None = None
+        self._cartesian_world_base_position_error_m = math.inf
+        self._cartesian_world_base_orientation_error_rad = math.inf
         self._jog_session_token = object()
         self._jog_watchdog_deadline = 0.0
         self._jog_stop_in_progress = False
+        self._jog_world_base: RigidTransform | None = None
+        self._jog_frame_message = ""
         self.terminal_status_file = self.status_file.with_name(
             f"{self.status_file.stem}_last_terminal{self.status_file.suffix}"
         )
@@ -1306,9 +2357,12 @@ class UR5eRTDETrajectoryServer(Node):
         )
         self._action_server = None
         self._cartesian_action_server = None
+        self._insert_action_server = None
+        self._insertion_demonstration_action_server = None
         self._relative_cartesian_action_server = None
         self._joint_jog_action_server = None
         self._cartesian_jog_service = None
+        self._insertion_demonstration_callback_group = ReentrantCallbackGroup()
         if not self.monitor_only:
             self._action_server = ActionServer(
                 self,
@@ -1324,6 +2378,23 @@ class UR5eRTDETrajectoryServer(Node):
                     CARTESIAN_ACTION_NAME,
                     execute_callback=self._execute_cartesian,
                     cancel_callback=self._cancel,
+                )
+            if MoveUR5eInsert is not None:
+                self._insert_action_server = ActionServer(
+                    self,
+                    MoveUR5eInsert,
+                    INSERT_ACTION_NAME,
+                    execute_callback=self._execute_insert,
+                    cancel_callback=self._cancel,
+                )
+            if RecordUR5eInsertionDemonstration is not None:
+                self._insertion_demonstration_action_server = ActionServer(
+                    self,
+                    RecordUR5eInsertionDemonstration,
+                    INSERT_DEMONSTRATION_ACTION_NAME,
+                    execute_callback=self._execute_insertion_demonstration,
+                    cancel_callback=self._cancel,
+                    callback_group=self._insertion_demonstration_callback_group,
                 )
             if MoveUR5eRelativeCartesian is not None:
                 self._relative_cartesian_action_server = ActionServer(
@@ -1384,30 +2455,44 @@ class UR5eRTDETrajectoryServer(Node):
             body["action_name"] = ""
             body["cartesian_action"] = ""
             body["cartesian_action_name"] = ""
+            body["insert_action_name"] = ""
+            body["insertion_demonstration_action_name"] = ""
             body["relative_cartesian_action_name"] = ""
             body["cartesian_jog_service_name"] = ""
             body["joint_jog_action_name"] = ""
             body["joint_action_ready"] = False
             body["joint_jog_action_ready"] = False
             body["cartesian_action_ready"] = False
+            body["insert_action_ready"] = False
+            body["insertion_demonstration_action_ready"] = False
             body["relative_cartesian_action_ready"] = False
             body["cartesian_jog_service_ready"] = False
             body["cartesian_jog_ready"] = False
             body["cartesian_function_ready"] = False
+            body["tcp_force_feedback_ready"] = False
+            body["tcp_speed_feedback_ready"] = False
+            body["insert_function_ready"] = False
+            body["insert_readiness_message"] = (
+                "Insertion motion is unavailable in read-only calibration monitoring"
+            )
         body["ros_domain_id"] = self.ros_domain_id
         body["process_id"] = os.getpid()
-        body["rtde_reset_required"] = bool(
-            getattr(self, "_rtde_reset_required", False)
-        )
-        body["rtde_failure_kind"] = str(
-            getattr(self, "_rtde_failure_kind", "") or ""
-        )
+        body["rtde_reset_required"] = bool(getattr(self, "_rtde_reset_required", False))
+        with self._insertion_demonstration_lock:
+            demonstration_status = dict(self._active_insertion_demonstration_status)
+        body.update(demonstration_status)
+        body["rtde_failure_kind"] = str(getattr(self, "_rtde_failure_kind", "") or "")
         body["rtde_failure_feedback_gap_sec"] = getattr(
             self,
             "_rtde_failure_feedback_gap_sec",
             None,
         )
         body["rtde_last_receive_timestamp"] = getattr(
+            self,
+            "_last_receive_timestamp",
+            None,
+        )
+        body["rtde_feedback_timestamp_sec"] = getattr(
             self,
             "_last_receive_timestamp",
             None,
@@ -1422,6 +2507,48 @@ class UR5eRTDETrajectoryServer(Node):
             "_rtde_control_reported_connected_before_reset",
             None,
         )
+        expected_world_base = getattr(
+            self,
+            "_cartesian_world_base_expected",
+            None,
+        )
+        observed_world_base = getattr(
+            self,
+            "_cartesian_world_base_observed",
+            None,
+        )
+        world_base_position_error = float(
+            getattr(self, "_cartesian_world_base_position_error_m", math.inf)
+        )
+        world_base_orientation_error = float(
+            getattr(self, "_cartesian_world_base_orientation_error_rad", math.inf)
+        )
+        body["cartesian_world_base_ready"] = bool(
+            getattr(self, "_cartesian_world_base_ready", False)
+        )
+        body["cartesian_world_base_message"] = str(
+            getattr(
+                self,
+                "_cartesian_world_base_message",
+                "protected ur5e.rtde.cartesian_world_base has not been validated",
+            )
+        )
+        body["cartesian_world_base_expected"] = _transform_status_payload(
+            expected_world_base
+        )
+        body["cartesian_world_base_observed"] = _transform_status_payload(
+            observed_world_base
+        )
+        body["cartesian_world_base_position_error_m"] = (
+            world_base_position_error
+            if math.isfinite(world_base_position_error)
+            else None
+        )
+        body["cartesian_world_base_orientation_error_rad"] = (
+            world_base_orientation_error
+            if math.isfinite(world_base_orientation_error)
+            else None
+        )
         body["updated_at"] = time.time()
         body["terminal_status_file"] = str(self.terminal_status_file)
         with self._status_lock:
@@ -1433,12 +2560,8 @@ class UR5eRTDETrajectoryServer(Node):
         body["monitor_only"] = self.monitor_only
         body["ros_domain_id"] = self.ros_domain_id
         body["process_id"] = os.getpid()
-        body["rtde_reset_required"] = bool(
-            getattr(self, "_rtde_reset_required", False)
-        )
-        body["rtde_failure_kind"] = str(
-            getattr(self, "_rtde_failure_kind", "") or ""
-        )
+        body["rtde_reset_required"] = bool(getattr(self, "_rtde_reset_required", False))
+        body["rtde_failure_kind"] = str(getattr(self, "_rtde_failure_kind", "") or "")
         body["rtde_failure_feedback_gap_sec"] = getattr(
             self,
             "_rtde_failure_feedback_gap_sec",
@@ -1448,6 +2571,49 @@ class UR5eRTDETrajectoryServer(Node):
             self,
             "_last_receive_timestamp",
             None,
+        )
+        body["rtde_feedback_timestamp_sec"] = getattr(
+            self,
+            "_last_receive_timestamp",
+            None,
+        )
+        expected_world_base = getattr(
+            self,
+            "_cartesian_world_base_expected",
+            None,
+        )
+        observed_world_base = getattr(
+            self,
+            "_cartesian_world_base_observed",
+            None,
+        )
+        world_base_position_error = float(
+            getattr(self, "_cartesian_world_base_position_error_m", math.inf)
+        )
+        world_base_orientation_error = float(
+            getattr(self, "_cartesian_world_base_orientation_error_rad", math.inf)
+        )
+        body["cartesian_world_base_ready"] = bool(
+            getattr(self, "_cartesian_world_base_ready", False)
+        )
+        body["cartesian_world_base_message"] = str(
+            getattr(self, "_cartesian_world_base_message", "")
+        )
+        body["cartesian_world_base_expected"] = _transform_status_payload(
+            expected_world_base
+        )
+        body["cartesian_world_base_observed"] = _transform_status_payload(
+            observed_world_base
+        )
+        body["cartesian_world_base_position_error_m"] = (
+            world_base_position_error
+            if math.isfinite(world_base_position_error)
+            else None
+        )
+        body["cartesian_world_base_orientation_error_rad"] = (
+            world_base_orientation_error
+            if math.isfinite(world_base_orientation_error)
+            else None
         )
         body["updated_at"] = time.time()
         body["terminal_status_file"] = str(self.terminal_status_file)
@@ -1476,9 +2642,7 @@ class UR5eRTDETrajectoryServer(Node):
             self._receive_error = f"{type(exc).__name__}: {exc}"
             self._receive_transport_failed = True
             self._rtde_reset_required = True
-            self._rtde_reset_reason = (
-                f"RTDE receive unavailable: {self._receive_error}"
-            )
+            self._rtde_reset_reason = f"RTDE receive unavailable: {self._receive_error}"
 
         if self.monitor_only:
             self.control = None
@@ -1554,23 +2718,21 @@ class UR5eRTDETrajectoryServer(Node):
             and math.isfinite(feedback_gap_sec)
         ):
             self._rtde_failure_feedback_gap_sec = float(feedback_gap_sec)
-        if (
-            getattr(self, "_rtde_receive_reported_connected_before_reset", None)
-            is None
-        ):
-            self._rtde_receive_reported_connected_before_reset = (
-                self._interface_reported_connected(getattr(self, "receive", None))
+        if getattr(self, "_rtde_receive_reported_connected_before_reset", None) is None:
+            self._rtde_receive_reported_connected_before_reset = self._interface_reported_connected(
+                getattr(self, "receive", None)
             )
-        if (
-            getattr(self, "_rtde_control_reported_connected_before_reset", None)
-            is None
-        ):
-            self._rtde_control_reported_connected_before_reset = (
-                self._interface_reported_connected(getattr(self, "control", None))
+        if getattr(self, "_rtde_control_reported_connected_before_reset", None) is None:
+            self._rtde_control_reported_connected_before_reset = self._interface_reported_connected(
+                getattr(self, "control", None)
             )
         self._cartesian_frame_ready = False
         self._cartesian_jog_ready = False
         self._cartesian_function_ready = False
+        self._tcp_force_feedback_ready = False
+        self._tcp_speed_feedback_ready = False
+        self._insert_function_ready = False
+        self._insert_readiness_message = self._rtde_reset_reason
         self._cartesian_frame_message = self._rtde_reset_reason
         self._joint_status_announced = False
         self._disconnect_rtde_interfaces()
@@ -1744,9 +2906,7 @@ class UR5eRTDETrajectoryServer(Node):
                 values = [float(value) for value in list(get_actual_qd())]
             except (OSError, RuntimeError, TypeError, ValueError):
                 return None
-        if len(values) < len(ARM_JOINTS) or not all(
-            math.isfinite(value) for value in values
-        ):
+        if len(values) < len(ARM_JOINTS) or not all(math.isfinite(value) for value in values):
             return None
         return values[: len(ARM_JOINTS)]
 
@@ -1785,6 +2945,8 @@ class UR5eRTDETrajectoryServer(Node):
                 wait_for_existing_stop = True
             elif not active:
                 self._jog_watchdog_deadline = 0.0
+                self._jog_world_base = None
+                self._jog_frame_message = ""
                 if bool(getattr(self, "_rtde_reset_required", False)):
                     return False, str(
                         getattr(self, "_rtde_reset_reason", "")
@@ -1822,6 +2984,8 @@ class UR5eRTDETrajectoryServer(Node):
                     self._active_motion_kind = ""
                 self._jog_watchdog_deadline = 0.0
                 self._jog_stop_in_progress = False
+                self._jog_world_base = None
+                self._jog_frame_message = ""
         status = _status_base()
         status.update(
             state="ready",
@@ -1847,7 +3011,7 @@ class UR5eRTDETrajectoryServer(Node):
         if expired:
             self._stop_cartesian_jog("UR5e Cartesian jog watchdog stopped motion")
 
-    def _publish_joint_state(self) -> None:
+    def _publish_joint_state(self) -> None:  # noqa: C901
         self._check_jog_watchdog()
         previous_sample_at = self.current_positions_monotonic
         actual = self._read_actual_q()
@@ -1926,7 +3090,8 @@ class UR5eRTDETrajectoryServer(Node):
                 name for name in function_methods if not callable(getattr(self.control, name, None))
             ]
             missing_jog_methods = [
-                name for name in ("jogStart", "jogStop")
+                name
+                for name in ("jogStart", "jogStop")
                 if not callable(getattr(self.control, name, None))
             ]
             self._cartesian_function_ready = bool(
@@ -1945,6 +3110,60 @@ class UR5eRTDETrajectoryServer(Node):
                     "Cartesian Smooth Hold validation failed: missing RTDE methods "
                     f"{missing_jog_methods}"
                 )
+        if (
+            validate_frames
+            and not self.monitor_only
+            and self.control is not None
+            and self.receive is not None
+        ):
+            actual_tcp_force = self._read_actual_tcp_force()
+            actual_tcp_speed = self._read_actual_tcp_speed()
+            self._tcp_force_feedback_ready = actual_tcp_force is not None
+            self._tcp_speed_feedback_ready = actual_tcp_speed is not None
+            missing_insert_methods = [
+                name
+                for name in (
+                    "forceMode",
+                    "forceModeStop",
+                    "getTCPOffset",
+                    "isPoseWithinSafetyLimits",
+                    "stopL",
+                )
+                if not callable(getattr(self.control, name, None))
+            ]
+            cap_error = _insert_hard_cap_error()
+            self._insert_function_ready = bool(
+                self._cartesian_frame_ready
+                and self._cartesian_function_ready
+                and self._tcp_force_feedback_ready
+                and self._tcp_speed_feedback_ready
+                and not missing_insert_methods
+                and cap_error is None
+                and MoveUR5eInsert is not None
+            )
+            if cap_error:
+                self._insert_readiness_message = cap_error
+            elif missing_insert_methods:
+                self._insert_readiness_message = (
+                    "Insertion interface validation failed: missing RTDE methods "
+                    f"{missing_insert_methods}"
+                )
+            elif not self._tcp_force_feedback_ready:
+                self._insert_readiness_message = (
+                    "Insertion interface validation failed: actual_TCP_force is unavailable"
+                )
+            elif not self._tcp_speed_feedback_ready:
+                self._insert_readiness_message = (
+                    "Insertion interface validation failed: actual_TCP_speed is unavailable"
+                )
+            elif not self._cartesian_frame_ready or not self._cartesian_function_ready:
+                self._insert_readiness_message = self._cartesian_frame_message
+            elif MoveUR5eInsert is None:
+                self._insert_readiness_message = (
+                    "MoveUR5eInsert interface is unavailable; rebuild cais_lab_robotics"
+                )
+            else:
+                self._insert_readiness_message = "UR5e insertion interface ready"
         with self._active_lock:
             control_connected = self.control is not None
             receive_connected = self.receive is not None
@@ -1965,9 +3184,13 @@ class UR5eRTDETrajectoryServer(Node):
                     message=str(
                         status.get("message")
                         or (
-                            "executing UR5e RTDE Cartesian moveL"
-                            if self._active_motion_kind == "cartesian"
-                            else "executing UR5e RTDE moveJ path"
+                            "executing UR5e RTDE insertion"
+                            if self._active_motion_kind == "insert"
+                            else (
+                                "executing UR5e RTDE Cartesian moveL"
+                                if self._active_motion_kind == "cartesian"
+                                else "executing UR5e RTDE moveJ path"
+                            )
                         )
                     ),
                     blocked_reason="",
@@ -1997,6 +3220,7 @@ class UR5eRTDETrajectoryServer(Node):
                 rtde_receive_connected=receive_connected,
                 rtde_control_connected=control_connected,
                 joint_states_fresh=self._joint_states_fresh(),
+                actual_positions_rad=[float(value) for value in actual],
                 cartesian_jog_ready=bool(
                     self._cartesian_jog_ready
                     and control_connected
@@ -2010,6 +3234,34 @@ class UR5eRTDETrajectoryServer(Node):
                     and receive_connected
                     and motion_idle
                     and not self._rtde_reset_required
+                ),
+                tcp_force_feedback_ready=bool(
+                    self._tcp_force_feedback_ready
+                    and receive_connected
+                    and not self._rtde_reset_required
+                ),
+                tcp_speed_feedback_ready=bool(
+                    self._tcp_speed_feedback_ready
+                    and receive_connected
+                    and not self._rtde_reset_required
+                ),
+                insert_function_ready=bool(
+                    self._insert_function_ready
+                    and control_connected
+                    and receive_connected
+                    and motion_idle
+                    and not self._rtde_reset_required
+                ),
+                insert_readiness_message=self._insert_readiness_message,
+                actual_tcp_force=(
+                    list(getattr(self, "_last_actual_tcp_force", None))
+                    if getattr(self, "_last_actual_tcp_force", None) is not None
+                    else None
+                ),
+                actual_tcp_speed=(
+                    list(getattr(self, "_last_actual_tcp_speed", None))
+                    if getattr(self, "_last_actual_tcp_speed", None) is not None
+                    else None
                 ),
                 cartesian_frame_validation_message=self._cartesian_frame_message,
                 cartesian_frame_position_error_m=(
@@ -2045,6 +3297,7 @@ class UR5eRTDETrajectoryServer(Node):
     ) -> None:
         with self._active_lock:
             if self._active_goal is goal_handle:
+                self._insert_motion_started = False
                 self._active_goal = None
                 self._active_goal_status = None
                 self._active_motion_kind = ""
@@ -2063,9 +3316,9 @@ class UR5eRTDETrajectoryServer(Node):
         result.error_string = str(error_string or "")
         return result
 
-    def _stop_motion(self) -> None:
+    def _stop_motion(self) -> bool:  # noqa: C901, PLR0912
         if self.control is None:
-            return
+            return False
         with self._active_lock:
             motion_kind = self._active_motion_kind
         if motion_kind == "cartesian_jog":
@@ -2073,9 +3326,11 @@ class UR5eRTDETrajectoryServer(Node):
             if callable(jog_stop):
                 try:
                     jog_stop()
-                    return
+                    return True
                 except (OSError, RuntimeError, TypeError, ValueError):
                     pass
+        if motion_kind == "insert":
+            return self._stop_insert_motion()
         method_names = (
             ("stopL", "stopJ", "servoStop", "stopScript")
             if motion_kind in {"cartesian", "relative_cartesian"}
@@ -2090,15 +3345,136 @@ class UR5eRTDETrajectoryServer(Node):
                     method(UR5E_RTDE_STOP_ACCEL_RAD_S2)
                 else:
                     method()
-                return
+                return True
             except TypeError:
                 try:
                     method()
-                    return
+                    return True
                 except Exception:
                     continue
             except Exception:
                 continue
+        return False
+
+    def _stop_insert_motion(self) -> bool:
+        """Stop every insertion command and require affirmative acknowledgements."""
+        if self.control is None:
+            self._insert_force_mode_stop_acknowledged = False
+            self._insert_servo_stop_acknowledged = False
+            self._insert_stop_l_command_completed = False
+            return False
+        stop_ok = True
+        force_mode_was_active = bool(
+            getattr(self, "_insert_force_mode_active", False)
+        )
+        force_mode_ok = not force_mode_was_active
+        if force_mode_was_active:
+            force_mode_stop = getattr(self.control, "forceModeStop", None)
+            try:
+                force_mode_ok = bool(callable(force_mode_stop) and force_mode_stop())
+            except (OSError, RuntimeError, TypeError, ValueError):
+                force_mode_ok = False
+            stop_ok = stop_ok and force_mode_ok
+            if force_mode_ok:
+                self._insert_force_mode_active = False
+                self._insert_force_mode_command = None
+        self._insert_force_mode_stop_acknowledged = force_mode_ok
+        servo_was_active = bool(getattr(self, "_insert_servo_active", False))
+        servo_ok = not servo_was_active
+        if servo_was_active:
+            servo_stop = getattr(self.control, "servoStop", None)
+            try:
+                servo_ok = bool(callable(servo_stop) and servo_stop())
+            except (OSError, RuntimeError, TypeError, ValueError):
+                servo_ok = False
+            stop_ok = stop_ok and servo_ok
+            if servo_ok:
+                self._insert_servo_active = False
+        self._insert_servo_stop_acknowledged = servo_ok
+        stop_l = getattr(self.control, "stopL", None)
+        try:
+            stop_l_result = (
+                stop_l(UR5E_RTDE_STOP_ACCEL_RAD_S2) if callable(stop_l) else False
+            )
+            # ur_rtde versions returning None still accepted and executed stopL.
+            stop_l_ok = stop_l_result is not False
+        except TypeError:
+            try:
+                stop_l_result = stop_l() if callable(stop_l) else False
+                stop_l_ok = stop_l_result is not False
+            except (OSError, RuntimeError, TypeError, ValueError):
+                stop_l_ok = False
+        except (OSError, RuntimeError, ValueError):
+            stop_l_ok = False
+        self._insert_stop_l_command_completed = stop_l_ok
+        return stop_ok and stop_l_ok
+
+    def _confirm_stationary_after_stop(
+        self,
+        timeout_sec: float = 2.0,
+        *,
+        linear_speed_limit_m_s: float | None = None,
+        angular_speed_limit_rad_s: float | None = None,
+    ) -> bool:
+        """Require fresh joint and TCP stationary evidence after a stop command."""
+        linear_limit = float(
+            linear_speed_limit_m_s
+            if linear_speed_limit_m_s is not None
+            else UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S
+        )
+        angular_limit = float(
+            angular_speed_limit_rad_s
+            if angular_speed_limit_rad_s is not None
+            else UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S
+        )
+        if (
+            not math.isfinite(linear_limit)
+            or linear_limit <= 0.0
+            or not math.isfinite(angular_limit)
+            or angular_limit <= 0.0
+        ):
+            return False
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        stationary_since: float | None = None
+        last_feedback_timestamp: float | None = None
+        while time.monotonic() < deadline:
+            feedback_timestamp = self._read_feedback_timestamp()
+            actual_qd = self._read_actual_qd()
+            actual_tcp_speed = self._read_actual_tcp_speed()
+            now = time.monotonic()
+            feedback_advanced = bool(
+                feedback_timestamp is not None
+                and (
+                    last_feedback_timestamp is None
+                    or feedback_timestamp > last_feedback_timestamp
+                )
+            )
+            if feedback_timestamp is not None:
+                last_feedback_timestamp = feedback_timestamp
+            joint_stationary = bool(
+                actual_qd is not None
+                and len(actual_qd) == 6
+                and all(math.isfinite(float(value)) for value in actual_qd)
+                and max(abs(float(value)) for value in actual_qd)
+                <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+            )
+            tcp_stationary = bool(
+                actual_tcp_speed is not None
+                and len(actual_tcp_speed) == 6
+                and all(math.isfinite(float(value)) for value in actual_tcp_speed)
+                and _vector_norm(tuple(float(value) for value in actual_tcp_speed[:3]))
+                <= linear_limit
+                and _vector_norm(tuple(float(value) for value in actual_tcp_speed[3:6]))
+                <= angular_limit
+            )
+            if feedback_advanced and joint_stationary and tcp_stationary:
+                stationary_since = stationary_since or now
+                if now - stationary_since >= UR5E_RTDE_STATIONARY_HOLD_SEC:
+                    return True
+            else:
+                stationary_since = None
+            time.sleep(0.02)
+        return False
 
     def _ensure_control_program_for_goal(self) -> str | None:
         """Ensure the RTDE control script is running before dispatching a goal."""
@@ -2182,6 +3558,7 @@ class UR5eRTDETrajectoryServer(Node):
     def _clear_active_goal(self, goal_handle: Any) -> None:
         with self._active_lock:
             if self._active_goal is goal_handle:
+                self._insert_motion_started = False
                 self._active_goal = None
                 self._active_goal_status = None
                 self._active_motion_kind = ""
@@ -2330,13 +3707,9 @@ class UR5eRTDETrajectoryServer(Node):
             target[joint - 1] += delta_rad
             within_limits = getattr(self.control, "isJointsWithinSafetyLimits", None)
             if not callable(within_limits):
-                raise RuntimeError(
-                    "RTDE control object has no isJointsWithinSafetyLimits method"
-                )
+                raise RuntimeError("RTDE control object has no isJointsWithinSafetyLimits method")
             if not bool(within_limits(target)):
-                raise ValueError(
-                    f"UR controller rejected J{joint} target as outside safety limits"
-                )
+                raise ValueError(f"UR controller rejected J{joint} target as outside safety limits")
 
             initial = [float(value) for value in actual]
             initial_target_error = abs(target[joint - 1] - initial[joint - 1])
@@ -2387,9 +3760,7 @@ class UR5eRTDETrajectoryServer(Node):
                         elif max(abs(float(value)) for value in actual_qd) <= (
                             UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
                         ):
-                            stop_stationary_since = (
-                                stop_stationary_since or time.monotonic()
-                            )
+                            stop_stationary_since = stop_stationary_since or time.monotonic()
                             if (
                                 time.monotonic() - stop_stationary_since
                                 >= UR5E_RTDE_STATIONARY_HOLD_SEC
@@ -2511,7 +3882,7 @@ class UR5eRTDETrajectoryServer(Node):
                 reason,
                 final_joint_error_rad=final_error,
             )
-        except Exception as exc:
+        except (LookupError, RuntimeError, TransformException) as exc:
             reason = f"UR5e RTDE joint jog failed: {type(exc).__name__}: {exc}"
             if motion_attempted:
                 self._stop_motion()
@@ -2535,6 +3906,5425 @@ class UR5eRTDETrajectoryServer(Node):
                 state_uncertain=motion_attempted,
             )
         finally:
+            self._clear_active_goal(goal_handle)
+
+    def _insert_result(  # noqa: PLR0913
+        self,
+        error_code: int,
+        error_string: str,
+        *,
+        trial_id: str = "",
+        hard_caps_sha256: str = "",
+        state_uncertain: bool = False,
+        motion_settled: bool = True,
+        final_world_tool0: RigidTransform | None = None,
+        final_insertion_depth_m: float = math.inf,
+        final_depth_error_m: float = math.inf,
+        final_lateral_offset_m: float = math.inf,
+        final_tilt_error_rad: float = math.inf,
+        final_search_radius_m: float = 0.0,
+        peak_axial_force_n: float = 0.0,
+        peak_lateral_force_n: float = 0.0,
+        peak_torque_nm: float = 0.0,
+        peak_filtered_axial_force_n: float = 0.0,
+        peak_filtered_lateral_force_n: float = 0.0,
+        peak_filtered_torque_nm: float = 0.0,
+        peak_tool_flange_torque_nm: float = 0.0,
+        contact_detected: bool = False,
+        engagement_detected: bool = False,
+        seated_detected: bool = False,
+        force_bias: list[float] | None = None,
+        final_phase: str = "",
+        soft_overload_detected: bool = False,
+        soft_overload_recovered: bool = False,
+        relief_exhausted: bool = False,
+        relief_cycle_count: int = 0,
+        last_soft_overload_reason: str = "",
+        relief_load_cleared: bool = False,
+        relief_backoff_m: float = 0.0,
+        relief_planned_backoff_m: float = 0.0,
+        total_relief_backoff_m: float = 0.0,
+        relief_resume_phase: str = "",
+        relief_force_mode_stop_acknowledged: bool = False,
+        relief_stop_l_command_completed: bool = False,
+        relief_stationary_confirmed: bool = False,
+        relief_force_mode_restart_acknowledged: bool = False,
+        hard_limit_detected: bool = False,
+        hard_limit_reason: str = "",
+        limit_trigger: str = "",
+        limit_trigger_value: float = 0.0,
+        limit_trigger_threshold: float = 0.0,
+        limit_trigger_actual_tcp_force: list[float] | None = None,
+        limit_trigger_tared_tcp_force: list[float] | None = None,
+        force_mode_stop_acknowledged: bool = False,
+        servo_stop_acknowledged: bool = False,
+        stop_l_command_completed: bool = False,
+        stationary_confirmed: bool = False,
+        server_trace_id: str = "",
+        server_trace_path: str = "",
+        server_trace_sha256: str = "",
+        server_trace_status: str = "not_started",
+        server_trace_complete: bool = False,
+        server_trace_sample_count: int = 0,
+        tactile_center_world_tool0: RigidTransform | None = None,
+        tactile_center_depth_m: float = 0.0,
+        tactile_center_confidence: float = 0.0,
+        tactile_center_evidence_sha256: str = "",
+        scheduled_search_radius_m: float = 0.0,
+        explored_search_radius_m: float = 0.0,
+        explored_search_angle_rad: float = 0.0,
+        disengagement_cycle_count: int = 0,
+        last_disengagement_reason: str = "",
+        disengagement_withdrawal_m: float = 0.0,
+        disengagement_contact_cleared: bool = False,
+        disengagement_force_mode_stop_acknowledged: bool = False,
+        recenter_position_error_m: float = math.inf,
+        recenter_command_acknowledged: bool = False,
+        disengagement_stationary_confirmed: bool = False,
+        retare_baseline_consistent: bool = False,
+    ) -> Any:
+        if MoveUR5eInsert is None:
+            return None
+        result = MoveUR5eInsert.Result()
+        result.error_code = int(error_code)
+        result.error_string = str(error_string or "")
+        result.trial_id = str(trial_id or "")
+        result.hard_caps_sha256 = str(hard_caps_sha256 or "")
+        result.state_uncertain = bool(state_uncertain)
+        result.motion_settled = bool(motion_settled)
+        result.final_tool0_pose_valid = final_world_tool0 is not None
+        result.final_tool0_pose = (
+            self._pose_stamped_from_transform(final_world_tool0)
+            if final_world_tool0 is not None
+            else PoseStamped()
+        )
+        result.final_insertion_depth_m = float(final_insertion_depth_m)
+        result.final_depth_error_m = float(final_depth_error_m)
+        result.final_lateral_offset_m = float(final_lateral_offset_m)
+        result.final_tilt_error_rad = float(final_tilt_error_rad)
+        result.final_search_radius_m = float(final_search_radius_m)
+        result.peak_axial_force_n = float(peak_axial_force_n)
+        result.peak_lateral_force_n = float(peak_lateral_force_n)
+        result.peak_torque_nm = float(peak_torque_nm)
+        result.peak_filtered_axial_force_n = float(peak_filtered_axial_force_n)
+        result.peak_filtered_lateral_force_n = float(peak_filtered_lateral_force_n)
+        result.peak_filtered_torque_nm = float(peak_filtered_torque_nm)
+        result.peak_tool_flange_torque_nm = float(peak_tool_flange_torque_nm)
+        result.contact_detected = bool(contact_detected)
+        result.engagement_detected = bool(engagement_detected)
+        result.seated_detected = bool(seated_detected)
+        result.force_bias_valid = bool(
+            force_bias is not None
+            and len(force_bias) == 6
+            and all(math.isfinite(float(value)) for value in force_bias)
+        )
+        result.force_bias = (
+            [float(value) for value in force_bias]
+            if result.force_bias_valid
+            else [0.0] * 6
+        )
+        result.final_phase = str(final_phase or "")
+        result.soft_overload_detected = bool(soft_overload_detected)
+        result.soft_overload_recovered = bool(soft_overload_recovered)
+        result.relief_exhausted = bool(relief_exhausted)
+        result.relief_cycle_count = int(relief_cycle_count)
+        result.last_soft_overload_reason = str(last_soft_overload_reason or "")
+        result.relief_load_cleared = bool(relief_load_cleared)
+        result.relief_backoff_m = float(relief_backoff_m)
+        result.relief_planned_backoff_m = float(relief_planned_backoff_m)
+        result.total_relief_backoff_m = float(total_relief_backoff_m)
+        result.relief_resume_phase = str(relief_resume_phase or "")
+        result.relief_force_mode_stop_acknowledged = bool(
+            relief_force_mode_stop_acknowledged
+        )
+        result.relief_stop_l_command_completed = bool(
+            relief_stop_l_command_completed
+        )
+        result.relief_stationary_confirmed = bool(relief_stationary_confirmed)
+        result.relief_force_mode_restart_acknowledged = bool(
+            relief_force_mode_restart_acknowledged
+        )
+        result.hard_limit_detected = bool(hard_limit_detected)
+        result.hard_limit_reason = str(hard_limit_reason or "")
+        result.limit_trigger = str(limit_trigger or "")
+        result.limit_trigger_value = float(limit_trigger_value)
+        result.limit_trigger_threshold = float(limit_trigger_threshold)
+        result.limit_trigger_actual_tcp_force = [
+            float(value)
+            for value in (limit_trigger_actual_tcp_force or [0.0] * 6)
+        ]
+        result.limit_trigger_tared_tcp_force = [
+            float(value)
+            for value in (limit_trigger_tared_tcp_force or [0.0] * 6)
+        ]
+        result.force_mode_stop_acknowledged = bool(force_mode_stop_acknowledged)
+        result.servo_stop_acknowledged = bool(servo_stop_acknowledged)
+        result.stop_l_command_completed = bool(stop_l_command_completed)
+        result.stationary_confirmed = bool(stationary_confirmed)
+        result.server_trace_id = str(server_trace_id or "")
+        result.server_trace_path = str(server_trace_path or "")
+        result.server_trace_sha256 = str(server_trace_sha256 or "")
+        result.server_trace_status = str(server_trace_status or "not_started")
+        result.server_trace_complete = bool(server_trace_complete)
+        result.server_trace_sample_count = int(server_trace_sample_count)
+        result.tactile_center_valid = tactile_center_world_tool0 is not None
+        result.tactile_center_tool0_pose = (
+            self._pose_stamped_from_transform(tactile_center_world_tool0)
+            if tactile_center_world_tool0 is not None
+            else PoseStamped()
+        )
+        result.tactile_center_depth_m = float(tactile_center_depth_m)
+        result.tactile_center_confidence = float(tactile_center_confidence)
+        result.tactile_center_evidence_sha256 = str(
+            tactile_center_evidence_sha256 or ""
+        )
+        result.scheduled_search_radius_m = float(scheduled_search_radius_m)
+        result.explored_search_radius_m = float(explored_search_radius_m)
+        result.explored_search_angle_rad = float(explored_search_angle_rad)
+        result.disengagement_cycle_count = int(disengagement_cycle_count)
+        result.last_disengagement_reason = str(last_disengagement_reason or "")
+        result.disengagement_withdrawal_m = float(disengagement_withdrawal_m)
+        result.disengagement_contact_cleared = bool(
+            disengagement_contact_cleared
+        )
+        result.disengagement_force_mode_stop_acknowledged = bool(
+            disengagement_force_mode_stop_acknowledged
+        )
+        result.recenter_position_error_m = float(recenter_position_error_m)
+        result.recenter_command_acknowledged = bool(
+            recenter_command_acknowledged
+        )
+        result.disengagement_stationary_confirmed = bool(
+            disengagement_stationary_confirmed
+        )
+        result.retare_baseline_consistent = bool(retare_baseline_consistent)
+        return result
+
+    @staticmethod
+    def _insertion_demonstration_result(
+        error_code: int,
+        error_string: str,
+        *,
+        state_uncertain: bool,
+        motion_settled: bool,
+        recording_id: str,
+        trace_path: str = "",
+        trace_sha256: str = "",
+        sample_count: int = 0,
+        started_at: float = 0.0,
+        finished_at: float = 0.0,
+        force_bias: list[float] | None = None,
+        baseline_force_span_n: float = 0.0,
+        baseline_torque_span_nm: float = 0.0,
+    ) -> Any:
+        result = RecordUR5eInsertionDemonstration.Result()
+        result.error_code = int(error_code)
+        result.error_string = str(error_string or "")
+        result.state_uncertain = bool(state_uncertain)
+        result.motion_settled = bool(motion_settled)
+        result.recording_id = str(recording_id or "")
+        result.trace_path = str(trace_path or "")
+        result.trace_sha256 = str(trace_sha256 or "")
+        result.sample_count = int(sample_count)
+        result.started_at = float(started_at)
+        result.finished_at = float(finished_at)
+        result.baseline_valid = force_bias is not None
+        result.force_bias = [float(value) for value in (force_bias or [0.0] * 6)]
+        result.baseline_force_span_n = float(baseline_force_span_n)
+        result.baseline_torque_span_nm = float(baseline_torque_span_nm)
+        return result
+
+    def _publish_insertion_demonstration_feedback(
+        self,
+        goal_handle: Any,
+        *,
+        phase: str,
+        sample_count: int,
+        elapsed_sec: float,
+        actual_world_tool0: RigidTransform,
+        actual_tcp_force: list[float],
+        actual_tcp_speed: list[float],
+        force_bias: list[float] | None,
+    ) -> None:
+        feedback = RecordUR5eInsertionDemonstration.Feedback()
+        feedback.phase = str(phase)
+        feedback.sample_count = int(sample_count)
+        feedback.elapsed_sec = float(elapsed_sec)
+        feedback.actual_tool0_pose = self._pose_stamped_from_transform(
+            actual_world_tool0
+        )
+        feedback.actual_tcp_force = [float(value) for value in actual_tcp_force]
+        feedback.actual_tcp_speed = [float(value) for value in actual_tcp_speed]
+        feedback.baseline_valid = force_bias is not None
+        feedback.force_bias = [float(value) for value in (force_bias or [0.0] * 6)]
+        goal_handle.publish_feedback(feedback)
+
+    def _execute_insertion_demonstration(self, goal_handle: Any) -> Any:  # noqa: C901, PLR0912, PLR0915
+        """Record synchronized UR5e feedback while another action owns jog motion."""
+        request = goal_handle.request
+        recording_id = str(getattr(request, "recording_id", "") or "")
+        part_name = str(getattr(request, "part_name", "") or "")
+        destination_location = str(
+            getattr(request, "destination_location", "") or ""
+        )
+        context_sha256 = str(getattr(request, "context_sha256", "") or "")
+        started_at = time.time()
+
+        def terminal(
+            code: int,
+            message: str,
+            *,
+            state_uncertain: bool = False,
+            trace_path: str = "",
+            trace_sha256: str = "",
+            sample_count: int = 0,
+            force_bias: list[float] | None = None,
+            baseline_force_span_n: float = 0.0,
+            baseline_torque_span_nm: float = 0.0,
+        ) -> Any:
+            motion_settled = self._confirm_stationary_after_stop(timeout_sec=0.5)
+            return self._insertion_demonstration_result(
+                code,
+                message,
+                state_uncertain=state_uncertain or not motion_settled,
+                motion_settled=motion_settled,
+                recording_id=recording_id,
+                trace_path=trace_path,
+                trace_sha256=trace_sha256,
+                sample_count=sample_count,
+                started_at=started_at,
+                finished_at=time.time(),
+                force_bias=force_bias,
+                baseline_force_span_n=baseline_force_span_n,
+                baseline_torque_span_nm=baseline_torque_span_nm,
+            )
+
+        valid_recording_id = bool(
+            recording_id
+            and len(recording_id) <= 128
+            and all(character.isalnum() or character in {"-", "_"} for character in recording_id)
+        )
+        try:
+            valid_context_hash = len(context_sha256) == 64 and int(
+                context_sha256, 16
+            ) >= 0
+        except ValueError:
+            valid_context_hash = False
+        if (
+            not valid_recording_id
+            or part_name not in INSERT_SUPPORTED_PART_NAMES
+            or destination_location != "assembly_board-v1"
+            or not valid_context_hash
+        ):
+            goal_handle.abort()
+            return terminal(-2, "insertion demonstration identity is invalid")
+        try:
+            expected_start = _transform_from_pose_stamped(
+                request.expected_start_tool0_pose
+            )
+            maximum_duration_sec = float(request.max_duration_sec)
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            goal_handle.abort()
+            return terminal(-2, f"insertion demonstration goal is invalid: {exc}")
+        if (
+            str(request.expected_start_tool0_pose.header.frame_id or "") != "world"
+            or not math.isfinite(maximum_duration_sec)
+            or maximum_duration_sec <= 0.0
+            or maximum_duration_sec
+            > UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC
+        ):
+            goal_handle.abort()
+            return terminal(-2, "insertion demonstration duration or start frame is invalid")
+        if self.monitor_only or self.receive is None or self.control is None:
+            goal_handle.abort()
+            return terminal(-1, "UR5e trajectory control and receive feedback are required")
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            goal_handle.abort()
+            return terminal(-1, str(getattr(self, "_rtde_reset_reason", "") or "RTDE reset required"))
+        try:
+            (
+                world_base,
+                frame_message,
+                frame_position_error,
+                frame_orientation_error,
+            ) = self._validated_cartesian_world_base()
+        except (RuntimeError, ValueError) as exc:
+            reason = str(exc)
+            status = _status_base()
+            status.update(
+                state="blocked",
+                message=reason,
+                blocked_reason=reason,
+                insertion_demonstration_active=False,
+            )
+            self._write_status(status)
+            goal_handle.abort()
+            return terminal(-1, reason)
+        with self._insertion_demonstration_lock:
+            if self._active_insertion_demonstration_goal is not None:
+                goal_handle.abort()
+                return terminal(-1, "another insertion demonstration is already active")
+            self._active_insertion_demonstration_goal = goal_handle
+            self._active_insertion_demonstration_status = {
+                "insertion_demonstration_active": True,
+                "insertion_demonstration_recording_id": recording_id,
+                "insertion_demonstration_phase": "recording_baseline",
+                "insertion_demonstration_sample_count": 0,
+                "cartesian_frame_validation_message": frame_message,
+                "cartesian_frame_position_error_m": frame_position_error,
+                "cartesian_frame_orientation_error_rad": frame_orientation_error,
+            }
+
+        trace_path = INSERT_DEMONSTRATION_TRACE_ROOT / f"{recording_id}.jsonl"
+        trace_tmp = trace_path.with_name(f".{trace_path.name}.{os.getpid()}.tmp")
+        sample_count = 0
+        force_bias: list[float] | None = None
+        baseline_force_span_n = 0.0
+        baseline_torque_span_nm = 0.0
+        baseline_samples: deque[tuple[float, list[float]]] = deque()
+        last_feedback_timestamp: float | None = None
+        last_publish_at = 0.0
+        trace_error = ""
+        phase = "recording_baseline"
+        try:
+            INSERT_DEMONSTRATION_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+            tool0_tcp = self._active_tcp_offset()
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                raise RuntimeError("actual TCP pose is unavailable")
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            start_position_error, start_orientation_error = _pose_errors(
+                actual_world_tool0,
+                expected_start,
+            )
+            if (
+                start_position_error > UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+                or start_orientation_error
+                > UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+            ):
+                raise ValueError(
+                    "current world -> tool0 does not match the frozen pre-insertion pose"
+                )
+            execution_started = time.monotonic()
+            deadline = execution_started + maximum_duration_sec
+            with trace_tmp.open("w", encoding="utf-8") as trace_file:
+                while rclpy.ok() and time.monotonic() < deadline:
+                    if goal_handle.is_cancel_requested:
+                        break
+                    feedback_timestamp = self._read_feedback_timestamp()
+                    if (
+                        feedback_timestamp is None
+                        or (
+                            last_feedback_timestamp is not None
+                            and feedback_timestamp <= last_feedback_timestamp
+                        )
+                    ):
+                        time.sleep(max(1.0 / UR5E_RTDE_FREQUENCY_HZ, 0.002))
+                        continue
+                    last_feedback_timestamp = feedback_timestamp
+                    actual_q = self._read_actual_q()
+                    actual_base_tcp = self._read_actual_tcp_transform()
+                    actual_tcp_force = self._read_actual_tcp_force()
+                    actual_tcp_speed = self._read_actual_tcp_speed()
+                    if any(
+                        value is None
+                        for value in (
+                            actual_q,
+                            actual_base_tcp,
+                            actual_tcp_force,
+                            actual_tcp_speed,
+                        )
+                    ):
+                        raise RuntimeError("complete advancing RTDE feedback is unavailable")
+                    actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                        actual_base_tcp,
+                        world_base=world_base,
+                        tool0_tcp=tool0_tcp,
+                    )
+                    elapsed_sec = time.monotonic() - execution_started
+                    linear_speed_m_s = math.sqrt(
+                        sum(float(value) ** 2 for value in actual_tcp_speed[:3])
+                    )
+                    angular_speed_rad_s = math.sqrt(
+                        sum(float(value) ** 2 for value in actual_tcp_speed[3:])
+                    )
+                    now_monotonic = time.monotonic()
+                    if force_bias is None:
+                        if (
+                            linear_speed_m_s
+                            > UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S
+                            or angular_speed_rad_s
+                            > UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S
+                        ):
+                            baseline_samples.clear()
+                        else:
+                            baseline_samples.append(
+                                (now_monotonic, list(actual_tcp_force))
+                            )
+                            while (
+                                baseline_samples
+                                and now_monotonic - baseline_samples[0][0]
+                                > UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC
+                            ):
+                                baseline_samples.popleft()
+                            if (
+                                len(baseline_samples) >= 5
+                                and baseline_samples[-1][0] - baseline_samples[0][0]
+                                >= UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC * 0.90
+                            ):
+                                values = [sample[1] for sample in baseline_samples]
+                                force_bias = [
+                                    sum(sample[index] for sample in values) / len(values)
+                                    for index in range(6)
+                                ]
+                                baseline_force_span_n = _vector_norm(
+                                    tuple(
+                                        max(sample[index] for sample in values)
+                                        - min(sample[index] for sample in values)
+                                        for index in range(3)
+                                    )
+                                )
+                                baseline_torque_span_nm = _vector_norm(
+                                    tuple(
+                                        max(sample[index] for sample in values)
+                                        - min(sample[index] for sample in values)
+                                        for index in range(3, 6)
+                                    )
+                                )
+                                phase = "recording_insertion"
+                    translation, rotation = actual_world_tool0
+                    with self._active_lock:
+                        active_motion_kind = str(self._active_motion_kind or "")
+                        active_motion_status = dict(self._active_goal_status or {})
+                    sample = {
+                        "sample_index": sample_count,
+                        "recorded_at": time.time(),
+                        "elapsed_sec": elapsed_sec,
+                        "rtde_timestamp_sec": float(feedback_timestamp),
+                        "phase": phase,
+                        "actual_q": [float(value) for value in actual_q],
+                        "actual_base_tcp_pose": _rtde_pose_from_transform(actual_base_tcp),
+                        "world_base_pose": {
+                            "x": float(world_base[0][0]),
+                            "y": float(world_base[0][1]),
+                            "z": float(world_base[0][2]),
+                            "qx": float(world_base[1][0]),
+                            "qy": float(world_base[1][1]),
+                            "qz": float(world_base[1][2]),
+                            "qw": float(world_base[1][3]),
+                        },
+                        "tool0_tcp_pose": {
+                            "x": float(tool0_tcp[0][0]),
+                            "y": float(tool0_tcp[0][1]),
+                            "z": float(tool0_tcp[0][2]),
+                            "qx": float(tool0_tcp[1][0]),
+                            "qy": float(tool0_tcp[1][1]),
+                            "qz": float(tool0_tcp[1][2]),
+                            "qw": float(tool0_tcp[1][3]),
+                        },
+                        "world_tool0_pose": {
+                            "x": float(translation[0]),
+                            "y": float(translation[1]),
+                            "z": float(translation[2]),
+                            "qx": float(rotation[0]),
+                            "qy": float(rotation[1]),
+                            "qz": float(rotation[2]),
+                            "qw": float(rotation[3]),
+                        },
+                        "actual_tcp_force": [float(value) for value in actual_tcp_force],
+                        "actual_tcp_speed": [float(value) for value in actual_tcp_speed],
+                        "force_bias_valid": force_bias is not None,
+                        "force_bias": list(force_bias) if force_bias is not None else None,
+                        "active_motion_kind": active_motion_kind,
+                        "active_motion_message": str(
+                            active_motion_status.get("message") or ""
+                        ),
+                        "active_motion_status": active_motion_status,
+                    }
+                    trace_file.write(
+                        json.dumps(sample, allow_nan=False, separators=(",", ":"))
+                        + "\n"
+                    )
+                    sample_count += 1
+                    if sample_count % 25 == 0:
+                        trace_file.flush()
+                    if now_monotonic - last_publish_at >= 0.10:
+                        self._publish_insertion_demonstration_feedback(
+                            goal_handle,
+                            phase=phase,
+                            sample_count=sample_count,
+                            elapsed_sec=elapsed_sec,
+                            actual_world_tool0=actual_world_tool0,
+                            actual_tcp_force=actual_tcp_force,
+                            actual_tcp_speed=actual_tcp_speed,
+                            force_bias=force_bias,
+                        )
+                        last_publish_at = now_monotonic
+                    with self._insertion_demonstration_lock:
+                        self._active_insertion_demonstration_status = {
+                            "insertion_demonstration_active": True,
+                            "insertion_demonstration_recording_id": recording_id,
+                            "insertion_demonstration_phase": phase,
+                            "insertion_demonstration_sample_count": sample_count,
+                        }
+                    time.sleep(max(1.0 / UR5E_RTDE_FREQUENCY_HZ, 0.002))
+                trace_file.flush()
+                os.fsync(trace_file.fileno())
+            if not goal_handle.is_cancel_requested:
+                trace_error = (
+                    "insertion demonstration exceeded its protected maximum duration"
+                )
+            trace_tmp.replace(trace_path)
+            trace_sha256 = hashlib.sha256(trace_path.read_bytes()).hexdigest()
+            if trace_error:
+                goal_handle.abort()
+                return terminal(
+                    -3,
+                    trace_error,
+                    state_uncertain=True,
+                    trace_path=str(trace_path),
+                    trace_sha256=trace_sha256,
+                    sample_count=sample_count,
+                    force_bias=force_bias,
+                    baseline_force_span_n=baseline_force_span_n,
+                    baseline_torque_span_nm=baseline_torque_span_nm,
+                )
+            goal_handle.canceled()
+            return terminal(
+                0,
+                "insertion demonstration recording stopped",
+                trace_path=str(trace_path),
+                trace_sha256=trace_sha256,
+                sample_count=sample_count,
+                force_bias=force_bias,
+                baseline_force_span_n=baseline_force_span_n,
+                baseline_torque_span_nm=baseline_torque_span_nm,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            with suppress(OSError):
+                if trace_tmp.is_file():
+                    trace_tmp.replace(trace_path)
+            trace_sha256 = ""
+            if trace_path.is_file():
+                with suppress(OSError):
+                    trace_sha256 = hashlib.sha256(trace_path.read_bytes()).hexdigest()
+            goal_handle.abort()
+            return terminal(
+                -3,
+                f"insertion demonstration recording failed: {type(exc).__name__}: {exc}",
+                state_uncertain=False,
+                trace_path=str(trace_path) if trace_path.is_file() else "",
+                trace_sha256=trace_sha256,
+                sample_count=sample_count,
+                force_bias=force_bias,
+                baseline_force_span_n=baseline_force_span_n,
+                baseline_torque_span_nm=baseline_torque_span_nm,
+            )
+        finally:
+            with self._insertion_demonstration_lock:
+                if self._active_insertion_demonstration_goal is goal_handle:
+                    self._active_insertion_demonstration_goal = None
+                    self._active_insertion_demonstration_status = {}
+
+    def _publish_insert_feedback(  # noqa: PLR0913
+        self,
+        goal_handle: Any,
+        *,
+        phase: str,
+        actual_world_tool0: RigidTransform,
+        insertion_depth_m: float,
+        depth_error_m: float,
+        lateral_offset_m: float,
+        search_radius_m: float,
+        axial_force_n: float,
+        raw_axial_force_n: float = 0.0,
+        lateral_force_n: float,
+        torque_nm: float,
+        contact_detected: bool,
+        engagement_detected: bool,
+        seated_detected: bool,
+        force_bias_valid: bool,
+        force_bias: list[float],
+        actual_tcp_force: list[float],
+        actual_tcp_speed: list[float],
+        trial_id: str = "",
+        filtered_axial_force_n: float = 0.0,
+        filtered_lateral_force_n: float = 0.0,
+        filtered_torque_nm: float = 0.0,
+        tool_flange_torque_nm: float = 0.0,
+        filtered_tool_flange_torque_nm: float = 0.0,
+        current_force_depth_fraction: float = 0.0,
+        force_depth_axial_upper_n: float = 0.0,
+        force_depth_lateral_upper_n: float = 0.0,
+        force_depth_torque_upper_nm: float = 0.0,
+        axial_profile_exceeded: bool = False,
+        axial_progress_stalled: bool = False,
+        tared_tcp_force: list[float] | None = None,
+        soft_overload_detected: bool = False,
+        soft_overload_reason: str = "",
+        soft_overload_duration_sec: float = 0.0,
+        relief_cycle_count: int = 0,
+        relief_elapsed_sec: float = 0.0,
+        relief_retreat_m: float = 0.0,
+        relief_load_cleared: bool = False,
+        relief_backoff_m: float = 0.0,
+        relief_planned_backoff_m: float = 0.0,
+        total_relief_backoff_m: float = 0.0,
+        relief_resume_phase: str = "",
+        commanded_axial_force_n: float = 0.0,
+        commanded_lateral_force_x_n: float = 0.0,
+        commanded_lateral_force_y_n: float = 0.0,
+        hard_limit_detected: bool = False,
+        hard_limit_reason: str = "",
+        limit_trigger: str = "",
+        limit_trigger_value: float = 0.0,
+        limit_trigger_threshold: float = 0.0,
+        limit_trigger_actual_tcp_force: list[float] | None = None,
+        limit_trigger_tared_tcp_force: list[float] | None = None,
+        tactile_center_world_tool0: RigidTransform | None = None,
+        tactile_center_depth_m: float = 0.0,
+        tactile_center_confidence: float = 0.0,
+        tactile_center_evidence_sha256: str = "",
+        scheduled_search_radius_m: float = 0.0,
+        explored_search_radius_m: float = 0.0,
+        explored_search_angle_rad: float = 0.0,
+        disengagement_cycle_count: int = 0,
+        last_disengagement_reason: str = "",
+        disengagement_withdrawal_m: float = 0.0,
+        disengagement_contact_cleared: bool = False,
+        disengagement_force_mode_stop_acknowledged: bool = False,
+        recenter_position_error_m: float = math.inf,
+        recenter_command_acknowledged: bool = False,
+        disengagement_stationary_confirmed: bool = False,
+        retare_baseline_consistent: bool = False,
+    ) -> None:
+        if MoveUR5eInsert is None:
+            return
+        feedback = MoveUR5eInsert.Feedback()
+        feedback.phase = str(phase)
+        feedback.trial_id = str(trial_id or "")
+        feedback.actual_tool0_pose = self._pose_stamped_from_transform(actual_world_tool0)
+        feedback.insertion_depth_m = float(insertion_depth_m)
+        feedback.depth_error_m = float(depth_error_m)
+        feedback.lateral_offset_m = float(lateral_offset_m)
+        feedback.search_radius_m = float(search_radius_m)
+        feedback.axial_force_n = float(axial_force_n)
+        feedback.raw_axial_force_n = float(raw_axial_force_n)
+        feedback.lateral_force_n = float(lateral_force_n)
+        feedback.torque_nm = float(torque_nm)
+        feedback.filtered_axial_force_n = float(filtered_axial_force_n)
+        feedback.filtered_lateral_force_n = float(filtered_lateral_force_n)
+        feedback.filtered_torque_nm = float(filtered_torque_nm)
+        feedback.tool_flange_torque_nm = float(tool_flange_torque_nm)
+        feedback.filtered_tool_flange_torque_nm = float(
+            filtered_tool_flange_torque_nm
+        )
+        feedback.current_force_depth_fraction = float(
+            current_force_depth_fraction
+        )
+        feedback.force_depth_axial_upper_n = float(force_depth_axial_upper_n)
+        feedback.force_depth_lateral_upper_n = float(
+            force_depth_lateral_upper_n
+        )
+        feedback.force_depth_torque_upper_nm = float(
+            force_depth_torque_upper_nm
+        )
+        feedback.axial_profile_exceeded = bool(axial_profile_exceeded)
+        feedback.axial_progress_stalled = bool(axial_progress_stalled)
+        feedback.contact_detected = bool(contact_detected)
+        feedback.engagement_detected = bool(engagement_detected)
+        feedback.seated_detected = bool(seated_detected)
+        feedback.force_bias_valid = bool(force_bias_valid)
+        feedback.force_bias = [float(value) for value in force_bias]
+        feedback.actual_tcp_force = [float(value) for value in actual_tcp_force]
+        feedback.tared_tcp_force = [
+            float(value) for value in (tared_tcp_force or [0.0] * 6)
+        ]
+        feedback.actual_tcp_speed = [float(value) for value in actual_tcp_speed]
+        feedback.soft_overload_detected = bool(soft_overload_detected)
+        feedback.soft_overload_reason = str(soft_overload_reason or "")
+        feedback.soft_overload_duration_sec = float(soft_overload_duration_sec)
+        feedback.relief_cycle_count = int(relief_cycle_count)
+        feedback.relief_elapsed_sec = float(relief_elapsed_sec)
+        feedback.relief_retreat_m = float(relief_retreat_m)
+        feedback.relief_load_cleared = bool(relief_load_cleared)
+        feedback.relief_backoff_m = float(relief_backoff_m)
+        feedback.relief_planned_backoff_m = float(relief_planned_backoff_m)
+        feedback.total_relief_backoff_m = float(total_relief_backoff_m)
+        feedback.relief_resume_phase = str(relief_resume_phase or "")
+        feedback.commanded_axial_force_n = float(commanded_axial_force_n)
+        feedback.commanded_lateral_force_x_n = float(commanded_lateral_force_x_n)
+        feedback.commanded_lateral_force_y_n = float(commanded_lateral_force_y_n)
+        feedback.tactile_center_valid = tactile_center_world_tool0 is not None
+        feedback.tactile_center_tool0_pose = (
+            self._pose_stamped_from_transform(tactile_center_world_tool0)
+            if tactile_center_world_tool0 is not None
+            else PoseStamped()
+        )
+        feedback.tactile_center_depth_m = float(tactile_center_depth_m)
+        feedback.tactile_center_confidence = float(tactile_center_confidence)
+        feedback.tactile_center_evidence_sha256 = str(
+            tactile_center_evidence_sha256 or ""
+        )
+        feedback.scheduled_search_radius_m = float(scheduled_search_radius_m)
+        feedback.explored_search_radius_m = float(explored_search_radius_m)
+        feedback.explored_search_angle_rad = float(explored_search_angle_rad)
+        feedback.disengagement_cycle_count = int(disengagement_cycle_count)
+        feedback.last_disengagement_reason = str(last_disengagement_reason or "")
+        feedback.disengagement_withdrawal_m = float(disengagement_withdrawal_m)
+        feedback.disengagement_contact_cleared = bool(
+            disengagement_contact_cleared
+        )
+        feedback.disengagement_force_mode_stop_acknowledged = bool(
+            disengagement_force_mode_stop_acknowledged
+        )
+        feedback.recenter_position_error_m = float(recenter_position_error_m)
+        feedback.recenter_command_acknowledged = bool(
+            recenter_command_acknowledged
+        )
+        feedback.disengagement_stationary_confirmed = bool(
+            disengagement_stationary_confirmed
+        )
+        feedback.retare_baseline_consistent = bool(retare_baseline_consistent)
+        feedback.hard_limit_detected = bool(hard_limit_detected)
+        feedback.hard_limit_reason = str(hard_limit_reason or "")
+        feedback.limit_trigger = str(limit_trigger or "")
+        feedback.limit_trigger_value = float(limit_trigger_value)
+        feedback.limit_trigger_threshold = float(limit_trigger_threshold)
+        feedback.limit_trigger_actual_tcp_force = [
+            float(value)
+            for value in (limit_trigger_actual_tcp_force or [0.0] * 6)
+        ]
+        feedback.limit_trigger_tared_tcp_force = [
+            float(value)
+            for value in (limit_trigger_tared_tcp_force or [0.0] * 6)
+        ]
+        goal_handle.publish_feedback(feedback)
+
+    def _start_insert_force_mode(
+        self,
+        *,
+        actual_base_tcp: RigidTransform,
+        insertion_axis_base: Vector3,
+        insertion_force_n: float,
+        contact_speed_m_s: float,
+        spiral_speed_m_s: float,
+        tilt_tolerance_rad: float,
+    ) -> None:
+        """Start translationally compliant insertion from a stationary TCP."""
+        force_mode = getattr(self.control, "forceMode", None)
+        if not callable(force_mode):
+            raise RuntimeError("RTDE control object has no forceMode method")
+        x_axis, y_axis, z_axis = _insertion_basis(insertion_axis_base)
+        task_frame: RigidTransform = (
+            actual_base_tcp[0],
+            _quaternion_from_basis(x_axis, y_axis, z_axis),
+        )
+        limits = [
+            spiral_speed_m_s,
+            spiral_speed_m_s,
+            contact_speed_m_s,
+            tilt_tolerance_rad,
+            tilt_tolerance_rad,
+            tilt_tolerance_rad,
+        ]
+        self._insert_force_mode_command = (
+            _rtde_pose_from_transform(task_frame),
+            [0, 0, 1, 0, 0, 0],
+            [0.0, 0.0, insertion_force_n, 0.0, 0.0, 0.0],
+            2,
+            limits,
+        )
+        self._insert_force_mode_active = True
+        accepted = force_mode(*self._insert_force_mode_command)
+        if not bool(accepted):
+            raise RuntimeError("UR5e RTDE forceMode returned False")
+
+    def _refresh_insert_force_mode(
+        self,
+        *,
+        lateral_force_x_n: float = 0.0,
+        lateral_force_y_n: float = 0.0,
+        axial_force_n: float | None = None,
+        lateral_compliant: bool | None = None,
+    ) -> None:
+        """Refresh force mode with bounded lateral search forces in its task frame."""
+        command = self._insert_force_mode_command
+        force_mode = getattr(self.control, "forceMode", None)
+        if command is None or not callable(force_mode):
+            raise RuntimeError("UR5e RTDE insertion force mode is not active")
+        task_frame, selection, wrench, force_type, limits = command
+        refreshed_selection = list(selection)
+        if lateral_compliant is not None:
+            refreshed_selection[0] = int(lateral_compliant)
+            refreshed_selection[1] = int(lateral_compliant)
+        refreshed_wrench = list(wrench)
+        refreshed_wrench[0] = float(lateral_force_x_n)
+        refreshed_wrench[1] = float(lateral_force_y_n)
+        if axial_force_n is not None:
+            refreshed_wrench[2] = float(axial_force_n)
+        refreshed_command = (
+            task_frame,
+            refreshed_selection,
+            refreshed_wrench,
+            force_type,
+            limits,
+        )
+        self._insert_force_mode_command = refreshed_command
+        if not bool(force_mode(*refreshed_command)):
+            raise RuntimeError("UR5e RTDE forceMode refresh returned False")
+
+    def _execute_insert_servo_pose(
+        self,
+        target_base_tcp: RigidTransform,
+        *,
+        speed_m_s: float,
+        acceleration_m_s2: float,
+        cycle_sec: float,
+    ) -> None:
+        servo_l = getattr(self.control, "servoL", None)
+        if not callable(servo_l):
+            raise RuntimeError("RTDE control object has no servoL method")
+        self._insert_servo_active = True
+        accepted = servo_l(
+            _rtde_pose_from_transform(target_base_tcp),
+            speed_m_s,
+            acceleration_m_s2,
+            cycle_sec,
+            0.05,
+            300.0,
+        )
+        if not bool(accepted):
+            raise RuntimeError("UR5e RTDE servoL returned False")
+
+    def _stop_insert_servo(self) -> bool:
+        if not bool(getattr(self, "_insert_servo_active", False)):
+            return True
+        servo_stop = getattr(self.control, "servoStop", None)
+        if not callable(servo_stop):
+            return False
+        try:
+            stopped = bool(servo_stop())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+        if stopped:
+            self._insert_servo_active = False
+        return stopped
+
+    def _execute_insert(  # noqa: C901, PLR0912, PLR0915 - guarded insertion lifecycle.
+        self,
+        goal_handle: Any,
+    ) -> Any:
+        """Execute one force-guarded insertion with bounded pre-engagement relief."""
+        with self._active_lock:
+            if bool(getattr(self, "_shutdown_requested", False)):
+                goal_handle.abort()
+                return self._insert_result(-1, "UR5e RTDE server is stopping")
+            if bool(getattr(self, "_rtde_reset_required", False)):
+                reason = str(getattr(self, "_rtde_reset_reason", "")) or (
+                    "UR5e RTDE reset required"
+                )
+                goal_handle.abort()
+                return self._insert_result(-1, reason, state_uncertain=True)
+            if self._latched_terminal_status is not None:
+                reason = str(
+                    self._latched_terminal_status.get("blocked_reason")
+                    or self._latched_terminal_status.get("message")
+                    or "UR5e RTDE server requires repair"
+                )
+                goal_handle.abort()
+                return self._insert_result(-1, reason, state_uncertain=True)
+            cap_error = _insert_hard_cap_error()
+            if cap_error:
+                goal_handle.abort()
+                return self._insert_result(-1, cap_error)
+            if self._active_goal is not None:
+                goal_handle.abort()
+                return self._insert_result(-1, "UR5e RTDE motion already executing")
+            self._active_goal = goal_handle
+            self._active_goal_status = None
+            self._active_motion_kind = "insert"
+            self._insert_motion_started = False
+            self._insert_force_mode_stop_acknowledged = False
+            self._insert_servo_stop_acknowledged = False
+            self._insert_stop_l_command_completed = False
+
+        status = _status_base()
+        status.update(
+            state="checking",
+            message="checking guarded UR5e RTDE insertion",
+            motion_kind="insert",
+            insert_phase="checking",
+        )
+        self._write_active_goal_status(goal_handle, status)
+        motion_attempted = False
+        expected_start_world_tool0: RigidTransform | None = None
+        target_world_tool0: RigidTransform | None = None
+        world_base: RigidTransform | None = None
+        tool0_tcp: RigidTransform | None = None
+        insertion_axis_world: Vector3 | None = None
+        insertion_axis_base: Vector3 | None = None
+        force_bias = [0.0] * 6
+        force_bias_valid = False
+        max_axial_force_n = math.inf
+        max_lateral_force_n = math.inf
+        max_torque_nm = math.inf
+        max_travel_m = math.inf
+        final_world_tool0: RigidTransform | None = None
+        final_insertion_depth_m = math.inf
+        final_depth_error_m = math.inf
+        final_lateral_offset_m = math.inf
+        final_tilt_error_rad = math.inf
+        final_search_radius_m = 0.0
+        peak_axial_force_n = 0.0
+        peak_lateral_force_n = 0.0
+        peak_torque_nm = 0.0
+        peak_filtered_axial_force_n = 0.0
+        peak_filtered_lateral_force_n = 0.0
+        peak_filtered_torque_nm = 0.0
+        peak_tool_flange_torque_nm = 0.0
+        contact_detected = False
+        engagement_detected = False
+        seated_detected = False
+        trial_id = ""
+        hard_caps_sha256 = ""
+        selected_hard_caps: dict[str, float | int | None] = {}
+        advanced_recovery_enabled = False
+        force_depth_fraction: list[float] = []
+        force_depth_axial_upper_n: list[float] = []
+        force_depth_lateral_upper_n: list[float] = []
+        force_depth_torque_upper_nm: list[float] = []
+        current_force_depth_fraction = 0.0
+        current_force_depth_axial_upper_n = 0.0
+        current_force_depth_lateral_upper_n = 0.0
+        current_force_depth_torque_upper_nm = 0.0
+        axial_profile_exceeded = False
+        lateral_profile_exceeded = False
+        torque_profile_exceeded = False
+        guarded_axial_force_ceiling_n = 0.0
+        guarded_lateral_force_ceiling_n = 0.0
+        guarded_torque_ceiling_nm = 0.0
+        guarded_axial_force_exceeded = False
+        guarded_lateral_force_exceeded = False
+        guarded_torque_exceeded = False
+        axial_progress_stalled = False
+        final_phase = "checking"
+        soft_overload_detected = False
+        soft_overload_recovered = False
+        relief_exhausted = False
+        relief_cycle_count = 0
+        last_soft_overload_reason = ""
+        hard_limit_detected = False
+        hard_limit_reason = ""
+        limit_trigger = ""
+        limit_trigger_value = 0.0
+        limit_trigger_threshold = 0.0
+        limit_trigger_actual_tcp_force = [0.0] * 6
+        limit_trigger_tared_tcp_force = [0.0] * 6
+        last_sample: dict[str, Any] = {}
+        filtered_axial_force_n = 0.0
+        filtered_lateral_force_n = 0.0
+        filtered_torque_nm = 0.0
+        filtered_tool_flange_torque_nm = 0.0
+        soft_overload_duration_sec = 0.0
+        relief_elapsed_sec = 0.0
+        relief_retreat_m = 0.0
+        relief_resume_phase = ""
+        commanded_axial_force_n = 0.0
+        commanded_lateral_force_x_n = 0.0
+        commanded_lateral_force_y_n = 0.0
+        relief_load_cleared = False
+        relief_backoff_m = 0.0
+        relief_planned_backoff_m = 0.0
+        total_relief_backoff_m = 0.0
+        force_mode_stop_acknowledged = False
+        servo_stop_acknowledged = False
+        stop_l_command_completed = False
+        stationary_confirmed = False
+        relief_force_mode_stop_acknowledged = False
+        relief_stop_l_command_completed = False
+        relief_stationary_confirmed = False
+        relief_force_mode_restart_acknowledged = False
+        server_trace_id = ""
+        server_trace_path = ""
+        server_trace_sha256 = ""
+        server_trace_status = "not_started"
+        server_trace_complete = False
+        server_trace_sample_count = 0
+        server_trace_tmp_path: Path | None = None
+        server_trace_file: Any | None = None
+        last_insert_feedback_timestamp: float | None = None
+        tactile_center_world_tool0: RigidTransform | None = None
+        tactile_center_depth_m = 0.0
+        tactile_center_confidence = 0.0
+        tactile_center_evidence_sha256 = ""
+        scheduled_search_radius_m = 0.0
+        explored_search_radius_m = 0.0
+        explored_search_angle_rad = 0.0
+        disengagement_cycle_count = 0
+        last_disengagement_reason = ""
+        disengagement_withdrawal_m = 0.0
+        disengagement_contact_cleared = False
+        disengagement_force_mode_stop_acknowledged = False
+        recenter_position_error_m = math.inf
+        recenter_command_acknowledged = False
+        disengagement_stationary_confirmed = False
+        retare_baseline_consistent = False
+        search_peck_state = ""
+        search_peck_cycle_count = 0
+        search_peck_retreat_m = 0.0
+
+        feedback_advance_grace_sec = min(
+            float(UR5E_RTDE_FEEDBACK_RECONNECT_AFTER_SEC),
+            max(0.05, 5.0 / float(UR5E_RTDE_FREQUENCY_HZ)),
+        )
+        feedback_advance_poll_sec = max(
+            0.002,
+            min(1.0 / float(UR5E_RTDE_FREQUENCY_HZ), 0.01),
+        )
+
+        def require_fresh_insert_feedback() -> float:
+            nonlocal last_insert_feedback_timestamp
+            receive_timestamp = self._read_feedback_timestamp()
+            if receive_timestamp is None:
+                raise RuntimeError("UR5e insertion RTDE timestamp is unavailable")
+            if last_insert_feedback_timestamp is None:
+                last_insert_feedback_timestamp = receive_timestamp
+                return receive_timestamp
+            if receive_timestamp < last_insert_feedback_timestamp:
+                raise RuntimeError(
+                    "UR5e insertion RTDE feedback timestamp moved backwards"
+                )
+            deadline = time.monotonic() + feedback_advance_grace_sec
+            while receive_timestamp == last_insert_feedback_timestamp:
+                if goal_handle.is_cancel_requested:
+                    raise _InsertCanceled(
+                        "canceled while waiting for advancing UR5e RTDE feedback"
+                    )
+                if not rclpy.ok():
+                    raise RuntimeError(
+                        "ROS shutdown interrupted UR5e insertion feedback"
+                    )
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "UR5e insertion RTDE feedback timestamp stopped advancing "
+                        f"for {feedback_advance_grace_sec:.3f} s"
+                    )
+                time.sleep(feedback_advance_poll_sec)
+                receive_timestamp = self._read_feedback_timestamp()
+                if receive_timestamp is None:
+                    raise RuntimeError(
+                        "UR5e insertion RTDE timestamp is unavailable"
+                    )
+                if receive_timestamp < last_insert_feedback_timestamp:
+                    raise RuntimeError(
+                        "UR5e insertion RTDE feedback timestamp moved backwards"
+                    )
+            last_insert_feedback_timestamp = receive_timestamp
+            return receive_timestamp
+
+        def result(
+            error_code: int,
+            error_string: str,
+            state_uncertain: bool,
+            *,
+            motion_settled: bool = True,
+        ) -> Any:
+            return self._insert_result(
+                error_code,
+                error_string,
+                state_uncertain=state_uncertain,
+                motion_settled=motion_settled,
+                final_world_tool0=final_world_tool0,
+                final_insertion_depth_m=final_insertion_depth_m,
+                final_depth_error_m=final_depth_error_m,
+                final_lateral_offset_m=final_lateral_offset_m,
+                final_tilt_error_rad=final_tilt_error_rad,
+                final_search_radius_m=final_search_radius_m,
+                peak_axial_force_n=peak_axial_force_n,
+                peak_lateral_force_n=peak_lateral_force_n,
+                peak_torque_nm=peak_torque_nm,
+                peak_filtered_axial_force_n=peak_filtered_axial_force_n,
+                peak_filtered_lateral_force_n=peak_filtered_lateral_force_n,
+                peak_filtered_torque_nm=peak_filtered_torque_nm,
+                peak_tool_flange_torque_nm=peak_tool_flange_torque_nm,
+                contact_detected=contact_detected,
+                engagement_detected=engagement_detected,
+                seated_detected=seated_detected,
+                force_bias=force_bias if force_bias_valid else None,
+                trial_id=trial_id,
+                hard_caps_sha256=hard_caps_sha256,
+                final_phase=final_phase,
+                soft_overload_detected=soft_overload_detected,
+                soft_overload_recovered=soft_overload_recovered,
+                relief_exhausted=relief_exhausted,
+                relief_cycle_count=relief_cycle_count,
+                last_soft_overload_reason=last_soft_overload_reason,
+                relief_load_cleared=relief_load_cleared,
+                relief_backoff_m=relief_backoff_m,
+                relief_planned_backoff_m=relief_planned_backoff_m,
+                total_relief_backoff_m=total_relief_backoff_m,
+                relief_resume_phase=relief_resume_phase,
+                relief_force_mode_stop_acknowledged=(
+                    relief_force_mode_stop_acknowledged
+                ),
+                relief_stop_l_command_completed=relief_stop_l_command_completed,
+                relief_stationary_confirmed=relief_stationary_confirmed,
+                relief_force_mode_restart_acknowledged=(
+                    relief_force_mode_restart_acknowledged
+                ),
+                hard_limit_detected=hard_limit_detected,
+                hard_limit_reason=hard_limit_reason,
+                limit_trigger=limit_trigger,
+                limit_trigger_value=limit_trigger_value,
+                limit_trigger_threshold=limit_trigger_threshold,
+                limit_trigger_actual_tcp_force=limit_trigger_actual_tcp_force,
+                limit_trigger_tared_tcp_force=limit_trigger_tared_tcp_force,
+                force_mode_stop_acknowledged=force_mode_stop_acknowledged,
+                servo_stop_acknowledged=servo_stop_acknowledged,
+                stop_l_command_completed=stop_l_command_completed,
+                stationary_confirmed=stationary_confirmed,
+                server_trace_id=server_trace_id,
+                server_trace_path=server_trace_path,
+                server_trace_sha256=server_trace_sha256,
+                server_trace_status=server_trace_status,
+                server_trace_complete=server_trace_complete,
+                server_trace_sample_count=server_trace_sample_count,
+                tactile_center_world_tool0=tactile_center_world_tool0,
+                tactile_center_depth_m=tactile_center_depth_m,
+                tactile_center_confidence=tactile_center_confidence,
+                tactile_center_evidence_sha256=(
+                    tactile_center_evidence_sha256
+                ),
+                scheduled_search_radius_m=scheduled_search_radius_m,
+                explored_search_radius_m=explored_search_radius_m,
+                explored_search_angle_rad=explored_search_angle_rad,
+                disengagement_cycle_count=disengagement_cycle_count,
+                last_disengagement_reason=last_disengagement_reason,
+                disengagement_withdrawal_m=disengagement_withdrawal_m,
+                disengagement_contact_cleared=(
+                    disengagement_contact_cleared
+                ),
+                disengagement_force_mode_stop_acknowledged=(
+                    disengagement_force_mode_stop_acknowledged
+                ),
+                recenter_position_error_m=recenter_position_error_m,
+                recenter_command_acknowledged=recenter_command_acknowledged,
+                disengagement_stationary_confirmed=(
+                    disengagement_stationary_confirmed
+                ),
+                retare_baseline_consistent=retare_baseline_consistent,
+            )
+
+        def capture_final_pose() -> None:
+            nonlocal final_world_tool0
+            nonlocal final_insertion_depth_m
+            nonlocal final_depth_error_m
+            nonlocal final_lateral_offset_m
+            nonlocal final_tilt_error_rad
+            if (
+                world_base is None
+                or tool0_tcp is None
+                or expected_start_world_tool0 is None
+                or target_world_tool0 is None
+                or insertion_axis_world is None
+            ):
+                return
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                return
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            (
+                final_insertion_depth_m,
+                final_depth_error_m,
+                final_lateral_offset_m,
+                final_tilt_error_rad,
+            ) = _insertion_pose_metrics(
+                actual_world_tool0,
+                expected_start_world_tool0,
+                target_world_tool0,
+                insertion_axis_world,
+            )
+            final_world_tool0 = actual_world_tool0
+
+        def stop_and_confirm() -> bool:
+            nonlocal force_mode_stop_acknowledged
+            nonlocal servo_stop_acknowledged
+            nonlocal stop_l_command_completed
+            nonlocal stationary_confirmed
+            stop_commanded = self._stop_motion()
+            force_mode_stop_acknowledged = bool(
+                getattr(self, "_insert_force_mode_stop_acknowledged", False)
+            )
+            servo_stop_acknowledged = bool(
+                getattr(self, "_insert_servo_stop_acknowledged", False)
+            )
+            stop_l_command_completed = bool(
+                getattr(self, "_insert_stop_l_command_completed", False)
+            )
+            stationary_confirmed = self._confirm_stationary_after_stop(
+                linear_speed_limit_m_s=relief_stationary_speed_m_s,
+                angular_speed_limit_rad_s=(
+                    relief_stationary_angular_speed_rad_s
+                ),
+            )
+            capture_final_pose()
+            return bool(stop_commanded and stationary_confirmed)
+
+        def start_server_trace() -> None:
+            nonlocal server_trace_id
+            nonlocal server_trace_path
+            nonlocal server_trace_status
+            nonlocal server_trace_tmp_path
+            nonlocal server_trace_file
+            if trial_id:
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", trial_id) is None:
+                    raise ValueError(
+                        "trial_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+                    )
+                server_trace_id = trial_id
+            else:
+                server_trace_id = f"automatic-{int(time.time() * 1_000_000_000)}-{os.getpid()}"
+            root = INSERT_TRIAL_TRACE_ROOT.resolve()
+            trace_directory = (root / server_trace_id).resolve()
+            if trace_directory.parent != root:
+                raise ValueError("server insertion trace path escaped its protected root")
+            trace_directory.mkdir(parents=True, exist_ok=True)
+            path = trace_directory / "trace.jsonl"
+            if path.exists():
+                raise ValueError(
+                    f"server insertion trace already exists for trial_id {server_trace_id}"
+                )
+            server_trace_path = str(path)
+            server_trace_tmp_path = trace_directory / (
+                f".trace.jsonl.{os.getpid()}.{int(time.time() * 1_000_000_000)}.tmp"
+            )
+            server_trace_file = server_trace_tmp_path.open("x", encoding="utf-8")
+            server_trace_status = "recording"
+            append_server_trace(
+                "header",
+                {
+                    "part_name": part_name,
+                    "calibration_id": calibration_id,
+                    "profile_sha256": profile_sha256,
+                    "hard_caps_sha256": hard_caps_sha256,
+                },
+            )
+
+        def append_server_trace(kind: str, payload: dict[str, Any]) -> None:
+            nonlocal server_trace_sample_count
+            if server_trace_file is None:
+                return
+            record = {
+                "kind": str(kind),
+                "recorded_at": time.time(),
+                "trial_id": trial_id,
+                "server_trace_id": server_trace_id,
+                **payload,
+            }
+            server_trace_file.write(
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            server_trace_file.flush()
+            if kind == "sample":
+                server_trace_sample_count += 1
+
+        def finalize_server_trace(
+            *,
+            terminal_state: str,
+            error_code: int,
+            error_string: str,
+        ) -> None:
+            nonlocal server_trace_file
+            nonlocal server_trace_sha256
+            nonlocal server_trace_status
+            nonlocal server_trace_complete
+            if server_trace_file is None or server_trace_tmp_path is None:
+                return
+            try:
+                append_server_trace(
+                    "terminal",
+                    {
+                        "terminal_state": terminal_state,
+                        "error_code": int(error_code),
+                        "error_string": str(error_string or ""),
+                        **terminal_evidence(),
+                    },
+                )
+                os.fsync(server_trace_file.fileno())
+                server_trace_file.close()
+                server_trace_file = None
+                final_path = Path(server_trace_path)
+                server_trace_tmp_path.replace(final_path)
+                server_trace_sha256 = hashlib.sha256(final_path.read_bytes()).hexdigest()
+                server_trace_status = "complete"
+                server_trace_complete = True
+            except (OSError, TypeError, ValueError):
+                server_trace_status = "failed"
+                server_trace_complete = False
+                with suppress(OSError):
+                    if server_trace_file is not None:
+                        server_trace_file.close()
+                server_trace_file = None
+
+        def terminal_evidence() -> dict[str, Any]:
+            return {
+                "trial_id": trial_id,
+                "hard_caps_sha256": hard_caps_sha256,
+                "insert_phase": final_phase,
+                "insert_current_force_depth_fraction": (
+                    current_force_depth_fraction
+                ),
+                "insert_force_depth_axial_upper_n": (
+                    current_force_depth_axial_upper_n
+                ),
+                "insert_force_depth_lateral_upper_n": (
+                    current_force_depth_lateral_upper_n
+                ),
+                "insert_force_depth_torque_upper_nm": (
+                    current_force_depth_torque_upper_nm
+                ),
+                "insert_axial_profile_exceeded": axial_profile_exceeded,
+                "insert_lateral_profile_exceeded": lateral_profile_exceeded,
+                "insert_torque_profile_exceeded": torque_profile_exceeded,
+                "insert_axial_progress_stalled": axial_progress_stalled,
+                "insert_filtered_axial_force_n": filtered_axial_force_n,
+                "insert_filtered_lateral_force_n": filtered_lateral_force_n,
+                "insert_filtered_torque_nm": filtered_torque_nm,
+                "insert_filtered_tool_flange_torque_nm": (
+                    filtered_tool_flange_torque_nm
+                ),
+                "insert_soft_overload_detected": soft_overload_detected,
+                "insert_soft_overload_reason": last_soft_overload_reason,
+                "insert_soft_overload_duration_sec": soft_overload_duration_sec,
+                "insert_soft_overload_recovered": soft_overload_recovered,
+                "insert_relief_exhausted": relief_exhausted,
+                "insert_relief_cycle_count": relief_cycle_count,
+                "insert_relief_elapsed_sec": relief_elapsed_sec,
+                "insert_relief_retreat_m": relief_retreat_m,
+                "insert_relief_load_cleared": relief_load_cleared,
+                "insert_relief_backoff_m": relief_backoff_m,
+                "insert_relief_planned_backoff_m": relief_planned_backoff_m,
+                "insert_total_relief_backoff_m": total_relief_backoff_m,
+                "insert_relief_resume_phase": relief_resume_phase,
+                "insert_relief_force_mode_stop_acknowledged": (
+                    relief_force_mode_stop_acknowledged
+                ),
+                "insert_relief_stop_l_command_completed": (
+                    relief_stop_l_command_completed
+                ),
+                "insert_relief_stationary_confirmed": relief_stationary_confirmed,
+                "insert_relief_force_mode_restart_acknowledged": (
+                    relief_force_mode_restart_acknowledged
+                ),
+                "insert_commanded_axial_force_n": commanded_axial_force_n,
+                "insert_commanded_lateral_force_x_n": (
+                    commanded_lateral_force_x_n
+                ),
+                "insert_commanded_lateral_force_y_n": (
+                    commanded_lateral_force_y_n
+                ),
+                "insert_hard_limit_detected": hard_limit_detected,
+                "insert_hard_limit_reason": hard_limit_reason,
+                "insert_limit_trigger": limit_trigger,
+                "insert_limit_trigger_value": limit_trigger_value,
+                "insert_limit_trigger_threshold": limit_trigger_threshold,
+                "insert_limit_trigger_actual_tcp_force": list(
+                    limit_trigger_actual_tcp_force
+                ),
+                "insert_limit_trigger_tared_tcp_force": list(
+                    limit_trigger_tared_tcp_force
+                ),
+                "insert_force_mode_stop_acknowledged": (
+                    force_mode_stop_acknowledged
+                ),
+                "insert_servo_stop_acknowledged": servo_stop_acknowledged,
+                "insert_stop_l_command_completed": stop_l_command_completed,
+                "insert_stationary_confirmed": stationary_confirmed,
+                "peak_filtered_axial_force_n": peak_filtered_axial_force_n,
+                "peak_filtered_lateral_force_n": peak_filtered_lateral_force_n,
+                "peak_filtered_torque_nm": peak_filtered_torque_nm,
+                "peak_tool_flange_torque_nm": peak_tool_flange_torque_nm,
+                "server_trace_id": server_trace_id,
+                "server_trace_path": server_trace_path,
+                "server_trace_sha256": server_trace_sha256,
+                "server_trace_status": server_trace_status,
+                "server_trace_complete": server_trace_complete,
+                "server_trace_sample_count": server_trace_sample_count,
+                "insert_tactile_center_valid": (
+                    tactile_center_world_tool0 is not None
+                ),
+                "insert_tactile_center_tool0_pose": (
+                    _transform_status_payload(tactile_center_world_tool0)
+                ),
+                "insert_tactile_center_depth_m": tactile_center_depth_m,
+                "insert_tactile_center_confidence": tactile_center_confidence,
+                "insert_tactile_center_evidence_sha256": (
+                    tactile_center_evidence_sha256
+                ),
+                "insert_scheduled_search_radius_m": scheduled_search_radius_m,
+                "insert_explored_search_radius_m": explored_search_radius_m,
+                "insert_explored_search_angle_rad": explored_search_angle_rad,
+                "insert_disengagement_cycle_count": disengagement_cycle_count,
+                "insert_last_disengagement_reason": last_disengagement_reason,
+                "insert_disengagement_withdrawal_m": (
+                    disengagement_withdrawal_m
+                ),
+                "insert_disengagement_contact_cleared": (
+                    disengagement_contact_cleared
+                ),
+                "insert_disengagement_force_mode_stop_acknowledged": (
+                    disengagement_force_mode_stop_acknowledged
+                ),
+                "insert_recenter_position_error_m": recenter_position_error_m,
+                "insert_recenter_command_acknowledged": (
+                    recenter_command_acknowledged
+                ),
+                "insert_disengagement_stationary_confirmed": (
+                    disengagement_stationary_confirmed
+                ),
+                "insert_retare_baseline_consistent": (
+                    retare_baseline_consistent
+                ),
+            }
+
+        def publish_last_sample(phase: str) -> None:
+            if not last_sample:
+                return
+            self._publish_insert_feedback(
+                goal_handle,
+                phase=phase,
+                trial_id=trial_id,
+                actual_world_tool0=last_sample["actual_world_tool0"],
+                insertion_depth_m=float(last_sample["insertion_depth_m"]),
+                depth_error_m=float(last_sample["depth_error_m"]),
+                lateral_offset_m=float(last_sample["lateral_offset_m"]),
+                search_radius_m=final_search_radius_m,
+                axial_force_n=float(last_sample["axial_force_n"]),
+                raw_axial_force_n=float(last_sample["raw_axial_force_n"]),
+                lateral_force_n=float(last_sample["lateral_force_n"]),
+                torque_nm=float(last_sample["torque_nm"]),
+                filtered_axial_force_n=filtered_axial_force_n,
+                filtered_lateral_force_n=filtered_lateral_force_n,
+                filtered_torque_nm=filtered_torque_nm,
+                tool_flange_torque_nm=float(
+                    last_sample["tool_flange_torque_nm"]
+                ),
+                filtered_tool_flange_torque_nm=filtered_tool_flange_torque_nm,
+                current_force_depth_fraction=current_force_depth_fraction,
+                force_depth_axial_upper_n=current_force_depth_axial_upper_n,
+                force_depth_lateral_upper_n=current_force_depth_lateral_upper_n,
+                force_depth_torque_upper_nm=current_force_depth_torque_upper_nm,
+                axial_profile_exceeded=axial_profile_exceeded,
+                axial_progress_stalled=axial_progress_stalled,
+                contact_detected=contact_detected,
+                engagement_detected=engagement_detected,
+                seated_detected=seated_detected,
+                force_bias_valid=force_bias_valid,
+                force_bias=force_bias,
+                actual_tcp_force=last_sample["actual_tcp_force"],
+                tared_tcp_force=last_sample["tared_tcp_force"],
+                actual_tcp_speed=last_sample["actual_tcp_speed"],
+                soft_overload_detected=soft_overload_detected,
+                soft_overload_reason=last_soft_overload_reason,
+                soft_overload_duration_sec=soft_overload_duration_sec,
+                relief_cycle_count=relief_cycle_count,
+                relief_elapsed_sec=relief_elapsed_sec,
+                relief_retreat_m=relief_retreat_m,
+                relief_load_cleared=relief_load_cleared,
+                relief_backoff_m=relief_backoff_m,
+                relief_planned_backoff_m=relief_planned_backoff_m,
+                total_relief_backoff_m=total_relief_backoff_m,
+                relief_resume_phase=relief_resume_phase,
+                commanded_axial_force_n=commanded_axial_force_n,
+                commanded_lateral_force_x_n=commanded_lateral_force_x_n,
+                commanded_lateral_force_y_n=commanded_lateral_force_y_n,
+                hard_limit_detected=hard_limit_detected,
+                hard_limit_reason=hard_limit_reason,
+                limit_trigger=limit_trigger,
+                limit_trigger_value=limit_trigger_value,
+                limit_trigger_threshold=limit_trigger_threshold,
+                limit_trigger_actual_tcp_force=limit_trigger_actual_tcp_force,
+                limit_trigger_tared_tcp_force=limit_trigger_tared_tcp_force,
+                tactile_center_world_tool0=tactile_center_world_tool0,
+                tactile_center_depth_m=tactile_center_depth_m,
+                tactile_center_confidence=tactile_center_confidence,
+                tactile_center_evidence_sha256=(
+                    tactile_center_evidence_sha256
+                ),
+                scheduled_search_radius_m=scheduled_search_radius_m,
+                explored_search_radius_m=explored_search_radius_m,
+                explored_search_angle_rad=explored_search_angle_rad,
+                disengagement_cycle_count=disengagement_cycle_count,
+                last_disengagement_reason=last_disengagement_reason,
+                disengagement_withdrawal_m=disengagement_withdrawal_m,
+                disengagement_contact_cleared=(
+                    disengagement_contact_cleared
+                ),
+                disengagement_force_mode_stop_acknowledged=(
+                    disengagement_force_mode_stop_acknowledged
+                ),
+                recenter_position_error_m=recenter_position_error_m,
+                recenter_command_acknowledged=recenter_command_acknowledged,
+                disengagement_stationary_confirmed=(
+                    disengagement_stationary_confirmed
+                ),
+                retare_baseline_consistent=retare_baseline_consistent,
+            )
+
+        def raise_hard_limit(
+            trigger: str,
+            value: float,
+            threshold: float,
+            reason: str,
+            *,
+            phase: str,
+        ) -> None:
+            nonlocal hard_limit_detected
+            nonlocal hard_limit_reason
+            nonlocal limit_trigger
+            nonlocal limit_trigger_value
+            nonlocal limit_trigger_threshold
+            nonlocal limit_trigger_actual_tcp_force
+            nonlocal limit_trigger_tared_tcp_force
+            hard_limit_detected = True
+            hard_limit_reason = reason
+            limit_trigger = trigger
+            limit_trigger_value = float(value)
+            limit_trigger_threshold = float(threshold)
+            limit_trigger_actual_tcp_force = list(
+                last_sample.get("actual_tcp_force", [0.0] * 6)
+            )
+            limit_trigger_tared_tcp_force = list(
+                last_sample.get("tared_tcp_force", [0.0] * 6)
+            )
+            append_server_trace(
+                "hard_trigger",
+                {
+                    **last_sample,
+                    "hard_limit_detected": True,
+                    "hard_limit_reason": reason,
+                    "limit_trigger": trigger,
+                    "limit_trigger_value": float(value),
+                    "limit_trigger_threshold": float(threshold),
+                },
+            )
+            status.update(
+                insert_hard_limit_detected=True,
+                insert_hard_limit_reason=reason,
+                insert_limit_trigger=trigger,
+                insert_limit_trigger_value=float(value),
+                insert_limit_trigger_threshold=float(threshold),
+                insert_limit_trigger_actual_tcp_force=list(
+                    limit_trigger_actual_tcp_force
+                ),
+                insert_limit_trigger_tared_tcp_force=list(
+                    limit_trigger_tared_tcp_force
+                ),
+            )
+            self._write_active_goal_status(goal_handle, status)
+            publish_last_sample(phase)
+            raise _InsertForceLimit(reason)
+
+        def sample(phase: str) -> dict[str, Any]:  # noqa: C901, PLR0915
+            nonlocal final_world_tool0
+            nonlocal final_insertion_depth_m
+            nonlocal final_depth_error_m
+            nonlocal final_lateral_offset_m
+            nonlocal final_tilt_error_rad
+            nonlocal peak_axial_force_n
+            nonlocal peak_lateral_force_n
+            nonlocal peak_torque_nm
+            nonlocal peak_tool_flange_torque_nm
+            nonlocal last_sample
+            nonlocal current_force_depth_fraction
+            nonlocal current_force_depth_axial_upper_n
+            nonlocal current_force_depth_lateral_upper_n
+            nonlocal current_force_depth_torque_upper_nm
+            nonlocal axial_profile_exceeded
+            nonlocal lateral_profile_exceeded
+            nonlocal torque_profile_exceeded
+            nonlocal axial_progress_stalled
+            nonlocal progress_reference_depth_m
+            nonlocal progress_reference_at
+            if (
+                world_base is None
+                or tool0_tcp is None
+                or expected_start_world_tool0 is None
+                or target_world_tool0 is None
+                or insertion_axis_world is None
+                or insertion_axis_base is None
+            ):
+                raise RuntimeError("insertion feedback transforms are unavailable")
+            require_fresh_insert_feedback()
+            actual_base_tcp = self._read_actual_tcp_transform()
+            actual_tcp_force = self._read_actual_tcp_force()
+            actual_tcp_speed = self._read_actual_tcp_speed()
+            if actual_base_tcp is None:
+                raise RuntimeError("UR5e insertion pose is unavailable")
+            if actual_tcp_force is None:
+                raise RuntimeError("actual_TCP_force is unavailable during insertion")
+            if actual_tcp_speed is None:
+                raise RuntimeError("actual_TCP_speed is unavailable during insertion")
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            (
+                insertion_depth_m,
+                depth_error_m,
+                lateral_offset_m,
+                tilt_error_rad,
+            ) = _insertion_pose_metrics(
+                actual_world_tool0,
+                expected_start_world_tool0,
+                target_world_tool0,
+                insertion_axis_world,
+            )
+            actual_base_tool0 = _compose_transform(
+                actual_base_tcp,
+                _inverse_transform(tool0_tcp),
+            )
+            tool0_tcp_offset_base = _rotate_vector(
+                actual_base_tool0[1],
+                tool0_tcp[0],
+            )
+            (
+                raw_axial_force_n,
+                axial_force_n,
+                lateral_force_n,
+                torque_nm,
+                tool_flange_torque_nm,
+                tared_tcp_force,
+            ) = _insertion_force_metrics(
+                actual_tcp_force,
+                force_bias,
+                insertion_axis_base,
+                tool0_tcp_offset_base,
+            )
+            axial_tcp_speed_m_s = _vector_dot(
+                tuple(actual_tcp_speed[:3]),
+                insertion_axis_base,
+            )
+            peak_axial_force_n = max(peak_axial_force_n, raw_axial_force_n)
+            peak_lateral_force_n = max(peak_lateral_force_n, lateral_force_n)
+            peak_torque_nm = max(peak_torque_nm, torque_nm)
+            peak_tool_flange_torque_nm = max(
+                peak_tool_flange_torque_nm,
+                tool_flange_torque_nm,
+            )
+            final_world_tool0 = actual_world_tool0
+            final_insertion_depth_m = insertion_depth_m
+            final_depth_error_m = depth_error_m
+            final_lateral_offset_m = lateral_offset_m
+            final_tilt_error_rad = tilt_error_rad
+            travel_m, _unused_orientation_error = _pose_errors(
+                actual_world_tool0,
+                expected_start_world_tool0,
+            )
+            last_sample = {
+                "phase": phase,
+                "actual_world_tool0": actual_world_tool0,
+                "insertion_depth_m": insertion_depth_m,
+                "depth_error_m": depth_error_m,
+                "lateral_offset_m": lateral_offset_m,
+                "tilt_error_rad": tilt_error_rad,
+                "axial_force_n": axial_force_n,
+                "raw_axial_force_n": raw_axial_force_n,
+                "lateral_force_n": lateral_force_n,
+                "torque_nm": torque_nm,
+                "tool_flange_torque_nm": tool_flange_torque_nm,
+                "tared_tcp_force": list(tared_tcp_force),
+                "actual_tcp_force": list(actual_tcp_force),
+                "actual_tcp_speed": list(actual_tcp_speed),
+                "axial_tcp_speed_m_s": axial_tcp_speed_m_s,
+                "linear_speed_m_s": _vector_norm(tuple(actual_tcp_speed[:3])),
+                "angular_speed_rad_s": _vector_norm(tuple(actual_tcp_speed[3:6])),
+            }
+            trace_relief_retreat_m = relief_retreat_m
+            if (
+                phase in {"relieving", "backing_off", "resuming"}
+                and relief_started_at is not None
+                and not relief_backoff_committed
+            ):
+                trace_relief_retreat_m = max(
+                    trace_relief_retreat_m,
+                    relief_entry_depth_m - insertion_depth_m,
+                )
+            trace_relief_backoff_m = max(
+                relief_backoff_m,
+                trace_relief_retreat_m,
+            )
+            append_server_trace(
+                "sample",
+                {
+                    **last_sample,
+                    "filtered_axial_force_n": filtered_axial_force_n,
+                    "filtered_lateral_force_n": filtered_lateral_force_n,
+                    "filtered_torque_nm": filtered_torque_nm,
+                    "filtered_tool_flange_torque_nm": (
+                        filtered_tool_flange_torque_nm
+                    ),
+                    "current_force_depth_fraction": (
+                        current_force_depth_fraction
+                    ),
+                    "force_depth_axial_upper_n": (
+                        current_force_depth_axial_upper_n
+                    ),
+                    "force_depth_lateral_upper_n": (
+                        current_force_depth_lateral_upper_n
+                    ),
+                    "force_depth_torque_upper_nm": (
+                        current_force_depth_torque_upper_nm
+                    ),
+                    "axial_profile_exceeded": axial_profile_exceeded,
+                    "lateral_profile_exceeded": lateral_profile_exceeded,
+                    "torque_profile_exceeded": torque_profile_exceeded,
+                    "guarded_axial_force_ceiling_n": (
+                        guarded_axial_force_ceiling_n
+                    ),
+                    "guarded_lateral_force_ceiling_n": (
+                        guarded_lateral_force_ceiling_n
+                    ),
+                    "guarded_torque_ceiling_nm": guarded_torque_ceiling_nm,
+                    "guarded_axial_force_exceeded": (
+                        guarded_axial_force_exceeded
+                    ),
+                    "guarded_lateral_force_exceeded": (
+                        guarded_lateral_force_exceeded
+                    ),
+                    "guarded_torque_exceeded": guarded_torque_exceeded,
+                    "axial_progress_stalled": axial_progress_stalled,
+                    "force_bias_valid": force_bias_valid,
+                    "force_bias": list(force_bias),
+                    "contact_detected": contact_detected,
+                    "engagement_detected": engagement_detected,
+                    "seated_detected": seated_detected,
+                    "soft_overload_detected": soft_overload_detected,
+                    "soft_overload_reason": last_soft_overload_reason,
+                    "relief_cycle_count": relief_cycle_count,
+                    "relief_elapsed_sec": relief_elapsed_sec,
+                    "relief_retreat_m": trace_relief_retreat_m,
+                    "relief_backoff_m": trace_relief_backoff_m,
+                    "relief_planned_backoff_m": relief_planned_backoff_m,
+                    "total_relief_backoff_m": total_relief_backoff_m,
+                    "commanded_axial_force_n": commanded_axial_force_n,
+                    "commanded_lateral_force_x_n": commanded_lateral_force_x_n,
+                    "commanded_lateral_force_y_n": commanded_lateral_force_y_n,
+                    "search_peck_state": search_peck_state,
+                    "search_peck_cycle_count": search_peck_cycle_count,
+                    "search_peck_retreat_m": search_peck_retreat_m,
+                },
+            )
+
+            hard_axial_force_n = float(
+                selected_hard_caps.get("insert_max_axial_force_n") or math.nan
+            )
+            hard_lateral_force_n = float(
+                selected_hard_caps.get("insert_max_lateral_force_n") or math.nan
+            )
+            hard_torque_nm = float(
+                selected_hard_caps.get("insert_max_torque_nm") or math.nan
+            )
+            hard_tool_flange_torque_nm = float(
+                selected_hard_caps.get("insert_max_tool_flange_torque_nm")
+                or math.nan
+            )
+            workspace_error = _workspace_error(actual_world_tool0)
+            if workspace_error:
+                raise_hard_limit(
+                    "workspace_pose",
+                    1.0,
+                    0.0,
+                    f"actual insertion pose left protected workspace: {workspace_error}",
+                    phase=phase,
+                )
+            if raw_axial_force_n > hard_axial_force_n:
+                raise_hard_limit(
+                    "axial_force_n",
+                    raw_axial_force_n,
+                    hard_axial_force_n,
+                    f"absolute axial force {raw_axial_force_n:.3f} N exceeded hard ceiling "
+                    f"{hard_axial_force_n:.3f} N",
+                    phase=phase,
+                )
+            if lateral_force_n > hard_lateral_force_n:
+                raise_hard_limit(
+                    "lateral_force_n",
+                    lateral_force_n,
+                    hard_lateral_force_n,
+                    f"lateral force {lateral_force_n:.3f} N exceeded hard ceiling "
+                    f"{hard_lateral_force_n:.3f} N",
+                    phase=phase,
+                )
+            if torque_nm > hard_torque_nm:
+                raise_hard_limit(
+                    "active_tcp_torque_nm",
+                    torque_nm,
+                    hard_torque_nm,
+                    f"active-TCP torque {torque_nm:.3f} Nm exceeded hard ceiling "
+                    f"{hard_torque_nm:.3f} Nm",
+                    phase=phase,
+                )
+            if tool_flange_torque_nm > hard_tool_flange_torque_nm:
+                raise_hard_limit(
+                    "tool_flange_torque_nm",
+                    tool_flange_torque_nm,
+                    hard_tool_flange_torque_nm,
+                    f"tool-flange torque {tool_flange_torque_nm:.3f} Nm exceeded hard "
+                    f"ceiling {hard_tool_flange_torque_nm:.3f} Nm",
+                    phase=phase,
+                )
+            if travel_m > max_travel_m:
+                raise_hard_limit(
+                    "insertion_travel_m",
+                    travel_m,
+                    max_travel_m,
+                    f"insertion travel {travel_m:.6f} m exceeded {max_travel_m:.6f} m",
+                    phase=phase,
+                )
+            if insertion_depth_m < -start_position_tolerance_m:
+                raise_hard_limit(
+                    "reverse_insertion_travel_m",
+                    -insertion_depth_m,
+                    start_position_tolerance_m,
+                    "insertion moved opposite insertion_axis_world by "
+                    f"{-insertion_depth_m:.6f} m, exceeding the accepted start "
+                    f"position tolerance {start_position_tolerance_m:.6f} m",
+                    phase=phase,
+                )
+            if insertion_depth_m > target_depth_m + seated_depth_tolerance_m:
+                raise_hard_limit(
+                    "insertion_depth_m",
+                    insertion_depth_m,
+                    target_depth_m + seated_depth_tolerance_m,
+                    f"insertion depth {insertion_depth_m:.6f} m exceeded target depth "
+                    f"{target_depth_m:.6f} m plus seated tolerance",
+                    phase=phase,
+                )
+            protected_spiral_radius_m = (
+                float(UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M or math.nan)
+                if spiral_radius_m > 0.0
+                else 0.0
+            )
+            mg_recovery_phase = phase in {
+                "relieving",
+                "backing_off",
+                "resuming",
+                "cocked",
+                "disengaging",
+                "recentering",
+                "retaring",
+                "retrying",
+            }
+            lateral_travel_limit_m = (
+                max_contact_search_radius_m
+                + (start_position_tolerance_m if mg_recovery_phase else 0.0)
+                if advanced_recovery_enabled
+                else protected_spiral_radius_m + start_position_tolerance_m
+            )
+            if lateral_offset_m > lateral_travel_limit_m:
+                raise_hard_limit(
+                    "lateral_offset_m",
+                    lateral_offset_m,
+                    lateral_travel_limit_m,
+                    f"lateral insertion offset {lateral_offset_m:.6f} m exceeded "
+                    f"{lateral_travel_limit_m:.6f} m",
+                    phase=phase,
+                )
+            if tilt_error_rad > tilt_tolerance_rad:
+                raise_hard_limit(
+                    "tilt_error_rad",
+                    tilt_error_rad,
+                    tilt_tolerance_rad,
+                    f"insertion tilt {tilt_error_rad:.6f} rad exceeded "
+                    f"{tilt_tolerance_rad:.6f} rad",
+                    phase=phase,
+                )
+            status.update(
+                state="executing",
+                message=f"executing UR5e RTDE insertion: {phase}",
+                blocked_reason="",
+                trial_id=trial_id,
+                insert_phase=phase,
+                insert_insertion_depth_m=insertion_depth_m,
+                insert_depth_error_m=depth_error_m,
+                insert_lateral_offset_m=lateral_offset_m,
+                insert_search_radius_m=final_search_radius_m,
+                insert_search_peck_state=search_peck_state,
+                insert_search_peck_cycle_count=search_peck_cycle_count,
+                insert_search_peck_retreat_m=search_peck_retreat_m,
+                insert_axial_force_n=axial_force_n,
+                insert_raw_axial_force_n=raw_axial_force_n,
+                insert_lateral_force_n=lateral_force_n,
+                insert_torque_nm=torque_nm,
+                insert_filtered_axial_force_n=filtered_axial_force_n,
+                insert_filtered_lateral_force_n=filtered_lateral_force_n,
+                insert_filtered_torque_nm=filtered_torque_nm,
+                insert_tool_flange_torque_nm=tool_flange_torque_nm,
+                insert_filtered_tool_flange_torque_nm=(
+                    filtered_tool_flange_torque_nm
+                ),
+                insert_current_force_depth_fraction=(
+                    current_force_depth_fraction
+                ),
+                insert_force_depth_axial_upper_n=(
+                    current_force_depth_axial_upper_n
+                ),
+                insert_force_depth_lateral_upper_n=(
+                    current_force_depth_lateral_upper_n
+                ),
+                insert_force_depth_torque_upper_nm=(
+                    current_force_depth_torque_upper_nm
+                ),
+                insert_axial_profile_exceeded=axial_profile_exceeded,
+                insert_lateral_profile_exceeded=lateral_profile_exceeded,
+                insert_torque_profile_exceeded=torque_profile_exceeded,
+                insert_axial_progress_stalled=axial_progress_stalled,
+                insert_tared_tcp_force=list(tared_tcp_force),
+                insert_contact_detected=contact_detected,
+                insert_engagement_detected=engagement_detected,
+                insert_seated_detected=seated_detected,
+                insert_tactile_center_valid=(
+                    tactile_center_world_tool0 is not None
+                ),
+                insert_tactile_center_tool0_pose=(
+                    _transform_status_payload(tactile_center_world_tool0)
+                ),
+                insert_tactile_center_depth_m=tactile_center_depth_m,
+                insert_tactile_center_confidence=tactile_center_confidence,
+                insert_tactile_center_evidence_sha256=(
+                    tactile_center_evidence_sha256
+                ),
+                insert_scheduled_search_radius_m=scheduled_search_radius_m,
+                insert_explored_search_radius_m=explored_search_radius_m,
+                insert_explored_search_angle_rad=explored_search_angle_rad,
+                insert_disengagement_cycle_count=disengagement_cycle_count,
+                insert_last_disengagement_reason=last_disengagement_reason,
+                insert_disengagement_withdrawal_m=disengagement_withdrawal_m,
+                insert_disengagement_contact_cleared=(
+                    disengagement_contact_cleared
+                ),
+                insert_disengagement_force_mode_stop_acknowledged=(
+                    disengagement_force_mode_stop_acknowledged
+                ),
+                insert_recenter_position_error_m=recenter_position_error_m,
+                insert_recenter_command_acknowledged=(
+                    recenter_command_acknowledged
+                ),
+                insert_disengagement_stationary_confirmed=(
+                    disengagement_stationary_confirmed
+                ),
+                insert_retare_baseline_consistent=retare_baseline_consistent,
+                insert_soft_overload_detected=soft_overload_detected,
+                insert_soft_overload_reason=last_soft_overload_reason,
+                insert_soft_overload_duration_sec=soft_overload_duration_sec,
+                insert_soft_overload_recovered=soft_overload_recovered,
+                insert_relief_exhausted=relief_exhausted,
+                insert_relief_cycle_count=relief_cycle_count,
+                insert_relief_elapsed_sec=relief_elapsed_sec,
+                insert_relief_retreat_m=relief_retreat_m,
+                insert_relief_load_cleared=relief_load_cleared,
+                insert_relief_backoff_m=relief_backoff_m,
+                insert_relief_planned_backoff_m=relief_planned_backoff_m,
+                insert_total_relief_backoff_m=total_relief_backoff_m,
+                insert_relief_resume_phase=relief_resume_phase,
+                insert_relief_force_mode_stop_acknowledged=(
+                    relief_force_mode_stop_acknowledged
+                ),
+                insert_relief_stop_l_command_completed=(
+                    relief_stop_l_command_completed
+                ),
+                insert_relief_stationary_confirmed=relief_stationary_confirmed,
+                insert_relief_force_mode_restart_acknowledged=(
+                    relief_force_mode_restart_acknowledged
+                ),
+                insert_commanded_axial_force_n=commanded_axial_force_n,
+                insert_commanded_lateral_force_x_n=commanded_lateral_force_x_n,
+                insert_commanded_lateral_force_y_n=commanded_lateral_force_y_n,
+                server_trace_id=server_trace_id,
+                server_trace_path=server_trace_path,
+                server_trace_status=server_trace_status,
+                server_trace_complete=False,
+                server_trace_sample_count=server_trace_sample_count,
+                actual_tcp_force=list(actual_tcp_force),
+                actual_tcp_speed=list(actual_tcp_speed),
+                peak_axial_force_n=peak_axial_force_n,
+                peak_lateral_force_n=peak_lateral_force_n,
+                peak_torque_nm=peak_torque_nm,
+                peak_tool_flange_torque_nm=peak_tool_flange_torque_nm,
+            )
+            self._write_active_goal_status(goal_handle, status)
+            self._publish_insert_feedback(
+                goal_handle,
+                phase=phase,
+                trial_id=trial_id,
+                actual_world_tool0=actual_world_tool0,
+                insertion_depth_m=insertion_depth_m,
+                depth_error_m=depth_error_m,
+                lateral_offset_m=lateral_offset_m,
+                search_radius_m=final_search_radius_m,
+                axial_force_n=axial_force_n,
+                raw_axial_force_n=raw_axial_force_n,
+                lateral_force_n=lateral_force_n,
+                torque_nm=torque_nm,
+                filtered_axial_force_n=filtered_axial_force_n,
+                filtered_lateral_force_n=filtered_lateral_force_n,
+                filtered_torque_nm=filtered_torque_nm,
+                tool_flange_torque_nm=tool_flange_torque_nm,
+                filtered_tool_flange_torque_nm=filtered_tool_flange_torque_nm,
+                current_force_depth_fraction=current_force_depth_fraction,
+                force_depth_axial_upper_n=current_force_depth_axial_upper_n,
+                force_depth_lateral_upper_n=current_force_depth_lateral_upper_n,
+                force_depth_torque_upper_nm=current_force_depth_torque_upper_nm,
+                axial_profile_exceeded=axial_profile_exceeded,
+                axial_progress_stalled=axial_progress_stalled,
+                contact_detected=contact_detected,
+                engagement_detected=engagement_detected,
+                seated_detected=seated_detected,
+                force_bias_valid=force_bias_valid,
+                force_bias=force_bias,
+                actual_tcp_force=actual_tcp_force,
+                tared_tcp_force=tared_tcp_force,
+                actual_tcp_speed=actual_tcp_speed,
+                soft_overload_detected=soft_overload_detected,
+                soft_overload_reason=last_soft_overload_reason,
+                soft_overload_duration_sec=soft_overload_duration_sec,
+                relief_cycle_count=relief_cycle_count,
+                relief_elapsed_sec=relief_elapsed_sec,
+                relief_retreat_m=relief_retreat_m,
+                relief_load_cleared=relief_load_cleared,
+                relief_backoff_m=relief_backoff_m,
+                relief_planned_backoff_m=relief_planned_backoff_m,
+                total_relief_backoff_m=total_relief_backoff_m,
+                relief_resume_phase=relief_resume_phase,
+                commanded_axial_force_n=commanded_axial_force_n,
+                commanded_lateral_force_x_n=commanded_lateral_force_x_n,
+                commanded_lateral_force_y_n=commanded_lateral_force_y_n,
+                hard_limit_detected=hard_limit_detected,
+                hard_limit_reason=hard_limit_reason,
+                limit_trigger=limit_trigger,
+                limit_trigger_value=limit_trigger_value,
+                limit_trigger_threshold=limit_trigger_threshold,
+                limit_trigger_actual_tcp_force=limit_trigger_actual_tcp_force,
+                limit_trigger_tared_tcp_force=limit_trigger_tared_tcp_force,
+                tactile_center_world_tool0=tactile_center_world_tool0,
+                tactile_center_depth_m=tactile_center_depth_m,
+                tactile_center_confidence=tactile_center_confidence,
+                tactile_center_evidence_sha256=(
+                    tactile_center_evidence_sha256
+                ),
+                scheduled_search_radius_m=scheduled_search_radius_m,
+                explored_search_radius_m=explored_search_radius_m,
+                explored_search_angle_rad=explored_search_angle_rad,
+                disengagement_cycle_count=disengagement_cycle_count,
+                last_disengagement_reason=last_disengagement_reason,
+                disengagement_withdrawal_m=disengagement_withdrawal_m,
+                disengagement_contact_cleared=(
+                    disengagement_contact_cleared
+                ),
+                disengagement_force_mode_stop_acknowledged=(
+                    disengagement_force_mode_stop_acknowledged
+                ),
+                recenter_position_error_m=recenter_position_error_m,
+                recenter_command_acknowledged=recenter_command_acknowledged,
+                disengagement_stationary_confirmed=(
+                    disengagement_stationary_confirmed
+                ),
+                retare_baseline_consistent=retare_baseline_consistent,
+            )
+            return last_sample
+
+        try:
+            request = goal_handle.request
+            part_name = str(request.part_name or "")
+            calibration_id = str(request.calibration_id or "")
+            profile_sha256 = str(request.profile_sha256 or "")
+            trial_id = str(getattr(request, "trial_id", "") or "")
+            if trial_id != trial_id.strip():
+                raise ValueError("trial_id must not contain surrounding whitespace")
+            if part_name not in INSERT_SUPPORTED_PART_NAMES:
+                raise ValueError(
+                    "part_name must be one of the exact supported tokens "
+                    f"{list(INSERT_SUPPORTED_PART_NAMES)}"
+                )
+            selected_hard_caps = _insert_hard_caps(part_name)
+            selected_cap_error = _insert_hard_cap_error(part_name)
+            if selected_cap_error:
+                raise ValueError(selected_cap_error)
+            advanced_recovery_enabled = all(
+                field_name in selected_hard_caps
+                for field_name in (
+                    "insert_max_contact_search_radius_m",
+                    "insert_max_disengagement_cycles",
+                    "insert_search_peck_retreat_m",
+                    "insert_search_peck_interval_sec",
+                )
+            )
+            hard_caps_sha256 = _insert_hard_caps_sha256(selected_hard_caps)
+            requested_hard_caps_sha256 = str(
+                getattr(request, "hard_caps_sha256", "") or ""
+            )
+            if requested_hard_caps_sha256 != hard_caps_sha256:
+                raise ValueError(
+                    "hard_caps_sha256 does not match the server-selected exact-part caps"
+                )
+            status.update(
+                insert_selected_part_name=part_name,
+                insert_selected_hard_caps=selected_hard_caps,
+                insert_selected_hard_caps_error="",
+                insert_selected_hard_caps_sha256=hard_caps_sha256,
+            )
+            self._write_active_goal_status(goal_handle, status)
+            if not calibration_id or calibration_id != calibration_id.strip():
+                raise ValueError("calibration_id is required without surrounding whitespace")
+            if len(profile_sha256) != 64 or any(
+                character not in "0123456789abcdefABCDEF" for character in profile_sha256
+            ):
+                raise ValueError("profile_sha256 must contain exactly 64 hexadecimal characters")
+            start_server_trace()
+
+            (
+                force_depth_fraction,
+                force_depth_axial_upper_n,
+                force_depth_lateral_upper_n,
+                force_depth_torque_upper_nm,
+            ) = _validated_force_depth_profile(
+                request,
+                hard_caps=selected_hard_caps,
+            )
+
+            contact_speed_m_s = _bounded_insert_value(
+                "contact_speed_m_s",
+                request.contact_speed_m_s,
+                UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S,
+            )
+            contact_force_delta_n = _bounded_insert_value(
+                "contact_force_delta_n",
+                request.contact_force_delta_n,
+                UR5E_RTDE_INSERT_MAX_CONTACT_FORCE_DELTA_N,
+            )
+            engagement_progress_m = _bounded_insert_value(
+                "engagement_progress_m",
+                request.engagement_progress_m,
+                UR5E_RTDE_INSERT_MAX_ENGAGEMENT_PROGRESS_M,
+            )
+            insertion_force_n = _bounded_insert_value(
+                "insertion_force_n",
+                request.insertion_force_n,
+                float(selected_hard_caps["insert_max_insertion_force_n"]),
+            )
+            spiral_radius_m = _bounded_insert_value(
+                "spiral_radius_m",
+                request.spiral_radius_m,
+                UR5E_RTDE_INSERT_MAX_SPIRAL_RADIUS_M,
+                allow_zero=True,
+            )
+            spiral_pitch_m = _bounded_insert_value(
+                "spiral_pitch_m",
+                request.spiral_pitch_m,
+                UR5E_RTDE_INSERT_MAX_SPIRAL_PITCH_M,
+            )
+            spiral_speed_m_s = _bounded_insert_value(
+                "spiral_speed_m_s",
+                request.spiral_speed_m_s,
+                UR5E_RTDE_INSERT_MAX_SPIRAL_SPEED_M_S,
+            )
+            spiral_acceleration_m_s2 = _bounded_insert_value(
+                "spiral_acceleration_m_s2",
+                request.spiral_acceleration_m_s2,
+                UR5E_RTDE_INSERT_MAX_SPIRAL_ACCELERATION_M_S2,
+            )
+            max_axial_force_n = _bounded_insert_value(
+                "max_axial_force_n",
+                request.max_axial_force_n,
+                float(selected_hard_caps["insert_max_axial_force_n"]),
+            )
+            max_lateral_force_n = _bounded_insert_value(
+                "max_lateral_force_n",
+                request.max_lateral_force_n,
+                float(selected_hard_caps["insert_max_lateral_force_n"]),
+            )
+            max_torque_nm = _bounded_insert_value(
+                "max_torque_nm",
+                request.max_torque_nm,
+                float(selected_hard_caps["insert_max_torque_nm"]),
+            )
+            baseline_force_uncertainty_n = _bounded_insert_value(
+                "baseline_force_uncertainty_n",
+                request.baseline_force_uncertainty_n,
+                float(selected_hard_caps["insert_max_lateral_force_n"]),
+            )
+            baseline_torque_uncertainty_nm = _bounded_insert_value(
+                "baseline_torque_uncertainty_nm",
+                request.baseline_torque_uncertainty_nm,
+                float(selected_hard_caps["insert_max_tool_flange_torque_nm"]),
+            )
+            tilt_tolerance_rad = _bounded_insert_value(
+                "tilt_tolerance_rad",
+                request.tilt_tolerance_rad,
+                UR5E_RTDE_INSERT_MAX_TILT_TOLERANCE_RAD,
+            )
+            seated_depth_tolerance_m = _bounded_insert_value(
+                "seated_depth_tolerance_m",
+                request.seated_depth_tolerance_m,
+                UR5E_RTDE_INSERT_MAX_SEATED_DEPTH_TOLERANCE_M,
+            )
+            settle_time_sec = _bounded_insert_value(
+                "settle_time_sec",
+                request.settle_time_sec,
+                UR5E_RTDE_INSERT_MAX_SETTLE_TIME_SEC,
+            )
+            timeout_sec = _bounded_insert_value(
+                "timeout_sec",
+                request.timeout_sec,
+                UR5E_RTDE_INSERT_MAX_TIMEOUT_SEC,
+            )
+            max_travel_m = float(UR5E_RTDE_INSERT_MAX_TRAVEL_M or math.nan)
+            soft_filter_window_sec = float(
+                UR5E_RTDE_INSERT_SOFT_FILTER_WINDOW_SEC or math.nan
+            )
+            soft_overload_hold_sec = float(
+                UR5E_RTDE_INSERT_SOFT_OVERLOAD_HOLD_SEC or math.nan
+            )
+            relief_unload_dwell_sec = float(
+                UR5E_RTDE_INSERT_RELIEF_UNLOAD_DWELL_SEC or math.nan
+            )
+            relief_clear_dwell_sec = float(
+                UR5E_RTDE_INSERT_RELIEF_CLEAR_DWELL_SEC or math.nan
+            )
+            relief_clear_hysteresis_ratio = float(
+                UR5E_RTDE_INSERT_RELIEF_CLEAR_HYSTERESIS_RATIO or math.nan
+            )
+            relief_timeout_sec = float(UR5E_RTDE_INSERT_RELIEF_TIMEOUT_SEC or math.nan)
+            relief_axial_force_ratio = float(
+                UR5E_RTDE_INSERT_RELIEF_AXIAL_FORCE_RATIO or math.nan
+            )
+            relief_reverse_force_ratio = float(
+                UR5E_RTDE_INSERT_RELIEF_REVERSE_FORCE_RATIO or math.nan
+            )
+            relief_resume_ramp_sec = float(
+                UR5E_RTDE_INSERT_RELIEF_RESUME_RAMP_SEC or math.nan
+            )
+            relief_search_force_ratio = float(
+                UR5E_RTDE_INSERT_RELIEF_SEARCH_FORCE_RATIO or math.nan
+            )
+            relief_search_speed_ratio = float(
+                UR5E_RTDE_INSERT_RELIEF_SEARCH_SPEED_RATIO or math.nan
+            )
+            relief_backoff_step_m = float(
+                UR5E_RTDE_INSERT_RELIEF_BACKOFF_STEP_M or math.nan
+            )
+            max_relief_retreat_m = float(
+                selected_hard_caps.get("insert_max_relief_retreat_m")
+                or math.nan
+            )
+            relief_stationary_speed_m_s = float(
+                UR5E_RTDE_INSERT_RELIEF_STATIONARY_SPEED_M_S or math.nan
+            )
+            relief_stationary_angular_speed_rad_s = float(
+                UR5E_RTDE_INSERT_RELIEF_STATIONARY_ANGULAR_SPEED_RAD_S
+                or math.nan
+            )
+            max_relief_cycles = int(UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES or 0)
+            max_contact_search_radius_m = float(
+                selected_hard_caps.get("insert_max_contact_search_radius_m")
+                or spiral_radius_m
+            )
+            max_disengagement_cycles = int(
+                selected_hard_caps.get("insert_max_disengagement_cycles") or 0
+            )
+            search_peck_retreat_limit_m = float(
+                selected_hard_caps.get("insert_search_peck_retreat_m") or 0.0
+            )
+            search_peck_interval_sec = float(
+                selected_hard_caps.get("insert_search_peck_interval_sec")
+                or math.inf
+            )
+            start_position_tolerance_m = float(
+                UR5E_RTDE_INSERT_START_POSITION_TOLERANCE_M or math.nan
+            )
+            start_orientation_tolerance_rad = float(
+                UR5E_RTDE_INSERT_START_ORIENTATION_TOLERANCE_RAD or math.nan
+            )
+            if contact_force_delta_n > max_axial_force_n:
+                raise ValueError("contact_force_delta_n exceeds max_axial_force_n")
+            if insertion_force_n > max_axial_force_n:
+                raise ValueError("insertion_force_n exceeds max_axial_force_n")
+            if contact_force_delta_n > insertion_force_n:
+                raise ValueError(
+                    "contact_force_delta_n exceeds insertion_force_n, so stable "
+                    "bottom-contact evidence cannot be established"
+                )
+            for field_name, recipe_limit, hard_ceiling in (
+                (
+                    "max_axial_force_n",
+                    max_axial_force_n,
+                    selected_hard_caps["insert_max_axial_force_n"],
+                ),
+                (
+                    "max_lateral_force_n",
+                    max_lateral_force_n,
+                    selected_hard_caps["insert_max_lateral_force_n"],
+                ),
+                (
+                    "max_torque_nm",
+                    max_torque_nm,
+                    selected_hard_caps["insert_max_torque_nm"],
+                ),
+            ):
+                if recipe_limit >= float(hard_ceiling or math.nan):
+                    raise ValueError(
+                        f"{field_name} must be strictly below its independent hard ceiling"
+                    )
+            guarded_axial_force_ceiling_n = (
+                float(selected_hard_caps["insert_max_axial_force_n"])
+                - baseline_force_uncertainty_n
+            )
+            guarded_lateral_force_ceiling_n = (
+                float(selected_hard_caps["insert_max_lateral_force_n"])
+                - baseline_force_uncertainty_n
+            )
+            guarded_torque_ceiling_nm = (
+                float(selected_hard_caps["insert_max_torque_nm"])
+                - baseline_torque_uncertainty_nm
+            )
+            for field_name, recipe_limit, guarded_ceiling in (
+                (
+                    "max_axial_force_n",
+                    max_axial_force_n,
+                    guarded_axial_force_ceiling_n,
+                ),
+                (
+                    "max_lateral_force_n",
+                    max_lateral_force_n,
+                    guarded_lateral_force_ceiling_n,
+                ),
+                (
+                    "max_torque_nm",
+                    max_torque_nm,
+                    guarded_torque_ceiling_nm,
+                ),
+            ):
+                if recipe_limit >= guarded_ceiling:
+                    raise ValueError(
+                        f"{field_name} does not leave its measured baseline uncertainty "
+                        "reserve below the independent hard ceiling"
+                    )
+
+            control_error = self._connect_control_for_goal()
+            if control_error:
+                raise RuntimeError(control_error)
+            required_methods = (
+                "forceMode",
+                "forceModeStop",
+                "getTCPOffset",
+                "isPoseWithinSafetyLimits",
+                "stopL",
+            )
+            missing_methods = [
+                name for name in required_methods if not callable(getattr(self.control, name, None))
+            ]
+            if missing_methods:
+                raise RuntimeError(f"missing RTDE insertion methods {missing_methods}")
+            if not self._joint_states_fresh() or self._read_actual_q() is None:
+                raise RuntimeError("UR5e RTDE feedback stale or missing")
+            program_error = self._ensure_control_program_for_goal()
+            if program_error:
+                raise RuntimeError(program_error)
+
+            for field_name, pose_message in (
+                ("expected_start_tool0_pose", request.expected_start_tool0_pose),
+                ("target_tool0_pose", request.target_tool0_pose),
+            ):
+                frame_id = str(pose_message.header.frame_id or "").strip()
+                if frame_id != "world":
+                    raise ValueError(
+                        f"{field_name} requires frame_id=world, received {frame_id or '(empty)'}"
+                    )
+            expected_start_world_tool0 = _transform_from_pose_stamped(
+                request.expected_start_tool0_pose
+            )
+            target_world_tool0 = _transform_from_pose_stamped(request.target_tool0_pose)
+            for pose_name, pose_value in (
+                ("expected_start_tool0_pose", expected_start_world_tool0),
+                ("target_tool0_pose", target_world_tool0),
+            ):
+                workspace_error = _workspace_error(pose_value)
+                if workspace_error:
+                    raise ValueError(f"{pose_name}: {workspace_error}")
+
+            insertion_axis_world = _normalize_vector(
+                (
+                    float(request.insertion_axis_world.x),
+                    float(request.insertion_axis_world.y),
+                    float(request.insertion_axis_world.z),
+                )
+            )
+            target_delta = tuple(
+                target_world_tool0[0][index] - expected_start_world_tool0[0][index]
+                for index in range(3)
+            )
+            target_depth_m = _vector_dot(target_delta, insertion_axis_world)
+            target_lateral = tuple(
+                target_delta[index] - target_depth_m * insertion_axis_world[index]
+                for index in range(3)
+            )
+            target_travel_m = _vector_norm(target_delta)
+            if target_depth_m <= 0.0:
+                raise ValueError(
+                    "target_tool0_pose must lie in the positive insertion_axis_world direction"
+                )
+            if target_travel_m > max_travel_m:
+                raise ValueError(
+                    f"target insertion travel {target_travel_m:.6f} m exceeds {max_travel_m:.6f} m"
+                )
+            target_lateral_limit_m = (
+                max_contact_search_radius_m
+                if advanced_recovery_enabled
+                else start_position_tolerance_m
+            )
+            if _vector_norm(target_lateral) > target_lateral_limit_m:
+                raise ValueError(
+                    "target_tool0_pose is outside the protected lateral start "
+                    f"boundary of {target_lateral_limit_m:.6f} m"
+                )
+            _unused_position_error, requested_orientation_change = _pose_errors(
+                expected_start_world_tool0,
+                target_world_tool0,
+            )
+            if requested_orientation_change > start_orientation_tolerance_rad:
+                raise ValueError(
+                    "MoveUR5eInsert does not perform orientation search; start and target "
+                    "orientation differ by "
+                    f"{requested_orientation_change:.6f} rad"
+                )
+            if engagement_progress_m > target_depth_m + seated_depth_tolerance_m:
+                raise ValueError("engagement_progress_m exceeds the available insertion depth")
+
+            (
+                world_base,
+                frame_message,
+                frame_position_error,
+                frame_orientation_error,
+            ) = self._validated_cartesian_world_base()
+            tool0_tcp = self._active_tcp_offset()
+            insertion_axis_base = _normalize_vector(
+                _rotate_vector(_quaternion_conjugate(world_base[1]), insertion_axis_world)
+            )
+            expected_base_tool0 = _compose_transform(
+                _inverse_transform(world_base),
+                expected_start_world_tool0,
+            )
+            expected_base_tcp = _compose_transform(expected_base_tool0, tool0_tcp)
+            target_base_tool0 = _compose_transform(
+                _inverse_transform(world_base),
+                target_world_tool0,
+            )
+            target_base_tcp = _compose_transform(target_base_tool0, tool0_tcp)
+            within_safety_limits = self.control.isPoseWithinSafetyLimits
+            if not bool(within_safety_limits(_rtde_pose_from_transform(expected_base_tcp))):
+                raise ValueError(
+                    "UR controller rejected expected_start_tool0_pose as outside safety limits"
+                )
+            if not bool(within_safety_limits(_rtde_pose_from_transform(target_base_tcp))):
+                raise ValueError(
+                    "UR controller rejected target_tool0_pose as outside safety limits"
+                )
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable")
+            actual_tcp_speed = self._read_actual_tcp_speed()
+            if actual_tcp_speed is None:
+                raise RuntimeError("UR5e actual_TCP_speed is unavailable")
+            actual_world_tool0 = self._world_tool0_from_actual_tcp(
+                actual_base_tcp,
+                world_base=world_base,
+                tool0_tcp=tool0_tcp,
+            )
+            start_position_error, start_orientation_error = _pose_errors(
+                actual_world_tool0,
+                expected_start_world_tool0,
+            )
+            if start_position_error > start_position_tolerance_m:
+                raise ValueError(
+                    f"actual start position differs by {start_position_error:.6f} m; "
+                    f"limit is {start_position_tolerance_m:.6f} m"
+                )
+            if start_orientation_error > start_orientation_tolerance_rad:
+                raise ValueError(
+                    f"actual start orientation differs by {start_orientation_error:.6f} rad; "
+                    f"limit is {start_orientation_tolerance_rad:.6f} rad"
+                )
+
+            status.update(
+                state="checking",
+                message="confirming stationary hold before zeroing software TCP force bias",
+                blocked_reason="",
+                insert_phase="zeroing_force",
+                part_name=part_name,
+                calibration_id=calibration_id,
+                profile_sha256=profile_sha256,
+                hard_caps_sha256=hard_caps_sha256,
+                trial_id=trial_id,
+                server_trace_id=server_trace_id,
+                server_trace_path=server_trace_path,
+                server_trace_status=server_trace_status,
+                server_trace_complete=False,
+                server_trace_sample_count=server_trace_sample_count,
+                target_insertion_depth_m=target_depth_m,
+                cartesian_frame_validation_message=frame_message,
+                cartesian_frame_position_error_m=frame_position_error,
+                cartesian_frame_orientation_error_rad=frame_orientation_error,
+                tcp_force_feedback_ready=True,
+                insert_function_ready=False,
+                insert_readiness_message="Insertion goal owns the motion slot",
+            )
+            self._write_active_goal_status(goal_handle, status)
+            if not self._confirm_stationary_after_stop(
+                linear_speed_limit_m_s=relief_stationary_speed_m_s,
+                angular_speed_limit_rad_s=(
+                    relief_stationary_angular_speed_rad_s
+                ),
+            ):
+                raise RuntimeError(
+                    "UR5e did not establish a stationary joint-velocity hold before "
+                    "zeroing the insertion force bias"
+                )
+            if goal_handle.is_cancel_requested:
+                raise _InsertCanceled("canceled before motion")
+            (
+                checking_depth_m,
+                checking_depth_error_m,
+                checking_lateral_offset_m,
+                _checking_tilt_error_rad,
+            ) = _insertion_pose_metrics(
+                actual_world_tool0,
+                expected_start_world_tool0,
+                target_world_tool0,
+                insertion_axis_world,
+            )
+            force_samples: list[list[float]] = []
+            for _sample_index in range(5):
+                if goal_handle.is_cancel_requested:
+                    raise _InsertCanceled("canceled before motion")
+                if not rclpy.ok():
+                    raise RuntimeError("ROS shutdown interrupted UR5e insertion before motion")
+                require_fresh_insert_feedback()
+                force_sample = self._read_actual_tcp_force()
+                if force_sample is None:
+                    raise RuntimeError("actual_TCP_force is unavailable while zeroing bias")
+                force_samples.append(force_sample)
+                if _sample_index == 0:
+                    self._publish_insert_feedback(
+                        goal_handle,
+                        phase="checking",
+                        trial_id=trial_id,
+                        actual_world_tool0=actual_world_tool0,
+                        insertion_depth_m=checking_depth_m,
+                        depth_error_m=checking_depth_error_m,
+                        lateral_offset_m=checking_lateral_offset_m,
+                        search_radius_m=0.0,
+                        axial_force_n=0.0,
+                        lateral_force_n=0.0,
+                        torque_nm=0.0,
+                        contact_detected=False,
+                        engagement_detected=False,
+                        seated_detected=False,
+                        force_bias_valid=False,
+                        force_bias=[0.0] * 6,
+                        actual_tcp_force=force_sample,
+                        actual_tcp_speed=actual_tcp_speed,
+                    )
+                time.sleep(0.02)
+            force_baseline_span_n = _vector_norm(
+                tuple(
+                    max(sample[index] for sample in force_samples)
+                    - min(sample[index] for sample in force_samples)
+                    for index in range(3)
+                )
+            )
+            torque_baseline_span_nm = _vector_norm(
+                tuple(
+                    max(sample[index] for sample in force_samples)
+                    - min(sample[index] for sample in force_samples)
+                    for index in range(3, 6)
+                )
+            )
+            if force_baseline_span_n >= contact_force_delta_n:
+                raise RuntimeError(
+                    "stationary TCP force baseline varied by "
+                    f"{force_baseline_span_n:.3f} N; contact threshold is "
+                    f"{contact_force_delta_n:.3f} N"
+                )
+            if torque_baseline_span_nm >= max_torque_nm * 0.50:
+                raise RuntimeError(
+                    "stationary TCP torque baseline varied by "
+                    f"{torque_baseline_span_nm:.3f} Nm"
+                )
+            force_bias = [
+                sum(sample[index] for sample in force_samples) / len(force_samples)
+                for index in range(6)
+            ]
+            force_bias_valid = True
+            baseline_base_tool0 = _compose_transform(
+                actual_base_tcp,
+                _inverse_transform(tool0_tcp),
+            )
+            baseline_tool0_tcp_offset_base = _rotate_vector(
+                baseline_base_tool0[1],
+                tool0_tcp[0],
+            )
+            (
+                zeroed_raw_axial_force_n,
+                zeroed_axial_force_n,
+                zeroed_lateral_force_n,
+                zeroed_torque_nm,
+                zeroed_tool_flange_torque_nm,
+                zeroed_tared_tcp_force,
+            ) = _insertion_force_metrics(
+                force_samples[-1],
+                force_bias,
+                insertion_axis_base,
+                baseline_tool0_tcp_offset_base,
+            )
+            self._publish_insert_feedback(
+                goal_handle,
+                phase="zeroing_force",
+                trial_id=trial_id,
+                actual_world_tool0=actual_world_tool0,
+                insertion_depth_m=checking_depth_m,
+                depth_error_m=checking_depth_error_m,
+                lateral_offset_m=checking_lateral_offset_m,
+                search_radius_m=0.0,
+                axial_force_n=zeroed_axial_force_n,
+                raw_axial_force_n=zeroed_raw_axial_force_n,
+                lateral_force_n=zeroed_lateral_force_n,
+                torque_nm=zeroed_torque_nm,
+                tool_flange_torque_nm=zeroed_tool_flange_torque_nm,
+                contact_detected=False,
+                engagement_detected=False,
+                seated_detected=False,
+                force_bias_valid=True,
+                force_bias=force_bias,
+                actual_tcp_force=force_samples[-1],
+                tared_tcp_force=zeroed_tared_tcp_force,
+                actual_tcp_speed=actual_tcp_speed,
+            )
+            execution_deadline = time.monotonic() + timeout_sec
+            control_cycle_sec = max(1.0 / UR5E_RTDE_FREQUENCY_HZ, 0.02)
+            engagement_hold_sec = max(0.10, min(settle_time_sec, 0.25))
+            stall_hold_sec = max(0.10, min(settle_time_sec, 0.50))
+            seated_hold_sec = max(0.10, settle_time_sec)
+            force_filter_window_sec = soft_filter_window_sec
+            contact_hold_sec = max(0.06, min(engagement_hold_sec, 0.10))
+            progress_epsilon_m = max(
+                1e-5,
+                min(seated_depth_tolerance_m, engagement_progress_m) * 0.25,
+            )
+            rebound_tolerance_m = max(
+                progress_epsilon_m,
+                min(seated_depth_tolerance_m, engagement_progress_m * 0.5),
+            )
+            near_zero_axial_speed_m_s = max(
+                1e-5,
+                min(
+                    contact_speed_m_s * 0.10,
+                    seated_depth_tolerance_m / seated_hold_sec,
+                ),
+            )
+            bottom_force_variation_n = max(0.5, contact_force_delta_n)
+            status.update(
+                state="executing",
+                message="executing direct compliant UR5e insertion",
+                insert_phase="seating",
+                force_bias_valid=True,
+                force_bias=list(force_bias),
+            )
+            self._write_active_goal_status(goal_handle, status)
+
+            if bool(getattr(self, "_shutdown_requested", False)) or not rclpy.ok():
+                raise RuntimeError("UR5e RTDE server stopped before insertion motion")
+            dispatch_ready, dispatch_message, _dispatch_position, _dispatch_orientation = (
+                self._cartesian_frame_validation()
+            )
+            if not dispatch_ready:
+                raise ValueError(dispatch_message)
+            motion_attempted = True
+            status["insert_motion_settled"] = False
+            with self._active_lock:
+                if self._active_goal is goal_handle:
+                    self._insert_motion_started = True
+            actual_base_tcp = self._read_actual_tcp_transform()
+            if actual_base_tcp is None:
+                raise RuntimeError("UR5e actual TCP pose is unavailable before force mode")
+            self._start_insert_force_mode(
+                actual_base_tcp=actual_base_tcp,
+                insertion_axis_base=insertion_axis_base,
+                insertion_force_n=insertion_force_n,
+                contact_speed_m_s=contact_speed_m_s,
+                spiral_speed_m_s=spiral_speed_m_s,
+                tilt_tolerance_rad=tilt_tolerance_rad,
+            )
+
+            phase = "seating"
+            final_phase = phase
+            deepest_depth_m = 0.0
+            filtered_force_samples: deque[
+                tuple[float, float, float, float, float]
+            ] = deque()
+            contact_candidate_since: float | None = None
+            contact_candidate_depth_m = 0.0
+            contact_reference_depth_m: float | None = None
+            progress_reference_depth_m = 0.0
+            progress_reference_at = time.monotonic()
+            search_engagement_reference_depth_m: float | None = None
+            engagement_candidate_since: float | None = None
+            engagement_candidate_interruption_since: float | None = None
+            engagement_candidate_peak_depth_m = 0.0
+            engagement_depth_m = 0.0
+            seated_candidate_since: float | None = None
+            seated_force_min_n = math.inf
+            seated_force_max_n = 0.0
+            spiral_started_at: float | None = None
+            spiral_theta = 0.0
+            spiral_scale = spiral_pitch_m / (2.0 * math.pi)
+            lateral_search_force_n = min(
+                insertion_force_n,
+                max_lateral_force_n * 0.50,
+            )
+            soft_overload_candidate_since: float | None = None
+            relief_started_at: float | None = None
+            relief_entry_depth_m = 0.0
+            relief_clear_since: float | None = None
+            relief_backoff_complete = False
+            relief_backoff_committed = False
+            relief_committed_backoff_m = 0.0
+            resume_started_at: float | None = None
+            frozen_search_resume_pending = False
+            initial_force_bias = list(force_bias)
+            spiral_phase_offset_rad = 0.0
+            expanded_search_boundary_theta: float | None = None
+            expanded_search_stage_radii_m = [
+                radius_m
+                for radius_m in (0.003, 0.005)
+                if radius_m < max_contact_search_radius_m
+            ]
+            expanded_search_stage_radii_m.append(max_contact_search_radius_m)
+            expanded_search_stage_index = 0
+            tactile_candidate_since: float | None = None
+            tactile_candidate_peak_depth_m = 0.0
+            tactile_candidate_load_score = math.inf
+            tactile_candidate_best_world_tool0: RigidTransform | None = None
+            tactile_candidate_best_lateral_force_n = 0.0
+            tactile_candidate_best_torque_nm = 0.0
+            disengagement_started_at: float | None = None
+            disengagement_deadline: float | None = None
+            disengagement_clear_since: float | None = None
+            disengagement_entry_depth_m = 0.0
+            disengagement_progress_reference_depth_m = 0.0
+            disengagement_progress_reference_at: float | None = None
+            retry_started_at: float | None = None
+            search_peck_state = "idle"
+            search_peck_started_at: float | None = None
+            search_peck_entry_depth_m = 0.0
+            search_peck_target_retreat_m = 0.0
+            search_peck_retreat_m = 0.0
+            search_peck_next_at = math.inf
+            search_origin_world_tool0: RigidTransform | None = None
+            search_guard_entry_theta = 0.0
+            search_escape_candidate_since: float | None = None
+
+            def update_tactile_center_candidate(
+                *,
+                sampled_at: float,
+                actual_world_tool0: RigidTransform,
+                insertion_depth_m: float,
+                filtered_lateral_force_n: float,
+                filtered_torque_nm: float,
+                profile_load_ok: bool,
+            ) -> None:
+                """Retain the deepest stable, low-load tactile pin-entry evidence."""
+                nonlocal tactile_candidate_since
+                nonlocal tactile_candidate_peak_depth_m
+                nonlocal tactile_candidate_load_score
+                nonlocal tactile_candidate_best_world_tool0
+                nonlocal tactile_candidate_best_lateral_force_n
+                nonlocal tactile_candidate_best_torque_nm
+                nonlocal tactile_center_world_tool0
+                nonlocal tactile_center_depth_m
+                nonlocal tactile_center_confidence
+                nonlocal tactile_center_evidence_sha256
+                if (
+                    not contact_detected
+                    or not profile_load_ok
+                    or insertion_depth_m < progress_epsilon_m
+                ):
+                    tactile_candidate_since = None
+                    tactile_candidate_peak_depth_m = 0.0
+                    tactile_candidate_load_score = math.inf
+                    tactile_candidate_best_world_tool0 = None
+                    return
+                if insertion_depth_m < (
+                    tactile_candidate_peak_depth_m - rebound_tolerance_m
+                ):
+                    tactile_candidate_since = None
+                    tactile_candidate_peak_depth_m = 0.0
+                    tactile_candidate_load_score = math.inf
+                    tactile_candidate_best_world_tool0 = None
+                    return
+                load_score = (
+                    filtered_lateral_force_n
+                    / max(current_force_depth_lateral_upper_n, 1e-9)
+                    + filtered_torque_nm
+                    / max(current_force_depth_torque_upper_nm, 1e-9)
+                )
+                if tactile_candidate_since is None:
+                    tactile_candidate_since = sampled_at
+                    tactile_candidate_peak_depth_m = insertion_depth_m
+                    tactile_candidate_load_score = load_score
+                    tactile_candidate_best_world_tool0 = actual_world_tool0
+                    tactile_candidate_best_lateral_force_n = (
+                        filtered_lateral_force_n
+                    )
+                    tactile_candidate_best_torque_nm = filtered_torque_nm
+                else:
+                    better_depth = insertion_depth_m > (
+                        tactile_candidate_peak_depth_m + progress_epsilon_m
+                    )
+                    tied_depth = abs(
+                        insertion_depth_m - tactile_candidate_peak_depth_m
+                    ) <= progress_epsilon_m
+                    if better_depth or (
+                        tied_depth and load_score < tactile_candidate_load_score
+                    ):
+                        tactile_candidate_peak_depth_m = insertion_depth_m
+                        tactile_candidate_load_score = load_score
+                        tactile_candidate_best_world_tool0 = actual_world_tool0
+                        tactile_candidate_best_lateral_force_n = (
+                            filtered_lateral_force_n
+                        )
+                        tactile_candidate_best_torque_nm = filtered_torque_nm
+                    if sampled_at - tactile_candidate_since < engagement_hold_sec:
+                        return
+                if insertion_depth_m + rebound_tolerance_m < (
+                    tactile_candidate_peak_depth_m
+                ):
+                    return
+                if tactile_candidate_best_world_tool0 is None:
+                    return
+                tactile_center_world_tool0 = tactile_candidate_best_world_tool0
+                tactile_center_depth_m = tactile_candidate_peak_depth_m
+                tactile_center_confidence = min(
+                    1.0,
+                    max(
+                        0.0,
+                        tactile_candidate_peak_depth_m
+                        / max(target_depth_m, 1e-9),
+                    ),
+                ) * min(
+                    1.0,
+                    max(0.0, 1.0 - tactile_candidate_load_score / 2.0),
+                )
+                evidence = {
+                    "trial_id": trial_id,
+                    "depth_m": float(tactile_candidate_peak_depth_m),
+                    "pose": _transform_status_payload(
+                        tactile_candidate_best_world_tool0
+                    ),
+                    "filtered_lateral_force_n": float(
+                        tactile_candidate_best_lateral_force_n
+                    ),
+                    "filtered_torque_nm": float(
+                        tactile_candidate_best_torque_nm
+                    ),
+                    "confidence": float(tactile_center_confidence),
+                }
+                tactile_center_evidence_sha256 = hashlib.sha256(
+                    json.dumps(
+                        evidence,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            def begin_disengagement(reason: str, *, insertion_depth_m: float) -> None:
+                """Start full-clearance recovery authorized by exact-part policy values."""
+                nonlocal phase
+                nonlocal final_phase
+                nonlocal disengagement_cycle_count
+                nonlocal last_disengagement_reason
+                nonlocal disengagement_started_at
+                nonlocal disengagement_deadline
+                nonlocal disengagement_clear_since
+                nonlocal disengagement_entry_depth_m
+                nonlocal disengagement_progress_reference_depth_m
+                nonlocal disengagement_progress_reference_at
+                nonlocal disengagement_withdrawal_m
+                nonlocal disengagement_contact_cleared
+                nonlocal disengagement_force_mode_stop_acknowledged
+                nonlocal recenter_command_acknowledged
+                nonlocal disengagement_stationary_confirmed
+                nonlocal retare_baseline_consistent
+                nonlocal search_peck_state
+                nonlocal search_peck_started_at
+                nonlocal search_peck_retreat_m
+                nonlocal search_peck_next_at
+                nonlocal engagement_candidate_since
+                nonlocal engagement_candidate_interruption_since
+                nonlocal engagement_candidate_peak_depth_m
+                if not advanced_recovery_enabled or max_disengagement_cycles <= 0:
+                    raise _InsertSearchExhausted(reason)
+                if disengagement_cycle_count >= max_disengagement_cycles:
+                    raise _InsertSearchExhausted(
+                        f"{reason}; protected disengagement cycle limit "
+                        f"{max_disengagement_cycles} exhausted"
+                    )
+                disengagement_cycle_count += 1
+                last_disengagement_reason = str(reason)
+                disengagement_started_at = time.monotonic()
+                disengagement_timeout_sec = max(
+                    relief_timeout_sec,
+                    target_depth_m / contact_speed_m_s + relief_timeout_sec,
+                )
+                disengagement_deadline = min(
+                    execution_deadline,
+                    disengagement_started_at + disengagement_timeout_sec,
+                )
+                disengagement_clear_since = None
+                disengagement_entry_depth_m = max(0.0, insertion_depth_m)
+                disengagement_progress_reference_depth_m = 0.0
+                disengagement_progress_reference_at = None
+                disengagement_withdrawal_m = 0.0
+                disengagement_contact_cleared = False
+                disengagement_force_mode_stop_acknowledged = False
+                recenter_command_acknowledged = False
+                disengagement_stationary_confirmed = False
+                retare_baseline_consistent = False
+                search_peck_state = "idle"
+                search_peck_started_at = None
+                search_peck_retreat_m = 0.0
+                search_peck_next_at = math.inf
+                engagement_candidate_since = None
+                engagement_candidate_interruption_since = None
+                engagement_candidate_peak_depth_m = 0.0
+                phase = "cocked"
+                final_phase = phase
+                append_server_trace(
+                    "cocked",
+                    {
+                        **last_sample,
+                        "disengagement_cycle_count": disengagement_cycle_count,
+                        "reason": last_disengagement_reason,
+                        "tactile_center_valid": (
+                            tactile_center_world_tool0 is not None
+                        ),
+                        "tactile_center_evidence_sha256": (
+                            tactile_center_evidence_sha256
+                        ),
+                    },
+                )
+
+            def require_disengagement_deadline(sampled_at: float) -> None:
+                """Fail when full protected disengagement exceeds its motion budget."""
+                nonlocal last_disengagement_reason
+                if (
+                    disengagement_started_at is None
+                    or disengagement_deadline is None
+                    or sampled_at < disengagement_deadline
+                ):
+                    return
+                disengagement_elapsed_sec = max(
+                    0.0,
+                    sampled_at - disengagement_started_at,
+                )
+                disengagement_trigger_reason = last_disengagement_reason
+                last_disengagement_reason = (
+                    f"{disengagement_trigger_reason}; {part_name} disengagement "
+                    "timed out after "
+                    f"{disengagement_elapsed_sec:.3f} s before contact cleared"
+                )
+                raise _InsertSearchExhausted(last_disengagement_reason)
+
+            def require_disengagement_progress(
+                *,
+                sampled_at: float,
+                insertion_depth_m: float,
+            ) -> None:
+                """Require bounded outward progress once reverse withdrawal starts."""
+                nonlocal disengagement_progress_reference_depth_m
+                nonlocal disengagement_progress_reference_at
+                nonlocal last_disengagement_reason
+                if disengagement_progress_reference_at is None:
+                    disengagement_progress_reference_depth_m = insertion_depth_m
+                    disengagement_progress_reference_at = sampled_at
+                    return
+                if insertion_depth_m <= (
+                    disengagement_progress_reference_depth_m - progress_epsilon_m
+                ):
+                    disengagement_progress_reference_depth_m = insertion_depth_m
+                    disengagement_progress_reference_at = sampled_at
+                    return
+                no_progress_elapsed_sec = max(
+                    0.0,
+                    sampled_at - disengagement_progress_reference_at,
+                )
+                if no_progress_elapsed_sec < relief_timeout_sec:
+                    return
+                disengagement_trigger_reason = last_disengagement_reason
+                last_disengagement_reason = (
+                    f"{disengagement_trigger_reason}; {part_name} disengagement made no "
+                    "protected withdrawal progress "
+                    f"for {no_progress_elapsed_sec:.3f} s before contact cleared"
+                )
+                raise _InsertSearchExhausted(last_disengagement_reason)
+
+            def complete_disengagement_recenter() -> None:  # noqa: C901, PLR0912, PLR0915
+                """Retract to the exact start, recenter while clear, and retry."""
+                nonlocal phase
+                nonlocal final_phase
+                nonlocal force_bias
+                nonlocal force_bias_valid
+                nonlocal contact_detected
+                nonlocal engagement_detected
+                nonlocal contact_candidate_since
+                nonlocal contact_candidate_depth_m
+                nonlocal contact_reference_depth_m
+                nonlocal search_engagement_reference_depth_m
+                nonlocal engagement_candidate_since
+                nonlocal engagement_candidate_interruption_since
+                nonlocal engagement_candidate_peak_depth_m
+                nonlocal engagement_depth_m
+                nonlocal progress_reference_depth_m
+                nonlocal progress_reference_at
+                nonlocal filtered_force_samples
+                nonlocal soft_overload_candidate_since
+                nonlocal soft_overload_duration_sec
+                nonlocal recenter_position_error_m
+                nonlocal recenter_command_acknowledged
+                nonlocal disengagement_stationary_confirmed
+                nonlocal disengagement_contact_cleared
+                nonlocal disengagement_force_mode_stop_acknowledged
+                nonlocal retare_baseline_consistent
+                nonlocal retry_started_at
+                nonlocal spiral_theta
+                nonlocal spiral_phase_offset_rad
+                nonlocal expanded_search_boundary_theta
+                nonlocal expanded_search_stage_index
+                nonlocal disengagement_withdrawal_m
+                nonlocal disengagement_progress_reference_depth_m
+                nonlocal disengagement_progress_reference_at
+                nonlocal search_origin_world_tool0
+                nonlocal search_guard_entry_theta
+                nonlocal search_escape_candidate_since
+                if (
+                    world_base is None
+                    or tool0_tcp is None
+                    or expected_start_world_tool0 is None
+                    or insertion_axis_world is None
+                    or insertion_axis_base is None
+                ):
+                    raise RuntimeError(
+                        f"{part_name} disengagement recenter geometry is unavailable"
+                    )
+                if not stop_and_confirm():
+                    raise RuntimeError(
+                        f"{part_name} disengagement did not receive stop and stationary "
+                        "acknowledgements"
+                    )
+                disengagement_force_mode_stop_acknowledged = (
+                    force_mode_stop_acknowledged
+                )
+                disengagement_stationary_confirmed = stationary_confirmed
+                current_world_tool0 = final_world_tool0
+                current_translation = current_world_tool0[0]
+                current_delta = tuple(
+                    current_translation[index]
+                    - expected_start_world_tool0[0][index]
+                    for index in range(3)
+                )
+                current_axial_depth_m = _vector_dot(
+                    current_delta,
+                    insertion_axis_world,
+                )
+                exact_start_depth_translation = tuple(
+                    current_translation[index]
+                    - current_axial_depth_m * insertion_axis_world[index]
+                    for index in range(3)
+                )
+                exact_start_depth_world_tool0 = (
+                    exact_start_depth_translation,
+                    expected_start_world_tool0[1],
+                )
+                workspace_error = _workspace_error(
+                    exact_start_depth_world_tool0
+                )
+                if workspace_error:
+                    raise RuntimeError(
+                        f"{part_name} exact pre-insertion withdrawal target is outside the "
+                        "workspace: " + workspace_error
+                    )
+                exact_start_depth_base_tool0 = _compose_transform(
+                    _inverse_transform(world_base),
+                    exact_start_depth_world_tool0,
+                )
+                exact_start_depth_base_tcp = _compose_transform(
+                    exact_start_depth_base_tool0,
+                    tool0_tcp,
+                )
+                if not bool(
+                    self.control.isPoseWithinSafetyLimits(
+                        _rtde_pose_from_transform(exact_start_depth_base_tcp)
+                    )
+                ):
+                    raise RuntimeError(
+                        f"UR controller rejected the {part_name} exact pre-insertion "
+                        "withdrawal target"
+                    )
+                phase = "disengaging"
+                final_phase = phase
+                status.update(
+                    insert_phase=phase,
+                    message=(
+                        f"{part_name} load-clear dwell confirmed — returning to the exact "
+                        "retained pre-insertion depth"
+                    ),
+                )
+                self._write_active_goal_status(goal_handle, status)
+                disengagement_progress_reference_depth_m = max(
+                    0.0,
+                    current_axial_depth_m,
+                )
+                disengagement_progress_reference_at = time.monotonic()
+                withdrawal_deadline = min(
+                    execution_deadline,
+                    disengagement_deadline
+                    if disengagement_deadline is not None
+                    else execution_deadline,
+                )
+                while rclpy.ok() and time.monotonic() < withdrawal_deadline:
+                    require_disengagement_deadline(time.monotonic())
+                    if goal_handle.is_cancel_requested:
+                        raise _InsertCanceled(
+                            f"canceled while withdrawing {part_name}"
+                        )
+                    self._execute_insert_servo_pose(
+                        exact_start_depth_base_tcp,
+                        speed_m_s=contact_speed_m_s,
+                        acceleration_m_s2=spiral_acceleration_m_s2,
+                        cycle_sec=control_cycle_sec,
+                    )
+                    withdrawal_sample = sample("disengaging")
+                    actual_world_tool0 = withdrawal_sample["actual_world_tool0"]
+                    withdrawal_position_error_m, withdrawal_orientation_error_rad = (
+                        _pose_errors(
+                            actual_world_tool0,
+                            exact_start_depth_world_tool0,
+                        )
+                    )
+                    disengagement_withdrawal_m = max(
+                        disengagement_withdrawal_m,
+                        disengagement_entry_depth_m
+                        - float(withdrawal_sample["insertion_depth_m"]),
+                    )
+                    withdrawal_sampled_at = time.monotonic()
+                    require_disengagement_progress(
+                        sampled_at=withdrawal_sampled_at,
+                        insertion_depth_m=float(
+                            withdrawal_sample["insertion_depth_m"]
+                        ),
+                    )
+                    status.update(
+                        insert_phase="disengaging",
+                        insert_disengagement_withdrawal_m=(
+                            disengagement_withdrawal_m
+                        ),
+                        insert_disengagement_contact_cleared=False,
+                    )
+                    self._write_active_goal_status(goal_handle, status)
+                    if (
+                        withdrawal_position_error_m
+                        <= min(
+                            UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M,
+                            progress_epsilon_m,
+                        )
+                        and withdrawal_orientation_error_rad
+                        <= start_orientation_tolerance_rad
+                    ):
+                        break
+                    time.sleep(control_cycle_sec)
+                else:
+                    require_disengagement_deadline(time.monotonic())
+                    raise _InsertSearchExhausted(
+                        f"{part_name} exact pre-insertion withdrawal timed out before "
+                        "contact cleared"
+                    )
+                if not self._stop_insert_servo():
+                    raise RuntimeError(
+                        f"{part_name} exact pre-insertion withdrawal servoStop was not "
+                        "acknowledged"
+                    )
+                disengagement_stationary_confirmed = (
+                    self._confirm_stationary_after_stop(
+                        linear_speed_limit_m_s=relief_stationary_speed_m_s,
+                        angular_speed_limit_rad_s=(
+                            relief_stationary_angular_speed_rad_s
+                        ),
+                    )
+                )
+                if not disengagement_stationary_confirmed:
+                    raise RuntimeError(
+                        f"{part_name} exact pre-insertion withdrawal did not establish "
+                        "stationary feedback"
+                    )
+                phase = "recentering"
+                final_phase = phase
+                recenter_world_tool0 = expected_start_world_tool0
+                if tactile_center_world_tool0 is not None:
+                    candidate_translation = tuple(
+                        tactile_center_world_tool0[0][index]
+                        - tactile_center_depth_m * insertion_axis_world[index]
+                        for index in range(3)
+                    )
+                    candidate_lateral = tuple(
+                        candidate_translation[index]
+                        - expected_start_world_tool0[0][index]
+                        for index in range(3)
+                    )
+                    candidate_axial = _vector_dot(
+                        candidate_lateral,
+                        insertion_axis_world,
+                    )
+                    candidate_translation = tuple(
+                        candidate_translation[index]
+                        - candidate_axial * insertion_axis_world[index]
+                        for index in range(3)
+                    )
+                    candidate_offset = _vector_norm(
+                        tuple(
+                            candidate_translation[index]
+                            - expected_start_world_tool0[0][index]
+                            for index in range(3)
+                        )
+                    )
+                    if candidate_offset <= max_contact_search_radius_m:
+                        recenter_world_tool0 = (
+                            candidate_translation,
+                            expected_start_world_tool0[1],
+                        )
+                workspace_error = _workspace_error(recenter_world_tool0)
+                if workspace_error:
+                    raise RuntimeError(
+                        f"{part_name} tactile recenter target is outside the workspace: "
+                        + workspace_error
+                    )
+                recenter_base_tool0 = _compose_transform(
+                    _inverse_transform(world_base),
+                    recenter_world_tool0,
+                )
+                recenter_base_tcp = _compose_transform(
+                    recenter_base_tool0,
+                    tool0_tcp,
+                )
+                if not bool(
+                    self.control.isPoseWithinSafetyLimits(
+                        _rtde_pose_from_transform(recenter_base_tcp)
+                    )
+                ):
+                    raise RuntimeError(
+                        f"UR controller rejected the {part_name} tactile recenter target"
+                    )
+                recenter_deadline = min(
+                    execution_deadline,
+                    time.monotonic() + max(1.0, target_depth_m / contact_speed_m_s),
+                )
+                recenter_command_acknowledged = True
+                while rclpy.ok() and time.monotonic() < recenter_deadline:
+                    if goal_handle.is_cancel_requested:
+                        raise _InsertCanceled(
+                            f"canceled while recentering {part_name}"
+                        )
+                    self._execute_insert_servo_pose(
+                        recenter_base_tcp,
+                        speed_m_s=contact_speed_m_s,
+                        acceleration_m_s2=spiral_acceleration_m_s2,
+                        cycle_sec=control_cycle_sec,
+                    )
+                    recenter_sample = sample("recentering")
+                    actual_world_tool0 = recenter_sample["actual_world_tool0"]
+                    recenter_position_error_m, recenter_orientation_error_rad = (
+                        _pose_errors(actual_world_tool0, recenter_world_tool0)
+                    )
+                    status.update(
+                        insert_phase="recentering",
+                        insert_recenter_position_error_m=(
+                            recenter_position_error_m
+                        ),
+                        insert_recenter_command_acknowledged=True,
+                    )
+                    self._write_active_goal_status(goal_handle, status)
+                    if (
+                        recenter_position_error_m
+                        <= UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
+                        and recenter_orientation_error_rad
+                        <= start_orientation_tolerance_rad
+                    ):
+                        break
+                    time.sleep(control_cycle_sec)
+                else:
+                    raise RuntimeError(f"{part_name} tactile recenter timed out")
+                if not self._stop_insert_servo():
+                    raise RuntimeError(
+                        f"{part_name} tactile recenter servoStop was not acknowledged"
+                    )
+                disengagement_stationary_confirmed = (
+                    self._confirm_stationary_after_stop(
+                        linear_speed_limit_m_s=relief_stationary_speed_m_s,
+                        angular_speed_limit_rad_s=(
+                            relief_stationary_angular_speed_rad_s
+                        ),
+                    )
+                )
+                if not disengagement_stationary_confirmed:
+                    raise RuntimeError(
+                        f"{part_name} tactile recenter did not establish stationary feedback"
+                    )
+                phase = "retaring"
+                final_phase = phase
+                status.update(
+                    insert_phase=phase,
+                    message=f"retaring {part_name} after tactile recenter",
+                )
+                self._write_active_goal_status(goal_handle, status)
+                retare_samples: list[list[float]] = []
+                for _sample_index in range(5):
+                    retare_sample = sample("retaring")
+                    actual_tcp_force = list(retare_sample["actual_tcp_force"])
+                    actual_tcp_speed = list(retare_sample["actual_tcp_speed"])
+                    if (
+                        _vector_norm(tuple(actual_tcp_speed[:3]))
+                        > relief_stationary_speed_m_s
+                        or _vector_norm(tuple(actual_tcp_speed[3:]))
+                        > relief_stationary_angular_speed_rad_s
+                    ):
+                        raise RuntimeError(
+                            f"{part_name} moved while retaring after disengagement"
+                        )
+                    retare_samples.append(list(actual_tcp_force))
+                    time.sleep(control_cycle_sec)
+                retared_bias = [
+                    sum(sample[index] for sample in retare_samples)
+                    / len(retare_samples)
+                    for index in range(6)
+                ]
+                retare_force_span_n = _vector_norm(
+                    tuple(
+                        max(sample[index] for sample in retare_samples)
+                        - min(sample[index] for sample in retare_samples)
+                        for index in range(3)
+                    )
+                )
+                retare_torque_span_nm = _vector_norm(
+                    tuple(
+                        max(sample[index] for sample in retare_samples)
+                        - min(sample[index] for sample in retare_samples)
+                        for index in range(3, 6)
+                    )
+                )
+                force_bias_delta = tuple(
+                    retared_bias[index] - initial_force_bias[index]
+                    for index in range(3)
+                )
+                signed_axial_force_bias_delta_n = _vector_dot(
+                    force_bias_delta,
+                    insertion_axis_base,
+                )
+                axial_force_bias_delta_n = abs(signed_axial_force_bias_delta_n)
+                lateral_force_bias_delta = tuple(
+                    force_bias_delta[index]
+                    - signed_axial_force_bias_delta_n * insertion_axis_base[index]
+                    for index in range(3)
+                )
+                lateral_force_bias_delta_n = _vector_norm(
+                    lateral_force_bias_delta
+                )
+                force_bias_delta_n = _vector_norm(force_bias_delta)
+                torque_bias_delta_nm = _vector_norm(
+                    tuple(
+                        retared_bias[index] - initial_force_bias[index]
+                        for index in range(3, 6)
+                    )
+                )
+                retare_samples_stable = bool(
+                    retare_force_span_n <= baseline_force_uncertainty_n
+                    and retare_torque_span_nm <= baseline_torque_uncertainty_nm
+                )
+                retare_contact_free = bool(
+                    axial_force_bias_delta_n
+                    <= contact_force_delta_n * relief_clear_hysteresis_ratio
+                    and lateral_force_bias_delta_n
+                    <= force_depth_lateral_upper_n[0]
+                    * relief_clear_hysteresis_ratio
+                    and torque_bias_delta_nm
+                    <= force_depth_torque_upper_nm[0]
+                    * relief_clear_hysteresis_ratio
+                )
+                retare_baseline_consistent = bool(
+                    retare_samples_stable and retare_contact_free
+                )
+                append_server_trace(
+                    "retare",
+                    {
+                        "disengagement_cycle_count": disengagement_cycle_count,
+                        "force_bias_delta_n": force_bias_delta_n,
+                        "axial_force_bias_delta_n": (
+                            axial_force_bias_delta_n
+                        ),
+                        "lateral_force_bias_delta_n": (
+                            lateral_force_bias_delta_n
+                        ),
+                        "torque_bias_delta_nm": torque_bias_delta_nm,
+                        "retare_force_span_n": retare_force_span_n,
+                        "retare_torque_span_nm": retare_torque_span_nm,
+                        "retare_samples_stable": retare_samples_stable,
+                        "retare_contact_free": retare_contact_free,
+                        "retare_baseline_consistent": (
+                            retare_baseline_consistent
+                        ),
+                    },
+                )
+                if not retare_baseline_consistent:
+                    raise _InsertSearchExhausted(
+                        f"Automatic retry stopped — {part_name} may have shifted in RG2 "
+                        "or remained in contact after full withdrawal"
+                    )
+                disengagement_contact_cleared = True
+                status.update(insert_disengagement_contact_cleared=True)
+                self._write_active_goal_status(goal_handle, status)
+                force_bias = retared_bias
+                force_bias_valid = True
+                contact_detected = False
+                engagement_detected = False
+                contact_candidate_since = None
+                contact_candidate_depth_m = 0.0
+                contact_reference_depth_m = None
+                search_engagement_reference_depth_m = None
+                engagement_candidate_since = None
+                engagement_candidate_interruption_since = None
+                engagement_candidate_peak_depth_m = 0.0
+                engagement_depth_m = 0.0
+                progress_reference_depth_m = 0.0
+                progress_reference_at = time.monotonic()
+                filtered_force_samples.clear()
+                soft_overload_candidate_since = None
+                soft_overload_duration_sec = 0.0
+                spiral_phase_offset_rad = (
+                    disengagement_cycle_count
+                    * 2.0
+                    * math.pi
+                    / max_disengagement_cycles
+                )
+                if tactile_center_world_tool0 is not None:
+                    spiral_theta = 0.0
+                    expanded_search_boundary_theta = None
+                    expanded_search_stage_index = 0
+                search_origin_world_tool0 = None
+                search_guard_entry_theta = spiral_theta
+                search_escape_candidate_since = None
+                restart_base_tcp = self._read_actual_tcp_transform()
+                if restart_base_tcp is None:
+                    raise RuntimeError(
+                        f"actual TCP pose is unavailable while retrying {part_name}"
+                    )
+                self._start_insert_force_mode(
+                    actual_base_tcp=restart_base_tcp,
+                    insertion_axis_base=insertion_axis_base,
+                    insertion_force_n=(
+                        insertion_force_n * relief_axial_force_ratio
+                    ),
+                    contact_speed_m_s=contact_speed_m_s,
+                    spiral_speed_m_s=(
+                        spiral_speed_m_s * relief_search_speed_ratio
+                    ),
+                    tilt_tolerance_rad=tilt_tolerance_rad,
+                )
+                phase = "retrying"
+                final_phase = phase
+                retry_started_at = time.monotonic()
+
+            def restart_force_mode_after_backoff() -> None:
+                nonlocal relief_backoff_m
+                nonlocal relief_backoff_committed
+                nonlocal relief_committed_backoff_m
+                nonlocal relief_force_mode_stop_acknowledged
+                nonlocal relief_stop_l_command_completed
+                nonlocal relief_stationary_confirmed
+                nonlocal relief_force_mode_restart_acknowledged
+                nonlocal relief_retreat_m
+                nonlocal total_relief_backoff_m
+                if not stop_and_confirm():
+                    raise RuntimeError(
+                        "relief backoff did not receive stop and stationary acknowledgements"
+                    )
+                relief_force_mode_stop_acknowledged = force_mode_stop_acknowledged
+                relief_stop_l_command_completed = stop_l_command_completed
+                relief_stationary_confirmed = stationary_confirmed
+                settled_relief_retreat_m = max(
+                    0.0,
+                    relief_entry_depth_m - final_insertion_depth_m,
+                )
+                relief_retreat_m = max(relief_retreat_m, settled_relief_retreat_m)
+                relief_backoff_m = max(relief_backoff_m, relief_retreat_m)
+                if relief_backoff_committed:
+                    total_relief_backoff_m += max(
+                        0.0,
+                        relief_backoff_m - relief_committed_backoff_m,
+                    )
+                else:
+                    total_relief_backoff_m += relief_backoff_m
+                    relief_backoff_committed = True
+                relief_committed_backoff_m = relief_backoff_m
+                if total_relief_backoff_m > max_relief_retreat_m + 1e-12:
+                    raise _InsertSoftOverload(
+                        "stationary cumulative relief retreat "
+                        f"{total_relief_backoff_m:.6f} m exceeded protected maximum "
+                        f"{max_relief_retreat_m:.6f} m"
+                    )
+                append_server_trace(
+                    "relief_backoff_complete",
+                    {
+                        **last_sample,
+                        "relief_cycle_count": relief_cycle_count,
+                        "relief_backoff_m": relief_backoff_m,
+                        "relief_planned_backoff_m": relief_planned_backoff_m,
+                        "total_relief_backoff_m": total_relief_backoff_m,
+                        "relief_load_cleared": relief_load_cleared,
+                        "relief_stationary_confirmed": relief_stationary_confirmed,
+                    },
+                )
+                dispatch_ready, dispatch_message, _position_error, _orientation_error = (
+                    self._cartesian_frame_validation()
+                )
+                if not dispatch_ready:
+                    raise RuntimeError(dispatch_message)
+                restart_base_tcp = self._read_actual_tcp_transform()
+                if restart_base_tcp is None:
+                    raise RuntimeError(
+                        "actual TCP pose is unavailable while restarting relief force mode"
+                    )
+                self._start_insert_force_mode(
+                    actual_base_tcp=restart_base_tcp,
+                    insertion_axis_base=insertion_axis_base,
+                    insertion_force_n=(
+                        insertion_force_n * relief_axial_force_ratio
+                    ),
+                    contact_speed_m_s=contact_speed_m_s,
+                    spiral_speed_m_s=(
+                        spiral_speed_m_s
+                        * relief_search_speed_ratio**relief_cycle_count
+                    ),
+                    tilt_tolerance_rad=tilt_tolerance_rad,
+                )
+                relief_force_mode_restart_acknowledged = True
+                append_server_trace(
+                    "relief_restart",
+                    {
+                        "relief_cycle_count": relief_cycle_count,
+                        "relief_backoff_m": relief_backoff_m,
+                        "relief_planned_backoff_m": relief_planned_backoff_m,
+                        "total_relief_backoff_m": total_relief_backoff_m,
+                        "relief_force_mode_stop_acknowledged": (
+                            relief_force_mode_stop_acknowledged
+                        ),
+                        "relief_stop_l_command_completed": (
+                            relief_stop_l_command_completed
+                        ),
+                        "relief_stationary_confirmed": relief_stationary_confirmed,
+                        "relief_force_mode_restart_acknowledged": True,
+                    },
+                )
+
+            def begin_relief(
+                *,
+                sampled_at: float,
+                insertion_depth_m: float,
+                trigger_name: str,
+                trigger_value: float,
+                trigger_threshold: float,
+                reason: str,
+            ) -> None:
+                nonlocal phase
+                nonlocal final_phase
+                nonlocal relief_cycle_count
+                nonlocal relief_exhausted
+                nonlocal relief_started_at
+                nonlocal relief_entry_depth_m
+                nonlocal relief_clear_since
+                nonlocal relief_backoff_complete
+                nonlocal relief_backoff_committed
+                nonlocal relief_committed_backoff_m
+                nonlocal resume_started_at
+                nonlocal relief_resume_phase
+                nonlocal limit_trigger
+                nonlocal limit_trigger_value
+                nonlocal limit_trigger_threshold
+                nonlocal limit_trigger_actual_tcp_force
+                nonlocal limit_trigger_tared_tcp_force
+                nonlocal relief_load_cleared
+                nonlocal relief_backoff_m
+                nonlocal relief_planned_backoff_m
+                nonlocal relief_force_mode_stop_acknowledged
+                nonlocal relief_stop_l_command_completed
+                nonlocal relief_stationary_confirmed
+                nonlocal relief_force_mode_restart_acknowledged
+                nonlocal frozen_search_resume_pending
+                nonlocal search_peck_state
+                nonlocal search_peck_started_at
+                nonlocal search_peck_retreat_m
+                nonlocal search_peck_next_at
+                nonlocal engagement_candidate_since
+                nonlocal engagement_candidate_interruption_since
+                nonlocal engagement_candidate_peak_depth_m
+                engagement_candidate_since = None
+                engagement_candidate_interruption_since = None
+                engagement_candidate_peak_depth_m = 0.0
+                limit_trigger = f"soft_{trigger_name}"
+                limit_trigger_value = trigger_value
+                limit_trigger_threshold = trigger_threshold
+                limit_trigger_actual_tcp_force = list(
+                    last_sample.get("actual_tcp_force", [0.0] * 6)
+                )
+                limit_trigger_tared_tcp_force = list(
+                    last_sample.get("tared_tcp_force", [0.0] * 6)
+                )
+                if engagement_detected or phase == "settling":
+                    seated_axial_stop_candidate = bool(
+                        depth_error_m <= seated_depth_tolerance_m
+                        and force_window_ready
+                        and filtered_axial_force_n >= contact_force_delta_n
+                        and filtered_axial_force_n
+                        <= guarded_axial_force_ceiling_n
+                        and filtered_lateral_force_n <= max_lateral_force_n
+                        and filtered_torque_nm <= max_torque_nm
+                        and tilt_error_rad <= tilt_tolerance_rad
+                        and abs(axial_tcp_speed_m_s)
+                        <= near_zero_axial_speed_m_s
+                        and deepest_depth_m - insertion_depth_m
+                        <= rebound_tolerance_m
+                    )
+                    if seated_axial_stop_candidate:
+                        phase = "settling"
+                        final_phase = phase
+                        return
+                    relief_exhausted = True
+                    begin_disengagement(
+                        f"{reason}; {part_name} cocking persisted after engagement",
+                        insertion_depth_m=insertion_depth_m,
+                    )
+                    return
+                if not contact_detected or phase not in {
+                    "seating",
+                    "searching",
+                    "expanded_searching",
+                    "resuming",
+                }:
+                    relief_exhausted = True
+                    raise _InsertSoftOverload(
+                        f"{reason}; relief requires pre-engagement contact"
+                    )
+                if relief_cycle_count >= max_relief_cycles:
+                    relief_exhausted = True
+                    begin_disengagement(
+                        f"{reason}; micro-relief cycle limit exhausted",
+                        insertion_depth_m=insertion_depth_m,
+                    )
+                    return
+                relief_resume_phase = (
+                    phase
+                    if phase in {"seating", "searching", "expanded_searching"}
+                    else relief_resume_phase
+                )
+                frozen_search_resume_pending = relief_resume_phase in {
+                    "searching",
+                    "expanded_searching",
+                }
+                relief_cycle_count += 1
+                relief_started_at = sampled_at
+                relief_entry_depth_m = insertion_depth_m
+                relief_clear_since = None
+                relief_backoff_complete = False
+                relief_backoff_committed = False
+                relief_committed_backoff_m = 0.0
+                resume_started_at = None
+                relief_load_cleared = False
+                relief_backoff_m = 0.0
+                relief_planned_backoff_m = 0.0
+                relief_force_mode_stop_acknowledged = False
+                relief_stop_l_command_completed = False
+                relief_stationary_confirmed = False
+                relief_force_mode_restart_acknowledged = False
+                search_peck_state = "idle"
+                search_peck_started_at = None
+                search_peck_retreat_m = 0.0
+                search_peck_next_at = math.inf
+                phase = "relieving"
+                final_phase = phase
+
+            while rclpy.ok() and time.monotonic() < execution_deadline:
+                if goal_handle.is_cancel_requested:
+                    raise _InsertCanceled("canceled")
+                now = time.monotonic()
+                lateral_force_x_n = 0.0
+                lateral_force_y_n = 0.0
+                axial_force_command_n = insertion_force_n
+                if phase in {"searching", "expanded_searching"}:
+                    if spiral_started_at is None:
+                        spiral_started_at = now
+                    search_elapsed_sec = max(0.0, now - spiral_started_at)
+                    ramp_time_sec = max(
+                        control_cycle_sec,
+                        spiral_speed_m_s / spiral_acceleration_m_s2,
+                    )
+                    ramp_fraction = min(1.0, search_elapsed_sec / ramp_time_sec)
+                    protected_search_speed_m_s = (
+                        float(selected_hard_caps["insert_max_spiral_speed_m_s"])
+                        if phase == "expanded_searching"
+                        else spiral_speed_m_s
+                    )
+                    search_speed_m_s = (
+                        protected_search_speed_m_s
+                        * relief_search_speed_ratio
+                        ** min(
+                            1,
+                            relief_cycle_count + disengagement_cycle_count,
+                        )
+                        * ramp_fraction
+                    )
+                    path_scale = math.sqrt(
+                        spiral_scale * spiral_scale
+                        + final_search_radius_m * final_search_radius_m
+                    )
+                    if search_peck_state != "descending":
+                        spiral_theta += (
+                            search_speed_m_s
+                            * control_cycle_sec
+                            / max(path_scale, 1e-12)
+                        )
+                    stopping_margin_m = max(
+                        search_speed_m_s * control_cycle_sec * 2.0,
+                        1e-6,
+                    )
+                    expanded_stage_radius_m = expanded_search_stage_radii_m[
+                        expanded_search_stage_index
+                    ]
+                    expanded_radius_limit_m = max(
+                        spiral_radius_m,
+                        expanded_stage_radius_m - stopping_margin_m,
+                    )
+                    scheduled_radius_unbounded_m = spiral_scale * spiral_theta
+                    if (
+                        phase == "searching"
+                        and advanced_recovery_enabled
+                        and scheduled_radius_unbounded_m >= spiral_radius_m
+                    ):
+                        phase = "expanded_searching"
+                        final_phase = phase
+                    search_radius_limit_m = (
+                        expanded_radius_limit_m
+                        if phase == "expanded_searching"
+                        else spiral_radius_m
+                    )
+                    final_search_radius_m = min(
+                        search_radius_limit_m,
+                        scheduled_radius_unbounded_m,
+                    )
+                    scheduled_search_radius_m = final_search_radius_m
+                    explored_search_radius_m = max(
+                        explored_search_radius_m,
+                        final_search_radius_m,
+                    )
+                    explored_search_angle_rad = max(
+                        explored_search_angle_rad,
+                        spiral_theta,
+                    )
+                    if (
+                        phase == "expanded_searching"
+                        and search_peck_state == "idle"
+                        and final_search_radius_m
+                        >= expanded_radius_limit_m - 1e-12
+                    ):
+                        if expanded_search_boundary_theta is None:
+                            expanded_search_boundary_theta = spiral_theta
+                        elif (
+                            spiral_theta - expanded_search_boundary_theta
+                            >= 2.0 * math.pi
+                        ):
+                            if expanded_search_stage_index + 1 < len(
+                                expanded_search_stage_radii_m
+                            ):
+                                expanded_search_stage_index += 1
+                                expanded_search_boundary_theta = None
+                            else:
+                                raise _InsertSearchExhausted(
+                                    "No pin entry found within "
+                                    f"{max_contact_search_radius_m * 1000.0:.0f} mm"
+                                )
+                    radial_ratio = min(
+                        1.0,
+                        spiral_scale / max(final_search_radius_m, spiral_scale),
+                    )
+                    force_scale = (
+                        lateral_search_force_n
+                        * relief_search_force_ratio
+                        ** min(
+                            1,
+                            relief_cycle_count + disengagement_cycle_count,
+                        )
+                        * ramp_fraction
+                        / math.sqrt(1.0 + radial_ratio * radial_ratio)
+                    )
+                    tangential_force_n = force_scale
+                    radial_force_n = force_scale * radial_ratio
+                    search_angle_rad = spiral_theta + spiral_phase_offset_rad
+                    lateral_force_x_n = (
+                        radial_force_n * math.cos(search_angle_rad)
+                        - tangential_force_n * math.sin(search_angle_rad)
+                    )
+                    lateral_force_y_n = (
+                        radial_force_n * math.sin(search_angle_rad)
+                        + tangential_force_n * math.cos(search_angle_rad)
+                    )
+                    if search_peck_state == "unloading":
+                        axial_force_command_n = (
+                            -insertion_force_n * relief_reverse_force_ratio
+                        )
+                    elif search_peck_state == "descending":
+                        lateral_force_x_n = 0.0
+                        lateral_force_y_n = 0.0
+                        axial_force_command_n = (
+                            insertion_force_n * relief_axial_force_ratio
+                        )
+                    elif phase == "expanded_searching":
+                        axial_force_command_n = (
+                            insertion_force_n * relief_axial_force_ratio
+                        )
+                elif phase == "cocked":
+                    axial_force_command_n = 0.0
+                elif phase == "disengaging":
+                    axial_force_command_n = (
+                        -insertion_force_n * relief_reverse_force_ratio
+                    )
+                elif phase == "retrying":
+                    if retry_started_at is None:
+                        retry_started_at = now
+                    retry_fraction = min(
+                        1.0,
+                        max(0.0, now - retry_started_at)
+                        / relief_resume_ramp_sec,
+                    )
+                    reduced_force_n = (
+                        insertion_force_n * relief_axial_force_ratio
+                    )
+                    axial_force_command_n = reduced_force_n + (
+                        insertion_force_n - reduced_force_n
+                    ) * retry_fraction
+                elif phase == "settling":
+                    axial_force_command_n = (
+                        insertion_force_n * relief_axial_force_ratio
+                    )
+                elif phase == "relieving":
+                    axial_force_command_n = insertion_force_n * relief_axial_force_ratio
+                elif phase == "backing_off":
+                    protected_total_retreat_m = _protected_relief_retreat_m(
+                        total_relief_backoff_m,
+                        relief_backoff_m,
+                        relief_backoff_committed=relief_backoff_committed,
+                    )
+                    if (
+                        not relief_backoff_complete
+                        and protected_total_retreat_m
+                        >= max_relief_retreat_m - 1e-12
+                    ):
+                        relief_exhausted = True
+                        begin_disengagement(
+                            "protected cumulative relief retreat reached "
+                            f"{max_relief_retreat_m:.6f} m before another reverse command",
+                            insertion_depth_m=final_insertion_depth_m,
+                        )
+                        continue
+                    if (
+                        not relief_backoff_complete
+                        and final_insertion_depth_m
+                        <= start_position_tolerance_m
+                    ):
+                        relief_exhausted = True
+                        begin_disengagement(
+                            "relief cannot command another reverse sample within "
+                            "the protected pre-insertion margin "
+                            f"{start_position_tolerance_m:.6f} m",
+                            insertion_depth_m=final_insertion_depth_m,
+                        )
+                        continue
+                    remaining_planned_backoff_m = max(
+                        0.0,
+                        relief_planned_backoff_m - relief_backoff_m,
+                    )
+                    remaining_total_retreat_m = max(
+                        0.0,
+                        max_relief_retreat_m - protected_total_retreat_m,
+                    )
+                    reverse_speed_m_s = max(
+                        relief_stationary_speed_m_s,
+                        max(
+                            0.0,
+                            -float(last_sample.get("axial_tcp_speed_m_s", 0.0)),
+                        ),
+                    )
+                    reverse_stop_margin_m = (
+                        reverse_speed_m_s * control_cycle_sec * 2.0
+                    )
+                    if remaining_total_retreat_m <= reverse_stop_margin_m:
+                        relief_exhausted = True
+                        begin_disengagement(
+                            "remaining cumulative relief retreat "
+                            f"{remaining_total_retreat_m:.6f} m cannot accommodate "
+                            "another reverse control sample",
+                            insertion_depth_m=final_insertion_depth_m,
+                        )
+                        continue
+                    if (
+                        relief_backoff_m > 0.0
+                        and remaining_planned_backoff_m <= reverse_stop_margin_m
+                    ):
+                        relief_backoff_complete = True
+                        restart_force_mode_after_backoff()
+                        phase = "resuming"
+                        final_phase = phase
+                        resume_started_at = now
+                        soft_overload_candidate_since = None
+                        soft_overload_duration_sec = 0.0
+                        filtered_force_samples.clear()
+                        continue
+                    axial_force_command_n = (
+                        -insertion_force_n * relief_reverse_force_ratio
+                    )
+                elif phase == "resuming":
+                    if resume_started_at is None:
+                        resume_started_at = now
+                    resume_fraction = min(
+                        1.0,
+                        max(0.0, now - resume_started_at) / relief_resume_ramp_sec,
+                    )
+                    relief_axial_force_n = insertion_force_n * relief_axial_force_ratio
+                    axial_force_command_n = relief_axial_force_n + (
+                        insertion_force_n - relief_axial_force_n
+                    ) * resume_fraction
+                commanded_axial_force_n = axial_force_command_n
+                lateral_compliant = bool(
+                    phase in {"searching", "expanded_searching"}
+                    and search_peck_state == "idle"
+                )
+                if not lateral_compliant:
+                    lateral_force_x_n = 0.0
+                    lateral_force_y_n = 0.0
+                commanded_lateral_force_x_n = lateral_force_x_n
+                commanded_lateral_force_y_n = lateral_force_y_n
+                self._refresh_insert_force_mode(
+                    lateral_force_x_n=lateral_force_x_n,
+                    lateral_force_y_n=lateral_force_y_n,
+                    axial_force_n=axial_force_command_n,
+                    lateral_compliant=lateral_compliant,
+                )
+                current_sample = sample(phase)
+                insertion_depth_m = float(current_sample["insertion_depth_m"])
+                depth_error_m = float(current_sample["depth_error_m"])
+                tilt_error_rad = float(current_sample["tilt_error_rad"])
+                axial_force_n = float(current_sample["axial_force_n"])
+                lateral_force_n = float(current_sample["lateral_force_n"])
+                torque_nm = float(current_sample["torque_nm"])
+                tool_flange_torque_nm = float(
+                    current_sample["tool_flange_torque_nm"]
+                )
+                axial_tcp_speed_m_s = float(current_sample["axial_tcp_speed_m_s"])
+                sampled_at = time.monotonic()
+                search_lateral_offset_m = 0.0
+                if search_origin_world_tool0 is not None:
+                    search_displacement = tuple(
+                        current_sample["actual_world_tool0"][0][index]
+                        - search_origin_world_tool0[0][index]
+                        for index in range(3)
+                    )
+                    search_axial_displacement_m = _vector_dot(
+                        search_displacement,
+                        insertion_axis_world,
+                    )
+                    search_lateral_offset_m = _vector_norm(
+                        tuple(
+                            search_displacement[index]
+                            - search_axial_displacement_m
+                            * insertion_axis_world[index]
+                            for index in range(3)
+                        )
+                    )
+                deepest_depth_m = max(deepest_depth_m, insertion_depth_m)
+                filtered_force_samples.append(
+                    (
+                        sampled_at,
+                        axial_force_n,
+                        lateral_force_n,
+                        torque_nm,
+                        tool_flange_torque_nm,
+                    )
+                )
+                while (
+                    filtered_force_samples
+                    and sampled_at - filtered_force_samples[0][0]
+                    > force_filter_window_sec
+                ):
+                    filtered_force_samples.popleft()
+                force_window_span_sec = (
+                    filtered_force_samples[-1][0] - filtered_force_samples[0][0]
+                    if len(filtered_force_samples) >= 2
+                    else 0.0
+                )
+                force_window_ready = bool(
+                    len(filtered_force_samples) >= 3
+                    and force_window_span_sec
+                    >= min(0.04, force_filter_window_sec * 0.50)
+                )
+
+                def median_force(index: int) -> float:
+                    values = sorted(sample_value[index] for sample_value in filtered_force_samples)
+                    midpoint = len(values) // 2
+                    if len(values) % 2:
+                        return values[midpoint]
+                    return (values[midpoint - 1] + values[midpoint]) * 0.50
+
+                filtered_axial_force_n = median_force(1)
+                filtered_lateral_force_n = median_force(2)
+                filtered_torque_nm = median_force(3)
+                filtered_tool_flange_torque_nm = median_force(4)
+                peak_filtered_axial_force_n = max(
+                    peak_filtered_axial_force_n,
+                    filtered_axial_force_n,
+                )
+                peak_filtered_lateral_force_n = max(
+                    peak_filtered_lateral_force_n,
+                    filtered_lateral_force_n,
+                )
+                peak_filtered_torque_nm = max(
+                    peak_filtered_torque_nm,
+                    filtered_torque_nm,
+                )
+                status.update(
+                    insert_filtered_axial_force_n=filtered_axial_force_n,
+                    insert_filtered_lateral_force_n=filtered_lateral_force_n,
+                    insert_filtered_torque_nm=filtered_torque_nm,
+                    insert_filtered_tool_flange_torque_nm=(
+                        filtered_tool_flange_torque_nm
+                    ),
+                )
+                profile_start_depth_m = (
+                    contact_reference_depth_m
+                    if contact_reference_depth_m is not None
+                    else insertion_depth_m
+                )
+                current_force_depth_fraction = min(
+                    1.0,
+                    max(
+                        0.0,
+                        (insertion_depth_m - profile_start_depth_m)
+                        / max(target_depth_m - profile_start_depth_m, 1e-12),
+                    ),
+                )
+                current_force_depth_axial_upper_n = _force_depth_upper(
+                    force_depth_fraction,
+                    force_depth_axial_upper_n,
+                    current_force_depth_fraction,
+                )
+                current_force_depth_lateral_upper_n = _force_depth_upper(
+                    force_depth_fraction,
+                    force_depth_lateral_upper_n,
+                    current_force_depth_fraction,
+                )
+                current_force_depth_torque_upper_nm = _force_depth_upper(
+                    force_depth_fraction,
+                    force_depth_torque_upper_nm,
+                    current_force_depth_fraction,
+                )
+                (
+                    learned_axial_limit_scale,
+                    depth_axial_limit_scale,
+                ) = _insert_axial_soft_limit_scales(part_name)
+                effective_max_axial_force_n = min(
+                    max_axial_force_n * learned_axial_limit_scale,
+                    guarded_axial_force_ceiling_n,
+                )
+                effective_force_depth_axial_upper_n = min(
+                    current_force_depth_axial_upper_n * depth_axial_limit_scale,
+                    guarded_axial_force_ceiling_n,
+                )
+                axial_progress_advancing = bool(
+                    insertion_depth_m
+                    >= progress_reference_depth_m + progress_epsilon_m
+                )
+                if axial_progress_advancing:
+                    progress_reference_depth_m = insertion_depth_m
+                    progress_reference_at = sampled_at
+                axial_progress_stalled = bool(
+                    contact_detected
+                    and depth_error_m > seated_depth_tolerance_m
+                    and sampled_at - progress_reference_at >= stall_hold_sec
+                )
+                axial_profile_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_axial_force_n
+                    > effective_force_depth_axial_upper_n
+                )
+                lateral_profile_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_lateral_force_n
+                    > current_force_depth_lateral_upper_n
+                )
+                torque_profile_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_torque_nm
+                    > current_force_depth_torque_upper_nm
+                )
+                learned_axial_force_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_axial_force_n > effective_max_axial_force_n
+                )
+                learned_lateral_force_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_lateral_force_n > max_lateral_force_n
+                )
+                learned_torque_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_torque_nm > max_torque_nm
+                )
+                guarded_axial_force_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_axial_force_n
+                    > guarded_axial_force_ceiling_n
+                )
+                guarded_lateral_force_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_lateral_force_n
+                    > guarded_lateral_force_ceiling_n
+                )
+                guarded_torque_exceeded = bool(
+                    force_window_ready
+                    and contact_detected
+                    and filtered_torque_nm > guarded_torque_ceiling_nm
+                )
+                force_depth_profile_in_band = bool(
+                    not axial_profile_exceeded
+                    and not lateral_profile_exceeded
+                    and not torque_profile_exceeded
+                )
+                learned_soft_limits_in_band = bool(
+                    not learned_axial_force_exceeded
+                    and not learned_lateral_force_exceeded
+                    and not learned_torque_exceeded
+                )
+                guarded_soft_limits_in_band = bool(
+                    not guarded_axial_force_exceeded
+                    and not guarded_lateral_force_exceeded
+                    and not guarded_torque_exceeded
+                )
+                engagement_profile_load = bool(
+                    force_window_ready
+                    and guarded_soft_limits_in_band
+                    and (
+                        (
+                            learned_soft_limits_in_band
+                            and force_depth_profile_in_band
+                        )
+                        or axial_progress_advancing
+                    )
+                )
+                if (
+                    force_window_ready
+                    and filtered_axial_force_n >= contact_force_delta_n
+                ):
+                    if contact_candidate_since is None:
+                        contact_candidate_since = sampled_at
+                        contact_candidate_depth_m = insertion_depth_m
+                    elif sampled_at - contact_candidate_since >= contact_hold_sec:
+                        contact_detected = True
+                        if contact_reference_depth_m is None:
+                            contact_reference_depth_m = contact_candidate_depth_m
+                elif not contact_detected:
+                    contact_candidate_since = None
+                    contact_candidate_depth_m = 0.0
+
+                update_tactile_center_candidate(
+                    sampled_at=sampled_at,
+                    actual_world_tool0=current_sample["actual_world_tool0"],
+                    insertion_depth_m=insertion_depth_m,
+                    filtered_lateral_force_n=filtered_lateral_force_n,
+                    filtered_torque_nm=filtered_torque_nm,
+                    profile_load_ok=(
+                        force_window_ready
+                        and learned_soft_limits_in_band
+                        and force_depth_profile_in_band
+                    ),
+                )
+                if (
+                    engagement_detected
+                    and depth_error_m <= seated_depth_tolerance_m
+                    and filtered_axial_force_n <= effective_max_axial_force_n
+                    and filtered_lateral_force_n <= max_lateral_force_n
+                    and filtered_torque_nm <= max_torque_nm
+                    and phase
+                    not in {
+                        "cocked",
+                        "disengaging",
+                        "recentering",
+                        "retaring",
+                        "retrying",
+                    }
+                ):
+                    phase = "settling"
+                    final_phase = phase
+                    search_peck_state = "idle"
+                    search_peck_started_at = None
+                    search_peck_next_at = math.inf
+                search_escaped_scheduled_spiral = bool(
+                    advanced_recovery_enabled
+                    and phase in {"searching", "expanded_searching"}
+                    and contact_detected
+                    and axial_progress_stalled
+                    and search_origin_world_tool0 is not None
+                    and search_lateral_offset_m
+                    > scheduled_search_radius_m + start_position_tolerance_m
+                )
+                if search_escaped_scheduled_spiral:
+                    if search_escape_candidate_since is None:
+                        search_escape_candidate_since = sampled_at
+                    search_completed_full_turn = bool(
+                        spiral_theta - search_guard_entry_theta >= 2.0 * math.pi
+                    )
+                    if (
+                        search_completed_full_turn
+                        and sampled_at - search_escape_candidate_since
+                        >= stall_hold_sec
+                    ):
+                        begin_disengagement(
+                            f"{part_name} search displacement escaped the scheduled tactile spiral "
+                            "while insertion progress was stalled",
+                            insertion_depth_m=insertion_depth_m,
+                        )
+                        time.sleep(control_cycle_sec)
+                        continue
+                else:
+                    search_escape_candidate_since = None
+
+                if (
+                    advanced_recovery_enabled
+                    and phase in {"searching", "expanded_searching"}
+                    and not engagement_detected
+                ):
+                    if search_peck_state == "idle":
+                        if (
+                            contact_detected
+                            and axial_progress_stalled
+                            and sampled_at >= search_peck_next_at
+                        ):
+                            available_retreat_m = max(0.0, insertion_depth_m)
+                            search_peck_target_retreat_m = min(
+                                search_peck_retreat_limit_m,
+                                available_retreat_m,
+                            )
+                            if search_peck_target_retreat_m > progress_epsilon_m:
+                                search_peck_state = "unloading"
+                                search_peck_started_at = sampled_at
+                                search_peck_entry_depth_m = insertion_depth_m
+                                search_peck_retreat_m = 0.0
+                                search_peck_cycle_count += 1
+                                soft_overload_candidate_since = None
+                                soft_overload_duration_sec = 0.0
+                                append_server_trace(
+                                    "search_peck_unloading",
+                                    {
+                                        **last_sample,
+                                        "search_peck_cycle_count": (
+                                            search_peck_cycle_count
+                                        ),
+                                        "search_peck_entry_depth_m": (
+                                            search_peck_entry_depth_m
+                                        ),
+                                        "search_peck_target_retreat_m": (
+                                            search_peck_target_retreat_m
+                                        ),
+                                    },
+                                )
+                            else:
+                                search_peck_next_at = (
+                                    sampled_at + search_peck_interval_sec
+                                )
+                    elif search_peck_state == "unloading":
+                        search_peck_retreat_m = max(
+                            search_peck_retreat_m,
+                            search_peck_entry_depth_m - insertion_depth_m,
+                        )
+                        reverse_speed_m_s = max(0.0, -axial_tcp_speed_m_s)
+                        reverse_stop_margin_m = max(
+                            progress_epsilon_m,
+                            reverse_speed_m_s * control_cycle_sec * 2.0,
+                        )
+                        remaining_retreat_m = max(
+                            0.0,
+                            search_peck_target_retreat_m
+                            - search_peck_retreat_m,
+                        )
+                        search_peck_elapsed_sec = (
+                            sampled_at - search_peck_started_at
+                            if search_peck_started_at is not None
+                            else 0.0
+                        )
+                        if (
+                            remaining_retreat_m <= reverse_stop_margin_m
+                            or search_peck_elapsed_sec >= relief_timeout_sec
+                        ):
+                            search_peck_state = "descending"
+                            search_peck_started_at = sampled_at
+                            filtered_force_samples.clear()
+                            append_server_trace(
+                                "search_peck_descending",
+                                {
+                                    **last_sample,
+                                    "search_peck_cycle_count": (
+                                        search_peck_cycle_count
+                                    ),
+                                    "search_peck_retreat_m": (
+                                        search_peck_retreat_m
+                                    ),
+                                },
+                            )
+                    elif search_peck_state == "descending":
+                        search_peck_elapsed_sec = (
+                            sampled_at - search_peck_started_at
+                            if search_peck_started_at is not None
+                            else 0.0
+                        )
+                        progressed_below_peck_entry = insertion_depth_m >= (
+                            search_peck_entry_depth_m + progress_epsilon_m
+                        )
+                        recontacted_without_progress = bool(
+                            insertion_depth_m
+                            >= search_peck_entry_depth_m - progress_epsilon_m
+                            and abs(axial_tcp_speed_m_s)
+                            <= near_zero_axial_speed_m_s
+                            and force_window_ready
+                            and filtered_axial_force_n >= contact_force_delta_n
+                        )
+                        if progressed_below_peck_entry:
+                            search_peck_next_at = math.inf
+                        elif (
+                            recontacted_without_progress
+                            or search_peck_elapsed_sec >= relief_timeout_sec
+                        ):
+                            append_server_trace(
+                                "search_peck_complete",
+                                {
+                                    **last_sample,
+                                    "search_peck_cycle_count": (
+                                        search_peck_cycle_count
+                                    ),
+                                    "search_peck_retreat_m": (
+                                        search_peck_retreat_m
+                                    ),
+                                    "recontacted_without_progress": (
+                                        recontacted_without_progress
+                                    ),
+                                },
+                            )
+                            search_peck_state = "idle"
+                            search_peck_started_at = None
+                            search_peck_next_at = (
+                                sampled_at + search_peck_interval_sec
+                            )
+                            filtered_force_samples.clear()
+
+                observed_soft_band_evidence: list[
+                    tuple[str, float, float, str]
+                ] = []
+                soft_overload_evidence: list[tuple[str, float, float, str]] = []
+                if force_window_ready and search_peck_state == "idle":
+                    if learned_axial_force_exceeded:
+                        observed_soft_band_evidence.append(
+                            (
+                                "axial_force_n",
+                                filtered_axial_force_n,
+                                effective_max_axial_force_n,
+                                "filtered axial force "
+                                f"{filtered_axial_force_n:.3f} N exceeded overall learned "
+                                f"limit {effective_max_axial_force_n:.3f} N",
+                            )
+                        )
+                    if learned_lateral_force_exceeded:
+                        observed_soft_band_evidence.append(
+                            (
+                                "lateral_force_n",
+                                filtered_lateral_force_n,
+                                max_lateral_force_n,
+                                "filtered lateral force "
+                                f"{filtered_lateral_force_n:.3f} N exceeded overall learned "
+                                f"limit {max_lateral_force_n:.3f} N",
+                            )
+                        )
+                    if learned_torque_exceeded:
+                        observed_soft_band_evidence.append(
+                            (
+                                "active_tcp_torque_nm",
+                                filtered_torque_nm,
+                                max_torque_nm,
+                                "filtered active-TCP torque "
+                                f"{filtered_torque_nm:.3f} Nm exceeded overall learned "
+                                f"limit {max_torque_nm:.3f} Nm",
+                            )
+                        )
+                    if guarded_axial_force_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "axial_force_n",
+                                filtered_axial_force_n,
+                                guarded_axial_force_ceiling_n,
+                                "filtered axial force "
+                                f"{filtered_axial_force_n:.3f} N exceeded guarded ceiling "
+                                f"{guarded_axial_force_ceiling_n:.3f} N below the hard cap",
+                            )
+                        )
+                    elif axial_progress_stalled and learned_axial_force_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "axial_force_n",
+                                filtered_axial_force_n,
+                                effective_max_axial_force_n,
+                                "filtered axial force "
+                                f"{filtered_axial_force_n:.3f} N exceeded overall learned "
+                                f"limit {effective_max_axial_force_n:.3f} N while insertion "
+                                "progress "
+                                "was stalled",
+                            )
+                        )
+                    elif axial_progress_stalled and axial_profile_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "axial_force_n",
+                                filtered_axial_force_n,
+                                effective_force_depth_axial_upper_n,
+                                "filtered axial force "
+                                f"{filtered_axial_force_n:.3f} N exceeded depth-profile "
+                                f"limit {effective_force_depth_axial_upper_n:.3f} N while "
+                                "insertion progress was stalled",
+                            )
+                        )
+                    if guarded_lateral_force_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "lateral_force_n",
+                                filtered_lateral_force_n,
+                                guarded_lateral_force_ceiling_n,
+                                "filtered lateral force "
+                                f"{filtered_lateral_force_n:.3f} N exceeded guarded ceiling "
+                                f"{guarded_lateral_force_ceiling_n:.3f} N below the hard cap",
+                            )
+                        )
+                    elif axial_progress_stalled and learned_lateral_force_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "lateral_force_n",
+                                filtered_lateral_force_n,
+                                max_lateral_force_n,
+                                "filtered lateral force "
+                                f"{filtered_lateral_force_n:.3f} N exceeded overall learned "
+                                f"limit {max_lateral_force_n:.3f} N while insertion progress "
+                                "was stalled",
+                            )
+                        )
+                    elif axial_progress_stalled and lateral_profile_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "lateral_force_n",
+                                filtered_lateral_force_n,
+                                current_force_depth_lateral_upper_n,
+                                "filtered lateral force "
+                                f"{filtered_lateral_force_n:.3f} N exceeded depth-profile "
+                                f"limit {current_force_depth_lateral_upper_n:.3f} N while "
+                                "insertion progress was stalled",
+                            )
+                        )
+                    if guarded_torque_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "active_tcp_torque_nm",
+                                filtered_torque_nm,
+                                guarded_torque_ceiling_nm,
+                                "filtered active-TCP torque "
+                                f"{filtered_torque_nm:.3f} Nm exceeded guarded ceiling "
+                                f"{guarded_torque_ceiling_nm:.3f} Nm below the hard cap",
+                            )
+                        )
+                    elif axial_progress_stalled and learned_torque_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "active_tcp_torque_nm",
+                                filtered_torque_nm,
+                                max_torque_nm,
+                                "filtered active-TCP torque "
+                                f"{filtered_torque_nm:.3f} Nm exceeded overall learned "
+                                f"limit {max_torque_nm:.3f} Nm while insertion progress "
+                                "was stalled",
+                            )
+                        )
+                    elif axial_progress_stalled and torque_profile_exceeded:
+                        soft_overload_evidence.append(
+                            (
+                                "active_tcp_torque_nm",
+                                filtered_torque_nm,
+                                current_force_depth_torque_upper_nm,
+                                "filtered active-TCP torque "
+                                f"{filtered_torque_nm:.3f} Nm exceeded depth-profile "
+                                f"limit {current_force_depth_torque_upper_nm:.3f} Nm while "
+                                "insertion progress was stalled",
+                            )
+                        )
+                if observed_soft_band_evidence:
+                    soft_overload_detected = True
+                    last_soft_overload_reason = "; ".join(
+                        evidence[3] for evidence in observed_soft_band_evidence
+                    )
+                if soft_overload_evidence:
+                    soft_overload_detected = True
+                    trigger_name, trigger_value, trigger_threshold, reason = (
+                        soft_overload_evidence[0]
+                    )
+                    last_soft_overload_reason = "; ".join(
+                        evidence[3] for evidence in soft_overload_evidence
+                    )
+                    if soft_overload_candidate_since is None:
+                        soft_overload_candidate_since = sampled_at
+                    soft_overload_duration_sec = max(
+                        0.0,
+                        sampled_at - soft_overload_candidate_since,
+                    )
+                    if (
+                        phase
+                        not in {
+                            "relieving",
+                            "backing_off",
+                            "cocked",
+                            "disengaging",
+                            "recentering",
+                            "retaring",
+                            "retrying",
+                        }
+                        and soft_overload_duration_sec >= soft_overload_hold_sec
+                    ):
+                        begin_relief(
+                            sampled_at=sampled_at,
+                            insertion_depth_m=insertion_depth_m,
+                            trigger_name=trigger_name,
+                            trigger_value=trigger_value,
+                            trigger_threshold=trigger_threshold,
+                            reason=reason,
+                        )
+                else:
+                    soft_overload_candidate_since = None
+                    soft_overload_duration_sec = 0.0
+
+                if phase in {"cocked", "disengaging", "retrying"}:
+                    if disengagement_started_at is None:
+                        disengagement_started_at = sampled_at
+                    if disengagement_deadline is None:
+                        disengagement_timeout_sec = max(
+                            relief_timeout_sec,
+                            target_depth_m / contact_speed_m_s
+                            + relief_timeout_sec,
+                        )
+                        disengagement_deadline = min(
+                            execution_deadline,
+                            disengagement_started_at
+                            + disengagement_timeout_sec,
+                        )
+                    if phase in {"cocked", "disengaging"}:
+                        require_disengagement_deadline(sampled_at)
+                    if phase == "cocked":
+                        if (
+                            sampled_at - disengagement_started_at
+                            >= relief_unload_dwell_sec
+                        ):
+                            phase = "disengaging"
+                            final_phase = phase
+                            filtered_force_samples.clear()
+                            disengagement_clear_since = None
+                            disengagement_progress_reference_depth_m = (
+                                insertion_depth_m
+                            )
+                            disengagement_progress_reference_at = sampled_at
+                    elif phase == "disengaging":
+                        disengagement_withdrawal_m = max(
+                            disengagement_withdrawal_m,
+                            disengagement_entry_depth_m - insertion_depth_m,
+                        )
+                        require_disengagement_progress(
+                            sampled_at=sampled_at,
+                            insertion_depth_m=insertion_depth_m,
+                        )
+                        disengagement_load_clear = bool(
+                            force_window_ready
+                            and filtered_axial_force_n
+                            <= contact_force_delta_n
+                            * relief_clear_hysteresis_ratio
+                            and filtered_lateral_force_n
+                            <= current_force_depth_lateral_upper_n
+                            * relief_clear_hysteresis_ratio
+                            and filtered_torque_nm
+                            <= current_force_depth_torque_upper_nm
+                            * relief_clear_hysteresis_ratio
+                        )
+                        if disengagement_load_clear:
+                            if disengagement_clear_since is None:
+                                disengagement_clear_since = sampled_at
+                            elif (
+                                sampled_at - disengagement_clear_since
+                                >= relief_clear_dwell_sec
+                            ):
+                                complete_disengagement_recenter()
+                        else:
+                            disengagement_clear_since = None
+                    elif (
+                        retry_started_at is not None
+                        and sampled_at - retry_started_at
+                        >= relief_resume_ramp_sec
+                    ):
+                        phase = "seating"
+                        final_phase = phase
+                        retry_started_at = None
+                    status.update(
+                        insert_phase=phase,
+                        insert_disengagement_cycle_count=(
+                            disengagement_cycle_count
+                        ),
+                        insert_last_disengagement_reason=(
+                            last_disengagement_reason
+                        ),
+                        insert_disengagement_withdrawal_m=(
+                            disengagement_withdrawal_m
+                        ),
+                        insert_disengagement_contact_cleared=(
+                            disengagement_contact_cleared
+                        ),
+                        insert_recenter_position_error_m=(
+                            recenter_position_error_m
+                        ),
+                        insert_retare_baseline_consistent=(
+                            retare_baseline_consistent
+                        ),
+                    )
+                    self._write_active_goal_status(goal_handle, status)
+                    time.sleep(control_cycle_sec)
+                    continue
+
+                stationary_for_relief = bool(
+                    float(current_sample["linear_speed_m_s"])
+                    <= relief_stationary_speed_m_s
+                    and float(current_sample["angular_speed_rad_s"])
+                    <= relief_stationary_angular_speed_rad_s
+                )
+                soft_load_clear = bool(
+                    force_window_ready
+                    and filtered_axial_force_n
+                    <= effective_force_depth_axial_upper_n
+                    * relief_clear_hysteresis_ratio
+                    and filtered_lateral_force_n
+                    <= current_force_depth_lateral_upper_n
+                    * relief_clear_hysteresis_ratio
+                    and filtered_torque_nm
+                    <= current_force_depth_torque_upper_nm
+                    * relief_clear_hysteresis_ratio
+                )
+                if phase in {"relieving", "backing_off", "resuming"}:
+                    relief_load_cleared = soft_load_clear
+                    if relief_started_at is None:
+                        raise RuntimeError("insertion relief start time is unavailable")
+                    relief_elapsed_sec = max(0.0, sampled_at - relief_started_at)
+                    relief_retreat_m = max(
+                        0.0,
+                        relief_entry_depth_m - insertion_depth_m,
+                    )
+                    relief_backoff_m = max(relief_backoff_m, relief_retreat_m)
+                    if (
+                        relief_backoff_committed
+                        and relief_backoff_m > relief_committed_backoff_m
+                    ):
+                        total_relief_backoff_m += (
+                            relief_backoff_m - relief_committed_backoff_m
+                        )
+                        relief_committed_backoff_m = relief_backoff_m
+                    protected_total_retreat_m = _protected_relief_retreat_m(
+                        total_relief_backoff_m,
+                        relief_backoff_m,
+                        relief_backoff_committed=relief_backoff_committed,
+                    )
+                    if protected_total_retreat_m > max_relief_retreat_m + 1e-12:
+                        relief_exhausted = True
+                        begin_disengagement(
+                            "cumulative relief retreat "
+                            f"{protected_total_retreat_m:.6f} m exceeded protected maximum "
+                            f"{max_relief_retreat_m:.6f} m",
+                            insertion_depth_m=insertion_depth_m,
+                        )
+                        continue
+                    if relief_retreat_m > max_relief_retreat_m + 1e-12:
+                        relief_exhausted = True
+                        begin_disengagement(
+                            "relief retreat "
+                            f"{relief_retreat_m:.6f} m exceeded protected maximum "
+                            f"{max_relief_retreat_m:.6f} m",
+                            insertion_depth_m=insertion_depth_m,
+                        )
+                        continue
+                    if relief_elapsed_sec > relief_timeout_sec:
+                        relief_exhausted = True
+                        begin_disengagement(
+                            f"relief cycle {relief_cycle_count} exceeded "
+                            f"{relief_timeout_sec:.3f} s",
+                            insertion_depth_m=insertion_depth_m,
+                        )
+                        continue
+                    if phase == "relieving":
+                        if soft_load_clear and stationary_for_relief:
+                            if relief_clear_since is None:
+                                relief_clear_since = sampled_at
+                            if (
+                                relief_elapsed_sec >= relief_unload_dwell_sec
+                                and sampled_at - relief_clear_since
+                                >= relief_clear_dwell_sec
+                            ):
+                                phase = "resuming"
+                                resume_started_at = sampled_at
+                                soft_overload_candidate_since = None
+                                soft_overload_duration_sec = 0.0
+                                filtered_force_samples.clear()
+                        elif relief_elapsed_sec >= relief_unload_dwell_sec:
+                            remaining_relief_retreat_m = (
+                                max_relief_retreat_m - total_relief_backoff_m
+                            )
+                            relief_planned_backoff_m = min(
+                                relief_backoff_step_m,
+                                remaining_relief_retreat_m,
+                            )
+                            minimum_depth_for_backoff_m = (
+                                relief_planned_backoff_m
+                                + start_position_tolerance_m
+                            )
+                            if insertion_depth_m <= minimum_depth_for_backoff_m:
+                                relief_exhausted = True
+                                begin_disengagement(
+                                    "available positive insertion depth "
+                                    f"{insertion_depth_m:.6f} m is below protected "
+                                    "backoff command "
+                                    f"{relief_planned_backoff_m:.6f} m plus "
+                                    "pre-insertion margin "
+                                    f"{start_position_tolerance_m:.6f} m",
+                                    insertion_depth_m=insertion_depth_m,
+                                )
+                                continue
+                            phase = "backing_off"
+                            relief_clear_since = None
+                    elif phase == "backing_off":
+                        if soft_load_clear:
+                            if relief_clear_since is None:
+                                relief_clear_since = sampled_at
+                        else:
+                            relief_clear_since = None
+                        relief_backoff_complete = bool(
+                            relief_retreat_m + 1e-12
+                            >= relief_planned_backoff_m
+                            or (
+                                relief_clear_since is not None
+                                and sampled_at - relief_clear_since
+                                >= relief_clear_dwell_sec
+                            )
+                        )
+                        if relief_backoff_complete:
+                            restart_force_mode_after_backoff()
+                            phase = "resuming"
+                            resume_started_at = sampled_at
+                            soft_overload_candidate_since = None
+                            soft_overload_duration_sec = 0.0
+                            filtered_force_samples.clear()
+                    elif phase == "resuming":
+                        if resume_started_at is None:
+                            resume_started_at = sampled_at
+                        if sampled_at - resume_started_at >= relief_resume_ramp_sec:
+                            phase = (
+                                relief_resume_phase
+                                if frozen_search_resume_pending
+                                else "seating"
+                            )
+                            if phase in {"searching", "expanded_searching"}:
+                                search_peck_next_at = (
+                                    sampled_at + search_peck_interval_sec
+                                    if advanced_recovery_enabled
+                                    else math.inf
+                                )
+                            final_phase = phase
+                            frozen_search_resume_pending = False
+                            soft_overload_recovered = True
+                            soft_overload_candidate_since = None
+                            soft_overload_duration_sec = 0.0
+                            filtered_force_samples.clear()
+                            progress_reference_depth_m = insertion_depth_m
+                            progress_reference_at = sampled_at
+                            relief_started_at = None
+                            relief_clear_since = None
+                            relief_backoff_complete = False
+                            relief_backoff_committed = False
+                            relief_committed_backoff_m = 0.0
+                            resume_started_at = None
+                    final_phase = phase
+                    if phase in {"relieving", "backing_off", "resuming"}:
+                        time.sleep(control_cycle_sec)
+                        continue
+
+                if engagement_detected and (
+                    insertion_depth_m < engagement_depth_m - rebound_tolerance_m
+                ):
+                    begin_disengagement(
+                        "detected engagement rebounded before seating",
+                        insertion_depth_m=insertion_depth_m,
+                    )
+                    time.sleep(control_cycle_sec)
+                    continue
+
+                engagement_reference_depth_m = (
+                    search_engagement_reference_depth_m
+                    if search_engagement_reference_depth_m is not None
+                    else (
+                        contact_reference_depth_m
+                        if contact_reference_depth_m is not None
+                        and depth_error_m > seated_depth_tolerance_m
+                        else 0.0
+                    )
+                )
+                engagement_progress_from_reference_m = (
+                    insertion_depth_m - engagement_reference_depth_m
+                )
+                if not engagement_detected:
+                    engagement_candidate_expected_band_load = bool(
+                        engagement_candidate_since is not None
+                        and contact_detected
+                        and engagement_progress_from_reference_m
+                        >= engagement_progress_m
+                        and guarded_soft_limits_in_band
+                        and not axial_progress_stalled
+                        and insertion_depth_m
+                        >= engagement_candidate_peak_depth_m
+                        - rebound_tolerance_m
+                    )
+                    if (
+                        contact_detected
+                        and (
+                            engagement_profile_load
+                            or engagement_candidate_expected_band_load
+                        )
+                        and engagement_progress_from_reference_m
+                        >= engagement_progress_m
+                    ):
+                        if (
+                            engagement_candidate_since is not None
+                            and engagement_candidate_interruption_since is not None
+                        ):
+                            engagement_candidate_since += max(
+                                0.0,
+                                sampled_at
+                                - engagement_candidate_interruption_since,
+                            )
+                        engagement_candidate_interruption_since = None
+                        if engagement_candidate_since is None:
+                            engagement_candidate_since = sampled_at
+                            engagement_candidate_peak_depth_m = insertion_depth_m
+                        elif (
+                            insertion_depth_m
+                            < engagement_candidate_peak_depth_m - rebound_tolerance_m
+                        ):
+                            engagement_candidate_since = None
+                            engagement_candidate_interruption_since = None
+                            engagement_candidate_peak_depth_m = 0.0
+                        else:
+                            engagement_candidate_peak_depth_m = max(
+                                engagement_candidate_peak_depth_m,
+                                insertion_depth_m,
+                            )
+                            if (
+                                sampled_at - engagement_candidate_since
+                                >= engagement_hold_sec
+                            ):
+                                engagement_detected = True
+                                engagement_depth_m = insertion_depth_m
+                                search_peck_state = "idle"
+                                search_peck_started_at = None
+                                search_peck_next_at = math.inf
+                                phase = "seating"
+                    elif (
+                        engagement_candidate_since is not None
+                        and contact_detected
+                        and engagement_progress_from_reference_m
+                        >= engagement_progress_m
+                        and not engagement_profile_load
+                        and insertion_depth_m
+                        > engagement_candidate_peak_depth_m
+                    ):
+                        # Preserve advancing evidence across only the same brief
+                        # interval that an overall learned soft-limit exceedance
+                        # is allowed before relief becomes mandatory.
+                        if engagement_candidate_interruption_since is None:
+                            engagement_candidate_interruption_since = sampled_at
+                        engagement_candidate_peak_depth_m = insertion_depth_m
+                        if (
+                            sampled_at - engagement_candidate_interruption_since
+                            > soft_overload_hold_sec
+                        ):
+                            engagement_candidate_since = None
+                            engagement_candidate_interruption_since = None
+                            engagement_candidate_peak_depth_m = 0.0
+                    else:
+                        engagement_candidate_since = None
+                        engagement_candidate_interruption_since = None
+                        engagement_candidate_peak_depth_m = 0.0
+
+                if insertion_depth_m >= (
+                    progress_reference_depth_m + progress_epsilon_m
+                ):
+                    progress_reference_depth_m = insertion_depth_m
+                    progress_reference_at = sampled_at
+                elif (
+                    not engagement_detected
+                    and phase not in {"searching", "expanded_searching"}
+                    and contact_detected
+                    and depth_error_m > seated_depth_tolerance_m
+                    and sampled_at - progress_reference_at >= stall_hold_sec
+                ):
+                    if spiral_radius_m <= 0.0:
+                        raise _InsertSearchExhausted(
+                            "direct insertion stalled after contact without engagement"
+                        )
+                    phase = "searching"
+                    spiral_started_at = sampled_at
+                    search_origin_world_tool0 = current_sample[
+                        "actual_world_tool0"
+                    ]
+                    search_guard_entry_theta = spiral_theta
+                    search_escape_candidate_since = None
+                    search_peck_state = "idle"
+                    search_peck_started_at = None
+                    search_peck_retreat_m = 0.0
+                    search_peck_next_at = (
+                        sampled_at + search_peck_interval_sec
+                        if advanced_recovery_enabled
+                        else math.inf
+                    )
+                    if not frozen_search_resume_pending:
+                        search_engagement_reference_depth_m = max(
+                            0.0,
+                            contact_reference_depth_m
+                            if contact_reference_depth_m is not None
+                            else insertion_depth_m,
+                        )
+                    frozen_search_resume_pending = False
+                    engagement_candidate_since = None
+                    engagement_candidate_interruption_since = None
+                    engagement_candidate_peak_depth_m = 0.0
+
+                reached_target_depth = depth_error_m <= seated_depth_tolerance_m
+                stable_bottom_contact = bool(
+                    force_window_ready
+                    and filtered_axial_force_n >= contact_force_delta_n
+                )
+                profile_load_at_depth = bool(
+                    tilt_error_rad <= tilt_tolerance_rad
+                    and (
+                        (
+                            learned_soft_limits_in_band
+                            and force_depth_profile_in_band
+                        )
+                        or (
+                            guarded_soft_limits_in_band
+                            and filtered_axial_force_n
+                            >= contact_force_delta_n
+                            and filtered_lateral_force_n
+                            <= max_lateral_force_n
+                            and filtered_torque_nm <= max_torque_nm
+                        )
+                    )
+                )
+                stationary_at_depth = (
+                    abs(axial_tcp_speed_m_s) <= near_zero_axial_speed_m_s
+                )
+                no_seated_rebound = bool(
+                    deepest_depth_m - insertion_depth_m <= rebound_tolerance_m
+                )
+                seated_evidence = bool(
+                    engagement_detected
+                    and reached_target_depth
+                    and stable_bottom_contact
+                    and profile_load_at_depth
+                    and stationary_at_depth
+                    and no_seated_rebound
+                )
+                if seated_evidence:
+                    phase = "settling"
+                    if seated_candidate_since is None:
+                        seated_candidate_since = sampled_at
+                        seated_force_min_n = filtered_axial_force_n
+                        seated_force_max_n = filtered_axial_force_n
+                    else:
+                        seated_force_min_n = min(
+                            seated_force_min_n,
+                            filtered_axial_force_n,
+                        )
+                        seated_force_max_n = max(
+                            seated_force_max_n,
+                            filtered_axial_force_n,
+                        )
+                        stable_force = (
+                            seated_force_max_n - seated_force_min_n
+                            <= bottom_force_variation_n
+                        )
+                        if (
+                            stable_force
+                            and sampled_at - seated_candidate_since >= seated_hold_sec
+                        ):
+                            seated_detected = True
+                            sample("settling")
+                            break
+                else:
+                    seated_candidate_since = None
+                    seated_force_min_n = math.inf
+                    seated_force_max_n = 0.0
+
+                final_phase = phase
+                if (
+                    phase == "searching"
+                    and final_search_radius_m >= spiral_radius_m
+                    and not engagement_detected
+                ):
+                    raise _InsertSearchExhausted(
+                        "spiral search reached spiral_radius_m without engagement"
+                    )
+                time.sleep(control_cycle_sec)
+            else:
+                if not rclpy.ok():
+                    raise RuntimeError("ROS shutdown interrupted UR5e insertion")
+                if phase in {"cocked", "disengaging"}:
+                    disengagement_timed_out_at = time.monotonic()
+                    disengagement_elapsed_sec = max(
+                        0.0,
+                        disengagement_timed_out_at
+                        - float(
+                            disengagement_started_at
+                            if disengagement_started_at is not None
+                            else disengagement_timed_out_at
+                        ),
+                    )
+                    last_disengagement_reason = (
+                        f"{part_name} disengagement timed out after "
+                        f"{disengagement_elapsed_sec:.3f} s before contact cleared"
+                    )
+                    raise _InsertSearchExhausted(
+                        last_disengagement_reason
+                    )
+                if not engagement_detected:
+                    raise _InsertSearchExhausted("insertion timed out without engagement")
+                raise _InsertSearchExhausted(
+                    "insertion timed out without stable seating evidence"
+                )
+
+            if not engagement_detected or not seated_detected:
+                raise _InsertSearchExhausted(
+                    "insertion ended without engagement and stable seating evidence"
+                )
+            if not stop_and_confirm():
+                raise RuntimeError("insertion completion did not confirm stationary motion")
+            capture_final_pose()
+            if (
+                final_depth_error_m > seated_depth_tolerance_m
+                or final_tilt_error_rad > tilt_tolerance_rad
+                or deepest_depth_m - final_insertion_depth_m > rebound_tolerance_m
+            ):
+                raise RuntimeError("final inserted pose is outside seated tolerance")
+            final_phase = "settling"
+            finalize_server_trace(
+                terminal_state="succeeded",
+                error_code=0,
+                error_string="",
+            )
+            status.update(**terminal_evidence())
+            status.update(
+                state="succeeded",
+                message=(
+                    "UR5e insertion engagement and stable seating confirmed with "
+                    "stationary hold"
+                ),
+                blocked_reason="",
+                insert_phase="settling",
+                insert_insertion_depth_m=final_insertion_depth_m,
+                insert_depth_error_m=final_depth_error_m,
+                insert_lateral_offset_m=final_lateral_offset_m,
+                insert_search_radius_m=final_search_radius_m,
+                insert_contact_detected=contact_detected,
+                insert_engagement_detected=engagement_detected,
+                insert_seated_detected=seated_detected,
+                insert_motion_settled=True,
+            )
+            goal_handle.succeed()
+            self._finish_active_goal_status(goal_handle, status)
+            return result(0, "", False)
+        except _InsertCanceled as exc:
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            reason = str(exc) or "canceled"
+            finalize_server_trace(
+                terminal_state="canceled",
+                error_code=-3,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            status.update(
+                state="canceled",
+                message=(
+                    "UR5e insertion canceled"
+                    if stop_confirmed
+                    else "UR5e insertion canceled without stationary confirmation"
+                ),
+                blocked_reason=(
+                    ""
+                    if stop_confirmed
+                    else "UR5e insertion cancellation did not confirm stationary motion"
+                ),
+                rtde_reset_required=not stop_confirmed,
+                insert_motion_settled=stop_confirmed,
+            )
+            if not stop_confirmed:
+                self._mark_rtde_reset_required(
+                    status["blocked_reason"],
+                    write_status=False,
+                    failure_kind="insert_cancel_stop_unconfirmed",
+                )
+            goal_handle.canceled()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=not stop_confirmed,
+            )
+            return result(
+                -3,
+                reason,
+                not stop_confirmed,
+                motion_settled=stop_confirmed,
+            )
+        except _InsertSearchExhausted as exc:
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            reason = f"UR5e insertion search exhausted: {exc}"
+            finalize_server_trace(
+                terminal_state="failed",
+                error_code=-5,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=not stop_confirmed,
+                insert_motion_settled=stop_confirmed,
+            )
+            if not stop_confirmed:
+                self._mark_rtde_reset_required(
+                    "UR5e insertion search stop did not confirm stationary motion",
+                    write_status=False,
+                    failure_kind="insert_search_stop_unconfirmed",
+                )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=not stop_confirmed,
+            )
+            return result(
+                -5,
+                reason,
+                not stop_confirmed,
+                motion_settled=stop_confirmed,
+            )
+        except _InsertSoftOverload as exc:
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            reason = f"UR5e insertion soft overload relief failed: {exc}"
+            relief_exhausted = True
+            finalize_server_trace(
+                terminal_state="failed",
+                error_code=-7,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            publish_last_sample(final_phase)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=not stop_confirmed,
+                insert_motion_settled=stop_confirmed,
+            )
+            if not stop_confirmed:
+                self._mark_rtde_reset_required(
+                    "UR5e insertion overload relief stop did not confirm stationary motion",
+                    write_status=False,
+                    failure_kind="insert_relief_stop_unconfirmed",
+                )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=not stop_confirmed,
+            )
+            return result(
+                -7,
+                reason,
+                not stop_confirmed,
+                motion_settled=stop_confirmed,
+            )
+        except _InsertForceLimit as exc:
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            reason = f"UR5e insertion force/torque/travel limit: {exc}"
+            finalize_server_trace(
+                terminal_state="failed",
+                error_code=-6,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            publish_last_sample(final_phase)
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=not stop_confirmed,
+                insert_motion_settled=stop_confirmed,
+            )
+            if not stop_confirmed:
+                self._mark_rtde_reset_required(
+                    "UR5e insertion safety stop did not confirm stationary motion",
+                    write_status=False,
+                    failure_kind="insert_safety_stop_unconfirmed",
+                )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=not stop_confirmed,
+            )
+            return result(
+                -6,
+                reason,
+                not stop_confirmed,
+                motion_settled=stop_confirmed,
+            )
+        except ValueError as exc:
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            reason = f"UR5e RTDE insertion target rejected: {exc}"
+            finalize_server_trace(
+                terminal_state="blocked",
+                error_code=-2,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            status.update(
+                state="blocked",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=motion_attempted and not stop_confirmed,
+                insert_motion_settled=stop_confirmed,
+            )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=motion_attempted and not stop_confirmed,
+            )
+            return result(
+                -2,
+                reason,
+                motion_attempted and not stop_confirmed,
+                motion_settled=stop_confirmed,
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown RTDE acceptance is safety-critical.
+            stop_confirmed = not motion_attempted or stop_and_confirm()
+            state_uncertain = bool(motion_attempted)
+            reason = f"UR5e RTDE insertion failed: {type(exc).__name__}: {exc}"
+            generic_error_code = -4 if motion_attempted else -1
+            finalize_server_trace(
+                terminal_state="failed",
+                error_code=generic_error_code,
+                error_string=reason,
+            )
+            status.update(**terminal_evidence())
+            if motion_attempted:
+                self._mark_rtde_reset_required(
+                    reason,
+                    write_status=False,
+                    failure_kind=(
+                        "insert_execution_unknown" if stop_confirmed else "insert_stop_unconfirmed"
+                    ),
+                )
+            reset_required = bool(
+                motion_attempted or getattr(self, "_rtde_reset_required", False)
+            )
+            status.update(
+                state="failed",
+                message=reason,
+                blocked_reason=reason,
+                rtde_reset_required=reset_required,
+                insert_motion_settled=stop_confirmed,
+            )
+            goal_handle.abort()
+            self._finish_active_goal_status(
+                goal_handle,
+                status,
+                latch_status=reset_required,
+            )
+            return result(
+                generic_error_code,
+                reason,
+                state_uncertain,
+                motion_settled=stop_confirmed,
+            )
+        finally:
+            if bool(getattr(self, "_insert_force_mode_active", False)) or bool(
+                getattr(self, "_insert_servo_active", False)
+            ):
+                self._stop_insert_motion()
+                self._confirm_stationary_after_stop()
             self._clear_active_goal(goal_handle)
 
     @staticmethod
@@ -2600,7 +9390,9 @@ class UR5eRTDETrajectoryServer(Node):
         workspace_error = _workspace_error(target_world_tool0)
         if workspace_error:
             raise ValueError(workspace_error)
-        world_base = self._lookup_rigid_transform("world", "base")
+        world_base, _frame_message, _position_error, _orientation_error = (
+            self._validated_cartesian_world_base()
+        )
         tool0_tcp = self._active_tcp_offset()
         base_tool0 = _compose_transform(_inverse_transform(world_base), target_world_tool0)
         target_base_tcp = _compose_transform(base_tool0, tool0_tcp)
@@ -2623,14 +9415,88 @@ class UR5eRTDETrajectoryServer(Node):
                 )
                 self._receive_error = f"{type(exc).__name__}: {exc}"
                 self._receive_transport_failed = True
-                self._mark_rtde_reset_required(
-                    reason,
-                    write_status=True,
-                    failure_kind="cartesian_receive_exception",
-                )
+                with self._active_lock:
+                    defer_reset = bool(
+                        self._active_motion_kind == "insert"
+                        and getattr(self, "_insert_motion_started", False)
+                    )
+                if not defer_reset:
+                    self._mark_rtde_reset_required(
+                        reason,
+                        write_status=True,
+                        failure_kind="cartesian_receive_exception",
+                    )
                 return None
         if len(values) != 6 or not all(math.isfinite(value) for value in values):
             return None
+        return values
+
+    def _read_actual_tcp_force(self) -> list[float] | None:
+        """Return the six finite base-frame TCP wrench values used by insertion."""
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
+        with self._receive_lock:
+            get_actual_tcp_force = getattr(self.receive, "getActualTCPForce", None)
+            if not callable(get_actual_tcp_force):
+                return None
+            try:
+                values = [float(value) for value in list(get_actual_tcp_force())]
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                reason = (
+                    "UR5e RTDE TCP force feedback transport failed: "
+                    f"{type(exc).__name__}: {exc}. Use Repair Hardware Stack."
+                )
+                self._receive_error = f"{type(exc).__name__}: {exc}"
+                self._receive_transport_failed = True
+                with self._active_lock:
+                    defer_reset = bool(
+                        self._active_motion_kind == "insert"
+                        and getattr(self, "_insert_motion_started", False)
+                    )
+                if not defer_reset:
+                    self._mark_rtde_reset_required(
+                        reason,
+                        write_status=True,
+                        failure_kind="tcp_force_receive_exception",
+                    )
+                return None
+        if len(values) != 6 or not all(math.isfinite(value) for value in values):
+            return None
+        self._last_actual_tcp_force = list(values)
+        return values
+
+    def _read_actual_tcp_speed(self) -> list[float] | None:
+        """Return the six finite base-frame active-TCP speed values."""
+        if bool(getattr(self, "_rtde_reset_required", False)):
+            return None
+        with self._receive_lock:
+            get_actual_tcp_speed = getattr(self.receive, "getActualTCPSpeed", None)
+            if not callable(get_actual_tcp_speed):
+                return None
+            try:
+                values = [float(value) for value in list(get_actual_tcp_speed())]
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                reason = (
+                    "UR5e RTDE TCP speed feedback transport failed: "
+                    f"{type(exc).__name__}: {exc}. Use Repair Hardware Stack."
+                )
+                self._receive_error = f"{type(exc).__name__}: {exc}"
+                self._receive_transport_failed = True
+                with self._active_lock:
+                    defer_reset = bool(
+                        self._active_motion_kind == "insert"
+                        and getattr(self, "_insert_motion_started", False)
+                    )
+                if not defer_reset:
+                    self._mark_rtde_reset_required(
+                        reason,
+                        write_status=True,
+                        failure_kind="tcp_speed_receive_exception",
+                    )
+                return None
+        if len(values) != 6 or not all(math.isfinite(value) for value in values):
+            return None
+        self._last_actual_tcp_speed = list(values)
         return values
 
     def _read_actual_tcp_transform(self) -> RigidTransform | None:
@@ -2652,12 +9518,95 @@ class UR5eRTDETrajectoryServer(Node):
         base_tool0 = _compose_transform(actual_base_tcp, _inverse_transform(tool0_tcp))
         return _compose_transform(world_base, base_tool0)
 
-    def _cartesian_frame_validation(
+    def _cartesian_frame_validation_with_world_base(
         self,
-    ) -> tuple[bool, str, float, float]:
-        """Validate TF against live RTDE TCP and the active TCP offset without motion."""
+    ) -> tuple[bool, str, float, float, RigidTransform | None]:
+        """Validate one live world -> base sample and reuse it for frame evidence."""
         try:
-            world_base = self._lookup_rigid_transform("world", "base")
+            expected_world_base = _configured_cartesian_world_base()
+        except RuntimeError as exc:
+            self._cartesian_world_base_ready = False
+            self._cartesian_world_base_message = str(exc)
+            self._cartesian_world_base_expected = None
+            self._cartesian_world_base_observed = None
+            self._cartesian_world_base_position_error_m = math.inf
+            self._cartesian_world_base_orientation_error_rad = math.inf
+            return (
+                False,
+                f"Cartesian frame validation failed: {exc}",
+                math.inf,
+                math.inf,
+                None,
+            )
+        self._cartesian_world_base_expected = expected_world_base
+        try:
+            observed_world_base = self._lookup_rigid_transform("world", "base")
+        except (
+            AttributeError,
+            LookupError,
+            OSError,
+            RuntimeError,
+            TransformException,
+            TypeError,
+            ValueError,
+        ) as exc:
+            self._cartesian_world_base_ready = False
+            self._cartesian_world_base_message = (
+                "Cartesian world -> base mount validation failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self._cartesian_world_base_observed = None
+            self._cartesian_world_base_position_error_m = math.inf
+            self._cartesian_world_base_orientation_error_rad = math.inf
+            return (
+                False,
+                self._cartesian_world_base_message,
+                math.inf,
+                math.inf,
+                None,
+            )
+        self._cartesian_world_base_observed = observed_world_base
+        mount_position_error, mount_orientation_error = _pose_errors(
+            observed_world_base,
+            expected_world_base,
+        )
+        self._cartesian_world_base_position_error_m = mount_position_error
+        self._cartesian_world_base_orientation_error_rad = mount_orientation_error
+        if mount_position_error > UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M:
+            self._cartesian_world_base_ready = False
+            self._cartesian_world_base_message = (
+                "Cartesian world -> base mount validation failed: observed translation "
+                "differs from protected ur5e.rtde.cartesian_world_base by "
+                f"{mount_position_error:.6f} m; limit is "
+                f"{UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M:.6f} m"
+            )
+            return (
+                False,
+                self._cartesian_world_base_message,
+                math.inf,
+                math.inf,
+                observed_world_base,
+            )
+        if mount_orientation_error > UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD:
+            self._cartesian_world_base_ready = False
+            self._cartesian_world_base_message = (
+                "Cartesian world -> base mount validation failed: observed orientation "
+                "differs from protected ur5e.rtde.cartesian_world_base by "
+                f"{mount_orientation_error:.6f} rad; limit is "
+                f"{UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD:.6f} rad"
+            )
+            return (
+                False,
+                self._cartesian_world_base_message,
+                math.inf,
+                math.inf,
+                observed_world_base,
+            )
+        self._cartesian_world_base_ready = True
+        self._cartesian_world_base_message = (
+            "live world -> base matches protected ur5e.rtde.cartesian_world_base"
+        )
+        try:
             tf_world_tool0 = self._lookup_rigid_transform("world", "tool0")
             tool0_tcp = self._active_tcp_offset()
             actual_base_tcp = self._read_actual_tcp_transform()
@@ -2665,19 +9614,28 @@ class UR5eRTDETrajectoryServer(Node):
                 raise RuntimeError("UR5e actual TCP pose is unavailable")
             reconstructed = self._world_tool0_from_actual_tcp(
                 actual_base_tcp,
-                world_base=world_base,
+                world_base=observed_world_base,
                 tool0_tcp=tool0_tcp,
             )
             position_error, orientation_error = _pose_errors(
                 reconstructed,
                 tf_world_tool0,
             )
-        except Exception as exc:
+        except (
+            AttributeError,
+            LookupError,
+            OSError,
+            RuntimeError,
+            TransformException,
+            TypeError,
+            ValueError,
+        ) as exc:
             return (
                 False,
                 f"Cartesian frame validation failed: {type(exc).__name__}: {exc}",
                 math.inf,
                 math.inf,
+                observed_world_base,
             )
         if position_error > UR5E_RTDE_CARTESIAN_FRAME_POSITION_TOLERANCE_M:
             return (
@@ -2686,6 +9644,7 @@ class UR5eRTDETrajectoryServer(Node):
                 f"position differs from TF by {position_error:.6f} m",
                 position_error,
                 orientation_error,
+                observed_world_base,
             )
         if orientation_error > UR5E_RTDE_CARTESIAN_FRAME_ORIENTATION_TOLERANCE_RAD:
             return (
@@ -2694,13 +9653,43 @@ class UR5eRTDETrajectoryServer(Node):
                 f"orientation differs from TF by {orientation_error:.6f} rad",
                 position_error,
                 orientation_error,
+                observed_world_base,
             )
         return (
             True,
             "UR5e Cartesian frame validation ready",
             position_error,
             orientation_error,
+            observed_world_base,
         )
+
+    def _cartesian_frame_validation(
+        self,
+    ) -> tuple[bool, str, float, float]:
+        """Validate TF against live RTDE TCP and the protected robot mount."""
+        ready, message, position_error, orientation_error, _world_base = (
+            self._cartesian_frame_validation_with_world_base()
+        )
+        self._cartesian_frame_ready = ready
+        self._cartesian_frame_message = message
+        self._cartesian_frame_position_error_m = position_error
+        self._cartesian_frame_orientation_error_rad = orientation_error
+        return ready, message, position_error, orientation_error
+
+    def _validated_cartesian_world_base(
+        self,
+    ) -> tuple[RigidTransform, str, float, float]:
+        """Return the exact live world -> base sample accepted by frame validation."""
+        ready, message, position_error, orientation_error, world_base = (
+            self._cartesian_frame_validation_with_world_base()
+        )
+        self._cartesian_frame_ready = ready
+        self._cartesian_frame_message = message
+        self._cartesian_frame_position_error_m = position_error
+        self._cartesian_frame_orientation_error_rad = orientation_error
+        if not ready or world_base is None:
+            raise ValueError(message)
+        return world_base, message, position_error, orientation_error
 
     def _pose_stamped_from_transform(self, value: RigidTransform) -> PoseStamped:
         translation, rotation = value
@@ -2821,11 +9810,12 @@ class UR5eRTDETrajectoryServer(Node):
             program_error = self._ensure_control_program_for_goal()
             if program_error:
                 raise RuntimeError(program_error)
-            frame_ready, frame_message, frame_position_error, frame_orientation_error = (
-                self._cartesian_frame_validation()
-            )
-            if not frame_ready:
-                raise ValueError(frame_message)
+            (
+                world_base,
+                frame_message,
+                frame_position_error,
+                frame_orientation_error,
+            ) = self._validated_cartesian_world_base()
 
             request = goal_handle.request
             world_delta = (
@@ -2842,9 +9832,7 @@ class UR5eRTDETrajectoryServer(Node):
                     f"(0, {UR5E_RTDE_CARTESIAN_JOG_MAX_STEP_M:.6f}] m"
                 )
             speed = float(request.speed_m_s or UR5E_RTDE_CARTESIAN_SPEED_M_S)
-            acceleration = float(
-                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
-            )
+            acceleration = float(request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2)
             if not math.isfinite(speed) or not 0.0 < speed <= UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
                 raise ValueError("relative Cartesian speed is outside the configured limit")
             if (
@@ -2853,7 +9841,6 @@ class UR5eRTDETrajectoryServer(Node):
             ):
                 raise ValueError("relative Cartesian acceleration is outside the configured limit")
 
-            world_base = self._lookup_rigid_transform("world", "base")
             base_delta = _rotate_vector(
                 _quaternion_conjugate(world_base[1]),
                 world_delta,
@@ -2874,10 +9861,7 @@ class UR5eRTDETrajectoryServer(Node):
                 tool0_tcp=tool0_tcp,
             )
             target_world_tool0 = (
-                tuple(
-                    actual_world_tool0[0][index] + world_delta[index]
-                    for index in range(3)
-                ),
+                tuple(actual_world_tool0[0][index] + world_delta[index] for index in range(3)),
                 actual_world_tool0[1],
             )
             workspace_error = _workspace_error(target_world_tool0)
@@ -2908,11 +9892,18 @@ class UR5eRTDETrajectoryServer(Node):
                 target_base_translation_m=list(base_delta),
                 start_base_tcp=start_pose,
                 target_base_tcp=target_pose,
+                speed_m_s=speed,
+                acceleration_m_s2=acceleration,
                 cartesian_frame_validation_message=frame_message,
                 cartesian_frame_position_error_m=frame_position_error,
                 cartesian_frame_orientation_error_rad=frame_orientation_error,
             )
             self._write_active_goal_status(goal_handle, status)
+            dispatch_ready, dispatch_message, _dispatch_position, _dispatch_orientation = (
+                self._cartesian_frame_validation()
+            )
+            if not dispatch_ready:
+                raise ValueError(dispatch_message)
             if not self._execute_movel_pose(
                 target_pose,
                 speed_m_s=speed,
@@ -3043,11 +10034,22 @@ class UR5eRTDETrajectoryServer(Node):
                 raise RuntimeError(control_error)
             if not self._joint_states_fresh():
                 raise RuntimeError("UR5e RTDE feedback stale or missing")
-            frame_ready, frame_message, _position_error, _orientation_error = (
-                self._cartesian_frame_validation()
-            )
-            if not frame_ready:
-                raise ValueError(frame_message)
+            with self._active_lock:
+                jog_session_active = self._active_goal is self._jog_session_token
+                cached_world_base = getattr(self, "_jog_world_base", None)
+                cached_frame_message = str(
+                    getattr(self, "_jog_frame_message", "") or ""
+                )
+            if jog_session_active and cached_world_base is not None:
+                world_base = cached_world_base
+                frame_message = cached_frame_message
+            else:
+                (
+                    world_base,
+                    frame_message,
+                    _position_error,
+                    _orientation_error,
+                ) = self._validated_cartesian_world_base()
             world_velocity_m_s = (
                 float(request.world_linear_velocity_m_s.x),
                 float(request.world_linear_velocity_m_s.y),
@@ -3061,9 +10063,7 @@ class UR5eRTDETrajectoryServer(Node):
             speed_m_s = max(abs(value) for value in world_velocity_m_s)
             if speed_m_s > UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
                 raise ValueError("UR5e Cartesian jog velocity exceeds the configured limit")
-            acceleration = float(
-                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
-            )
+            acceleration = float(request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2)
             if (
                 not math.isfinite(acceleration)
                 or not 0.0 < acceleration <= UR5E_RTDE_CARTESIAN_ACCEL_M_S2
@@ -3073,7 +10073,6 @@ class UR5eRTDETrajectoryServer(Node):
                 UR5E_RTDE_CARTESIAN_JOG_MAX_WATCHDOG_SEC,
                 max(UR5E_RTDE_CARTESIAN_JOG_MIN_WATCHDOG_SEC, float(request.watchdog_sec)),
             )
-            world_base = self._lookup_rigid_transform("world", "base")
             base_velocity_m_s = _rotate_vector(
                 _quaternion_conjugate(world_base[1]),
                 world_velocity_m_s,
@@ -3082,13 +10081,10 @@ class UR5eRTDETrajectoryServer(Node):
             if actual_pose is None:
                 raise RuntimeError("UR5e actual TCP pose is unavailable")
             lookahead_pose = [
-                actual_pose[index] + base_velocity_m_s[index] * watchdog_sec
-                for index in range(3)
+                actual_pose[index] + base_velocity_m_s[index] * watchdog_sec for index in range(3)
             ] + actual_pose[3:6]
             within_safety_limits = getattr(self.control, "isPoseWithinSafetyLimits", None)
-            if not callable(within_safety_limits) or not bool(
-                within_safety_limits(lookahead_pose)
-            ):
+            if not callable(within_safety_limits) or not bool(within_safety_limits(lookahead_pose)):
                 raise ValueError("UR controller rejected the Cartesian jog lookahead pose")
             with self._active_lock:
                 if self._active_goal not in (None, self._jog_session_token):
@@ -3096,6 +10092,8 @@ class UR5eRTDETrajectoryServer(Node):
                 self._active_goal = self._jog_session_token
                 self._active_motion_kind = "cartesian_jog"
                 self._jog_watchdog_deadline = time.monotonic() + watchdog_sec
+                self._jog_world_base = world_base
+                self._jog_frame_message = frame_message
             jog_start = getattr(self.control, "jogStart", None)
             if not callable(jog_start):
                 raise RuntimeError("RTDE control object has no jogStart method")
@@ -3106,6 +10104,8 @@ class UR5eRTDETrajectoryServer(Node):
                     getattr(type(self.control), "FEATURE_BASE", 0),
                 )
             )
+            # ur_rtde jogStart translation values are mm/s. The ROS service and
+            # every other Cartesian calculation in this server use metres/second.
             speeds = [
                 base_velocity_m_s[0] * 1000.0,
                 base_velocity_m_s[1] * 1000.0,
@@ -3141,6 +10141,14 @@ class UR5eRTDETrajectoryServer(Node):
                 active = self._active_goal is self._jog_session_token
             if active:
                 self._stop_cartesian_jog(reason)
+            else:
+                status = _status_base()
+                status.update(
+                    state="blocked",
+                    message=reason,
+                    blocked_reason=reason,
+                )
+                self._write_status(status)
             response.accepted = False
             response.message = reason
             return response
@@ -3194,9 +10202,7 @@ class UR5eRTDETrajectoryServer(Node):
 
             request = goal_handle.request
             speed = float(request.speed_m_s or UR5E_RTDE_CARTESIAN_SPEED_M_S)
-            acceleration = float(
-                request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2
-            )
+            acceleration = float(request.acceleration_m_s2 or UR5E_RTDE_CARTESIAN_ACCEL_M_S2)
             if not math.isfinite(speed) or not 0.0 < speed <= UR5E_RTDE_CARTESIAN_MAX_SPEED_M_S:
                 raise ValueError(
                     f"Cartesian speed {speed!r} must be within "
@@ -3266,15 +10272,22 @@ class UR5eRTDETrajectoryServer(Node):
             )
             self._write_active_goal_status(goal_handle, status)
 
-            if (
+            motion_required = bool(
                 position_error > UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
                 or orientation_error > UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
-            ) and not self._execute_movel(
-                target_base_tcp,
-                speed_m_s=speed,
-                acceleration_m_s2=acceleration,
-            ):
-                raise RuntimeError("UR5e RTDE moveL returned False")
+            )
+            if motion_required:
+                dispatch_ready, dispatch_message, _dispatch_position, _dispatch_orientation = (
+                    self._cartesian_frame_validation()
+                )
+                if not dispatch_ready:
+                    raise ValueError(dispatch_message)
+                if not self._execute_movel(
+                    target_base_tcp,
+                    speed_m_s=speed,
+                    acceleration_m_s2=acceleration,
+                ):
+                    raise RuntimeError("UR5e RTDE moveL returned False")
 
             deadline = time.monotonic() + timeout_sec
             stationary_since: float | None = None
@@ -3292,8 +10305,7 @@ class UR5eRTDETrajectoryServer(Node):
                     )
                 if bool(getattr(self, "_rtde_reset_required", False)):
                     raise RuntimeError(
-                        str(getattr(self, "_rtde_reset_reason", ""))
-                        or "UR5e RTDE reset required"
+                        str(getattr(self, "_rtde_reset_reason", "")) or "UR5e RTDE reset required"
                     )
                 actual_base_tcp = self._read_actual_tcp_transform()
                 if actual_base_tcp is None:
@@ -3322,13 +10334,10 @@ class UR5eRTDETrajectoryServer(Node):
                 )
                 reached = bool(
                     position_error <= UR5E_RTDE_CARTESIAN_POSITION_TOLERANCE_M
-                    and orientation_error
-                    <= UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
+                    and orientation_error <= UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
                 )
                 now = time.monotonic()
-                stationary_since = (
-                    stationary_since or now if reached and stationary else None
-                )
+                stationary_since = stationary_since or now if reached and stationary else None
                 status.update(
                     cartesian_position_error_m=position_error,
                     cartesian_orientation_error_rad=orientation_error,
@@ -3342,8 +10351,7 @@ class UR5eRTDETrajectoryServer(Node):
                     status.update(
                         state="succeeded",
                         message=(
-                            "UR5e RTDE Cartesian target reached and completed "
-                            "stationary hold"
+                            "UR5e RTDE Cartesian target reached and completed stationary hold"
                         ),
                     )
                     goal_handle.succeed()
@@ -3410,10 +10418,7 @@ class UR5eRTDETrajectoryServer(Node):
     ) -> FollowJointTrajectory.Result:
         with self._active_lock:
             if bool(getattr(self, "_rtde_reset_required", False)):
-                reason = (
-                    str(getattr(self, "_rtde_reset_reason", ""))
-                    or "UR5e RTDE reset required"
-                )
+                reason = str(getattr(self, "_rtde_reset_reason", "")) or "UR5e RTDE reset required"
                 status = _status_base()
                 status.update(
                     state="failed",
@@ -3606,12 +10611,8 @@ class UR5eRTDETrajectoryServer(Node):
                     return self._result(-1, reason)
                 feedback_timestamp = self._read_feedback_timestamp()
                 status["rtde_feedback_timestamp_sec"] = feedback_timestamp
-                feedback_advanced = (
-                    feedback_timestamp is not None
-                    and (
-                        last_feedback_timestamp is None
-                        or feedback_timestamp > last_feedback_timestamp
-                    )
+                feedback_advanced = feedback_timestamp is not None and (
+                    last_feedback_timestamp is None or feedback_timestamp > last_feedback_timestamp
                 )
                 if feedback_advanced:
                     last_feedback_timestamp = feedback_timestamp
@@ -3622,10 +10623,7 @@ class UR5eRTDETrajectoryServer(Node):
                 else:
                     feedback_gap_sec = actual_at - last_feedback_advance_at
                     status["rtde_feedback_gap_sec"] = feedback_gap_sec
-                    if (
-                        feedback_gap_sec
-                        >= UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
-                    ):
+                    if feedback_gap_sec >= UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC:
                         reason = (
                             "UR5e RTDE trajectory feedback stopped advancing and did not "
                             "recover within "
@@ -3689,9 +10687,7 @@ class UR5eRTDETrajectoryServer(Node):
                             max_observed_joint_velocity or 0.0,
                             max_actual_joint_velocity,
                         )
-                    status["max_observed_joint_velocity_rad_s"] = (
-                        max_observed_joint_velocity
-                    )
+                    status["max_observed_joint_velocity_rad_s"] = max_observed_joint_velocity
                     status["trajectory_elapsed_sec"] = actual_at - execution_started
 
                     start_delta = max(
@@ -3699,15 +10695,11 @@ class UR5eRTDETrajectoryServer(Node):
                         for current, initial in zip(actual, initial_q, strict=True)
                     )
                     status["motion_start_observed_delta_rad"] = start_delta
-                    if (
-                        not motion_started
-                        and (
-                            start_delta >= UR5E_RTDE_MOTION_START_DELTA_RAD
-                            or (
-                                max_actual_joint_velocity is not None
-                                and max_actual_joint_velocity
-                                > UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
-                            )
+                    if not motion_started and (
+                        start_delta >= UR5E_RTDE_MOTION_START_DELTA_RAD
+                        or (
+                            max_actual_joint_velocity is not None
+                            and max_actual_joint_velocity > UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
                         )
                     ):
                         motion_started = True
@@ -3717,8 +10709,7 @@ class UR5eRTDETrajectoryServer(Node):
                     target_reached = max_delta <= UR5E_RTDE_GOAL_TOLERANCE_RAD
                     stationary = (
                         max_actual_joint_velocity is not None
-                        and max_actual_joint_velocity
-                        <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
+                        and max_actual_joint_velocity <= UR5E_RTDE_STATIONARY_MAX_JOINT_VEL_RAD_S
                     )
                     if target_reached and stationary:
                         if stationary_since is None:
@@ -3731,9 +10722,7 @@ class UR5eRTDETrajectoryServer(Node):
                     if motion_started and stationary and not target_reached:
                         if stopped_away_since is None:
                             stopped_away_since = actual_at
-                        status["stopped_away_hold_sec"] = (
-                            actual_at - stopped_away_since
-                        )
+                        status["stopped_away_hold_sec"] = actual_at - stopped_away_since
                     else:
                         stopped_away_since = None
                         status["stopped_away_hold_sec"] = 0.0
@@ -3761,21 +10750,17 @@ class UR5eRTDETrajectoryServer(Node):
                     if (
                         not motion_started
                         and not target_reached
-                        and actual_at - execution_started
-                        >= UR5E_RTDE_MOTION_START_TIMEOUT_SEC
+                        and actual_at - execution_started >= UR5E_RTDE_MOTION_START_TIMEOUT_SEC
                     ):
-                        if (
-                            initial_feedback_timestamp is not None
-                            and not status.get("rtde_feedback_timestamp_advanced")
+                        if initial_feedback_timestamp is not None and not status.get(
+                            "rtde_feedback_timestamp_advanced"
                         ):
                             reason = (
                                 "UR5e RTDE trajectory feedback did not advance after moveJ "
                                 "was accepted"
                             )
                         else:
-                            reason = (
-                                "UR5e RTDE trajectory did not start after moveJ was accepted"
-                            )
+                            reason = "UR5e RTDE trajectory did not start after moveJ was accepted"
                         self._stop_motion()
                         status.update(
                             state="failed",
@@ -3793,8 +10778,7 @@ class UR5eRTDETrajectoryServer(Node):
 
                     if (
                         stopped_away_since is not None
-                        and actual_at - stopped_away_since
-                        >= UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
+                        and actual_at - stopped_away_since >= UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
                     ):
                         reason = "UR5e RTDE trajectory ended before reaching the final joint target"
                         status.update(
@@ -3904,9 +10888,7 @@ def main(argv: list[str] | None = None) -> int:
         raise
     finally:
         if not failed and bool(getattr(node, "_rtde_reset_required", False)):
-            reason = str(getattr(node, "_rtde_reset_reason", "")) or (
-                "UR5e RTDE reset required"
-            )
+            reason = str(getattr(node, "_rtde_reset_reason", "")) or ("UR5e RTDE reset required")
             status = _status_base()
             status.update(
                 state="failed",

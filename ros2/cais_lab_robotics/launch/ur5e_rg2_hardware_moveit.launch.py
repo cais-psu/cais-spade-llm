@@ -8,6 +8,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -22,8 +23,6 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 RG2_PREFIX = "ur5e_rg2_"
-UR5E_BASE_XYZ = "0.0 0.0 1.021"
-UR5E_BASE_RPY = "0 0 3.142"
 
 
 def _load_hardware_arms_config() -> dict[str, Any]:
@@ -54,12 +53,54 @@ def _float(config: dict[str, Any], keys: tuple[str, ...], default: float) -> flo
         return float(default)
 
 
+def _required_float(config: dict[str, Any], keys: tuple[str, ...]) -> float:
+    value = _nested(config, keys, None)
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{'.'.join(keys)} is missing or is not a finite number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{'.'.join(keys)} is missing or is not a finite number"
+        ) from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{'.'.join(keys)} is missing or is not a finite number")
+    return parsed
+
+
 def _str(config: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
     value = str(_nested(config, keys, default) or "").strip()
     return value or str(default)
 
 
 HARDWARE_ARMS_CONFIG = _load_hardware_arms_config()
+UR5E_BASE_XYZ = " ".join(
+    str(
+        _required_float(
+            HARDWARE_ARMS_CONFIG,
+            ("ur5e", "rtde", "cartesian_world_base", field_name),
+        )
+    )
+    for field_name in ("x_m", "y_m", "z_m")
+)
+UR5E_WORLD_BASE_ROLL_RAD = _required_float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "rtde", "cartesian_world_base", "roll_rad"),
+)
+UR5E_WORLD_BASE_PITCH_RAD = _required_float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "rtde", "cartesian_world_base", "pitch_rad"),
+)
+UR5E_WORLD_BASE_YAW_RAD = _required_float(
+    HARDWARE_ARMS_CONFIG,
+    ("ur5e", "rtde", "cartesian_world_base", "yaw_rad"),
+)
+if UR5E_WORLD_BASE_ROLL_RAD != 0.0 or UR5E_WORLD_BASE_PITCH_RAD != 0.0:
+    raise ValueError(
+        "ur5e.rtde.cartesian_world_base roll_rad and pitch_rad must be 0.0 "
+        "for the UR base_link mount"
+    )
+UR5E_BASE_RPY = f"0 0 {UR5E_WORLD_BASE_YAW_RAD - math.pi}"
 RG2_MAX_VELOCITY = _float(
     HARDWARE_ARMS_CONFIG,
     ("ur5e", "moveit", "gripper_joint_limits", "max_velocity"),

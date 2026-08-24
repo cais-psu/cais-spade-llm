@@ -270,6 +270,111 @@ def matrix_from_transform_message(message: Any) -> np.ndarray:
     )
 
 
+def _validated_rigid_transform(value: Any, *, name: str) -> np.ndarray:
+    try:
+        transform = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ArucoLocalizationError(f"{name} is not a numeric 4x4 transform") from exc
+    if transform.shape != (4, 4):
+        raise ArucoLocalizationError(f"{name} must be a 4x4 transform")
+    if not np.all(np.isfinite(transform)):
+        raise ArucoLocalizationError(f"{name} contains a non-finite value")
+    if not np.allclose(
+        transform[3],
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-9,
+    ):
+        raise ArucoLocalizationError(f"{name} has an invalid homogeneous row")
+    rotation = transform[:3, :3]
+    if not np.allclose(
+        rotation.T @ rotation,
+        np.eye(3, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise ArucoLocalizationError(f"{name} rotation is not orthonormal")
+    determinant = float(np.linalg.det(rotation))
+    if not math.isclose(determinant, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ArucoLocalizationError(f"{name} rotation is not proper")
+    return transform
+
+
+def transform_camera_optical_point_to_assembly_board_v1(
+    point_camera_m: Any,
+    *,
+    point_frame_id: str,
+    camera_frame_id: str,
+    camera_to_aruco: Any,
+    assembly_board_v1_aruco_to_assembly_board_v1: Any,
+) -> np.ndarray:
+    """Transform one exact optical-frame point into ``assembly_board-v1``.
+
+    Args:
+        point_camera_m: Three-dimensional part point in the camera optical frame.
+        point_frame_id: Exact frame identifier carried with ``point_camera_m``.
+        camera_frame_id: Exact optical frame from the RealSense ``CameraInfo``.
+        camera_to_aruco: Pose of ``assembly_board-v1_aruco`` in the camera frame.
+        assembly_board_v1_aruco_to_assembly_board_v1: Pose of
+            ``assembly_board-v1`` in ``assembly_board-v1_aruco``.
+
+    Returns:
+        The three-dimensional part point in ``assembly_board-v1`` coordinates.
+
+    Raises:
+        ArucoLocalizationError: If the frames do not match exactly, the point is
+            invalid, or either transform is not a finite rigid transform.
+    """
+    if not isinstance(point_frame_id, str) or not point_frame_id:
+        raise ArucoLocalizationError("camera optical-frame point frame_id is missing")
+    if not isinstance(camera_frame_id, str) or not camera_frame_id:
+        raise ArucoLocalizationError("RealSense CameraInfo frame_id is missing")
+    if point_frame_id != camera_frame_id:
+        raise ArucoLocalizationError(
+            "camera optical-frame point frame_id does not exactly match RealSense "
+            f"CameraInfo: {point_frame_id!r} != {camera_frame_id!r}"
+        )
+    try:
+        point = np.asarray(point_camera_m, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ArucoLocalizationError(
+            "camera optical-frame part point is not a numeric three-vector"
+        ) from exc
+    if point.shape != (3,):
+        raise ArucoLocalizationError(
+            "camera optical-frame part point must be a three-vector"
+        )
+    if not np.all(np.isfinite(point)):
+        raise ArucoLocalizationError(
+            "camera optical-frame part point contains a non-finite value"
+        )
+
+    marker_pose_in_camera = _validated_rigid_transform(
+        camera_to_aruco,
+        name="camera_to_aruco",
+    )
+    board_pose_in_marker = _validated_rigid_transform(
+        assembly_board_v1_aruco_to_assembly_board_v1,
+        name="assembly_board-v1_aruco_to_assembly_board-v1",
+    )
+    point_camera = np.append(point, 1.0)
+    point_board = (
+        np.linalg.inv(board_pose_in_marker)
+        @ np.linalg.inv(marker_pose_in_camera)
+        @ point_camera
+    )
+    if not np.all(np.isfinite(point_board)) or not math.isclose(
+        float(point_board[3]),
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ArucoLocalizationError(
+            "camera optical-frame part point produced invalid assembly_board-v1 coordinates"
+        )
+    return point_board[:3]
+
+
 def detect_assembly_board_v1_aruco(image: np.ndarray) -> np.ndarray:
     """Return the four refined corners of exactly one original-dictionary ID 70."""
     if not hasattr(cv2, "aruco"):

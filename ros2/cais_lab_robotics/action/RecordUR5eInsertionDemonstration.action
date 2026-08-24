@@ -1,0 +1,33 @@
+# Exact recording identity frozen by the caller before any sample is accepted.
+string recording_id
+string part_name
+string destination_location
+string context_sha256
+geometry_msgs/PoseStamped expected_start_tool0_pose
+float64 max_duration_sec
+---
+# 0 completed/canceled with a valid trace; -1 busy/not ready; -2 invalid;
+# -3 feedback/trace failure; -4 state uncertain.
+int32 error_code
+string error_string
+bool state_uncertain
+bool motion_settled
+string recording_id
+string trace_path
+string trace_sha256
+int32 sample_count
+float64 started_at
+float64 finished_at
+bool baseline_valid
+float64[6] force_bias
+float64 baseline_force_span_n
+float64 baseline_torque_span_nm
+---
+string phase
+int32 sample_count
+float64 elapsed_sec
+geometry_msgs/PoseStamped actual_tool0_pose
+float64[6] actual_tcp_force
+float64[6] actual_tcp_speed
+bool baseline_valid
+float64[6] force_bias

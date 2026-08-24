@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -261,6 +262,95 @@ def _write_assembly_board_v1_snapshot(
     return snapshot_path
 
 
+def _write_stationary_inspection_geometry(
+    manager: PerceptionManager,
+    root: Path,
+    *,
+    configured: bool,
+) -> Path:
+    geometry_path = (
+        root
+        / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
+    )
+    geometry_path.parent.mkdir(parents=True, exist_ok=True)
+    registration = {
+        "calibration_id": "board-registration" if configured else None,
+        "x": 0.0 if configured else None,
+        "y": 0.0 if configured else None,
+        "z": 0.0 if configured else None,
+        "qx": 0.0 if configured else None,
+        "qy": 0.0 if configured else None,
+        "qz": 0.0 if configured else None,
+        "qw": 1.0 if configured else None,
+    }
+    geometry_path.write_text(
+        json.dumps(
+            {
+                "real": {
+                    "assembly_board": {
+                        "assembly_board-v1_aruco_to_assembly_board-v1": registration,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.project_root = root
+    return geometry_path
+
+
+def _write_stationary_inspection_result(
+    manager: PerceptionManager,
+    inspection: dict[str, object],
+    *,
+    preview_world_pose_ready: bool = False,
+) -> None:
+    captured_at = float(inspection.get("captured_at") or time.time() + 0.5)
+    preview_dir = manager_module.PREVIEW_ROOT / "stationary"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    (preview_dir / "detection_status.json").write_text(
+        json.dumps(
+            {
+                "updated_at": time.time() + 0.5,
+                "captured_at": captured_at,
+                "visual_detection_ready": True,
+                "world_pose_ready": preview_world_pose_ready,
+                "pose_error": "",
+                "detections": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot_path = manager._snapshot_path("stationary")
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "updated_at": time.time() + 0.5,
+                "frame_captured_at": captured_at,
+                "camera_role": "stationary",
+                "detections": [],
+                "last_error": "",
+                "stationary_inspection": {
+                    "frame_id": "assembly_board-v1",
+                    "captured_at": captured_at,
+                    "xy_tolerance_m": 0.01,
+                    "seating_tolerance_m": 0.005,
+                    "registration": {
+                        "name": "assembly_board-v1_aruco_to_assembly_board-v1",
+                        "configured": True,
+                        "calibration_id": "board-registration",
+                    },
+                    "aruco": {"marker_id": 70, "marker_length_m": 0.076},
+                    "parts": [],
+                    **inspection,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_post_staging_acceptance_allowed_for_unaccepted_hand_eye_role(
     perception_manager: PerceptionManager,
 ) -> None:
@@ -275,11 +365,107 @@ def test_post_staging_acceptance_allowed_for_unaccepted_hand_eye_role(
     assert status["post_staging_acceptance_allowed"] is True
 
 
-def test_post_staging_acceptance_allowed_for_latched_movement_with_matching_calibration(
+def test_stationary_id70_status_is_diagnostic_and_never_accepts_a_world_baseline(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+) -> None:
+    _write_stationary_inspection_geometry(
+        perception_manager,
+        tmp_path / "configured",
+        configured=True,
+    )
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "stationary",
+        marker_id=999,
+        sample_count=99,
+    )
+    captured_at = time.time() + 0.5
+    _write_stationary_inspection_result(
+        perception_manager,
+        {
+            "available": True,
+            "success": True,
+            "message": "stationary assembly inspection passed for SG and MG.",
+            "captured_at": captured_at,
+            "aruco": {
+                "marker_id": 70,
+                "marker_length_m": 0.076,
+                "captured_at": captured_at,
+                "visible": True,
+                "valid": True,
+                "stable": True,
+                "sample_count": 10,
+                "required_sample_count": 10,
+                "reprojection_error_px": 0.4,
+                "maximum_reprojection_error_px": 1.0,
+                "translation_spread_m": 0.001,
+                "maximum_translation_spread_m": 0.003,
+                "rotation_spread_deg": 0.2,
+                "maximum_rotation_spread_deg": 1.0,
+            },
+        },
+    )
+
+    status = perception_manager.assembly_board_v1_aruco_status("stationary")
+
+    assert status["source"] == "stationary_inspection"
+    assert status["marker_id"] == 70
+    assert status["sample_count"] == 10
+    assert status["marker_quality_ready"] is True
+    assert status["stationary_diagnostic_only"] is True
+    assert status["frame_id"] == "assembly_board-v1"
+    assert status["world_pose_ready"] is False
+    assert status["inspection_only"] is True
+    assert status["calibration_required"] is False
+    assert status["inspection_available"] is True
+    assert status["calibration_ready"] is False
+    assert status["active_calibration_ready"] is False
+    assert status["ready_to_accept"] is False
+    assert status["accepted_baseline_ready"] is False
+    assert status["movement_evidence_valid"] is False
+    assert status["translation_delta_m"] is None
+    assert status["rotation_delta_deg"] is None
+    assert "no world or robot placement authority" in status["accepted_baseline_error"]
+    with pytest.raises(ValueError, match="diagnostic only"):
+        perception_manager.locate_and_accept_assembly_board_v1("stationary")
+
+
+def test_stationary_id70_status_uses_current_unconfigured_registration_reason(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+) -> None:
+    _write_stationary_inspection_geometry(
+        perception_manager,
+        tmp_path / "unconfigured",
+        configured=False,
+    )
+    _write_stationary_inspection_result(
+        perception_manager,
+        {
+            "available": True,
+            "success": True,
+            "message": "stale success",
+        },
+    )
+
+    status = perception_manager.assembly_board_v1_aruco_status("stationary")
+
+    expected = (
+        "assembly_board-v1_aruco_to_assembly_board-v1 is not configured; "
+        "stationary assembly inspection is unavailable."
+    )
+    assert status["inspection_available"] is False
+    assert status["inspection_success"] is False
+    assert status["inspection_message"] == expected
+    assert status["error"] == expected
+
+
+def test_explicitly_persisted_movement_block_remains_through_occlusion_until_accept(
     perception_manager: PerceptionManager,
 ) -> None:
     snapshot_path = _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
-    perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+    first = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
     payload = perception_manager.config()
     payload["assembly_board-v1_aruco"]["roles"]["ur5e"]["movement_blocked"] = True
     manager_module._atomic_yaml_write(perception_manager.config_path, payload)
@@ -290,7 +476,22 @@ def test_post_staging_acceptance_allowed_for_latched_movement_with_matching_cali
     assert status["accepted"] is True
     assert status["calibration_identity_matches"] is True
     assert status["movement_blocked"] is True
+    assert status["accepted_baseline_ready"] is False
+    assert "moved more than 10 mm or 2 deg" in status["accepted_baseline_error"]
     assert status["post_staging_acceptance_allowed"] is True
+
+    _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        pose=dict(first["pose"]),
+    )
+    second = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
+
+    assert second["accepted_generation"] == 2
+    assert second["movement_blocked"] is False
+    assert second["accepted_baseline_ready"] is True
+    saved = perception_manager.config()["assembly_board-v1_aruco"]["roles"]["ur5e"]
+    assert saved["movement_blocked"] is False
 
 
 @pytest.mark.parametrize(
@@ -343,7 +544,7 @@ def test_post_staging_acceptance_requires_hand_eye_and_76_mm_configuration(
     ] is False
 
 
-def test_assembly_board_v1_acceptance_persists_per_role_generation_and_movement(
+def test_cross_view_movement_evidence_does_not_persist_movement_block(
     perception_manager: PerceptionManager,
 ) -> None:
     _write_assembly_board_v1_snapshot(perception_manager, "ur5e")
@@ -357,25 +558,31 @@ def test_assembly_board_v1_acceptance_persists_per_role_generation_and_movement(
     assert config["roles"]["ur5e"]["accepted_pose"] == pytest.approx(first["pose"])
     assert config["roles"]["xarm6"]["accepted_generation"] == 0
 
-    moved_pose = {**first["pose"], "x": float(first["pose"]["x"]) + 0.011}
-    _write_assembly_board_v1_snapshot(perception_manager, "ur5e", pose=moved_pose)
-    moved = perception_manager.assembly_board_v1_aruco_status("ur5e")
-    assert moved["translation_delta_m"] == pytest.approx(0.011)
-    assert moved["rotation_delta_deg"] == pytest.approx(0.0)
-    assert moved["movement_evidence_valid"] is True
-    assert moved["movement_blocked"] is True
-    assert moved["accepted_baseline_ready"] is False
-    assert "moved more than 10 mm or 2 deg" in moved["accepted_baseline_error"]
+    cross_view_angle_rad = math.radians(3.5)
+    cross_view_pose = {
+        **first["pose"],
+        "qz": math.sin(cross_view_angle_rad / 2.0),
+        "qw": math.cos(cross_view_angle_rad / 2.0),
+    }
+    snapshot_path = _write_assembly_board_v1_snapshot(
+        perception_manager,
+        "ur5e",
+        pose=cross_view_pose,
+    )
+    cross_view = perception_manager.assembly_board_v1_aruco_status("ur5e")
+    assert cross_view["translation_delta_m"] == pytest.approx(0.0)
+    assert cross_view["rotation_delta_deg"] == pytest.approx(3.5)
+    assert cross_view["movement_evidence_valid"] is True
+    assert cross_view["excessive_movement"] is True
+    assert cross_view["movement_blocked"] is False
+    assert cross_view["accepted_baseline_ready"] is True
+    assert cross_view["accepted_baseline_error"] == ""
     assert perception_manager.config()["assembly_board-v1_aruco"]["roles"][
         "ur5e"
-    ]["movement_blocked"] is True
+    ]["movement_blocked"] is False
 
-    moved_snapshot = json.loads(
-        perception_manager._assembly_board_v1_aruco_path("ur5e").read_text(
-            encoding="utf-8"
-        )
-    )
-    moved_snapshot.update(
+    cross_view_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    cross_view_snapshot.update(
         {
             "valid": False,
             "visible": False,
@@ -386,26 +593,16 @@ def test_assembly_board_v1_acceptance_persists_per_role_generation_and_movement(
             "last_error": "assembly_board-v1 ArUco ID 70 is not visible",
         }
     )
-    perception_manager._assembly_board_v1_aruco_path("ur5e").write_text(
-        json.dumps(moved_snapshot),
-        encoding="utf-8",
-    )
+    snapshot_path.write_text(json.dumps(cross_view_snapshot), encoding="utf-8")
 
     occluded = perception_manager.assembly_board_v1_aruco_status("ur5e")
     assert occluded["movement_evidence_valid"] is False
-    assert occluded["movement_blocked"] is True
-    assert occluded["accepted_baseline_ready"] is False
-    assert "moved more than 10 mm or 2 deg" in occluded["accepted_baseline_error"]
-
-    _write_assembly_board_v1_snapshot(perception_manager, "ur5e", pose=moved_pose)
-    second = perception_manager.locate_and_accept_assembly_board_v1("ur5e")
-    assert second["accepted_generation"] == 2
-    assert second["movement_blocked"] is False
-    assert second["accepted_baseline_ready"] is True
-    assert second["previous_translation_delta_m"] == pytest.approx(0.011)
-    assert perception_manager.config()["assembly_board-v1_aruco"]["roles"][
-        "ur5e"
-    ]["movement_blocked"] is False
+    assert occluded["excessive_movement"] is False
+    assert occluded["movement_blocked"] is False
+    assert occluded["accepted_baseline_ready"] is True
+    assert occluded["accepted_baseline_error"] == ""
+    assert occluded["accepted_generation"] == first["accepted_generation"]
+    assert occluded["accepted_pose"] == pytest.approx(first["pose"])
 
 
 def test_stale_movement_evidence_does_not_relatch_a_new_accepted_generation(
@@ -972,7 +1169,7 @@ def test_ur5e_calibration_starts_only_read_only_state_and_tf_monitor(
     assert state_domain == 0
 
 
-@pytest.mark.parametrize("hardware_stack", ["ur5e", "dual robots"])
+@pytest.mark.parametrize("hardware_stack", ["xarm6", "ur5e", "dual robots"])
 def test_normal_ur5e_hardware_state_publisher_stops_calibration_state_publisher(
     perception_manager: PerceptionManager,
     hardware_stack: str,
@@ -1009,14 +1206,52 @@ def test_normal_ur5e_hardware_state_publisher_stops_calibration_state_publisher(
     }
 
 
-def test_xarm6_hardware_state_publisher_does_not_replace_ur5e_calibration_tf(
+@pytest.mark.parametrize("hardware_stack", ["xarm6", "ur5e", "dual robots"])
+@pytest.mark.parametrize("calibration_publisher_running", [False, True])
+def test_starting_ur5e_hardware_stack_reserves_full_tf_authority(
+    perception_manager: PerceptionManager,
+    hardware_stack: str,
+    calibration_publisher_running: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = perception_manager.bridge
+    bridge.selected_hardware_stack = hardware_stack
+    if calibration_publisher_running:
+        bridge.running.add("ur5e_calibration_state_publisher")
+    monkeypatch.setattr(
+        perception_manager,
+        "_ur5e_joint_state_publisher_running",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        perception_manager,
+        "_run_ros_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    perception_manager._ensure_ur5e_calibration_monitor()
+
+    assert "ur5e_calibration_state_publisher" not in bridge.running
+    assert "ur5e_calibration_state_publisher" not in {
+        name for name, _command, _domain in bridge.commands
+    }
+    assert (
+        "ur5e_calibration_state_publisher" in bridge.stopped
+    ) is calibration_publisher_running
+
+
+def test_xarm6_hardware_state_publisher_replaces_ur5e_calibration_tf(
     perception_manager: PerceptionManager,
 ) -> None:
     bridge = perception_manager.bridge
     bridge.active_hardware_stack = "xarm6"
     bridge.running.add("hardware_robot_state_publisher")
 
-    assert perception_manager._ur5e_full_state_publisher_running() is False
+    assert perception_manager._ur5e_full_state_publisher_running() is True
 
 
 def test_failed_main_rtde_process_does_not_suppress_read_only_monitor(
@@ -1077,6 +1312,19 @@ def test_missing_charuco_board_is_an_operator_warning_without_traceback() -> Non
     assert "ChArUco board is not visible enough" in message
     assert "Place the complete board in the color view" in message
     assert "Traceback" not in message
+
+
+def test_stationary_calibration_frame_error_names_stationary_capture() -> None:
+    result = SimpleNamespace(
+        returncode=1,
+        stdout="",
+        stderr="RuntimeError: color image or CameraInfo is unavailable",
+    )
+
+    message = PerceptionManager._calibration_capture_error(result, "stationary")
+
+    assert message.startswith("stationary color image or CameraInfo is unavailable")
+    assert "UR5e" not in message
 
 
 def test_ur5e_calibration_missing_tf_reports_local_control_workflow() -> None:
@@ -1341,6 +1589,17 @@ def test_camera_status_reports_windows_wsl_and_assignment_counts(
         "preflight",
         lambda: {"ready": True, "checks": {}, "setup_message": "ready"},
     )
+    stationary_preview_dir = manager_module.PREVIEW_ROOT / "stationary"
+    stationary_preview_dir.mkdir(parents=True, exist_ok=True)
+    (stationary_preview_dir / "detection_status.json").write_text(
+        json.dumps(
+            {
+                "captured_at": time.time(),
+                "world_pose_ready": True,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     status = perception_manager.status()
 
@@ -1355,7 +1614,18 @@ def test_camera_status_reports_windows_wsl_and_assignment_counts(
     assert status["preflight"]["camera_inventory"] == status["camera_inventory"]
     assert status["cameras"]["ur5e"]["serial"] == "103422070738"
     assert status["cameras"]["xarm6"]["serial"] == ""
-    assert status["cameras"]["stationary"]["serial"] == ""
+    stationary = status["cameras"]["stationary"]
+    assert stationary["serial"] == ""
+    assert stationary["inspection_only"] is True
+    assert stationary["calibration_required"] is False
+    assert stationary["calibration_ready"] is True
+    assert stationary["calibration"]["required"] is False
+    assert stationary["world_pose_ready"] is False
+    assert stationary["tf_ready"] is False
+    assert stationary["detection_preview"]["world_pose_ready"] is False
+    assert stationary["detection_preview"]["tf_ready"] is False
+    assert stationary["perception"]["world_pose_ready"] is False
+    assert stationary["perception"]["tf_ready"] is False
 
 
 def test_camera_log_reports_specific_driver_error(tmp_path: Path) -> None:
@@ -1636,10 +1906,14 @@ def test_role_specific_services_keep_ur5e_canonical(
         lambda **_kwargs: None,
     )
     payload = perception_manager.config()
-    for role in CAMERA_ROLES:
+    for role in ("ur5e", "xarm6"):
         calibration = tmp_path / f"{role}.yaml"
         calibration.write_text("validation:\n  accepted: true\n", encoding="utf-8")
         payload["cameras"][role]["calibration_path"] = str(calibration)
+    stationary_calibration = tmp_path / "stationary-does-not-exist.yaml"
+    payload["cameras"]["stationary"]["calibration_path"] = str(
+        stationary_calibration
+    )
     manager_module._atomic_yaml_write(perception_manager.config_path, payload)
 
     for role in CAMERA_ROLES:
@@ -1655,6 +1929,48 @@ def test_role_specific_services_keep_ur5e_canonical(
     )
     assert "publish_canonical_services:=false" in commands["physical_perception_xarm6"]
     assert "background_rate_hz:=0.0" in commands["physical_perception_stationary"]
+    assert f"hand_eye_config:={stationary_calibration}" not in commands[
+        "physical_perception_stationary"
+    ]
+    assert "table_plane_config:=" not in commands["physical_perception_stationary"]
+    assert "hand_eye_config:=" in commands["physical_perception"]
+    assert "table_plane_config:=" in commands["physical_perception"]
+    assert "hand_eye_config:=" in commands["physical_perception_xarm6"]
+    assert "table_plane_config:=" in commands["physical_perception_xarm6"]
+    assert (
+        "assembly_board_v1_geometry_path:="
+        in commands["physical_perception_stationary"]
+    )
+    assert (
+        "assembly_board_v1_marker_length_m:=0.076"
+        in commands["physical_perception_stationary"]
+    )
+    assert "assembly_board_v1_geometry_path:=" not in commands["physical_perception"]
+    assert "publish_canonical_services:=false" in commands[
+        "physical_perception_stationary"
+    ]
+
+
+def test_stationary_start_collects_id70_window_without_immediate_test_detection(
+    perception_manager: PerceptionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(perception_manager, "start_camera", lambda _role: None)
+    monkeypatch.setattr(
+        perception_manager,
+        "_wait_for_camera_frame",
+        lambda _role: None,
+    )
+    monkeypatch.setattr(perception_manager, "start_perception", lambda _role: None)
+    monkeypatch.setattr(
+        perception_manager,
+        "test_detection",
+        lambda _role: pytest.fail(
+            "stationary startup must not evaluate the ID 70 window before 10 frames"
+        ),
+    )
+
+    assert perception_manager.start_detection("stationary") is None
 
 
 def test_start_and_stop_detection_own_the_complete_camera_stack(
@@ -1752,6 +2068,205 @@ def test_ui_test_detection_accepts_visual_result_when_world_pose_is_blocked(
     assert "world pose unavailable" in result["message"]
 
 
+def test_stationary_test_detection_fails_closed_for_unconfigured_registration(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_stationary_inspection_geometry(
+        perception_manager,
+        tmp_path / "unconfigured",
+        configured=False,
+    )
+    _write_stationary_inspection_result(
+        perception_manager,
+        {
+            "available": True,
+            "success": True,
+            "message": "stale success must not bypass current configuration",
+        },
+    )
+    monkeypatch.setattr(
+        manager_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    result = perception_manager.test_detection("stationary")
+
+    expected = (
+        "assembly_board-v1_aruco_to_assembly_board-v1 is not configured; "
+        "stationary assembly inspection is unavailable."
+    )
+    assert result["success"] is False
+    assert result["stationary_inspection_ready"] is False
+    assert result["message"] == expected
+    assert result["stationary_inspection"]["message"] == expected
+    assert result["diagnostic_only"] is True
+    assert result["canonical_authority"] is False
+    assert result["robot_motion_requested"] is False
+
+
+def test_stationary_test_detection_exposes_exact_frame_sg_mg_inspection(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_stationary_inspection_geometry(
+        perception_manager,
+        tmp_path / "configured",
+        configured=True,
+    )
+    captured_at = time.time() + 0.5
+    parts = [
+        {
+            "part_name": "SG",
+            "detected": True,
+            "success": True,
+            "expected": {
+                "frame_id": "assembly_board-v1",
+                "x": -0.1,
+                "y": 0.08,
+                "z": 0.03,
+                "point": "top_surface",
+            },
+            "observed": {
+                "frame_id": "assembly_board-v1",
+                "x": -0.096,
+                "y": 0.08,
+                "z": 0.032,
+                "point": "top_surface",
+            },
+            "xy_error_m": 0.004,
+            "seating_error_m": 0.002,
+        },
+        {
+            "part_name": "MG",
+            "detected": True,
+            "success": True,
+            "expected": {
+                "frame_id": "assembly_board-v1",
+                "x": 0.0,
+                "y": 0.08,
+                "z": 0.03,
+                "point": "top_surface",
+            },
+            "observed": {
+                "frame_id": "assembly_board-v1",
+                "x": 0.003,
+                "y": 0.08,
+                "z": 0.029,
+                "point": "top_surface",
+            },
+            "xy_error_m": 0.003,
+            "seating_error_m": -0.001,
+        },
+    ]
+    _write_stationary_inspection_result(
+        perception_manager,
+        {
+            "available": True,
+            "success": True,
+            "message": "SG and MG assembly inspection passed",
+            "captured_at": captured_at,
+            "aruco": {
+                "marker_id": 70,
+                "marker_length_m": 0.076,
+                "captured_at": captured_at,
+                "visible": True,
+                "valid": True,
+                "sample_count": 10,
+                "required_sample_count": 10,
+                "reprojection_error_px": 0.4,
+                "translation_spread_m": 0.001,
+                "rotation_spread_deg": 0.2,
+            },
+            "parts": parts,
+        },
+        preview_world_pose_ready=True,
+    )
+    monkeypatch.setattr(
+        manager_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    result = perception_manager.test_detection("stationary")
+
+    assert result["success"] is True
+    assert result["world_pose_ready"] is False
+    assert result["stationary_inspection_ready"] is True
+    assert result["message"] == "SG and MG assembly inspection passed"
+    assert result["stationary_inspection"]["xy_tolerance_m"] == pytest.approx(0.01)
+    assert result["stationary_inspection"]["seating_tolerance_m"] == pytest.approx(
+        0.005
+    )
+    assert result["stationary_inspection"]["parts"] == parts
+    assert result["stationary_inspection"]["aruco"]["sample_count"] == 10
+    assert result["stationary_inspection"]["unsupported_part_names"] == [
+        "LG",
+        "SRP",
+        "MRP",
+        "LRP",
+        "SCP",
+        "MCP",
+        "LCP",
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "assembly_board-v1 ArUco ID 70 is not visible",
+        "multiple assembly_board-v1 ArUco ID 70 markers are visible",
+        "assembly_board-v1 ArUco stability window has 9/10 samples",
+        "assembly_board-v1 ArUco pose is ambiguous",
+    ],
+)
+def test_stationary_test_detection_preserves_fail_closed_marker_reason(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    _write_stationary_inspection_geometry(
+        perception_manager,
+        tmp_path / "configured",
+        configured=True,
+    )
+    _write_stationary_inspection_result(
+        perception_manager,
+        {
+            "available": False,
+            "success": False,
+            "message": message,
+        },
+    )
+    monkeypatch.setattr(
+        manager_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    result = perception_manager.test_detection("stationary")
+
+    assert result["success"] is False
+    assert result["stationary_inspection_ready"] is False
+    assert result["message"] == message
+
+
 def test_cross_camera_warning_threshold_is_ten_millimetres() -> None:
     cameras = {
         "ur5e": {
@@ -1778,6 +2293,8 @@ def test_cross_camera_warning_threshold_is_ten_millimetres() -> None:
     rows = PerceptionManager._cross_camera_comparisons(cameras)
     assert rows[0]["disagreement_m"] == pytest.approx(0.011)
     assert rows[0]["warning"] is True
+    cameras["stationary"]["inspection_only"] = True
+    assert PerceptionManager._cross_camera_comparisons(cameras) == []
 
 
 def test_stale_preview_and_external_viewer_lifecycle(
@@ -1829,6 +2346,56 @@ def test_calibration_activate_and_rollback_preserve_previous(
     assert yaml.safe_load(active.read_text(encoding="utf-8"))["calibration_id"] == "old"
 
 
+def test_stationary_sample_reset_archives_and_starts_an_empty_exact_role_set(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+) -> None:
+    samples_path = tmp_path / "stationary_camera_samples.json"
+    previous = {
+        "camera_role": "stationary",
+        "world_frame": "world",
+        "tool_frame": "world",
+        "stationary_camera": True,
+        "samples": [{"captured_at": 123.0}],
+    }
+    samples_path.write_text(json.dumps(previous), encoding="utf-8")
+    config = perception_manager.config()
+    config["cameras"]["stationary"]["samples_path"] = str(samples_path)
+    manager_module._atomic_yaml_write(perception_manager.config_path, config)
+
+    result = perception_manager.reset_stationary_calibration_samples()
+
+    archive_path = Path(result["archive_path"])
+    assert archive_path.is_file()
+    assert json.loads(archive_path.read_text(encoding="utf-8")) == previous
+    assert json.loads(samples_path.read_text(encoding="utf-8")) == {
+        "camera_role": "stationary",
+        "world_frame": "world",
+        "tool_frame": "world",
+        "stationary_camera": True,
+        "samples": [],
+    }
+    assert result["sample_count"] == 0
+    assert result["robot_motion_requested"] is False
+
+
+def test_stationary_capture_rejects_another_roles_existing_sample_set(
+    perception_manager: PerceptionManager,
+    tmp_path: Path,
+) -> None:
+    samples_path = tmp_path / "stationary_camera_samples.json"
+    samples_path.write_text(
+        json.dumps({"camera_role": "ur5e", "samples": []}),
+        encoding="utf-8",
+    )
+    config = perception_manager.config()
+    config["cameras"]["stationary"]["samples_path"] = str(samples_path)
+    manager_module._atomic_yaml_write(perception_manager.config_path, config)
+
+    with pytest.raises(RuntimeError, match=r"Archive \+ Reset Samples"):
+        perception_manager.save_pose_and_capture("stationary")
+
+
 def test_stationary_extrinsic_solver_uses_surveyed_world_pose(tmp_path: Path) -> None:
     identity = np.eye(4).tolist()
     samples = {
@@ -1858,8 +2425,87 @@ def test_stationary_extrinsic_solver_uses_surveyed_world_pose(tmp_path: Path) ->
         },
     )
     assert result["parent_frame"] == "world"
+    assert result["accepted_pose_count"] == 10
     assert result["parent_to_camera_link"]["translation"]["z"] == pytest.approx(1.2)
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["validation"]["accepted"]
+
+
+def test_stationary_extrinsic_solver_rejects_fewer_than_ten_samples(
+    tmp_path: Path,
+) -> None:
+    identity = np.eye(4).tolist()
+    samples_path = tmp_path / "stationary_samples.json"
+    samples_path.write_text(
+        json.dumps(
+            {
+                "camera_role": "stationary",
+                "samples": [
+                    {
+                        "camera_to_board": identity,
+                        "camera_link_to_optical": identity,
+                        "reprojection_error_px": 0.1,
+                    }
+                    for _index in range(9)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="at least 10 accepted stationary"):
+        solve_stationary_calibration(
+            samples_path,
+            tmp_path / "stationary_realsense_extrinsic.yaml",
+            board_world_pose={
+                "configured": True,
+                "x": 0.2,
+                "y": -0.1,
+                "z": 1.2,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.0,
+            },
+        )
+
+
+def test_stationary_extrinsic_solver_rejects_inconsistent_fixed_camera_samples(
+    tmp_path: Path,
+) -> None:
+    identity = np.eye(4)
+    moved = identity.copy()
+    moved[0, 3] = 0.1
+    samples_path = tmp_path / "stationary_samples.json"
+    samples_path.write_text(
+        json.dumps(
+            {
+                "camera_role": "stationary",
+                "samples": [
+                    {
+                        "camera_to_board": (moved if index == 9 else identity).tolist(),
+                        "camera_link_to_optical": identity.tolist(),
+                        "reprojection_error_px": 0.1,
+                    }
+                    for index in range(10)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="stationary calibration rejected.*translation RMS"):
+        solve_stationary_calibration(
+            samples_path,
+            tmp_path / "stationary_realsense_extrinsic.yaml",
+            board_world_pose={
+                "configured": True,
+                "x": 0.2,
+                "y": -0.1,
+                "z": 1.2,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.0,
+            },
+        )
 
 
 def test_preview_and_page_contracts_do_not_invoke_inference_or_motion() -> None:
@@ -1872,6 +2518,8 @@ def test_preview_and_page_contracts_do_not_invoke_inference_or_motion() -> None:
     page_source = Path("cais_spade_llm/ui/pages/perception.py").read_text(encoding="utf-8")
     app_source = Path("cais_spade_llm/ui/app.py").read_text(encoding="utf-8")
     assert "RoboflowGearDetector" not in preview_source
+    assert "AssemblyBoardV1ArucoLocalizer(" in preview_source
+    assert 'if camera_role in ("ur5e", "xarm6")' in preview_source
     assert "Camera & Perception" in page_source
     assert '"Perception", "/perception"' in app_source
     assert "/perception/stream/{camera_role}/{stream_name}" in app_source
@@ -1902,6 +2550,15 @@ def test_preview_and_page_contracts_do_not_invoke_inference_or_motion() -> None:
     assert "I Confirm — Plan and Replay" in page_source
     assert "Local Control through read-only" in page_source
     assert "MoveIt and RG2 control remain stopped" in page_source
+    assert "camera is inspection-only" in page_source
+    assert "does not use this ChArUco calibration workflow" in page_source
+    assert "Capture Sample" not in page_source
+    assert "Archive + Reset Samples" not in page_source
+    assert "Save Surveyed Pose" not in page_source
+    assert "_render_stationary_board_pose" not in page_source
+    assert "Stationary ID 70 (diagnostic only)" in page_source
+    assert "SG/MG slot XY error (10 mm limit)" in page_source
+    assert "Stationary assembly inspection supports SG and MG only" in page_source
     assert "Calibration live view — raw color" in page_source
     assert "Enlarge Calibration View" in page_source
     assert 'color_url = f"/perception/frame/{role}/color"' in page_source

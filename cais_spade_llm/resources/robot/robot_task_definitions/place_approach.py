@@ -169,11 +169,14 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                 op="move_cartesian",
                 executor="primitive",
                 exposed=True,
-                physical_position_required=True,
                 params={
                     "x": _step_output("place_targets", "approach_pose", "x"),
                     "y": _step_output("place_targets", "approach_pose", "y"),
                     "z": _step_output("place_targets", "approach_pose", "z"),
+                    "qx": _step_output("place_targets", "approach_pose", "qx"),
+                    "qy": _step_output("place_targets", "approach_pose", "qy"),
+                    "qz": _step_output("place_targets", "approach_pose", "qz"),
+                    "qw": _step_output("place_targets", "approach_pose", "qw"),
                     "speed": _arg("speed"),
                 },
                 public_params={
@@ -188,11 +191,15 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                 op="move_cartesian",
                 executor="primitive",
                 exposed=True,
-                physical_position_required=True,
                 params={
                     "x": _step_output("place_targets", "target_pose", "x"),
                     "y": _step_output("place_targets", "target_pose", "y"),
                     "z": _step_output("place_targets", "target_pose", "z"),
+                    "qx": _step_output("place_targets", "target_pose", "qx"),
+                    "qy": _step_output("place_targets", "target_pose", "qy"),
+                    "qz": _step_output("place_targets", "target_pose", "qz"),
+                    "qw": _step_output("place_targets", "target_pose", "qw"),
+                    "speed": _arg("speed"),
                 },
                 public_params={
                     "x": _step_ref("place_targets.<PART>", "target_pose.x"),
@@ -213,6 +220,32 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "place_z": _step_output("place_targets", "place_z"),
                     "place_part_origin_z": _step_output("place_targets", "place_part_origin_z"),
                     "part_height": _step_output("place_targets", "part_height"),
+                    "pre_insert_pose": _step_output(
+                        "place_targets", "pre_insert_pose"
+                    ),
+                    "insert_pose": _step_output("place_targets", "insert_pose"),
+                    "insertion_axis_world": _step_output(
+                        "place_targets", "insertion_axis_world"
+                    ),
+                    "move_insert_profile": _step_output(
+                        "place_targets", "move_insert_profile"
+                    ),
+                    "move_insert_profile_sha256": _step_output(
+                        "place_targets", "move_insert_profile_sha256"
+                    ),
+                    "move_insert_timeout_sec": _step_output(
+                        "place_targets", "move_insert_timeout_sec"
+                    ),
+                    "move_insert_mode": _step_output(
+                        "place_targets", "move_insert_mode"
+                    ),
+                    "surface_role": _step_output("place_targets", "surface_role"),
+                    "assembly_board_v1_pose": _step_output(
+                        "place_targets", "assembly_board_v1_pose"
+                    ),
+                    "assembly_board_v1_registration": _step_output(
+                        "place_targets", "assembly_board_v1_registration"
+                    ),
                     "destination_location": _arg("destination_location"),
                     "model_name": _step_output("place_targets", "model_name"),
                 },
@@ -247,8 +280,8 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
         dry_run_duration=5.0,
         failure_part=_first(_arg("part_name"), _state("_held_part")),
         notes=(
-            "Physical RobotAgent.place_approach stages at destination_location, freezes assembly_board-v1 localization, computes destination geometry, moves above the destination, then descends to the place pose.",
-            "Direct controller pose helpers are hidden from synthesis; use compute_place_targets plus move_cartesian approach/target poses.",
+            "Physical RobotAgent.place_approach stages at destination_location, freezes assembly_board-v1 localization, computes destination geometry, moves above the destination, then descends to the pre-insert pose.",
+            "Direct controller pose helpers are hidden from synthesis; use compute_place_targets plus move_cartesian approach/pre-insert poses.",
         ),
     ),
 )
