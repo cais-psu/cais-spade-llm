@@ -358,12 +358,12 @@ _XARM6_MAX_JOINT_SPEED_DEG_S = math.degrees(
         ),
     )
 )
-_UR5E_CARTESIAN_SPEED_MM_S = 1000.0 * max(
-    0.005,
+_UR5E_CARTESIAN_SPEED_MM_S = max(
+    5.0,
     ros2_processes.hardware_arms_float(
         _HARDWARE_ARMS_CONFIG,
-        ("ur5e", "rtde", "cartesian_speed_m_s"),
-        0.05,
+        ("ur5e", "cartesian", "speed_mm_s"),
+        100.0,
     ),
 )
 _UR5E_CARTESIAN_MAX_SPEED_MM_S = max(
@@ -15638,6 +15638,7 @@ class SystemBridge:
         part_name: str,
         *,
         operator_confirmed_held_part: bool = False,
+        defer_manual_pre_execute_checks: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Validate every no-motion gate and build exact generated-method arguments."""
         if not isinstance(operator_confirmed_held_part, bool):
@@ -16078,6 +16079,7 @@ class SystemBridge:
             and destination_location == "assembly_board-v1"
             and not bool(readiness.get("independent_commissioning"))
             and not operator_confirmed_held_part
+            and not defer_manual_pre_execute_checks
         ):
             pre_staging_readiness, pre_staging_error = (
                 self._physical_ur5e_place_approach_pre_staging_error(
@@ -16092,8 +16094,10 @@ class SystemBridge:
             if pre_staging_error:
                 return None, {}, readiness, pre_staging_error
 
-        if function_name in {"pick_grasp", "place_insert"} and not bool(
-            readiness.get("independent_commissioning")
+        if (
+            function_name in {"pick_grasp", "place_insert"}
+            and not bool(readiness.get("independent_commissioning"))
+            and not defer_manual_pre_execute_checks
         ):
             dependent_pose_readiness, dependent_pose_error = (
                 self._manual_dependent_function_pose_error(
@@ -16313,6 +16317,7 @@ class SystemBridge:
         part_name: str,
         *,
         operator_confirmed_held_part: bool = False,
+        defer_manual_pre_execute_checks: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Prepare the selected physical runtime through no-motion preflight."""
         cfg, request_error = self._digital_twin_robot_function_request_error(
@@ -16354,6 +16359,7 @@ class SystemBridge:
                     if operator_confirmed_held_part is not False
                     else {}
                 ),
+                defer_manual_pre_execute_checks=defer_manual_pre_execute_checks,
             )
 
         lifecycle_lock = (
@@ -16438,6 +16444,7 @@ class SystemBridge:
                     if operator_confirmed_held_part is not False
                     else {}
                 ),
+                defer_manual_pre_execute_checks=defer_manual_pre_execute_checks,
             )
 
     async def _digital_twin_robot_function_execution_preflight_prepared_async(
@@ -16450,6 +16457,7 @@ class SystemBridge:
         part_name: str,
         *,
         operator_confirmed_held_part: bool = False,
+        defer_manual_pre_execute_checks: bool = False,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Run blocking ROS readiness probes without blocking the NiceGUI event loop."""
         result: tuple[Any | None, dict[str, Any], dict[str, Any], str] | None = None
@@ -16502,6 +16510,9 @@ class SystemBridge:
                             }
                             if operator_confirmed_held_part is not False
                             else {}
+                        ),
+                        defer_manual_pre_execute_checks=(
+                            defer_manual_pre_execute_checks
                         ),
                     )
                     if result is not None:
@@ -29336,6 +29347,7 @@ class SystemBridge:
                         if operator_confirmed_held_part is not False
                         else {}
                     ),
+                    defer_manual_pre_execute_checks=True,
                 )
             )
             try:
@@ -37084,7 +37096,7 @@ class SystemBridge:
                 return target
         if (
             str(robot or "").strip().lower() == "ur5e"
-            and str(op or "").strip().lower() in {"cartesian", "cartesian_smooth", "joint"}
+            and str(op or "").strip().lower() == "joint"
             and target.get("environment") == "real"
         ):
             ready, message = self.teleop_named_position_readiness("ur5e")
@@ -37303,23 +37315,26 @@ class SystemBridge:
             self._teleop_cartesian_modes[key] = requested
             return True, f"{key} Cartesian {requested} selected for Gazebo"
         if key == "ur5e":
-            if requested != "off":
-                recording = self._current_insertion_demonstration()
-                recording_cartesian_jog = bool(
-                    recording is not None
-                    and bool(recording.get("active"))
-                    and not bool(recording.get("recovery_required"))
-                    and not self._insertion_demonstration_blocking_error(
-                        allow_ur5e_cartesian_jog=True
-                    )
-                )
-                pending_review_error = (
-                    ""
-                    if recording_cartesian_jog
-                    else self._move_insert_pending_review_error()
-                )
-                if pending_review_error:
-                    return False, pending_review_error
+            if requested == "off":
+                self._teleop_cartesian_modes[key] = requested
+                return True, f"UR5e Cartesian {requested} ready"
+            preflight = self._teleop_preflight(
+                key,
+                "cartesian_smooth" if requested == "smooth" else "cartesian",
+            )
+            warning = str(preflight.get("warning") or "")
+            if warning:
+                return False, warning
+            ok, message, payload = self._teleop_request_payload(
+                {
+                    "op": "cartesian_readiness",
+                    "robot": "ur5e",
+                },
+                timeout_sec=5.0,
+                ros_domain_id=preflight.get("ros_domain_id"),
+            )
+            if not ok or payload.get("cartesian_jog_ready") is not True:
+                return False, message or "UR5e Cartesian jog service is unavailable"
             self._teleop_cartesian_modes[key] = requested
             return True, f"UR5e Cartesian {requested} ready"
 
@@ -37806,7 +37821,7 @@ class SystemBridge:
                 agent_lock_acquired = False
                 if not xarm6_session_owns_locks:
                     if not self._ur5e_robot_function_execution_lock.acquire(
-                        timeout=_UR5E_TELEOP_HANDOFF_TIMEOUT_SEC
+                        blocking=False
                     ):
                         active = str(
                             self._ur5e_robot_function_execution_active
@@ -37818,9 +37833,7 @@ class SystemBridge:
                     agent_motion_lock = getattr(resource_agent, "_robot_motion_lock", None)
                     if agent_motion_lock is not None:
                         agent_lock_acquired = bool(
-                            agent_motion_lock.acquire(
-                                timeout=_UR5E_TELEOP_HANDOFF_TIMEOUT_SEC
-                            )
+                            agent_motion_lock.acquire(blocking=False)
                         )
                         if not agent_lock_acquired:
                             self._ur5e_robot_function_execution_lock.release()

@@ -2006,7 +2006,7 @@ class PerceptionManager:
             f"--camera-optical-frame {camera['camera_name']}_color_optical_frame "
             f"--hand-eye-config {camera['calibration_path']} "
             f"--marker-length-m {marker_length_m} --output-root {PREVIEW_ROOT} "
-            f"--expected-rate-hz {expected_rate_hz}"
+            f"--maximum-rate-hz 10.0 --expected-rate-hz {expected_rate_hz}"
         )
         preview_error = self.bridge._start_tracked_ros2_command(
             names["preview"],

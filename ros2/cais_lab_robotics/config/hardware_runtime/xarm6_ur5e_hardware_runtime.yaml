@@ -65,6 +65,8 @@ ur5e:
     rtde_allowed_execution_duration_scaling: 8.0
     rtde_allowed_goal_duration_margin: 20.0
     rtde_trajectory_controller: "cais_ur5e_rtde_trajectory_controller"
+  cartesian:
+    speed_mm_s: 100.0
   rtde:
     # The server consumes feedback at 50 Hz. A 125 Hz RTDE session leaves
     # sampling headroom without running two 500 Hz native clients in WSL.
@@ -82,10 +84,11 @@ ur5e:
     feedback_reconnect_after_sec: 0.5
     feedback_reconnect_retry_sec: 1.0
     feedback_recovery_timeout_sec: 2.0
+    stationary_hold_sec: 0.10
     stopped_away_hold_sec: 0.5
-    cartesian_speed_m_s: 0.10
-    cartesian_max_speed_m_s: 0.10
-    cartesian_accel_m_s2: 0.10
+    cartesian_speed_m_s: 0.15
+    cartesian_max_speed_m_s: 0.15
+    cartesian_accel_m_s2: 0.20
     cartesian_position_tolerance_m: 0.002
     cartesian_orientation_tolerance_rad: 0.0349065850
     # Effective configured lab geometry for TF world -> base, not the launch
@@ -200,8 +203,8 @@ ur5e:
       close_width_mm: 10.0
       open_force: 10.0
       close_force: 40.0
-      open_settle_sec: 1.2
-      close_settle_sec: 2.0
+      open_settle_sec: 0.6
+      close_settle_sec: 1.0
       method: "script"
       disable_remote_control_check: true
     xmlrpc:

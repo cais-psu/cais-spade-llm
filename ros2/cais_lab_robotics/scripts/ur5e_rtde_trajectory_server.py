@@ -178,6 +178,7 @@ def _apply_hardware_arms_config(config_path: Path) -> None:  # noqa: PLR0915
     global UR5E_RTDE_FEEDBACK_RECONNECT_RETRY_SEC
     global UR5E_RTDE_FEEDBACK_RECOVERY_TIMEOUT_SEC
     global UR5E_RTDE_FREQUENCY_HZ
+    global UR5E_RTDE_STATIONARY_HOLD_SEC
     global UR5E_RTDE_STOPPED_AWAY_HOLD_SEC
     global UR5E_RTDE_ALLOWED_EXECUTION_DURATION_SCALING
     global UR5E_RTDE_RESULT_MARGIN_SEC
@@ -365,6 +366,14 @@ def _apply_hardware_arms_config(config_path: Path) -> None:  # noqa: PLR0915
                 ("ur5e", "rtde", "frequency_hz"),
                 UR5E_RTDE_FREQUENCY_HZ,
             ),
+        ),
+    )
+    UR5E_RTDE_STATIONARY_HOLD_SEC = max(
+        0.05,
+        _float(
+            config,
+            ("ur5e", "rtde", "stationary_hold_sec"),
+            UR5E_RTDE_STATIONARY_HOLD_SEC,
         ),
     )
     UR5E_RTDE_STOPPED_AWAY_HOLD_SEC = max(
@@ -2379,6 +2388,8 @@ class UR5eRTDETrajectoryServer(Node):
         self._jog_stop_in_progress = False
         self._jog_world_base: RigidTransform | None = None
         self._jog_frame_message = ""
+        self._jog_base_velocity_m_s: tuple[float, float, float] | None = None
+        self._jog_acceleration_m_s2: float | None = None
         self.terminal_status_file = self.status_file.with_name(
             f"{self.status_file.stem}_last_terminal{self.status_file.suffix}"
         )
@@ -2981,6 +2992,8 @@ class UR5eRTDETrajectoryServer(Node):
                 self._jog_watchdog_deadline = 0.0
                 self._jog_world_base = None
                 self._jog_frame_message = ""
+                self._jog_base_velocity_m_s = None
+                self._jog_acceleration_m_s2 = None
                 if bool(getattr(self, "_rtde_reset_required", False)):
                     return False, str(
                         getattr(self, "_rtde_reset_reason", "")
@@ -3020,6 +3033,8 @@ class UR5eRTDETrajectoryServer(Node):
                 self._jog_stop_in_progress = False
                 self._jog_world_base = None
                 self._jog_frame_message = ""
+                self._jog_base_velocity_m_s = None
+                self._jog_acceleration_m_s2 = None
         status = _status_base()
         status.update(
             state="ready",
@@ -10120,7 +10135,11 @@ class UR5eRTDETrajectoryServer(Node):
         finally:
             self._clear_active_goal(goal_handle)
 
-    def _set_cartesian_jog(self, request: Any, response: Any) -> Any:
+    def _set_cartesian_jog(  # noqa: C901, PLR0915 - guarded jog refresh lifecycle.
+        self,
+        request: Any,
+        response: Any,
+    ) -> Any:
         """Start, refresh, or stop one watchdog-guarded translation-only RTDE jog."""
         if bool(request.stop):
             response.accepted, response.message = self._stop_cartesian_jog(
@@ -10141,16 +10160,31 @@ class UR5eRTDETrajectoryServer(Node):
                 cached_frame_message = str(
                     getattr(self, "_jog_frame_message", "") or ""
                 )
+                ready_world_base = getattr(
+                    self,
+                    "_cartesian_world_base_observed",
+                    None,
+                )
+                cached_cartesian_frame_ready = bool(
+                    getattr(self, "_cartesian_frame_ready", False)
+                    and getattr(self, "_cartesian_world_base_ready", False)
+                    and getattr(self, "_cartesian_jog_ready", False)
+                    and ready_world_base is not None
+                )
+                ready_frame_message = str(
+                    getattr(self, "_cartesian_frame_message", "") or ""
+                )
             if jog_session_active and cached_world_base is not None:
                 world_base = cached_world_base
                 frame_message = cached_frame_message
+            elif cached_cartesian_frame_ready:
+                world_base = ready_world_base
+                frame_message = ready_frame_message
             else:
-                (
-                    world_base,
-                    frame_message,
-                    _position_error,
-                    _orientation_error,
-                ) = self._validated_cartesian_world_base()
+                raise RuntimeError(
+                    "UR5e Cartesian frame readiness is unavailable; "
+                    "Repair Hardware Stack before Smooth Hold"
+                )
             world_velocity_m_s = (
                 float(request.world_linear_velocity_m_s.x),
                 float(request.world_linear_velocity_m_s.y),
@@ -10190,11 +10224,33 @@ class UR5eRTDETrajectoryServer(Node):
             with self._active_lock:
                 if self._active_goal not in (None, self._jog_session_token):
                     raise RuntimeError("UR5e RTDE motion already executing")
+                unchanged_jog = bool(
+                    self._active_goal is self._jog_session_token
+                    and self._jog_base_velocity_m_s is not None
+                    and all(
+                        math.isclose(current, previous, abs_tol=1e-12)
+                        for current, previous in zip(
+                            base_velocity_m_s,
+                            self._jog_base_velocity_m_s,
+                            strict=True,
+                        )
+                    )
+                    and self._jog_acceleration_m_s2 is not None
+                    and math.isclose(
+                        acceleration,
+                        self._jog_acceleration_m_s2,
+                        abs_tol=1e-12,
+                    )
+                )
                 self._active_goal = self._jog_session_token
                 self._active_motion_kind = "cartesian_jog"
                 self._jog_watchdog_deadline = time.monotonic() + watchdog_sec
                 self._jog_world_base = world_base
                 self._jog_frame_message = frame_message
+            if unchanged_jog:
+                response.accepted = True
+                response.message = "UR5e Cartesian Smooth Hold active"
+                return response
             jog_start = getattr(self.control, "jogStart", None)
             if not callable(jog_start):
                 raise RuntimeError("RTDE control object has no jogStart method")
@@ -10217,6 +10273,9 @@ class UR5eRTDETrajectoryServer(Node):
             ]
             if not bool(jog_start(speeds, feature_base, acceleration)):
                 raise RuntimeError("UR5e RTDE jogStart returned False")
+            with self._active_lock:
+                self._jog_base_velocity_m_s = tuple(base_velocity_m_s)
+                self._jog_acceleration_m_s2 = acceleration
             status = _status_base()
             status.update(
                 state="executing",
@@ -10324,8 +10383,11 @@ class UR5eRTDETrajectoryServer(Node):
                 world_base,
                 tool0_tcp,
             ) = self._resolve_cartesian_target(request.target_tool0_pose)
-            frame_ready, frame_message, frame_position_error, frame_orientation_error = (
-                self._cartesian_frame_validation()
+            frame_ready = bool(self._cartesian_frame_ready)
+            frame_message = str(self._cartesian_frame_message)
+            frame_position_error = float(self._cartesian_frame_position_error_m)
+            frame_orientation_error = float(
+                self._cartesian_frame_orientation_error_rad
             )
             if not frame_ready:
                 raise ValueError(frame_message)

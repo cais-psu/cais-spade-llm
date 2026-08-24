@@ -2802,7 +2802,7 @@ class KeyboardTeleop(Node):
                 world_velocity_m_s,
                 watchdog_sec,
                 stop=False,
-                timeout_sec=0.40,
+                timeout_sec=0.30,
             )
             if ok:
                 return True
@@ -2815,7 +2815,7 @@ class KeyboardTeleop(Node):
         return False
 
     def _ur5e_cartesian_jog_refresh_loop(self):
-        while not self._ur5e_smooth_refresh_stop.wait(0.10):
+        while not self._ur5e_smooth_refresh_stop.wait(0.05):
             if not self._ur5e_refresh_cartesian_jog_once():
                 return
 
@@ -2887,7 +2887,7 @@ class KeyboardTeleop(Node):
                 self._ur5e_smooth_watchdog_sec = watchdog_sec
                 self._ur5e_smooth_heartbeat_monotonic = time.monotonic()
             return True, 'UR5e Cartesian Smooth Hold active'
-        if not client.wait_for_service(timeout_sec=2.0):
+        if not client.service_is_ready():
             return False, f'{self.ur5e_hardware_cartesian_jog_service} is unavailable'
         ok, message = self._send_ur5e_cartesian_jog(
             world_velocity_m_s,

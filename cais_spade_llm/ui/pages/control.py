@@ -5874,6 +5874,8 @@ def _teleop_section(
             status_label = state_labels["status"]
             if status_label is None or not _client_alive(status_label):
                 return
+            if cartesian_jog_mode["mode"] == "smooth":
+                return
             if smooth_hold["pressed"] or smooth_hold["active"] or smooth_hold["stopping"]:
                 return
             if state_refresh["busy"]:
@@ -6274,6 +6276,20 @@ def _teleop_section(
                         position="bottom-right",
                         timeout=5000,
                     )
+                return
+            if (
+                not smooth_hold["pressed"]
+                or int(smooth_hold["generation"]) != generation
+                or cartesian_jog_mode["mode"] != "smooth"
+                or str(robot_select.value or "") != robot
+            ):
+                await asyncio.to_thread(
+                    bridge.teleop_cartesian_smooth,
+                    robot,
+                    axis,
+                    0.0,
+                    "stop",
+                )
                 return
             smooth_hold["active"] = True
             smooth_hold["robot"] = robot
@@ -7471,6 +7487,7 @@ def _teleop_section(
         _refresh_teleop_status()
         _refresh_cartesian_controls()
         _schedule_cartesian_readiness_refresh(invalidate=True)
+        asyncio.create_task(_apply_cartesian_mode("Smooth Hold"))
         ui.timer(1.0, _refresh_teleop_status)
         ui.timer(0.5, _schedule_cartesian_readiness_refresh)
         asyncio.create_task(_refresh_teleop_state_async())
