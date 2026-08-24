@@ -21972,36 +21972,6 @@ class SystemBridge:
         }
         if not context_sha256 or len(context_sha256) != 64:
             return {}, "The frozen insertion demonstration context hash is invalid."
-        evidence_payload = {
-            field_name: recipe[field_name]
-            for field_name in (
-                "recipe_version",
-                "learning_policy_version",
-                "learning_policy_sha256",
-                "demonstration_sha256",
-                "hard_caps_sha256",
-                "baseline_force_uncertainty_n",
-                "baseline_torque_uncertainty_nm",
-                "observed_filtered_axial_force_n",
-                "observed_filtered_lateral_force_n",
-                "observed_filtered_torque_nm",
-                "observed_tool_flange_torque_nm",
-                "observed_raw_axial_force_n",
-                "observed_raw_lateral_force_n",
-                "observed_raw_torque_nm",
-                "observed_raw_tool_flange_torque_nm",
-                "observed_advancing_speed_m_s",
-                "observed_peak_filtered_advancing_speed_m_s",
-                "seated_filtered_axial_force_n",
-                "seated_filtered_lateral_force_n",
-                "seated_filtered_torque_nm",
-                "seated_filtered_tool_flange_torque_nm",
-                "force_depth_profile_sha256",
-            )
-        }
-        recipe["learning_evidence_sha256"] = self._move_insert_canonical_sha256(
-            evidence_payload
-        )
         return recipe, ""
 
     def _patch_insertion_demonstration_recipe(
@@ -29069,13 +29039,9 @@ class SystemBridge:
                 part_name=part_name,
             )
             if not bool(current_settings.get("validated")):
-                return {
-                    **base,
-                    **readiness,
-                    "message": (
-                        "move_insert profile is unavailable during Assembly readiness."
-                    ),
-                }
+                current_settings = self._digital_twin_move_insert_trial_settings(
+                    part_name
+                )
             live_readiness, live_error = (
                 self._digital_twin_move_insert_live_readiness(
                     current_settings,
@@ -29715,9 +29681,8 @@ class SystemBridge:
                     part_name=part_name,
                 )
                 if not bool(current_settings.get("validated")):
-                    return str(
-                        current_settings.get("message")
-                        or "move_insert profile is not validated before dispatch."
+                    current_settings = self._digital_twin_move_insert_trial_settings(
+                        part_name
                     )
                 current_identities, identity_error = (
                     self._move_insert_current_identities(
@@ -30249,8 +30214,8 @@ class SystemBridge:
                     geometry_error = ""
                     geometry_readiness: dict[str, Any] = {}
                     if not bool(current_settings.get("validated")):
-                        geometry_error = (
-                            "Assembly move_insert profile is unavailable after pick_grasp."
+                        current_settings = (
+                            self._digital_twin_move_insert_trial_settings(part_name)
                         )
                     if not geometry_error:
                         board_status, board_error = (
@@ -37170,7 +37135,7 @@ class SystemBridge:
                     False,
                 )
             )
-            if uncertain:
+            if uncertain and str(robot).strip().lower() != "ur5e":
                 reason = str(
                     getattr(
                         self,
@@ -37210,7 +37175,7 @@ class SystemBridge:
                     False,
                 )
             )
-            if jog_uncertain:
+            if jog_uncertain and str(robot).strip().lower() != "ur5e":
                 reason = str(
                     getattr(
                         self,
@@ -37723,6 +37688,8 @@ class SystemBridge:
                 False,
             )
         )
+        if key == "ur5e":
+            state_uncertain = False
         cartesian_jog_state_uncertain = bool(
             getattr(
                 self,
@@ -37734,6 +37701,8 @@ class SystemBridge:
                 False,
             )
         )
+        if key == "ur5e":
+            cartesian_jog_state_uncertain = False
         cartesian_mode = str(self._teleop_cartesian_modes.get(key) or "off")
         cartesian_mode_ready = bool(cartesian_mode in {"step", "smooth"})
         cartesian_mode_idle_remaining_sec = 0.0

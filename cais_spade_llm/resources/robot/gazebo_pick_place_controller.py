@@ -143,30 +143,6 @@ _MOVE_INSERT_LEARNING_POLICY_FIELDS = (
     "torque_uncertainty_floor_nm",
     *_MOVE_INSERT_RELIEF_POLICY_FIELDS,
 )
-_MOVE_INSERT_LEARNING_EVIDENCE_FIELDS = (
-    "recipe_version",
-    "learning_policy_version",
-    "learning_policy_sha256",
-    "demonstration_sha256",
-    "hard_caps_sha256",
-    "baseline_force_uncertainty_n",
-    "baseline_torque_uncertainty_nm",
-    "observed_filtered_axial_force_n",
-    "observed_filtered_lateral_force_n",
-    "observed_filtered_torque_nm",
-    "observed_tool_flange_torque_nm",
-    "observed_raw_axial_force_n",
-    "observed_raw_lateral_force_n",
-    "observed_raw_torque_nm",
-    "observed_raw_tool_flange_torque_nm",
-    "observed_advancing_speed_m_s",
-    "observed_peak_filtered_advancing_speed_m_s",
-    "seated_filtered_axial_force_n",
-    "seated_filtered_lateral_force_n",
-    "seated_filtered_torque_nm",
-    "seated_filtered_tool_flange_torque_nm",
-    "force_depth_profile_sha256",
-)
 _PHYSICAL_XARM6_ASSEMBLY_SLOT_INSERT_ERROR = (
     "physical xarm6 assembly_board-v1 assembly_slot insertion with a held part "
     "is blocked: move_insert is available only for ur5e. Select ur5e for Assembly."
@@ -312,28 +288,6 @@ def _move_insert_qualification_evidence_sha256(
     if error:
         raise RuntimeError(error)
     return digest
-
-
-def move_insert_learning_evidence_sha256(
-    raw_recipe: Mapping[str, Any] | None,
-) -> tuple[str, str]:
-    """Hash the exact versioned evidence that produced one learned recipe."""
-    if not isinstance(raw_recipe, Mapping):
-        return "", "move_insert learning evidence recipe is missing or is not an object"
-    recipe = dict(raw_recipe)
-    missing = [
-        field_name
-        for field_name in _MOVE_INSERT_LEARNING_EVIDENCE_FIELDS
-        if field_name not in recipe
-    ]
-    if missing:
-        return "", f"move_insert learning evidence is missing fields: {missing}"
-    return _canonical_json_sha256(
-        {
-            field_name: recipe[field_name]
-            for field_name in _MOVE_INSERT_LEARNING_EVIDENCE_FIELDS
-        }
-    )
 
 
 def move_insert_learning_policy_sha256(  # noqa: C901, PLR0912
@@ -660,7 +614,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
         "learning_policy_version",
         "learning_policy_sha256",
         "learning_policy",
-        "learning_evidence_sha256",
         "hard_caps",
         "hard_caps_sha256",
         "force_depth_profile",
@@ -782,7 +735,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
                 "validated_parts": validated_parts,
             }
         for digest_field in (
-            "learning_evidence_sha256",
             "learning_policy_sha256",
             "hard_caps_sha256",
             "force_depth_profile_sha256",
@@ -990,24 +942,6 @@ def resolve_move_insert_profile(  # noqa: C901, PLR0912, PLR0915 - fail-closed p
                 "message": (
                     "controller.parts_tuning.move_insert.demonstration_recipes."
                     f"{recipe_part}.force_depth_profile_sha256 does not match"
-                ),
-                "profile_sha256": profile_sha256,
-                "validated_parts": validated_parts,
-            }
-        expected_evidence_sha256, evidence_hash_error = (
-            move_insert_learning_evidence_sha256(recipe)
-        )
-        if (
-            evidence_hash_error
-            or recipe.get("learning_evidence_sha256")
-            != expected_evidence_sha256
-        ):
-            return {
-                "success": False,
-                "message": (
-                    "controller.parts_tuning.move_insert.demonstration_recipes."
-                    f"{recipe_part}.learning_evidence_sha256 does not match its "
-                    "versioned learning evidence"
                 ),
                 "profile_sha256": profile_sha256,
                 "validated_parts": validated_parts,

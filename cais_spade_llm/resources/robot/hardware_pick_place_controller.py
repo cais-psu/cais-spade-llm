@@ -3332,9 +3332,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
         try:
             result_future = goal_handle.get_result_async()
             self._set_active_move_insert_goal(goal_handle, result_future)
+            result_timeout_sec = supplied_timeout + 10.0
             wrapped = self._wait_move_insert_terminal_result(
                 result_future,
-                supplied_timeout + 10.0,
+                result_timeout_sec,
             )
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             cancel_result = self.cancel_move_insert(timeout_sec=8.0)

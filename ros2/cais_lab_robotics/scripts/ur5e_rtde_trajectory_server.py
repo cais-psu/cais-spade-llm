@@ -807,8 +807,10 @@ UR5E_RTDE_INSERT_DEMONSTRATION_MAX_DURATION_SEC = 300.0
 UR5E_RTDE_INSERT_DEMONSTRATION_BASELINE_SEC = 1.0
 UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_SPEED_M_S = 0.001
 UR5E_RTDE_INSERT_DEMONSTRATION_STATIONARY_ANGULAR_SPEED_RAD_S = 0.02
-UR5E_RTDE_INSERT_MG_LEARNED_AXIAL_LIMIT_SCALE = 1.50
-UR5E_RTDE_INSERT_MG_DEPTH_AXIAL_LIMIT_SCALE = 1.75
+UR5E_RTDE_INSERT_MG_LEARNED_AXIAL_LIMIT_SCALE = 3.00
+UR5E_RTDE_INSERT_MG_DEPTH_AXIAL_LIMIT_SCALE = 3.00
+UR5E_RTDE_INSERT_MG_FORCE_COMMAND_SCALE = 3.00
+UR5E_RTDE_INSERT_MG_EXECUTION_TIMEOUT_SEC = 60.0
 
 _apply_hardware_arms_config(DEFAULT_CONFIG_FILE)
 
@@ -946,6 +948,38 @@ def _insert_axial_soft_limit_scales(part_name: str) -> tuple[float, float]:
             UR5E_RTDE_INSERT_MG_DEPTH_AXIAL_LIMIT_SCALE,
         )
     return 1.0, 1.0
+
+
+def _insert_force_command_scale(part_name: str) -> float:
+    if part_name == "MG":
+        return UR5E_RTDE_INSERT_MG_FORCE_COMMAND_SCALE
+    return 1.0
+
+
+def _insert_depth_completion_enabled(part_name: str) -> bool:
+    return part_name == "MG"
+
+
+def _insert_automatic_withdrawal_enabled(part_name: str) -> bool:
+    return part_name != "MG"
+
+
+def _insert_axis_only_target_enabled(part_name: str) -> bool:
+    return part_name == "MG"
+
+
+def _insert_soft_recovery_enabled(part_name: str) -> bool:
+    return part_name != "MG"
+
+
+def _insert_full_hard_ceiling_enabled(part_name: str) -> bool:
+    return part_name == "MG"
+
+
+def _insert_execution_timeout_sec(part_name: str, requested_timeout_sec: float) -> float:
+    if part_name == "MG":
+        return max(requested_timeout_sec, UR5E_RTDE_INSERT_MG_EXECUTION_TIMEOUT_SEC)
+    return requested_timeout_sec
 
 
 def _insert_hard_cap_error(part_name: str = "") -> str | None:
@@ -6061,13 +6095,19 @@ class UR5eRTDETrajectoryServer(Node):
             selected_cap_error = _insert_hard_cap_error(part_name)
             if selected_cap_error:
                 raise ValueError(selected_cap_error)
-            advanced_recovery_enabled = all(
-                field_name in selected_hard_caps
-                for field_name in (
-                    "insert_max_contact_search_radius_m",
-                    "insert_max_disengagement_cycles",
-                    "insert_search_peck_retreat_m",
-                    "insert_search_peck_interval_sec",
+            automatic_withdrawal_enabled = _insert_automatic_withdrawal_enabled(
+                part_name
+            )
+            advanced_recovery_enabled = bool(
+                automatic_withdrawal_enabled
+                and all(
+                    field_name in selected_hard_caps
+                    for field_name in (
+                        "insert_max_contact_search_radius_m",
+                        "insert_max_disengagement_cycles",
+                        "insert_search_peck_retreat_m",
+                        "insert_search_peck_interval_sec",
+                    )
                 )
             )
             hard_caps_sha256 = _insert_hard_caps_sha256(selected_hard_caps)
@@ -6159,6 +6199,14 @@ class UR5eRTDETrajectoryServer(Node):
                 request.max_torque_nm,
                 float(selected_hard_caps["insert_max_torque_nm"]),
             )
+            learned_axial_limit_scale, _depth_axial_limit_scale = (
+                _insert_axial_soft_limit_scales(part_name)
+            )
+            insertion_force_n = min(
+                insertion_force_n * _insert_force_command_scale(part_name),
+                float(selected_hard_caps["insert_max_insertion_force_n"]),
+                max_axial_force_n * learned_axial_limit_scale,
+            )
             baseline_force_uncertainty_n = _bounded_insert_value(
                 "baseline_force_uncertainty_n",
                 request.baseline_force_uncertainty_n,
@@ -6236,6 +6284,8 @@ class UR5eRTDETrajectoryServer(Node):
                 or math.nan
             )
             max_relief_cycles = int(UR5E_RTDE_INSERT_MAX_RELIEF_CYCLES or 0)
+            if not automatic_withdrawal_enabled:
+                max_relief_cycles = 0
             max_contact_search_radius_m = float(
                 selected_hard_caps.get("insert_max_contact_search_radius_m")
                 or spiral_radius_m
@@ -6258,7 +6308,7 @@ class UR5eRTDETrajectoryServer(Node):
             )
             if contact_force_delta_n > max_axial_force_n:
                 raise ValueError("contact_force_delta_n exceeds max_axial_force_n")
-            if insertion_force_n > max_axial_force_n:
+            if insertion_force_n > max_axial_force_n * learned_axial_limit_scale:
                 raise ValueError("insertion_force_n exceeds max_axial_force_n")
             if contact_force_delta_n > insertion_force_n:
                 raise ValueError(
@@ -6286,18 +6336,18 @@ class UR5eRTDETrajectoryServer(Node):
                     raise ValueError(
                         f"{field_name} must be strictly below its independent hard ceiling"
                     )
-            guarded_axial_force_ceiling_n = (
-                float(selected_hard_caps["insert_max_axial_force_n"])
-                - baseline_force_uncertainty_n
+            guarded_uncertainty_scale = (
+                0.0 if _insert_full_hard_ceiling_enabled(part_name) else 1.0
             )
-            guarded_lateral_force_ceiling_n = (
-                float(selected_hard_caps["insert_max_lateral_force_n"])
-                - baseline_force_uncertainty_n
-            )
-            guarded_torque_ceiling_nm = (
-                float(selected_hard_caps["insert_max_torque_nm"])
-                - baseline_torque_uncertainty_nm
-            )
+            guarded_axial_force_ceiling_n = float(
+                selected_hard_caps["insert_max_axial_force_n"]
+            ) - baseline_force_uncertainty_n * guarded_uncertainty_scale
+            guarded_lateral_force_ceiling_n = float(
+                selected_hard_caps["insert_max_lateral_force_n"]
+            ) - baseline_force_uncertainty_n * guarded_uncertainty_scale
+            guarded_torque_ceiling_nm = float(
+                selected_hard_caps["insert_max_torque_nm"]
+            ) - baseline_torque_uncertainty_nm * guarded_uncertainty_scale
             for field_name, recipe_limit, guarded_ceiling in (
                 (
                     "max_axial_force_n",
@@ -6375,6 +6425,18 @@ class UR5eRTDETrajectoryServer(Node):
                 for index in range(3)
             )
             target_depth_m = _vector_dot(target_delta, insertion_axis_world)
+            if _insert_axis_only_target_enabled(part_name):
+                target_delta = tuple(
+                    target_depth_m * insertion_axis_world[index]
+                    for index in range(3)
+                )
+                target_world_tool0 = (
+                    tuple(
+                        expected_start_world_tool0[0][index] + target_delta[index]
+                        for index in range(3)
+                    ),
+                    expected_start_world_tool0[1],
+                )
             target_lateral = tuple(
                 target_delta[index] - target_depth_m * insertion_axis_world[index]
                 for index in range(3)
@@ -6620,7 +6682,10 @@ class UR5eRTDETrajectoryServer(Node):
                 tared_tcp_force=zeroed_tared_tcp_force,
                 actual_tcp_speed=actual_tcp_speed,
             )
-            execution_deadline = time.monotonic() + timeout_sec
+            execution_deadline = time.monotonic() + _insert_execution_timeout_sec(
+                part_name,
+                timeout_sec,
+            )
             control_cycle_sec = max(1.0 / UR5E_RTDE_FREQUENCY_HZ, 0.02)
             engagement_hold_sec = max(0.10, min(settle_time_sec, 0.25))
             stall_hold_sec = max(0.10, min(settle_time_sec, 0.50))
@@ -8370,6 +8435,7 @@ class UR5eRTDETrajectoryServer(Node):
                     tuple[str, float, float, str]
                 ] = []
                 soft_overload_evidence: list[tuple[str, float, float, str]] = []
+                soft_recovery_enabled = _insert_soft_recovery_enabled(part_name)
                 if force_window_ready and search_peck_state == "idle":
                     if learned_axial_force_exceeded:
                         observed_soft_band_evidence.append(
@@ -8415,7 +8481,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 f"{guarded_axial_force_ceiling_n:.3f} N below the hard cap",
                             )
                         )
-                    elif axial_progress_stalled and learned_axial_force_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and learned_axial_force_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "axial_force_n",
@@ -8428,7 +8498,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 "was stalled",
                             )
                         )
-                    elif axial_progress_stalled and axial_profile_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and axial_profile_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "axial_force_n",
@@ -8451,7 +8525,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 f"{guarded_lateral_force_ceiling_n:.3f} N below the hard cap",
                             )
                         )
-                    elif axial_progress_stalled and learned_lateral_force_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and learned_lateral_force_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "lateral_force_n",
@@ -8463,7 +8541,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 "was stalled",
                             )
                         )
-                    elif axial_progress_stalled and lateral_profile_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and lateral_profile_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "lateral_force_n",
@@ -8486,7 +8568,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 f"{guarded_torque_ceiling_nm:.3f} Nm below the hard cap",
                             )
                         )
-                    elif axial_progress_stalled and learned_torque_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and learned_torque_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "active_tcp_torque_nm",
@@ -8498,7 +8584,11 @@ class UR5eRTDETrajectoryServer(Node):
                                 "was stalled",
                             )
                         )
-                    elif axial_progress_stalled and torque_profile_exceeded:
+                    elif (
+                        soft_recovery_enabled
+                        and axial_progress_stalled
+                        and torque_profile_exceeded
+                    ):
                         soft_overload_evidence.append(
                             (
                                 "active_tcp_torque_nm",
@@ -8995,6 +9085,17 @@ class UR5eRTDETrajectoryServer(Node):
                     and stationary_at_depth
                     and no_seated_rebound
                 )
+                if (
+                    _insert_depth_completion_enabled(part_name)
+                    and engagement_detected
+                    and reached_target_depth
+                    and guarded_soft_limits_in_band
+                    and tilt_error_rad <= tilt_tolerance_rad
+                ):
+                    phase = "settling"
+                    seated_detected = True
+                    sample("settling")
+                    break
                 if seated_evidence:
                     phase = "settling"
                     if seated_candidate_since is None:

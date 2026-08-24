@@ -119,8 +119,8 @@ ur5e:
     # supervised one-confirmation workflow until its durable qualification is
     # complete; Control exposes no numeric editor for these protected values.
     MG:
-      insert_max_insertion_force_n: 76.0
-      insert_max_axial_force_n: 104.0
+      insert_max_insertion_force_n: 100.0
+      insert_max_axial_force_n: 120.0
       insert_max_lateral_force_n: 55.0
       insert_max_torque_nm: 2.9
       insert_max_tool_flange_torque_nm: 7.8

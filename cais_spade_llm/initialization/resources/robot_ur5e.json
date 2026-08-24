@@ -367,12 +367,12 @@
                   "insert_max_contact_speed_m_s": 0.005,
                   "insert_max_contact_force_delta_n": 12.0,
                   "insert_max_engagement_progress_m": 0.02,
-                  "insert_max_insertion_force_n": 76.0,
+                  "insert_max_insertion_force_n": 100.0,
                   "insert_max_spiral_radius_m": 0.002,
                   "insert_max_spiral_pitch_m": 0.001,
                   "insert_max_spiral_speed_m_s": 0.004,
                   "insert_max_spiral_acceleration_m_s2": 0.03,
-                  "insert_max_axial_force_n": 104.0,
+                  "insert_max_axial_force_n": 120.0,
                   "insert_max_lateral_force_n": 55.0,
                   "insert_max_torque_nm": 2.9,
                   "insert_max_tilt_tolerance_rad": 0.0523598776,
@@ -403,7 +403,7 @@
                   "insert_search_peck_retreat_m": 0.003,
                   "insert_search_peck_interval_sec": 0.75
                 },
-                "hard_caps_sha256": "662de2c658b09592204c26816d7288d2c5636e70224028ac1aab31c3947fee7e",
+                "hard_caps_sha256": "a329bf5222d80c4fdde1aa29dc699bcbb1924083e5a83be44e61e61ae2e91084",
                 "force_depth_profile": {
                   "depth_fraction": [
                     0.0,
@@ -535,8 +535,7 @@
                 "max_torque_nm": 1.2328538805424154,
                 "tilt_tolerance_rad": 0.03490658503988659,
                 "seated_depth_tolerance_m": 0.0012065052207944158,
-                "settle_time_sec": 0.5,
-                "learning_evidence_sha256": "be15ceccfc59131a82da500e9e5405b7867eff0c063a5fabcfbcbd9fb9083355"
+                "settle_time_sec": 0.5
               }
             },
             "part_overrides": {},
