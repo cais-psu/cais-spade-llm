@@ -6,9 +6,11 @@
   `Spec2Primitives: A Multi-Agent Framework for Dynamic Primitive Composition in Industrial Robotic Assembly`.
 - Put all new Spec2Primitives implementation, schemas, cases, tests, documentation,
   UI implementation, and generated runtime records under this directory.
-- Search this directory by default. Do not run repository-wide searches for a
+- Search this directory by default. Read-only inspection and search outside this
+  directory are permitted without asking when they are needed for a
   Spec2Primitives task.
-- Ask the user before inspecting or modifying a file outside this directory.
+- Ask the user before modifying any file outside this directory. Read-only
+  inspection outside this directory never requires confirmation.
 
 ## Incremental workflow and handoff
 
@@ -51,9 +53,9 @@
   future RobotAgent connection under `spec2primitives/agents/ra/`.
 - Do not create ResourceAgent or CCA folders; they are outside the current
   Spec2Primitives roadmap.
-- When a future adapter requires an existing public interface, ask before opening
-  the exact external interface file. Inspect only that file and do not modify it
-  without explicit permission.
+- When a future adapter requires an existing public interface, inspect the exact
+  external interface without asking. Do not modify it without explicit
+  permission.
 
 ## Scene-only milestone boundary
 
@@ -63,10 +65,12 @@
 - Do not import `SystemBridge` or issue direct ROS2 shell commands from this
   package. The application passes a runtime object that satisfies the narrow
   Spec2Primitives adapter protocol.
-- Do not add hardware launch, agent calls, ProductAgent, ResourceAgent, CCA,
-  RobotAgent, or robot execution.
-- Keep the User Interaction chat local and non-executing until a later task
-  explicitly connects the PA/RA pipeline.
+- Do not add hardware launch, ResourceAgent, CCA, RobotAgent, or robot execution.
+- Keep ProductAgent access behind the Spec2Primitives-owned
+  `ProductAgentContextRuntime` composition boundary. Do not start its lifecycle
+  or expose other shared-agent operations.
+- Keep the User ↔ ProductAgent interaction non-executing. RA communication
+  remains unavailable until its separately authorized phase.
 - `table_spec2primitives.world` may display the approved NIST CAD corpus, but no
   recognition, VLM, planning, insertion physics, or robot execution is
   implemented in this milestone.

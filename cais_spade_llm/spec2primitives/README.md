@@ -4,9 +4,13 @@
 
 Spec2Primitives is the isolated workspace for
 **Spec2Primitives: A Multi-Agent Framework for Dynamic Primitive Composition in Industrial Robotic Assembly**.
-The current scene-only milestone contains the project skeleton, research scope,
-future implementation plan, source references, a dedicated no-hardware NIST
-Gazebo scene launcher, and a local placeholder chat.
+The current implementation contains the project skeleton, research scope,
+implementation plan, approved source references, demand-driven RGB-D context
+tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
+interaction UI connected through Phase 3.3, the Phase 3.1 product-requirement
+intake boundary, Phase 3.2 requested-context serving, and configurable Phase 3.3
+ProductAgent context reassessment mechanics. The retrieval-first clarification
+gate and all Phase 4 context understanding remain unimplemented.
 
 ## MUST: Do not leak the answer
 
@@ -43,8 +47,13 @@ navigation item.
 
 The page can start and stop the no-hardware `gazebo_dual_spec2primitives` simulation,
 which launches `table_spec2primitives.world` with Gazebo, MoveIt, and RViz while
-forcing `run_perception:=false`. Its User Interaction chat only displays a local
-placeholder response and does not plan or execute the submitted request.
+forcing `run_perception:=false`. Its Phase 2 PA interaction workspace can run
+Phase 3.1 through Phase 3.3, display every persisted request and served result,
+and stop for completion, clarification, failure, or the selected emergency turn
+limit. Current Phase 3.3 behavior can still ask for clarification before all
+relevant permitted context is retrieved; that is a documented pending correction,
+not completed context understanding. The page does not run document-diagram VLM
+interpretation, CAD/RGB-D grounding, planning, RA, CCA, or robot execution.
 
 The dedicated scene uses the actual NIST plate, pin, gear fixture, shaft, and
 gear STL visuals. `Gear_Plate` and three `Gear_Shaft` instances are pre-installed
@@ -55,7 +64,8 @@ insertion-physics, or robot-execution claim.
 
 ## Folder guide
 
-- `agents/pa/`: future Spec2Primitives ProductAgent adapter and PA workflow code.
+- `agents/pa/`: the Phase 3.1 ProductAgent composition boundary, Phase 3.2 exact
+  context serving, Phase 3.3 reassessment loop, and future PA workflow code.
 - `agents/ra/`: future Spec2Primitives RobotAgent adapter and RA workflow code.
 - `adapters/`: narrow runtime connections, beginning with
   `gazebo_dual_spec2primitives`.
@@ -66,7 +76,7 @@ insertion-physics, or robot-execution claim.
 - `references/resources/`: future static resource and primitive-catalog refs.
 - `contexts/`: ignored per-interaction product and resource runtime context.
 - `evaluations/`: isolated post-prediction evaluation and ground truth.
-- `schemas/`: future data templates and contracts; none are defined in Phase 0.
+- `schemas/`: future data templates and contracts.
 - `tests/fixtures/`: future controlled, repeatable inputs.
 - `RESEARCH_POSITIONING.md`: terminology, Manual2Skill comparison, research
   gap, primitive definition, and claim boundaries for the paper.

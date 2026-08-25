@@ -13,6 +13,6 @@ inspect the PNG files under
 
 The provider has no background stream, cached latest observation, automatic
 agent delivery, UI behavior, segmentation, recognition, grounding, PA, or RA
-connection. Phase 2 may let PA request this operation dynamically through its
+connection. Phase 3 may let PA request this operation dynamically through its
 future Spec2Primitives-owned adapter. RGB segmentation, depth geometry, and CAD
 registration remain future work.

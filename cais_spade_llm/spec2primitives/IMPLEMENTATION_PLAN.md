@@ -1,12 +1,33 @@
 # Spec2Primitives Implementation Plan
 
-Phase 0, the Phase 0.1 operator shell, Phase 1, Phase 1.1, and Phase 1.2 are
-implemented. Every later phase is future work and requires a separate,
-explicitly scoped implementation request. This plan does not authorize an
-end-to-end implementation.
+Phase 0, the Phase 0.1 operator shell, Phase 1, Phase 1.1, Phase 1.2, the Phase
+2 PA interaction UI, Phase 2.1, Phase 3.1, and Phase 3.2 are implemented. The
+Phase 3.3 loop mechanics, persistence, numbered serving, turn limit, and UI are
+implemented, but its retrieval-first clarification policy is not complete.
+Phase 3.4 onward and all Phase 4 context understanding remain future work
+requiring a separate, explicitly scoped implementation request. This plan does
+not authorize an end-to-end implementation.
 
 `PA` refers to ProductAgent and `RA` refers to RobotAgent throughout this plan.
 Only PA and RA participate in the current Spec2Primitives roadmap.
+
+## Current implementation status
+
+| Phase | Status | Current boundary |
+|---|---|---|
+| Phase 0 and Phase 0.1 | implemented | Isolated package and no-hardware NIST operator scene. |
+| Phase 1, Phase 1.1, and Phase 1.2 | implemented | Approved exact-ref retrieval plus stored and request-scoped live RGB-D observations. |
+| Phase 2 and Phase 2.1 | implemented | PA UI, configurable turn limit, live PA turn counter, transcript, compact evidence summaries, and complete audit records. |
+| Phase 3.1 | implemented; policy revision pending | Exact requirement intake and first request work, but first-turn clarification is still accepted by the current code. |
+| Phase 3.2 | implemented | One persisted document, CAD, or live-observation request is served exactly and recorded without fallback evidence. |
+| Phase 3.3 | partially implemented | The reassessment loop works, but PA can still request clarification before retrieving all relevant permitted context. |
+| Phase 3.4 and Phase 3.5 | not implemented | User replies and the post-Phase 4 `context understanding complete` handoff are unavailable. |
+| Phase 4 onward | not implemented | No document-diagram VLM interpretation, CAD/RGB-D grounding, assembly plan, RA communication, primitive composition, validation, or execution exists. |
+
+The next implementation is the Phase 3.3 retrieval-first correction and its
+transition into Phase 4.1. Controlled tests of retrieval and observation capture
+do not constitute document-diagram understanding, metric grounding, Gazebo task
+execution, or physical execution.
 
 ## Directory architecture
 
@@ -35,7 +56,7 @@ spec2primitives/
 │   └── ground_truth/
 ├── schemas/
 ├── tests/
-└── ui.py
+└── spec2primitives_ui.py
 ```
 
 - `agents/pa/` and `agents/ra/` contain only future Spec2Primitives-owned adapters
@@ -162,7 +183,7 @@ be reported.
   `contexts/<interaction_identifier>/products/observations/` root.
 - Preserve one lossless `<camera>_rgb.png` and one original metric
   `<camera>_depth_m.npy` per camera for direct inspection.
-- Keep PA and RA disconnected. Phase 2 may let PA request this operation
+- Keep PA and RA disconnected. Phase 3 may let PA request this operation
   dynamically; no agent receives observations automatically.
 - Cover request-only lifecycle, complete capture, freshness, synchronization,
   calibration, malformed messages, cleanup, and dependency boundaries with
@@ -180,17 +201,53 @@ be reported.
   RGB segmentation, depth geometry, CAD registration, grounding, planning, or
   execution.
 
-## Phase 2: PA context retrieval and clarification
+## Phase 2: PA interaction UI - implemented
 
-Every Phase 2.x step requires a separate implementation request. None of these
-steps is implemented.
+- Preserve the dual-Gazebo launcher controls.
+- Provide a PA-only workspace with the exact `product_requirement` input, a
+  `Start PA Context Interaction` control, PA activity, User ↔ ProductAgent Messages,
+  `needed_context`, served context, Evidence Sources, retrieval error,
+  clarification, and ordered interaction record areas. Evidence Sources is the
+  operator-facing label for the unchanged internal `provenance` record.
+- Show a disabled Phase 5 Assembly Plan layout with Step, Assembly Task,
+  Required Outcome, and Evidence Sources columns, but no invented plan entries.
+- Keep the disabled Phase 5 Assembly Plan preview separate from connected PA
+  interaction results.
+- Add the first RA UI card in Phase 6 when PA-to-RA messages exist, then extend
+  that card during Phase 7 composition and Phase 8 validation/revision.
 
-PA retrieves permitted context before asking for clarification unless the user
-intent itself is ambiguous. PA treats user expertise as unknown. The user is
+### Phase 2.1: UI connection through Phase 3.3 - implemented
+
+- Compose one application-owned shared ProductAgent behind
+  `ProductAgentContextRuntime`; do not call `setup()` or expose its SPADE
+  lifecycle to the UI.
+- Create one unique caller-owned interaction directory per submission and
+  preserve the exact `product_requirement`.
+- Let the operator select `Maximum PA turns` from 2 through 50, with 12 as the
+  default and Phase 3.1 counted as turn 1. Keep the value fixed while the
+  interaction is active.
+- Run Phase 3.1 through Phase 3.3 when requested context is served. Display every
+  PA decision, compact served result, Evidence Sources, retrieval error,
+  clarification, completion, live turn counter, and complete ordered records.
+- Stop on completion, clarification, failure, or the emergency turn limit. Do
+  not perform grounding, planning, RA, CCA, or robot execution.
+
+## Phase 3: PA context retrieval and clarification
+
+Every Phase 3.x step requires a separate implementation request. Phase 3.1 and
+Phase 3.2 are implemented. Phase 3.3 is partially implemented; its mechanical
+loop is present but its retrieval-first clarification gate remains future work.
+Phase 3.4 and Phase 3.5 are not implemented.
+
+PA retrieves permitted context and Phase 4 attempts context understanding before
+PA asks for clarification. PA treats user expertise as unknown. The user is
 authoritative about the requested goal, but user factual claims never override
 contradictory approved evidence. Unsupported factual claims remain unresolved.
+An unresolved component location, receiving feature, pose, diagram association,
+CAD association, or current arrangement is a system evidence problem, not a
+user clarification question.
 
-### Phase 2.1: product requirement intake and first `needed context` decision
+### Phase 3.1: product requirement intake and first `needed context` decision - implemented; policy revision pending
 
 - Add a Spec2Primitives-owned adapter under `agents/pa/` using composition with
   the shared ProductAgent. Do not subclass ProductAgent or LlmAgent.
@@ -228,6 +285,10 @@ contradictory approved evidence. Unsupported factual claims remain unresolved.
 - Require exactly one active value: an approved `context_ref`,
   `request_live_observation: true`, or a non-empty `clarification_question`.
   Reject mixed, malformed, unknown-ref, or unsupported decisions.
+- The current implementation accepts first-turn `clarification_question`. The
+  retrieval-first revision must stop accepting it as a terminal shortcut and
+  must proceed through permitted evidence retrieval and Phase 4 understanding
+  before Phase 3.4 can ask the user.
 - Do not allow the first PA turn to return `context understanding complete`
   because no requested evidence has been served.
 - Preserve the exact requirement, PA input, PA output or failure, and ordered
@@ -236,76 +297,151 @@ contradictory approved evidence. Unsupported factual claims remain unresolved.
 - Do not resolve document or CAD evidence, capture live RGB-D, call a VLM,
   perform grounding, modify the UI, build a plan, or execute robot behavior.
 
-### Phase 2.2: requested context serving
+### Phase 3.2: requested context serving - implemented
 
+- Read and strictly validate the persisted Phase 3.1 requirement and successful
+  `needed_context` decision; do not accept a replacement decision from a caller.
 - Resolve only the exact approved `context_ref` requested by PA, or perform one
-  explicit fresh live RGB-D capture when PA requests it.
-- Return the served context or structured failure on the next PA turn. Never
-  substitute unrequested, failed, or missing evidence with guessed content.
+  explicit fresh live RGB-D capture as `observation_0001` when PA requests it.
+- Store static results under `products/served_references/`, live artifacts under
+  `products/observations/`, and the ordered request, result, or failure under
+  `interaction_record/retrieval_0001.json` using exclusive writes.
+- Return the exact served context or a structured failure. Never substitute
+  unrequested, failed, or missing evidence with guessed content.
 - Preserve every request, served value, `context_ref`, `observation_ref`,
   evidence label, provenance record, and retrieval error.
+- Stop before the next PA turn. Do not call ProductAgent, an LLM, VLM, UI,
+  grounding, planning, RA, CCA, or robot execution.
 
-### Phase 2.3: context understanding assessment
+### Phase 3.3: configurable ReAct-style context understanding assessment - partially implemented
 
-- Have PA assess each served context against the unchanged
-  `product_requirement` and decide whether it needs another permitted context,
-  a user clarification, or has reached `context understanding complete`.
-- Preserve the auditable evidence summary and supporting refs, not hidden model
-  reasoning.
-- Let `assemble Medium Gear` proceed directly to context retrieval. Do not make
-  clarification mandatory merely because execution details were not supplied.
+- Record `max_pa_turns` and `live_observation_timeout_sec` exclusively in
+  `interaction_record/pa_context_settings.json`; count `turn_0001` in the limit.
+- Have PA assess all accumulated served context against the unchanged
+  `product_requirement` and decide whether it needs one more approved
+  `context_ref`, a fresh live observation, or is ready to transition into Phase
+  4 context understanding.
+- Automatically serve each valid request and reassess. Number PA and retrieval
+  records together and assign live captures the next `observation_000N`.
+- Require sufficient context for the requested component, assembly destination,
+  receiving feature, and current arrangement when relevant, with no unresolved
+  ambiguity, contradiction, outstanding request, or failed required retrieval.
+- Tell PA that Phase 4 owns grounding, Phase 5 owns robot-independent assembly
+  planning, Phase 6 introduces PA-to-RA communication, and Phase 7 lets RA
+  retrieve robot state and the resource-owned primitive catalog. Do not contact
+  RA or retrieve that catalog in Phase 3.
+- Preserve exact prompts, response formats, raw outputs, served results,
+  Evidence Sources through internal `provenance`, and failures. Do not preserve
+  hidden model reasoning or RGB/depth arrays in JSON.
+- Let `assemble Medium Gear` proceed directly to context retrieval. PA must not
+  ask the user to choose a gear-shaft location while relevant approved document,
+  `Gear_Medium.STL`, `Gear_Plate.STL`, `Gear_Shaft.STL`,
+  `GMC_Laser_Plate_Virtual.STL`, or live-observation evidence can still address
+  the unresolved system question. Do not hard-code their request order.
+- Add this Phase 3.3 transition response without changing the existing field
+  names:
+
+  ```json
+  {
+    "needed_context": null,
+    "context understanding complete": false
+  }
+  ```
+
+  It means PA selected no further permitted retrieval and the recorded evidence
+  must proceed to Phase 4. It does not mean the context has been understood.
+- Do not accept `clarification_question` from the Phase 3 retrieval loop. Only a
+  persisted Phase 4.3 result may enter Phase 3.4.
 - When a user factual claim is unsupported or contradicts approved evidence,
   preserve the exact claim and conflict. Do not use it as grounded evidence.
+- Stop on the Phase 4 transition, PA or retrieval failure, invalid response,
+  existing-record conflict, or `pa_turn_limit_reached`. Limit exhaustion never
+  implies completion.
+- The current implementation still permits early clarification and early
+  `context understanding complete`; that observed behavior is the remaining
+  Phase 3.3 correction, not completed context understanding.
 
-### Phase 2.4: user clarification
+### Phase 3.4: user clarification
 
-- Pause the same interaction only when user intent remains ambiguous or required
-  evidence cannot resolve a necessary question.
+- Enter Phase 3.4 only from a persisted Phase 4.3 result showing that the whole
+  available context was processed and only unresolved user intent prevents
+  completion.
+- Do not ask the user to determine a component identity, receiving feature,
+  location, pose, geometric association, or current arrangement that approved
+  evidence and Phase 4 tools are responsible for establishing.
 - Ask one focused question, route the exact user reply back through PA, and
   preserve the original requirement, question, reply, and resulting decision.
-- Resume the same interaction and allow PA to retrieve more context or repeat
-  clarification until the requirement is sufficient or the user cancels.
+- Resume the same interaction through Phase 4.3 and allow another `needed_context`
+  request, one further clarification, or completion until the requirement is
+  sufficient or the user cancels.
 - If the user insists on a factual claim contradicted by approved evidence, do
   not allow `context understanding complete`; let the user revise or cancel.
 
-### Phase 2.5: `context understanding complete` handoff
+### Phase 3.5: `context understanding complete` handoff
 
-- Allow `context understanding complete` only after every context item PA
-  identified as required has been served, required ambiguities are resolved,
-  and no required evidence remains missing or contradictory.
+- Allow `context understanding complete` only after Phase 4.1 document-diagram
+  interpretation, Phase 4.2 CAD/RGB-D grounding, and the Phase 4.3 decision have
+  succeeded with no required ambiguity, contradiction, missing evidence, or
+  failed required retrieval.
 - Preserve the original requirement, retrieved refs, observations,
-  clarification history, retrieval errors, and supporting provenance for the
-  Phase 4 handoff.
-- Treat `context understanding complete` as ready for Phase 4 PA grounding. It
-  does not produce `target_feature`, target pose, insertion axis, tolerances, an
-  assembly plan, or `primitive_steps`.
+  clarification history, retrieval errors, Phase 4 outputs, and supporting
+  provenance for the Phase 5 handoff.
+- Treat `context understanding complete` as ready for Phase 5 PA assembly
+  planning. It does not produce an assembly plan or `primitive_steps`.
 
-### Planned Phase 2.1 verification
+### Phase 3.1 verification
 
-- Test exact requirement preservation and the approved `context_ref`, live
-  observation, and clarification decisions.
-- Test rejection of malformed, mixed, unknown-ref, unsupported, and premature
-  completion responses.
+- Preserve the existing exact requirement, approved `context_ref`, and live
+  observation coverage. Revise first-turn clarification coverage so that it is
+  rejected instead of treated as a valid terminal decision.
+- Test rejection of clarification, malformed, mixed, unknown-ref, unsupported,
+  and premature completion responses.
 - Test PA-call failure recording without claiming completion.
-- Verify that Phase 2.1 does not call `setup()`, planning, CCA, RA, the resolver,
+- Verify that Phase 3.1 does not call `setup()`, planning, CCA, RA, the resolver,
   live capture, VLM, UI, or execution behavior and cannot access forbidden
   Gazebo or evaluator inputs.
-- Run the focused Phase 2.1 tests, `poetry check`, repository compileall, and
-  `git diff --check` when Phase 2.1 is separately implemented.
+- Run the focused Phase 3.1 tests, `poetry check`, repository compileall, and
+  `git diff --check` for the implemented Phase 3.1 boundary.
 
-## Phase 3: PA interaction UI
+### Phase 3.2 verification
 
-This phase requires a separate implementation request.
+- Test exact document, CAD, and controlled live-observation serving, including
+  provenance, deterministic artifact references, and one requested tool call.
+- Test clarification decisions, invalid Phase 3.1 records, resolver and capture
+  failures, malformed results, and existing-record protection without fallback
+  evidence.
+- Verify that Phase 3.2 does not call ProductAgent, an LLM, VLM, UI, grounding,
+  planning, RA, CCA, forbidden Gazebo-state inputs, or robot execution.
+- Run the focused Phase 3.2 tests, the complete Spec2Primitives suite, Ruff,
+  `poetry check`, repository compileall, and `git diff --check`.
 
-- Provide a PA card that shows its current retrieval or clarification activity.
-- Show PA requests, served context, provenance, retrieval errors, and user
-  clarification in an expandable ordered interaction record.
-- Label fixture, replay, and live records distinctly.
-- Do not add RA interaction or robot execution.
+### Phase 3.3 verification
+
+- Test limits 2 and 12 plus the UI maximum 50, invalid values, exclusive settings,
+  cumulative evidence, exact requirement preservation, numbered records, and
+  one PA call plus one resolver or capture call per request.
+- Revise the Medium Gear document, CAD, and live-observation sequence to finish
+  with the Phase 4 transition rather than direct completion or clarification.
+  Preserve alternative PA-selected ordering, malformed or duplicate refs, PA
+  and retrieval failure, record conflicts, and `pa_turn_limit_reached` coverage.
+- Verify every decision and compact served result appears in the PA UI while the
+  expandable audit view preserves full records and internal `provenance`.
+- Verify Phase 3.3 has no VLM, grounding, planning, primitive-catalog, RA, CCA,
+  forbidden Gazebo-state, evaluator, or execution dependency.
+- Add revised tests proving that Phase 3.3 requests relevant remaining evidence
+  instead of asking which gear-shaft location receives the Medium Gear.
+- Test the exact `needed_context: null` and
+  `context understanding complete: false` transition into Phase 4 and rejection
+  of Phase 3 clarification or completion before a Phase 4.3 record exists.
 
 ## Phase 4: PA grounding
 
-This phase requires a separate implementation request.
+This is the context-understanding stage and requires separate, bounded
+implementation requests. It consumes the complete persisted Phase 3 evidence;
+it does not assume that retrieving a PDF or STL means its diagrams or geometry
+were understood.
+
+### Phase 4.1: document-diagram VLM interpretation
 
 - Implement the VLM as a controlled tool under `tools/document_evidence/`, not
   as another agent.
@@ -313,8 +449,17 @@ This phase requires a separate implementation request.
   observations or use it to propose metric geometry.
 - Preserve the exact document `context ref`, page-level provenance, structured
   VLM output, and uncertainty.
+
+### Phase 4.2: CAD and RGB-D grounding
+
 - Keep RGB segmentation, depth geometry, and CAD registration under
   `tools/rgb_d_cad_grounding/`.
+- Load approved CAD geometry for grounding; the existing filename, units,
+  triangle count, and bounds summary alone does not establish a component match,
+  receiving feature, or pose.
+- Use only approved RGB, depth, camera calibration, document interpretation, and
+  CAD evidence. Never use Gazebo model names, entity state, world contents,
+  configured spawn poses, or evaluator data.
 - Do not let VLM output independently establish `target_feature`, target pose,
   insertion axis, or tolerances.
 - Produce provenance-backed `target_feature`, target pose, insertion axis, and
@@ -325,6 +470,27 @@ This phase requires a separate implementation request.
   value.
 - Keep recognition inputs within the approved document, candidate CAD, RGB,
   depth, and camera calibration boundary.
+
+### Phase 4.3: post-understanding decision
+
+- Assess the combined Phase 4.1 and Phase 4.2 outputs against the exact
+  `product_requirement` and every unresolved requirement recorded by Phase 3.
+- Use one existing structured decision:
+  - an active `needed_context` with `context understanding complete: false`
+    returns to Phase 3.2 for exactly that approved ref or fresh observation;
+  - an active `clarification_question` with
+    `context understanding complete: false` enters Phase 3.4 only when the
+    unresolved value is user intent that system evidence cannot determine;
+  - `needed_context: null` with `context understanding complete: true` enters
+    Phase 3.5;
+  - a VLM, retrieval, CAD, RGB-D, contradiction, or grounding failure stops
+    fail-closed and must not be converted into a user clarification question.
+- Preserve the Phase 4 input, evidence refs, output, uncertainty, unresolved
+  values, and decision in the ordered interaction record without hidden model
+  reasoning.
+- Allow the runtime to loop Phase 4.3 → Phase 3.2 → Phase 4 when more permitted
+  evidence can resolve the missing context. Phase numbering does not require a
+  one-way runtime sequence.
 
 ## Phase 5: PA assembly plan
 
@@ -394,11 +560,12 @@ authorization.
 
 ## UI and interface boundaries
 
-- No public interface or UI code changes are authorized by this roadmap update.
+- Phase 2 preserves the public `render(runtime: DualGazeboRuntime)` interface
+  while adding only a disconnected PA presentation scaffold.
 - Phase 1 adds only a local exact-ref resolver interface. Phase 1.1 adds only an
   offline observation-bundle interface, and Phase 1.2 adds live Gazebo capture
-  through that interface. ProductAgent integration begins in Phase 2.1.
-- The planned Phase 2.1 adapter composes the shared ProductAgent through
+  through that interface. ProductAgent integration begins in Phase 3.1.
+- The Phase 3.1 adapter composes the shared ProductAgent through
   `ask_llm_structured(...)`; it does not own or invoke the ProductAgent SPADE
   lifecycle.
 - Future adapters provide read-only structured interaction records and a

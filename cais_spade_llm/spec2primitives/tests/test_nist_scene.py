@@ -382,14 +382,20 @@ def test_world_file_argument_defaults_and_pass_through_are_declared() -> None:
     assert "LaunchConfiguration('world_file').perform(context)" in xarm_launch
 
 
-def test_spec2primitives_navigation_and_route_pass_the_existing_runtime() -> None:
+def test_spec2primitives_navigation_and_route_pass_the_composed_runtime() -> None:
     app_source = (
         REPOSITORY_ROOT / "cais_spade_llm" / "ui" / "app.py"
     ).read_text(encoding="utf-8")
 
     assert '("Spec2Primitives", "/spec2primitives", "account_tree")' in app_source
     assert '@ui.page("/spec2primitives")' in app_source
-    assert "spec2primitives_ui.render(bridge)" in app_source
+    assert (
+        "from cais_spade_llm.spec2primitives import spec2primitives_ui"
+        in app_source
+    )
+    assert "create_spec2primitives_ui_runtime" in app_source
+    assert "spec2primitives_runtime = create_spec2primitives_ui_runtime(bridge)" in app_source
+    assert "spec2primitives_ui.render(spec2primitives_runtime)" in app_source
 
 
 def test_reference_pdf_hash_is_recorded_content() -> None:

@@ -160,8 +160,13 @@ def create_app() -> None:
     app.add_static_files("/safety-previews", str(_safety_previews_dir))
 
     # Import page renderers.
-    from cais_spade_llm.spec2primitives import ui as spec2primitives_ui
+    from cais_spade_llm.spec2primitives import spec2primitives_ui
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
+        create_spec2primitives_ui_runtime,
+    )
     from cais_spade_llm.ui.pages import control, dashboard, perception, products, resources, safety
+
+    spec2primitives_runtime = create_spec2primitives_ui_runtime(bridge)
 
     @app.get("/perception/stream/{camera_role}/{stream_name}")
     async def perception_stream(camera_role: str, stream_name: str) -> StreamingResponse:
@@ -261,7 +266,7 @@ def create_app() -> None:
     @ui.page("/spec2primitives")
     def spec2primitives_page():
         _page_wrapper(bridge)
-        spec2primitives_ui.render(bridge)
+        spec2primitives_ui.render(spec2primitives_runtime)
 
     @ui.page("/perception")
     def perception_page():

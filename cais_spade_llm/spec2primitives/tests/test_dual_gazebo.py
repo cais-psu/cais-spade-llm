@@ -1,4 +1,4 @@
-"""Tests for the isolated Spec2Primitives dual Gazebo adapter and placeholder chat."""
+"""Tests for the dual Gazebo adapter and connected Phase 2 PA UI."""
 
 from __future__ import annotations
 
@@ -7,13 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from cais_spade_llm.spec2primitives import spec2primitives_ui
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
     DUAL_GAZEBO_NAME,
     read_dual_gazebo_status,
     start_dual_gazebo,
     stop_dual_gazebo,
 )
-from cais_spade_llm.spec2primitives.ui import _placeholder_reply
+from cais_spade_llm.spec2primitives.spec2primitives_ui import (
+    _phase_2_connection_message,
+)
 
 
 class FakeRuntime:
@@ -124,11 +127,98 @@ def test_stop_uses_exact_dual_gazebo_name() -> None:
     assert runtime.stop_calls == [DUAL_GAZEBO_NAME]
 
 
-def test_placeholder_reply_states_that_nothing_executed() -> None:
-    reply = _placeholder_reply("assembly the medium gear")
+def test_phase_2_message_states_the_connected_and_unavailable_boundaries() -> None:
+    message = _phase_2_connection_message()
 
-    assert "not connected yet" in reply
-    assert "no plan or robot action was executed" in reply
+    assert "Connected through Phase 3.3" in message
+    for unavailable_boundary in (
+        "grounding",
+        "planning",
+        "RA",
+        "CCA",
+        "robot action",
+    ):
+        assert unavailable_boundary in message
+
+
+def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
+
+    for exact_ui_term in (
+        'label="product_requirement"',
+        'ui.label("Run settings")',
+        'label="Maximum PA turns"',
+        '"Start PA Context Interaction"',
+        'ui.label("PA Interaction")',
+        'ui.label("ProductAgent")',
+        'ui.badge("connected through Phase 3.3")',
+        'ui.badge("idle")',
+        '"needed_context"',
+        '"served context"',
+        '"Evidence Sources"',
+        '"retrieval error"',
+        '"clarification"',
+        'ui.label("User ↔ ProductAgent Messages")',
+        'ui.label("Assembly Plan")',
+        'ui.label("Robot-independent assembly plan")',
+        'ui.badge("Phase 5")',
+        'ui.badge("not available")',
+        '"Step"',
+        '"Assembly Task"',
+        '"Required Outcome"',
+        'ui.button("Open Assembly Plan"',
+        'ui.expansion("ordered interaction record"',
+    ):
+        assert exact_ui_term in source
+
+    assert 'requirement_input.on_value_change' in source
+    assert ').props("outlined").classes("w-full")' in source
+    assert 'max_pa_turns_input.on_value_change' in source
+    assert 'max_pa_turns_input.props("disable")' in source
+    assert 'max_pa_turns_input.props(remove="disable")' in source
+    assert 'start_button.on_click(_start_pa_interaction)' in source
+    assert "start_pa_context_interaction(" in source
+    assert "serve_pa_requested_context," in source
+    assert "continue_pa_context_interaction," in source
+    assert '"No assembly plan is available."' in source
+    assert '"No interaction record exists because Phase 3 was not started."' in source
+    assert '("provenance",' not in source
+    assert "_render_ra" not in source
+    assert '"RA Interaction"' not in source
+    assert 'ui.badge("not connected")' not in source
+
+
+def test_phase_2_pa_ui_imports_only_the_authorized_phase_3_dependencies() -> None:
+    source_path = Path(spec2primitives_ui.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imported_modules.update(
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+
+    assert (
+        "cais_spade_llm.spec2primitives.agents.pa" in imported_modules
+    )
+    assert (
+        "cais_spade_llm.spec2primitives.adapters.ui_runtime" in imported_modules
+    )
+    assert not any(
+        forbidden in module
+        for module in imported_modules
+        for forbidden in (
+            ".agents.ra",
+            "cca",
+            "document_evidence",
+            "grounding",
+        )
+    )
 
 
 def test_spec2primitives_does_not_import_bridge() -> None:
