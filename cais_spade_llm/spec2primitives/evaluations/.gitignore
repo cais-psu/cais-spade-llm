@@ -1,0 +1,6 @@
+*
+!.gitignore
+!README.md
+!ground_truth/
+ground_truth/*
+!ground_truth/README.md

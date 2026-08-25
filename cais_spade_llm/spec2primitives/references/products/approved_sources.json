@@ -1,0 +1,249 @@
+{
+  "sources": [
+    {
+      "context_ref": "NIST_assembly_instructions.pdf",
+      "evidence_type": "document",
+      "repository_path": "cais_spade_llm/spec2primitives/references/products/NIST_assembly_instructions.pdf",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "page_count": 6
+    },
+    {
+      "context_ref": "BNC_Female.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/BNC_Female.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "BNC_Male.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/BNC_Male.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "DB_Housing.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/DB_Housing.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "DSUB_Female.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/DSUB_Female.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "DSUB_Male.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/DSUB_Male.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "GMC_Laser_Plate_Virtual.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/GMC_Laser_Plate_Virtual.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Gear_Large.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Gear_Large.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Gear_Medium.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Gear_Plate.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Gear_Plate.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Gear_Shaft.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Gear_Shaft.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Gear_Small.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Gear_Small.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "KET12_Square_12mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/KET12_Square_12mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "KET16_Square_16mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/KET16_Square_16mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "KET4_Square_4mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/KET4_Square_4mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "KET8_Square_8mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/KET8_Square_8mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M12_Hex_Nut.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M12_Hex_Nut.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M12_Screw.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M12_Screw.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M16_Hex_Nut.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M16_Hex_Nut.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M16_Screw.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M16_Screw.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M4_Hex_Nut.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M4_Hex_Nut.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M4_Screw.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M4_Screw.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M8_Hex_Nut.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M8_Hex_Nut.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "M8_Screw.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/M8_Screw.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RGOCG12-50_12mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RGOCG12-50_12mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RGOCG16-50_16mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RGOCG16-50_16mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RGOCG4-50_Round_4mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RGOCG4-50_Round_4mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RGOCG8-50_8mm.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RGOCG8-50_8mm.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RJ45_Female.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RJ45_Female.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RJ45_Housing.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RJ45_Housing.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "RJ45_Male.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/RJ45_Male.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "USB_Female.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/USB_Female.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "USB_Male.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/USB_Male.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Waterproof_Female.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Waterproof_Female.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    },
+    {
+      "context_ref": "Waterproof_Male.STL",
+      "evidence_type": "CAD",
+      "repository_path": "ros2/cais_lab_robotics/cad_models/Waterproof_Male.STL",
+      "source_url": "https://www.nist.gov/el/intelligent-systems-division-73500/robotic-grasping-and-manipulation-assembly/assembly",
+      "units": "mm"
+    }
+  ]
+}

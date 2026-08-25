@@ -1,0 +1,478 @@
+<?xml version="1.0" ?>
+<sdf version="1.4">
+  <world name="default">
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <!-- Evaluator-only ground truth. Spec2Primitives recognition must not consume it. -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+      <update_rate>50</update_rate>
+    </plugin>
+    <!-- IFRA LinkAttacher world plugin (services: /ATTACHLINK, /DETACHLINK) -->
+    <plugin name="gazebo_link_attacher" filename="libgazebo_link_attacher.so"/>
+    <include>
+      <uri>model://table</uri>
+      <name>table_xarm6</name>
+      <pose>0.0 0.40 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://table</uri>
+      <name>table_ur5e</name>
+      <pose>0.0 -0.40 0 0 0 0</pose>
+    </include>
+
+    <model name="GMC_Laser_Plate_Virtual">
+      <static>true</static>
+      <!-- The CAD top faces down; the newly exposed opposite face stays at z=1.0439916. -->
+      <!-- Table surface is z=1.015. The plate's lower face retains the 20 mm gap. -->
+      <pose>0 0 1.0439916 3.141592653589793 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <pose>-0.192 -0.192 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/GMC_Laser_Plate_Virtual.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.192 -0.192 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/GMC_Laser_Plate_Virtual.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/White</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Static NIST gear fixture. The three hidden M6 fasteners are not modeled. -->
+    <model name="Gear_Plate">
+      <static>true</static>
+      <pose>-0.0205504 0.1448242 1.0439916 0 0 -1.57079632679</pose>
+      <link name="Gear_Plate">
+        <collision name="collision">
+          <pose>-0.2131605 0.2018883 0.0847159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Plate.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2018883 0.0847159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Plate.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_1">
+        <pose>0 0.0500000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_2">
+        <pose>0 0.0200000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_3">
+        <pose>0 -0.0300000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== PERCEPTION CAMERAS (4x depth, facing down) ========== -->
+    <!-- Camera height Z=1.40, table surface ~1.02 → ~0.38m distance
+         hfov=0.8 rad → covers ~0.33m horizontally across 640px → ~0.5mm/px
+         Pose: roll=0, pitch=π/2 (look down -Z), yaw=0 -->
+
+    <!-- Camera above Prusa MK3 (pick detection) -->
+    <model name="cam_mk3">
+      <static>true</static>
+      <pose>-0.4 0 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk3</namespace>
+            </ros>
+            <camera_name>cam_mk3</camera_name>
+            <frame_name>cam_mk3_link</frame_name>
+            <min_depth>0.05</min_depth>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Prusa MK4-1 (pick detection) -->
+    <model name="cam_mk4_1">
+      <static>true</static>
+      <pose>0.4 0.3 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk4_1</namespace>
+            </ros>
+            <camera_name>cam_mk4_1</camera_name>
+            <frame_name>cam_mk4_1_link</frame_name>
+            <min_depth>0.05</min_depth>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Prusa MK4-2 (pick detection) -->
+    <model name="cam_mk4_2">
+      <static>true</static>
+      <pose>0.4 -0.3 1.40 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk4_2</namespace>
+            </ros>
+            <camera_name>cam_mk4_2</camera_name>
+            <frame_name>cam_mk4_2_link</frame_name>
+            <min_depth>0.05</min_depth>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above the full 384 mm Spec2Primitives NIST plate. -->
+    <model name="cam_assembly">
+      <static>true</static>
+      <pose>0 0 1.55 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.95</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>2.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_assembly</namespace>
+            </ros>
+            <camera_name>cam_assembly</camera_name>
+            <frame_name>cam_assembly_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Prusa MK3 (Flat Mockup) on Left Side (-0.6, 0) -->
+    <model name="prusa_mk3">
+      <static>true</static>
+      <pose>-0.4 0 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/DarkGrey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Prusa MK4-1 (Flat Mockup) on Right Side (0.4, 0.3) -->
+    <model name="prusa_mk4_1">
+      <static>true</static>
+      <pose>0.4 0.3 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Prusa MK4-2 (Flat Mockup) on Right Side (0.4, -0.3) -->
+    <model name="prusa_mk4_2">
+      <static>true</static>
+      <pose>0.4 -0.3 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Exact NIST KET CAD on prusa_mk3. Neutral materials avoid identity leakage. -->
+    <model name="KET4_Square_4mm">
+      <pose>-0.46 0.06 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.004 0.004 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.002 -0.002 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET4_Square_4mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET8_Square_8mm">
+      <pose>-0.34 0.06 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.03</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.008 0.007 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.004 -0.0035 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET8_Square_8mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET12_Square_12mm">
+      <pose>-0.46 -0.06 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.04</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.012 0.008 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.006 -0.004 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET12_Square_12mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET16_Square_16mm">
+      <pose>-0.34 -0.06 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.016 0.010 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.008 -0.005 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET16_Square_16mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Exact NIST RGOCG CAD on prusa_mk4_1. -->
+    <model name="RGOCG4-50_Round_4mm">
+      <pose>0.34 0.36 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.002</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.002 -0.002 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG4-50_Round_4mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG8-50_8mm">
+      <pose>0.46 0.36 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.02</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.004</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.004 -0.004 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG8-50_8mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG12-50_12mm">
+      <pose>0.34 0.24 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.006</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.006 -0.006 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG12-50_12mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG16-50_16mm">
+      <pose>0.46 0.24 1.075 0 0 0</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.08</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.008 -0.008 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG16-50_16mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Existing NIST gear CAD grouped on prusa_mk4_2. -->
+    <include>
+      <uri>model://gear_small</uri>
+      <name>gear_small</name>
+      <pose>0.30 -0.30 1.10 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://gear_medium</uri>
+      <name>gear_medium</name>
+      <pose>0.40 -0.30 1.10 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://gear_large</uri>
+      <name>gear_large</name>
+      <pose>0.50 -0.30 1.10 0 0 0</pose>
+    </include>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <!-- Re-enabling gravity to 9.81 so the objects can sit on the tables instead of flying -->
+      <gravity>0 0 -9.81</gravity>
+    </physics>
+
+  </world>
+</sdf>

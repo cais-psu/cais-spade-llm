@@ -15,19 +15,19 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   explicitly asks for a public interface change.
 - Do not mix unrelated refactors into feature work or bug fixes.
 
-## Spec2Skill / ICRA 2027 isolation
+## Spec2Primitives / ICRA 2027 isolation
 
-- When a task mentions `Spec2Skill` or `ICRA 2027`, begin in
-  `cais_spade_llm/spec2skill/` and read its `AGENTS.md` before doing any work.
-- Keep searches scoped to `cais_spade_llm/spec2skill/`; do not run repository-wide
-  searches for a Spec2Skill task unless the user explicitly expands the scope.
-- Do not inspect or modify `cais_spade_llm/ui/bridge.py` for Spec2Skill work unless
+- When a task mentions `Spec2Primitives` or `ICRA 2027`, begin in
+  `cais_spade_llm/spec2primitives/` and read its `AGENTS.md` before doing any work.
+- Keep searches scoped to `cais_spade_llm/spec2primitives/`; do not run repository-wide
+  searches for a Spec2Primitives task unless the user explicitly expands the scope.
+- Do not inspect or modify `cais_spade_llm/ui/bridge.py` for Spec2Primitives work unless
   the user explicitly requests work on that file.
 - Treat ProductAgent, ResourceAgent, CCA, and RobotAgent as shared, read-only
   runtime authorities. Connect to them only through adapters owned by
-  `cais_spade_llm/spec2skill/` after the user authorizes that integration work.
-- Ask before modifying any file outside `cais_spade_llm/spec2skill/` for a
-  Spec2Skill task.
+  `cais_spade_llm/spec2primitives/` after the user authorizes that integration work.
+- Ask before modifying any file outside `cais_spade_llm/spec2primitives/` for a
+  Spec2Primitives task.
 
 ## Fixed-symbol rule
 

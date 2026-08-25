@@ -151,9 +151,9 @@ def build_ros2_launch_cmds(
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "run_perception:=false include_assembly_parts:=true include_loose_parts:=true"
         ),
-        "gazebo_dual_spec2skill": (
+        "gazebo_dual_spec2primitives": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
-            "world_file:=table_spec2skill.world run_perception:=false "
+            "world_file:=table_spec2primitives.world run_perception:=false "
             "include_assembly_parts:=true include_loose_parts:=true"
         ),
         "gazebo_dual_gazebo_only": (
@@ -426,16 +426,16 @@ def ros2_launch_required_paths(
             "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
         ),
     )
-    spec2skill_world_asset = (
+    spec2primitives_world_asset = (
         (
-            cais_lab_robotics_share / "worlds" / "table_spec2skill.world",
-            "ROS2 workspace is missing the Spec2Skill NIST world. "
+            cais_lab_robotics_share / "worlds" / "table_spec2primitives.world",
+            "ROS2 workspace is missing the Spec2Primitives NIST world. "
             "Re-run `make bootstrap-gazebo`.",
         ),
     )
     dual_launch_assets = {
         "gazebo_dual": dual_assets,
-        "gazebo_dual_spec2skill": (*dual_assets, *spec2skill_world_asset),
+        "gazebo_dual_spec2primitives": (*dual_assets, *spec2primitives_world_asset),
     }
     dual_passive_assets = (
         (
