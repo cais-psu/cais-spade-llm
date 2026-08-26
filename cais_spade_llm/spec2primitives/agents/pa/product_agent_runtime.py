@@ -20,12 +20,13 @@ _PRODUCT_AGENT_INSTRUCTIONS = (
 class _SharedProductAgentContextRuntime:
     """Expose only structured ProductAgent calls without its SPADE lifecycle."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, model: str) -> None:
         self._product_agent = ProductAgent(
             _PRODUCT_AGENT_JID,
             "",
             name=_PRODUCT_AGENT_NAME,
             instruction_override=_PRODUCT_AGENT_INSTRUCTIONS,
+            model=model,
         )
 
     async def ask_llm_structured(
@@ -41,6 +42,6 @@ class _SharedProductAgentContextRuntime:
         )
 
 
-def create_product_agent_context_runtime() -> ProductAgentContextRuntime:
+def create_product_agent_context_runtime(*, model: str) -> ProductAgentContextRuntime:
     """Create the read-only ProductAgent composition used by the PA UI."""
-    return _SharedProductAgentContextRuntime()
+    return _SharedProductAgentContextRuntime(model=model)

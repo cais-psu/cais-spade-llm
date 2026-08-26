@@ -68,6 +68,16 @@ communication, registered-resource selection, and heterogeneous context
 retrieval are inherited or supporting mechanisms when reused in the ICRA
 system; they are not new Spec2Primitives contributions.
 
+The Phase 4.2B1--4.2B2A perception path is also supporting infrastructure. Automatic
+four-camera RGB-D capture, calibration validation, deprojection, deterministic
+support-plane handling, connected-region segmentation, compact mask records,
+strict one-CAD principal-size comparison, camera-frame candidate-center
+measurement, atomic records, and operator status reporting are necessary
+plumbing for later experiments, not the claimed research contribution. A
+size-only accepted correspondence is not general identity recognition, a
+rotation, a complete pose, a robot pick coordinate, a context-completion or
+assembly-readiness assessment, planning, or execution.
+
 Spec2Primitives studies a composite-function coverage gap. It begins after an RA
 has been selected and no valid selection, ordering, and parameterization of its
 available predefined composite functions can satisfy the required grounded
@@ -121,10 +131,9 @@ The symbolic side consists of more than OWL alone:
 Within the proposed method, the ontology is the canonical semantic interface for
 entity identity, evidence links, PA–RA meaning, and primitive-input type and
 entity bindings. Typed context and status records represent unresolved needs,
-conflicts, numeric values, and freshness. Together with the external
-`can_produce` and `may_require` producer descriptors, the bounded projection
-supports routing an already identified typed need without hard-coding PDF, CAD,
-or RGB-D retrieval order.
+conflicts, numeric values, and freshness. Together with the application-owned
+evidence-type routing map, the bounded projection supports routing an already
+identified typed need without hard-coding PDF, CAD, or RGB-D retrieval order.
 
 The composite-function coverage gap and `exact eight` composition surface are
 established from RA-authoritative, versioned catalog snapshots that are treated
@@ -449,7 +458,7 @@ After this boundary, each origin uses its exact selected RA through the same
 composer implementation, eight-symbol catalog interface, context-request
 surface, candidate schema, validation sequence, feedback loop, and execution
 boundary. Nominal perception and planning and the existing recovery event
-generation, selection, allocation, DES/CCA reasoning, approval, and safety
+generation, selection, allocation, approval, and safety
 validation remain distinct upstream mechanisms and are reported separately.
 The recovery study tests transfer of the composer; it is not a second
 recovery-planning contribution.
@@ -502,17 +511,16 @@ primitive interface or task needs one grounded typed input
         ↓
 current ABox/typed context does not support it
         ↓
-authorized producer can_produce that input kind
+select one relevant approved evidence type
         ↓
-producer may_require particular approved evidence
+dispatch that evidence type's application-owned producer route
         ↓
 PA retrieves that evidence and runs the producer
 ```
 
 The primitive does not consume raw PDF, STL, RGB, depth, or calibration data.
-Those sources belong to PA's controlled tools. The `can_produce` and
-`may_require` fields are typed producer-descriptor metadata outside the
-authoritative TBox; their values use approved ontology or typed-context kinds.
+Those sources belong to PA's controlled tools. The evidence-type routing map is
+ordinary application configuration outside the authoritative TBox.
 This keeps source selection dynamic without adding a static all-modality shape
 or task-specific source order. OWL supports semantic matching, while a bounded
 SHACL or equivalent check may detect that an already identified input is absent;
@@ -555,7 +563,7 @@ initial versioned PA handoff to RA
 One source per cycle is an auditable retrieval operation, not a limit of one
 source for the interaction. PA chooses the number and order of relevant
 document, CAD, and RGB-D requests from the evolving goal and ABox state together
-with controlled-tool capability descriptors. It does not retrieve the entire
+with the approved source types. It does not retrieve the entire
 approved corpus by default.
 
 For ICRA:
@@ -574,8 +582,8 @@ For ICRA:
 - Document and scene tools are controlled, side-effect-free producers. Both
   return one generic subject-predicate-object triple-delta contract; the
   orchestrator validates and merges accepted assertions.
-- Tool `can_produce` and `may_require` descriptors help PA route an unresolved
-  semantic need to relevant approved evidence. Neither the TBox nor PA uses a
+- The application-owned evidence-type map routes an approved source to one
+  producer. Neither the TBox nor PA uses a
   product-specific slot template, fixed source count, fixed modality set, or
   fixed retrieval order.
 - PA-to-RA task records and resource-owned primitive contracts reference the
@@ -821,7 +829,7 @@ The paper must not claim that:
   framework;
 - moving a predefined composite function's internal sequence into an LLM prompt
   constitutes dynamic primitive composition; or
-- the inherited recovery event-generation, selection, DES/CCA, safety, or
+- the inherited recovery event-generation, selection, safety, or
   approval framework is an ICRA contribution.
 
 The task-transition contract is a grounded goal and binding record rather than

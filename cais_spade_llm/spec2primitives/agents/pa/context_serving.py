@@ -39,7 +39,8 @@ _FIRST_TURN_KEYS = {
     "PA_output",
     "failure",
 }
-_PA_INPUT_KEYS = {"prompt", "response_format"}
+_FIRST_PA_INPUT_KEYS = {"prompt", "response_format"}
+_LATER_PA_INPUT_KEYS = {"assessment_ref"}
 _PROVENANCE_KEYS = {"repository_path", "source_url"}
 _REJECTION_KEYS = {"context_ref", "reason", "message"}
 
@@ -81,9 +82,7 @@ def _serve_pa_requested_context_turn(
 ) -> dict[str, object]:
     """Serve the exact request from one persisted PA turn."""
     retrieval_record_path = (
-        interaction_root
-        / "interaction_record"
-        / f"retrieval_{retrieval_number:04d}.json"
+        interaction_root / "interaction_record" / f"retrieval_{retrieval_number:04d}.json"
     )
     if retrieval_record_path.exists():
         return _failure(
@@ -392,13 +391,9 @@ def _read_recorded_pa_request(
         return None, None, f"turn_{turn_number:04d} did not complete successfully."
 
     pa_input = turn_record["PA_input"]
-    if (
-        not isinstance(pa_input, dict)
-        or set(pa_input) != _PA_INPUT_KEYS
-        or not isinstance(pa_input["prompt"], str)
-        or not isinstance(pa_input["response_format"], dict)
-    ):
-        return None, None, f"turn_{turn_number:04d} PA_input is invalid."
+    pa_input_error = _pa_input_validation_error(pa_input, turn_number)
+    if pa_input_error is not None:
+        return None, None, pa_input_error
 
     pa_output = turn_record["PA_output"]
     expected_output_keys = (
@@ -426,6 +421,26 @@ def _read_recorded_pa_request(
     if validation_error is not None:
         return None, None, validation_error
     return product_requirement, needed_context, None
+
+
+def _pa_input_validation_error(pa_input: object, turn_number: int) -> str | None:
+    if not isinstance(pa_input, dict):
+        return f"turn_{turn_number:04d} PA_input is invalid."
+    if turn_number == 1:
+        if (
+            set(pa_input) != _FIRST_PA_INPUT_KEYS
+            or not isinstance(pa_input["prompt"], str)
+            or not isinstance(pa_input["response_format"], dict)
+        ):
+            return "turn_0001 PA_input is invalid."
+        return None
+    expected_assessment_ref = f"interaction_record/decision_{turn_number - 1:04d}.json"
+    if (
+        set(pa_input) != _LATER_PA_INPUT_KEYS
+        or pa_input.get("assessment_ref") != expected_assessment_ref
+    ):
+        return f"turn_{turn_number:04d} assessment_ref is invalid."
+    return None
 
 
 def _needed_context_validation_error(
@@ -653,8 +668,7 @@ def _write_retrieval_record_or_return_failure(
                 observation_ref=None,
                 reason="record_write_failed",
                 message=(
-                    f"retrieval_{retrieval_number:04d} write failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"retrieval_{retrieval_number:04d} write failed: {type(exc).__name__}: {exc}"
                 ),
             ),
         )

@@ -8,13 +8,19 @@ The current implementation contains the project skeleton, research scope,
 implementation plan, approved source references, demand-driven RGB-D context
 tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
 interaction UI connected through Phase 3.3, the Phase 3.1 product-requirement
-intake boundary, Phase 3.2 requested-context serving, and configurable Phase 3.3
-ProductAgent context reassessment mechanics. The Phase 4.0 RDFLib foundation
-now separates shared immutable TBox semantics from PA-owned product context,
-initializes independent interaction ABoxes, and validates evidence-backed fact
-deltas. It is not yet wired into the Phase 3 retrieval loop; the retrieval-first
-clarification gate and Phase 4.1 onward context understanding remain
-unimplemented.
+intake boundary, Phase 3.2 requested-context serving, and contract-first Phase
+3.3 ontology orchestration. The Phase 4.0 RDFLib foundation separates shared
+immutable TBox semantics from PA-owned product context, initializes independent
+interaction ABoxes before PA's first request, and validates evidence-backed fact
+deltas inside the loop. Phase 4.1 adds an injected OpenAI document interpreter
+and a separate diagnostic ABox. Phase 4.2A adds assertion-free approved-CAD and
+four-camera RGB-D preprocessing. Phase 4.2B1 adds an automatic observation-only
+capture, preprocessing, and minimal segmentation path. Phase 4.2B2A adds strict
+size-only matching against one requested approved CAD and returns a unique
+candidate center in its camera optical frame. The UI remains status-only. Only
+persisted Phase 4.3-style assessments can clarify or complete. The main live
+loop fails closed until an authoritative TBox and complete correspondence,
+pose, and Phase 4.3 grounding runtime are configured.
 
 ## MUST: Do not leak the answer
 
@@ -38,7 +44,8 @@ remain shared runtime authorities and will be reached through future adapters
 under `agents/pa/` and `agents/ra/`. They are not copied or modified. The dual
 Gazebo UI uses a narrow adapter protocol; `SystemBridge` and
 `cais_spade_llm/ui/bridge.py` remain outside the Spec2Primitives package and are not
-modified. ResourceAgent and CCA are outside the current Spec2Primitives roadmap.
+modified. Unused shared-agent subsystems are outside the current
+Spec2Primitives roadmap.
 
 The existing application entrypoint remains:
 
@@ -51,13 +58,22 @@ navigation item.
 
 The page can start and stop the no-hardware `gazebo_dual_spec2primitives` simulation,
 which launches `table_spec2primitives.world` with Gazebo, MoveIt, and RViz while
-forcing `run_perception:=false`. Its Phase 2 PA interaction workspace can run
-Phase 3.1 through Phase 3.3, display every persisted request and served result,
-and stop for completion, clarification, failure, or the selected emergency turn
-limit. Current Phase 3.3 behavior can still ask for clarification before all
-relevant permitted context is retrieved; that is a documented pending correction,
-not completed context understanding. The page does not run document-diagram VLM
-interpretation, CAD/RGB-D grounding, planning, RA, CCA, or robot execution.
+forcing `run_perception:=false`. Its Phase 2 PA interaction workspace exposes
+the Phase 3.1--3.3 contract and displays `grounding_unavailable` because no
+production ontology or complete grounding producers are configured. Controlled tests
+inject a schema-only fixture and producer doubles to exercise the complete
+orchestration record. A separate Phase 4.1 diagnostic can interpret the approved
+NIST PDF when an authoritative TBox and `OPENAI_API_KEY` are configured. It does
+not authorize PA completion. RGB-D capture, preprocessing, and minimal
+segmentation run automatically only when the observation pipeline is invoked.
+The operator card is read-only and displays `idle`, `running`, `ready`, or
+`failed`, source and assembly candidate counts, CAD-correspondence and location
+states, and `pose: not_evaluated`. It has no CAD, coordinate, score, timeout,
+camera-role, threshold, mask, or artifact controls. The production card remains
+`idle` until an authorized runtime caller invokes the supporting path. CAD
+preprocessing stays separate and size association processes only the exact CAD
+provided by its future caller. No rotation, complete pose, PA integration,
+planning, RA, or robot execution occurs.
 
 The dedicated scene uses the actual NIST plate, pin, gear fixture, shaft, and
 gear STL visuals. `Gear_Plate` and three `Gear_Shaft` instances are pre-installed
@@ -69,8 +85,8 @@ insertion-physics, or robot-execution claim.
 ## Folder guide
 
 - `agents/pa/`: the Phase 3.1 ProductAgent composition boundary, Phase 3.2 exact
-  context serving, Phase 3.3 reassessment loop, PA-owned Phase 4.0 product
-  context, and future PA workflow code.
+  context serving, Phase 3.3 controlled grounding orchestration contracts,
+  PA-owned Phase 4.0 product context, and future PA workflow code.
 - `agents/ra/`: future Spec2Primitives RobotAgent adapter and RA workflow code.
 - `adapters/`: narrow runtime connections, beginning with
   `gazebo_dual_spec2primitives`.
@@ -78,7 +94,9 @@ insertion-physics, or robot-execution claim.
   `product requirement: assemble Medium Gear`.
 - `ontology/`: shared immutable PPR TBox loading, profile validation,
   fingerprinting, and class-hierarchy queries. It owns no writable ABox.
-- `tools/`: controlled retrieval, observation, and future perception tools.
+- `tools/`: controlled retrieval, observation, OpenAI document interpretation,
+  Phase 4.2A CAD/RGB-D preprocessing, and Phase 4.2B1 minimal camera-local
+  segmentation plus Phase 4.2B2A size-only candidate association tools.
 - `references/products/`: static product documents and approved CAD refs.
 - `references/resources/`: future static resource and primitive-catalog refs.
 - `contexts/`: ignored per-interaction product and resource runtime context;

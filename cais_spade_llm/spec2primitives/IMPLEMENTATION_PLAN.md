@@ -1,17 +1,22 @@
 # Spec2Primitives Implementation Plan
 
 Phase 0, the Phase 0.1 operator shell, Phase 1, Phase 1.1, Phase 1.2, the Phase
-2 PA interaction UI, Phase 2.1, Phase 3.1, and Phase 3.2 are implemented. The
-Phase 3.3 loop mechanics, persistence, numbered serving, turn limit, and UI are
-implemented, but the loop still assesses raw retrieved summaries and can finish
-before ontology-backed grounding. The standalone Phase 4.0 PPR context
-foundation is implemented, but it is not wired into Phase 3. Phase 3.4 onward
-and Phase 4.1 onward remain future work requiring separate, explicitly scoped
-implementation requests. The target runtime initializes Phase 4.0 before PA
-selects its first source, then alternates Phase 3 retrieval with Phase 4
-interpretation and ABox updates. Phase numbers identify capabilities, not a
-required one-way runtime order. This plan does not authorize an end-to-end
-implementation.
+2 PA interaction UI, Phase 2.1, Phase 3.1, Phase 3.2, the Phase 3.3
+contract-first ontology integration, Phase 4.0, Phase 4.1, Phase 4.2A
+preprocessing, Phase 4.2B1 minimal automatic RGB-D segmentation, and Phase
+4.2B2A CAD-size candidate association are implemented. Phase 3.1
+now initializes Phase 4.0 before PA selects its first source and rejects
+first-turn clarification. Phase 3.3 now orchestrates numbered retrieval,
+controlled interpretation, validated ABox deltas, and persisted Phase 4.3-style
+decisions without assessing raw evidence summaries. The production UI remains
+fail-closed because no authoritative runtime TBox or complete correspondence,
+complete pose, and Phase 4.3
+grounding runtime is configured. The separate Phase 4.1 UI diagnostic also
+fails closed until an authoritative TBox and `OPENAI_API_KEY` are configured.
+Phase 3.4 onward and the remaining Phase 4.2B2 work remain future work
+requiring separate, explicitly scoped implementation requests. Phase numbers
+identify capabilities, not a required one-way runtime order. This plan does not
+authorize an end-to-end implementation.
 
 `PA` refers to ProductAgent and `RA` refers to RobotAgent throughout this plan.
 Only PA and RA participate in the current Spec2Primitives roadmap.
@@ -23,22 +28,29 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phase 0 and Phase 0.1 | implemented | Isolated package and no-hardware NIST operator scene. |
 | Phase 1, Phase 1.1, and Phase 1.2 | implemented | Approved exact-ref retrieval plus stored and request-scoped live RGB-D observations. |
 | Phase 2 and Phase 2.1 | implemented | PA UI, configurable turn limit, live PA turn counter, transcript, compact evidence summaries, and complete audit records. |
-| Phase 3.1 | implemented; ontology integration pending | Exact requirement intake and first request work exist, but no TBox/ABox is initialized before the first request and first-turn clarification is still accepted. |
+| Phase 3.1 | implemented; production ontology configuration pending | Exact requirement intake loads an injected schema-only TBox, initializes the ABox before PA's first request, exposes the unresolved view and approved evidence types, and rejects first-turn clarification. |
 | Phase 3.2 | implemented | One persisted document, CAD, or live-observation request is served exactly and recorded without fallback evidence. |
-| Phase 3.3 | partially implemented | Numbered retrieval can repeat, but served evidence is not yet interpreted into an ABox and PA can still clarify or complete from raw summaries. |
+| Phase 3.3 | contract-first integration implemented | Each served result is routed by its evidence type to one injected producer, its delta is validated and merged, and only a persisted Phase 4.3-style decision can request more evidence, clarify, or complete. |
 | Phase 3.4 and Phase 3.5 | not implemented | User replies and the post-Phase 4 `context understanding complete` handoff are unavailable. |
-| Phase 4.0 | implemented; Phase 3 integration pending | Shared RDFLib TBox loading and PA-owned product-context support for independent interaction ABoxes, controlled-tool capability descriptors, and evidence-backed triple-delta validation and persistence exist. Invalid deltas are rejected before mutation. |
-| Phase 4.1 onward | not implemented | No document-diagram VLM interpretation, CAD/RGB-D grounding, assembly plan, RA communication, primitive composition, validation, or execution exists. |
+| Phase 4.0 | implemented and wired through injected contracts | Shared RDFLib TBox loading, independent PA ABoxes, safe reload, compact views, evidence-type routing, and atomic evidence-backed delta validation are used by Phase 3. |
+| Phase 4.1 | implemented as a separate diagnostic | All six approved NIST PDF pages are rendered and sent through an injected OpenAI vision boundary in one structured request; its compiled delta is persisted and accepted only through the shared ABox validator. |
+| Phase 4.2A | implemented as a separate diagnostic | Exact approved binary STL meshes and fresh validated four-camera RGB-D bundles become atomic typed geometry records and assertion-free deltas; correspondence and pose remain not evaluated. |
+| Phase 4.2B1 | implemented supporting infrastructure | An observation-only entrypoint automatically captures, validates, preprocesses, and minimally segments four camera-local RGB-D views with fixed internal parameters. The UI is status-only. |
+| Phase 4.2B2A | implemented supporting infrastructure | One exact preprocessed approved CAD record is compared with validated segmented candidates by its two largest principal dimensions. A unique size match yields only a candidate center in its camera optical frame. |
+| Remaining Phase 4.2B2 onward | not implemented | No rotation, complete pose, cross-camera or robot-frame transform, complete scene grounding, assembly plan, RA communication, primitive composition, validation, or execution exists. |
 
 The Phase 4.0 foundation separates shared immutable TBox semantics from the
 PA-owned writable product context. It loads a caller-supplied TBox, initializes
 an independent interaction ABox from the exact requirement, and validates and
-persists small tool-capability and generic evidence-backed triple-delta
-contracts. The pasted OWL serves only as an RDF/XML parser and mixed-graph test
+persists generic evidence-backed triple-delta contracts. The pasted OWL serves
+only as an RDF/XML parser and mixed-graph test
 fixture until the authoritative TBox is provided: it contains both schema
 axioms and named individuals, so its ABox facts never become runtime task facts.
-The next small implementation is the Phase 3.3 integration revision that
-orchestrates the dynamic retrieval-grounding loop against this foundation.
+The next separately authorized geometry capability is rotation and complete
+camera-frame pose estimation, followed by camera-to-robot transformation and
+Phase 4.3 assessment.
+Production use also requires an authoritative schema-only TBox;
+the mixed and minimal fixtures remain test-only.
 Controlled tests of retrieval and observation capture do not constitute
 document-diagram understanding, metric grounding, Gazebo task execution, or
 physical execution.
@@ -159,7 +171,7 @@ Resource discovery and optimal allocation are inherited from prior work and
 remain out of scope. The nominal path consumes the registered RA roster and the
 exact `resource_jid` returned by that mechanism; the recovery event already
 contains its assigned `resource_jid`. Communication is unicast to that RA, not a
-broadcast. Recovery event generation and selection, DES/CCA reasoning, fault
+broadcast. Recovery event generation and selection, DES reasoning, fault
 diagnosis, ontology design, a complete symbolic planner, controller design, and
 proof of globally complete or optimal composition are not ICRA implementation
 contributions.
@@ -185,7 +197,7 @@ reassess the objective
 retrieve again, hand off, return missing_context, or stop fail-closed
 ```
 
-Both loops must preserve the exact request, selected producer, returned refs,
+Both loops must preserve the exact request, routed producer, returned refs,
 provenance, failures, freshness, and reassessment result. Neither loop retrieves
 every available source by default, repeats a failed request without new
 justification, treats turn-limit exhaustion as completion, or asks the LLM to
@@ -194,7 +206,7 @@ self-certify sufficiency.
 PA owns product-intent and scene grounding:
 
 - PA starts from the exact requirement, current interaction ABox, typed product
-  context, unresolved claims, and controlled-tool capability descriptors.
+  context, unresolved claims, and approved evidence types.
 - PA may request one approved document or CAD ref, or one fresh permitted RGB-D
   observation, then invoke only the matching controlled interpretation or
   grounding tool.
@@ -254,21 +266,20 @@ task or candidate exposes one missing typed input
         ↓
 check whether the current ABox or typed context already supports it
         ↓ missing
-match the semantic input type to one authorized producer's can_produce entry
+select one approved evidence type and its application-owned producer route
         ↓
-resolve only that producer's may_require evidence refs
+resolve only the selected exact approved evidence ref
         ↓
 retrieve the approved document or CAD, or capture fresh RGB-D and calibration
         ↓
 run the producer, validate and persist its result, then reassess
 ```
 
-`can_produce` and `may_require` are fields in controlled typed producer
-descriptors whose values reference approved PPR types or typed-context kinds;
-they are not new predicates inserted into the authoritative TBox. PPR facts are
-matched through the ontology. Poses, calibration, CAD correspondence, and other
-geometry values may remain in typed context records when the loaded TBox does
-not provide vocabulary for them.
+The evidence-type-to-producer route is ordinary application configuration, not
+an ontology predicate or model output. PPR facts are matched through the
+ontology. Poses, calibration, CAD correspondence, and other geometry values may
+remain in typed context records when the loaded TBox does not provide
+vocabulary for them.
 
 This design never declares all document, STL, RGB, depth, and calibration inputs
 mandatory. Documentation is retrieved only when a missing process, product,
@@ -544,14 +555,14 @@ be reported.
   PA decision, compact served result, Evidence Sources, retrieval error,
   clarification, completion, live turn counter, and complete ordered records.
 - Stop on completion, clarification, failure, or the emergency turn limit. Do
-  not perform grounding, planning, RA, CCA, or robot execution.
+  not perform grounding, planning, RA, or robot execution.
 
 ## Phase 3: PA context retrieval and clarification
 
-Every Phase 3.x step requires a separate implementation request. Phase 3.1 and
-Phase 3.2 are implemented. Phase 3.3 is partially implemented; its mechanical
-loop is present but its ontology-grounded assessment and clarification gate
-remain future work. Phase 3.4 and Phase 3.5 are not implemented.
+Every Phase 3.x step requires a separate implementation request. Phase 3.1,
+Phase 3.2, and the contract-first Phase 3.3 ontology integration are
+implemented. Real Phase 4 producers, Phase 3.4, and Phase 3.5 are not
+implemented.
 
 In the target runtime, Phase 3 retrieval and Phase 4 grounding form one loop.
 Phase 4.0 loads the fixed TBox and initializes the interaction ABox immediately
@@ -573,7 +584,7 @@ location, receiving feature, pose, diagram association, CAD association, or
 current arrangement is a system evidence problem, not a user clarification
 question.
 
-### Phase 3.1: product requirement intake and first `needed context` decision - implemented; ontology integration and policy revision pending
+### Phase 3.1: product requirement intake and first `needed context` decision - implemented with contract-first ontology integration
 
 - Add a Spec2Primitives-owned adapter under `agents/pa/` using composition with
   the shared ProductAgent. Do not subclass ProductAgent or LlmAgent.
@@ -584,13 +595,16 @@ question.
       product_agent: ProductAgentContextRuntime,
       interaction_root: Path,
       product_requirement: str,
+      *,
+      ontology_config: PAOntologyConfig | None = None,
+      grounding_runtime: ProductContextGroundingRuntime | None = None,
   ) -> dict[str, object]:
       ...
   ```
 
 - Expose only the inherited public `ask_llm_structured(...)` operation through
   `ProductAgentContextRuntime`. Do not call `ProductAgent.setup()`, start SPADE
-  behaviours, build a plan, or contact CCA or RA.
+  behaviours, build a plan, or contact RA.
 - Reject an empty or whitespace-only `product_requirement`; otherwise preserve
   it exactly as supplied.
 - In the ontology-backed revision, invoke Phase 4.0 after preserving the exact
@@ -601,8 +615,8 @@ question.
   closed on TBox loading, profile validation, or ABox initialization errors,
   before PA can choose an evidence source.
 - Give PA the unchanged `product_requirement`, `approved_context_refs()`, the
-  compact unresolved product-context view, controlled-tool capability
-  descriptors, permitted request shapes, and the option to request one fresh
+  compact unresolved product-context view, approved evidence types, permitted
+  request shapes, and the option to request one fresh
   live RGB-D observation. Do not preload or interpret document, CAD, or
   observation content in this bootstrap slice.
 - Run one structured PA turn with this response shape:
@@ -621,10 +635,9 @@ question.
   approved `context_ref` or `request_live_observation: true`.
   `clarification_question` must remain null on this first turn. Reject mixed,
   malformed, unknown-ref, unsupported, or first-turn clarification decisions.
-- The current implementation accepts first-turn `clarification_question`. The
-  ontology-grounded revision must stop accepting it as a terminal shortcut and
-  must proceed through permitted evidence retrieval, controlled interpretation,
-  and ABox updates before Phase 3.4 can ask the user.
+- The implementation rejects first-turn `clarification_question` as a terminal
+  shortcut and requires a permitted evidence request before Phase 3.4 can ask
+  the user.
 - Do not allow the first PA turn to return `context understanding complete`
   because no requested evidence has been served.
 - Preserve the exact requirement, PA input, PA output or failure, and ordered
@@ -649,9 +662,9 @@ question.
 - Treat this as one auditable retrieval operation. The Phase 3.3 orchestrator
   may call Phase 3.2 repeatedly for a dynamic sequence of relevant sources.
 - Stop before the next PA turn. Do not call ProductAgent, an LLM, VLM, UI,
-  grounding, planning, RA, CCA, or robot execution.
+  grounding, planning, RA, or robot execution.
 
-### Phase 3.3: configurable ReAct-style context understanding assessment - partially implemented
+### Phase 3.3: configurable ontology-backed context orchestration - contract-first integration implemented
 
 - Record `max_pa_turns` and `live_observation_timeout_sec` exclusively in
   `interaction_record/pa_context_settings.json`; count `turn_0001` in the limit.
@@ -659,10 +672,10 @@ question.
   After the Phase 3.1 bootstrap request, it accepts only a persisted Phase 4.3
   decision over the current ABox; it must not declare sufficiency or select a
   different source from raw served summaries.
-- Validate that the returned unresolved semantic need, selected exact approved
-  `context_ref` or fresh observation, and controlled producer agree with the
-  producer's `can_produce` and `may_require` descriptor. These descriptors route
-  evidence; they do not define hard-coded assembly slots or expected answers.
+- Validate the returned unresolved semantic need and selected exact approved
+  `context_ref` or fresh observation, then dispatch only the application-owned
+  producer route for that evidence type. Routing does not define hard-coded
+  assembly slots or expected answers.
 - For every valid request, call Phase 3.2 once, invoke only the matching Phase
   4.1 or Phase 4.2 producer, validate and merge its generic triple delta, and
   invoke Phase 4.3 before choosing the next source. Number PA, retrieval,
@@ -700,10 +713,11 @@ question.
 - Stop on a terminal Phase 4.3 decision, unrecoverable PA, retrieval, or
   interpretation failure, invalid response, existing-record conflict, or
   `pa_turn_limit_reached`. Limit exhaustion never implies completion.
-- The current implementation still permits early clarification and early
-  `context understanding complete` from raw evidence and has no Phase 4 tool or
-  ABox integration; that observed behavior is the remaining Phase 3.3
-  correction, not completed context understanding.
+- The production UI supplies no TBox or producer implementation and returns
+  `grounding_unavailable` before PA evidence selection. Controlled tests inject
+  the schema-only fixture and producer doubles; they do not constitute Phase
+  4.1 document understanding, Phase 4.2 scene grounding, or a production Phase
+  4.3 assessor.
 
 ### Phase 3.4: user clarification
 
@@ -747,7 +761,7 @@ question.
 - Test rejection of clarification, malformed, mixed, unknown-ref, unsupported,
   and premature completion responses.
 - Test PA-call failure recording without claiming completion.
-- Verify that Phase 3.1 does not call `setup()`, planning, CCA, RA, the resolver,
+- Verify that Phase 3.1 does not call `setup()`, planning, RA, the resolver,
   live capture, VLM, UI, or execution behavior and cannot access forbidden
   Gazebo or evaluator inputs.
 - Run the focused Phase 3.1 tests, `poetry check`, repository compileall, and
@@ -761,7 +775,7 @@ question.
   records, resolver and capture failures, malformed results, and existing-record
   protection without fallback evidence.
 - Verify that Phase 3.2 does not call ProductAgent, an LLM, VLM, UI, grounding,
-  planning, RA, CCA, forbidden Gazebo-state inputs, or robot execution.
+  planning, RA, forbidden Gazebo-state inputs, or robot execution.
 - Run the focused Phase 3.2 tests, the complete Spec2Primitives suite, Ruff,
   `poetry check`, repository compileall, and `git diff --check`.
 
@@ -780,7 +794,7 @@ question.
 - Verify every decision and compact served result appears in the PA UI while the
   expandable audit view preserves full records and internal `provenance`.
 - Verify Phase 3.3 invokes only the controlled Phase 4 producer selected by its
-  capability descriptor and has no planning, primitive-catalog, RA, CCA,
+  capability descriptor and has no planning, primitive-catalog, RA,
   forbidden Gazebo-state, evaluator, or execution dependency.
 - Add revised tests proving that Phase 3.3 requests relevant remaining evidence
   instead of asking which gear-shaft location receives the Medium Gear.
@@ -792,15 +806,15 @@ question.
 ## Phase 4: PA grounding
 
 This is the context-understanding stage and requires separate, bounded
-implementation requests. The Phase 4.0 foundation is implemented but not yet
-invoked by Phase 3. The target stage participates inside the Phase 3 retrieval
+implementation requests. The Phase 4.0 foundation is invoked by Phase 3 through
+injected contracts. The target stage participates inside the Phase 3 retrieval
 loop; it does not wait for a batch of Phase 3 evidence and does not assume that
 retrieving a PDF or STL means its diagrams or geometry were understood. Phase
 4.0 runs before the first source decision, Phase 4.1 or Phase 4.2 runs after each
 relevant source is served, and Phase 4.3 reassesses the updated ABox after each
 accepted delta.
 
-### Phase 4.0: PPR-aligned context representation - implemented; Phase 3 integration pending
+### Phase 4.0: PPR-aligned context representation - implemented and contract-first integrated with Phase 3
 
 - Keep shared immutable PPR semantics, TBox profile validation, fingerprinting,
   and class-hierarchy queries in `ontology/ppr_tbox.py`. Keep PA-owned writable
@@ -838,12 +852,9 @@ accepted delta.
   `observed_feature_1`, an expected CAD match, a pose-record path, or a
   product-specific completion template. A failed or uncertain match produces no
   factual assertion and remains unresolved.
-- Give each controlled tool a small capability descriptor expressed with fixed
-  ontology and typed-context symbols: `can_produce` describes the kinds of
-  assertions or typed records it may return, and `may_require` describes
-  permitted evidence it may need. These descriptor fields are adapter-owned
-  routing metadata outside the TBox, not ontology predicates or required
-  assembly fields.
+- Keep one small application-owned map from `document`, `CAD`, and `observation`
+  to fixed producer identifiers. This map is runtime routing only; it is not
+  part of the TBox, the ABox, or the PA decision schema.
 - Use the PPR `product`, `feature`, `process`, `resource`, and `capability` types
   as the common vocabulary for the future PA-to-RA handoff and typed primitive
   input bindings. The TBox constrains meaning and vocabulary; it does not
@@ -907,31 +918,130 @@ accepted delta.
 - Verify that the shared ontology package has no PA or RA dependency and that
   PA product-context code has no RA dependency.
 
-### Phase 4.1: document-diagram VLM interpretation
+### Phase 4.1: OpenAI document interpretation - implemented diagnostic
 
 - Implement the VLM as a controlled tool under `tools/document_evidence/`, not
   as another agent.
-- Advertise its fixed-symbol `can_produce` and `may_require` descriptor. For one
-  served document request, return a generic evidence-backed triple delta without
-  mutating the ABox or declaring context understanding complete.
+- Accept one exact served NIST document, render all six pages at a bounded
+  resolution, and send the ordered text and page images through an injected
+  `DocumentVisionRuntime` in one structured request.
+- The production adapter uses the OpenAI Responses API with `store: false`, no
+  tools, a strict JSON schema, and the model settings in
+  `config/model_runtime.json`. Credentials remain environment-only.
+- Compile model entity keys into interaction-owned IRIs and return a generic
+  evidence-backed triple delta without mutating the ABox or declaring context
+  understanding complete.
 - Let the VLM interpret approved document diagrams only. Do not give it RGB-D
   observations or use it to propose metric geometry.
 - Preserve the exact document `context ref`, page-level provenance, structured
-  VLM output, and uncertainty. Uncertain interpretations remain unresolved and
-  do not become factual assertions.
+  VLM output, configured and returned model, response identifier, rendered-page
+  hashes, compiled delta, and uncertainty. Uncertain interpretations remain
+  unresolved and do not become factual assertions.
+- Expose a separate UI diagnostic that initializes and persists its own ABox.
+  Keep the main PA loop fail-closed until the remaining grounding and assessment
+  producers are implemented.
 
 ### Phase 4.2: CAD and RGB-D grounding
 
-- Keep RGB segmentation, depth geometry, and CAD registration under
+#### Phase 4.2A: CAD and RGB-D preprocessing - implemented diagnostic
+
+- `tools/rgb_d_cad_grounding/preprocessor.py` accepts only an exact served CAD
+  or observation context. Approved CAD access is bound to the fixed inventory;
+  the served SHA-256 must still match before the full binary STL is loaded.
+- CAD preprocessing converts every triangle vertex from millimetres to metres
+  and atomically stores compressed `triangles_m` and `facet_normals` arrays. Its
+  typed record preserves source provenance and hashes, triangle and vertex
+  counts, bounds, centroid, units, coordinate frame, and artifact metadata.
+- Observation preprocessing reloads the complete validated four-camera bundle,
+  accepts only supported calibrated distortion models, and deprojects every
+  finite positive registered metric-depth pixel. Each independent optical-frame
+  artifact stores lossless valid-resolution `points_m`, `colors_rgb`, and
+  `pixels_uv` arrays with timestamps, calibration, evidence refs, counts, depth
+  range, and hashes. No camera extrinsics or hidden downsampling are introduced.
+- Each exclusive operation persists atomically under
+  `products/grounding/rgb_d_cad_grounding/`. The returned generic delta contains
+  no RDF assertions, references the typed record, and preserves correspondence
+  and pose as explicit unresolved needs.
+- The controlled preprocessing diagnostic remains callable through an injected
+  `ObservationCaptureRuntime` for focused tests. It is no longer exposed as an
+  operator workflow and cannot report context completion.
+- The production PA loop remains fail-closed. Phase 4.2A is not registered as a
+  complete CAD or observation grounding producer because it performs no
+  segmentation, correspondence, pose estimation, or Phase 4.3 assessment.
+
+#### Phase 4.2B1: minimal automatic RGB-D segmentation - implemented supporting infrastructure
+
+- `segmenter.py` accepts only an intact Phase 4.2A
+  `ColoredPointCloudSetRecord`, verifies its referenced point-cloud hashes and
+  array contracts, and atomically persists one compact segmentation record plus
+  one `uint16` label mask per camera.
+- Use fixed deterministic internal parameters for conservative support-plane
+  detection, depth-connected regions, minimum candidate size, and candidate
+  limits. They are implementation details, not operator configuration.
+- Treat `cam_mk3`, `cam_mk4_1`, and `cam_mk4_2` as source cameras: remove a
+  reliable dominant support plane and segment remaining loose regions. Treat
+  `cam_assembly` as the assembly-target camera: retain its dominant surface and
+  segment its plate area in that camera's independent optical frame.
+- Record camera role, frame, candidate count, point bounds, centroid, depth and
+  pixel bounds, source and mask hashes, and the fixed parameter set. A camera
+  with no candidate is explicitly unresolved. Identity, `CAD_correspondence`,
+  pose, and cross-camera fusion remain `not_evaluated`.
+- `run_automatic_rgbd_segmentation_pipeline(...)` performs one automatic
+  capture → validation → observation preprocessing → segmentation sequence.
+  It accepts only the contexts root and injected capture runtime; CAD
+  preprocessing remains a separate operation for later correspondence work.
+- The operator UI polls a compact `idle`, `running`, `ready`, or `failed` status
+  and displays only source and assembly candidate counts plus the unevaluated
+  identity and pose states. It has no CAD, timeout, role, threshold, mask, or
+  artifact controls. Until an authorized runtime caller invokes the automatic
+  observation path, production status remains `idle`.
+- This phase is perception plumbing, not the research contribution. It does not
+  use an ontology, VLM, PA decision, identity model, CAD matching, pose
+  estimator, planner, resource agent, primitive composer, or executor.
+
+#### Phase 4.2B2A: simple CAD size matching and candidate location - implemented supporting infrastructure
+
+- `size_correspondence.py` accepts one intact `RGBDSegmentationRecord` and one
+  already-preprocessed exact approved `CADMeshRecord`. It revalidates record
+  paths, hashes, mesh bounds, point-cloud arrays, label masks, camera frames,
+  candidate summaries, and aggregate counts before measuring anything.
+- Reconstruct every candidate from its label mask and colored point-cloud
+  artifact. Compare its two largest principal dimensions with the two largest
+  CAD dimensions and record the relative error plus coordinate-wise median
+  center in the candidate's camera optical frame.
+- Accept only when both dimension errors are at most 15 percent and the next
+  ranked reliable candidate is at least ten percentage points worse. Similar
+  valid sizes are `ambiguous`; no valid size is `rejected`. A candidate touching
+  an image boundary is treated as unreliable partial visibility and cannot be
+  accepted.
+- Persist one exclusive atomic `CADSizeCorrespondenceRecord` under the existing
+  geometry product directory. Preserve the exact CAD ref and hashes, source
+  segmentation ref and hash, complete deterministic ranking, selected camera,
+  frame, candidate identifier, dimensions, errors, and camera-frame center.
+- `CAD_correspondence` is `accepted`, `ambiguous`, or `rejected`; `location` is
+  `available`, `ambiguous`, or `unavailable`. Rotation, complete pose,
+  cross-camera fusion, and robot-frame conversion remain `not_evaluated`.
+- Process only the exact CAD supplied by the caller. Do not scan or preload the
+  approved CAD inventory, use a VLM, or read simulator identities, configured
+  positions, detector output, or evaluator data.
+- The operator UI remains status-only. It can display CAD-correspondence and
+  location states plus `pose: not_evaluated`, but exposes no CAD selector,
+  coordinates, thresholds, masks, scores, or processing controls.
+- This size association is supporting perception infrastructure. It is not
+  installed as a complete Phase 3 producer and cannot authorize context
+  completion, assembly readiness, planning, or execution.
+
+#### Remaining Phase 4.2B2 and later grounding work - not implemented
+
+- Keep later rotation, complete pose estimation, and transforms under
   `tools/rgb_d_cad_grounding/`.
-- Advertise the tool's fixed-symbol `can_produce` and `may_require` descriptor.
-  For the currently served approved evidence, dynamically detect zero or more
+- Register the tool under the application-owned `CAD` and `observation` producer
+  routes. For the currently served approved evidence, dynamically detect zero or more
   instances, generate their IRIs, evaluate candidate CAD correspondences, and
   return the same generic triple-delta contract without mutating the ABox.
 - Retain detailed geometry in dynamically created typed context records
   referenced by the assertion provenance. Propose RDF assertions only through
-  vocabulary declared by the loaded TBox and authorized by the producer
-  descriptor.
+  vocabulary declared by the loaded TBox and accepted by the shared validator.
 - Load approved CAD geometry for grounding; the existing filename, units,
   triangle count, and bounds summary alone does not establish a component match,
   receiving feature, or pose.
@@ -954,13 +1064,14 @@ accepted delta.
 ### Phase 4.3: post-understanding decision
 
 - Assess the current interaction ABox, typed context records, unresolved
-  assertions, evidence status, and controlled-tool capability descriptors
+  assertions, evidence status, and approved evidence-type routes
   against the exact `product_requirement`. Phase 4.1 and Phase 4.2 may each run
   zero or more times; neither modality is mandatory by itself.
-- Resolve a missing semantic fact or typed binding through the matching
-  producer's `can_produce` and `may_require` descriptor. Do not infer that the
-  primitive itself consumes a PDF, STL, RGB, depth, or calibration payload, and
-  do not retrieve a modality merely because it is available.
+- Resolve a missing semantic fact or typed binding by selecting one relevant
+  approved source and dispatching its application-owned producer route. Do not
+  infer that the primitive itself consumes a PDF, STL, RGB, depth, or
+  calibration payload, and do not retrieve a modality merely because it is
+  available.
 - Derive the next unresolved semantic need from the current goal and ABox, then
   select one relevant producer and permitted source. Process sources dynamically
   until every retrieved source has been interpreted, every accepted delta has
@@ -1066,12 +1177,12 @@ This phase requires a separate implementation request.
   changes its identifier, required outcome, semantics, feasibility, or assigned
   `resource_jid`, stop that transfer attempt fail-closed. The inherited framework
   may produce a newly validated event outside Spec2Primitives and import it as a
-  new transfer input; the adapter never invokes the recovery selector or CCA.
+  new transfer input; the adapter never invokes the recovery selector.
   Robot state, capability, primitive-catalog, IK, collision, and trajectory gaps
   remain RA-owned.
 - Keep upstream recovery-event feasibility records distinct from downstream
   primitive-program validation. Importing the selected recovery event does not
-  make recovery event generation, selection, allocation, DES/CCA reasoning, or
+  make recovery event generation, selection, allocation, DES reasoning, or
   safety planning a Spec2Primitives contribution.
 - Display exchanged messages in the corresponding live PA and RA cards and the
   ordered interaction record.

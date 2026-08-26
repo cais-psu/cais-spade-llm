@@ -3,6 +3,10 @@
 from cais_spade_llm.spec2primitives.agents.pa.context_assessment import (
     continue_pa_context_interaction,
 )
+from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
+    PAOntologyConfig,
+    ProductContextGroundingRuntime,
+)
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
     start_pa_context_interaction,
@@ -13,6 +17,8 @@ from cais_spade_llm.spec2primitives.agents.pa.context_serving import (
 
 __all__ = [
     "ProductAgentContextRuntime",
+    "PAOntologyConfig",
+    "ProductContextGroundingRuntime",
     "continue_pa_context_interaction",
     "serve_pa_requested_context",
     "start_pa_context_interaction",

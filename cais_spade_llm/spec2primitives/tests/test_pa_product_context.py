@@ -13,14 +13,11 @@ from rdflib import RDF, Graph, Literal, Namespace, URIRef
 
 from cais_spade_llm.spec2primitives.agents.pa import product_context
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
-    ToolCapabilityDescriptor,
-    ToolOutputs,
     TripleAssertion,
     TripleDelta,
     TripleObject,
     initialize_interaction_abox,
     validate_and_merge_triple_delta,
-    validate_tool_capability_descriptor,
 )
 from cais_spade_llm.spec2primitives.ontology import (
     OntologyContextError,
@@ -141,78 +138,6 @@ def test_existing_interaction_abox_is_not_overwritten(tmp_path: Path) -> None:
     assert _ontology_file_bytes(abox) == before
 
 
-def test_valid_tool_capability_descriptor_uses_fixed_tbox_symbols() -> None:
-    descriptor = _descriptor(
-        producer="document_evidence",
-        classes=[PPR.feature, PPR.process],
-        properties=[PPR.defines, PPR.realizes],
-        typed_context_records=["document_page_record"],
-        may_require=["approved_document"],
-    )
-
-    validated = validate_tool_capability_descriptor(descriptor, _load_tbox())
-
-    assert validated.producer == "document_evidence"
-    assert set(validated.can_produce.classes) == {
-        str(PPR.feature),
-        str(PPR.process),
-    }
-    assert set(validated.can_produce.properties) == {
-        str(PPR.defines),
-        str(PPR.realizes),
-    }
-    assert validated.can_produce.typed_context_records == ("document_page_record",)
-    assert validated.may_require == ("approved_document",)
-
-
-@pytest.mark.parametrize(
-    "descriptor",
-    [
-        {},
-        {
-            "producer": "document_evidence",
-            "can_produce": {"classes": [], "properties": []},
-            "may_require": [],
-        },
-        {
-            "producer": "controlled_evidence",
-            "can_produce": {
-                "classes": ["http://unknown.example/Class"],
-                "properties": [],
-            },
-            "may_require": ["approved_evidence"],
-        },
-        {
-            "producer": "controlled_evidence",
-            "can_produce": {
-                "classes": [],
-                "properties": ["http://unknown.example/property"],
-            },
-            "may_require": ["approved_evidence"],
-        },
-    ],
-)
-def test_malformed_or_unknown_tool_capability_descriptor_is_rejected(
-    descriptor: dict[str, object],
-) -> None:
-    with pytest.raises(OntologyContextError):
-        validate_tool_capability_descriptor(descriptor, _load_tbox())
-
-
-def test_malformed_descriptor_dataclass_uses_the_same_validation() -> None:
-    descriptor = ToolCapabilityDescriptor(
-        producer="controlled_evidence",
-        can_produce=ToolOutputs(
-            classes=(1,),
-            properties=(),
-        ),
-        may_require=("approved_evidence",),
-    )
-
-    with pytest.raises(OntologyContextError):
-        validate_tool_capability_descriptor(descriptor, _load_tbox())
-
-
 def test_malformed_delta_dataclass_is_rejected_atomically(tmp_path: Path) -> None:
     tbox = _load_tbox()
     abox = initialize_interaction_abox(tmp_path, "dataclass requirement", tbox)
@@ -236,14 +161,7 @@ def test_malformed_delta_dataclass_is_rejected_atomically(tmp_path: Path) -> Non
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            ToolCapabilityDescriptor(
-                producer="controlled_evidence",
-                can_produce=ToolOutputs(
-                    classes=(str(PPR.feature),),
-                    properties=(),
-                ),
-                may_require=("approved_evidence",),
-            ),
+            "controlled_evidence",
             delta,
             authorized_evidence_refs=[evidence_ref],
         )
@@ -270,13 +188,7 @@ def test_document_and_scene_deltas_use_one_validator_and_retain_provenance(
     document_result = validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        _descriptor(
-            producer="document_evidence",
-            classes=[PPR.feature, PPR.process],
-            properties=[PPR.defines, PPR.realizes],
-            typed_context_records=["document_page_record"],
-            may_require=["approved_document"],
-        ),
+        "document_evidence",
         {
             "assertions": [
                 _iri_assertion(required_feature, RDF.type, PPR.feature, document_ref),
@@ -295,12 +207,7 @@ def test_document_and_scene_deltas_use_one_validator_and_retain_provenance(
     scene_result = validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        _descriptor(
-            producer="rgb_d_cad_grounding",
-            classes=[PPR.product],
-            typed_context_records=["pose_record"],
-            may_require=["approved_rgb_d_and_cad"],
-        ),
+        "rgb_d_cad_grounding",
         {
             "assertions": [
                 _iri_assertion(observed_product, RDF.type, PPR.product, observation_ref)
@@ -367,11 +274,7 @@ def test_one_two_and_many_dynamic_deltas_merge_in_source_selected_order(
 ) -> None:
     tbox = _load_tbox()
     abox = initialize_interaction_abox(tmp_path, "dynamic requirement", tbox)
-    descriptor = _descriptor(
-        producer="controlled_evidence",
-        classes=[PPR.feature],
-        may_require=["approved_evidence"],
-    )
+    producer = "controlled_evidence"
     subjects: list[URIRef] = []
 
     assert not any("dynamic_feature" in str(node) for triple in abox.graph for node in triple)
@@ -382,7 +285,7 @@ def test_one_two_and_many_dynamic_deltas_merge_in_source_selected_order(
         result = validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            producer,
             {"assertions": [_iri_assertion(subject, RDF.type, PPR.feature, evidence_ref)]},
             authorized_evidence_refs=[evidence_ref],
         )
@@ -404,11 +307,7 @@ def test_uncertain_delta_with_no_assertions_stays_outside_the_abox(
     result = validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        _descriptor(
-            producer="rgb_d_cad_grounding",
-            typed_context_records=["match_record"],
-            may_require=["approved_rgb_d_and_cad"],
-        ),
+        "rgb_d_cad_grounding",
         {
             "assertions": [],
             "uncertainty": ["candidate match below threshold"],
@@ -432,8 +331,7 @@ def test_uncertain_delta_with_no_assertions_stays_outside_the_abox(
         "missing_evidence",
         "unauthorized_evidence",
         "malformed_iri_object",
-        "unauthorized_class",
-        "unauthorized_property",
+        "unknown_class",
         "external_subject",
     ],
 )
@@ -445,10 +343,7 @@ def test_invalid_delta_is_rejected_atomically(
     abox = initialize_interaction_abox(tmp_path, "atomic requirement", tbox)
     evidence_ref = "approved_evidence"
     subject = URIRef(f"{abox.namespace}candidate_feature")
-    descriptor = _descriptor(
-        classes=[PPR.feature],
-        properties=[PPR.defines],
-    )
+    producer = "controlled_evidence"
     assertion = _iri_assertion(subject, RDF.type, PPR.feature, evidence_ref)
     authorized_refs = [evidence_ref]
 
@@ -460,15 +355,11 @@ def test_invalid_delta_is_rejected_atomically(
         assertion["evidence_refs"] = ["unapproved_evidence"]
     elif invalid_case == "malformed_iri_object":
         assertion["object"] = {"kind": "iri", "value": "not-an-absolute-iri"}
-    elif invalid_case == "unauthorized_class":
-        assertion["object"] = {"kind": "iri", "value": str(PPR.product)}
-    elif invalid_case == "unauthorized_property":
-        assertion = _iri_assertion(
-            abox.specification_iri,
-            PPR.realizes,
-            subject,
-            evidence_ref,
-        )
+    elif invalid_case == "unknown_class":
+        assertion["object"] = {
+            "kind": "iri",
+            "value": "http://unknown.example/Class",
+        }
     elif invalid_case == "external_subject":
         assertion["subject"] = "http://external.example/subject"
 
@@ -477,7 +368,7 @@ def test_invalid_delta_is_rejected_atomically(
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            producer,
             {"assertions": [assertion]},
             authorized_evidence_refs=authorized_refs,
         )
@@ -487,27 +378,22 @@ def test_invalid_delta_is_rejected_atomically(
 
 
 @pytest.mark.parametrize(
-    ("predicate", "object_iri", "descriptor_key"),
+    ("predicate", "object_iri"),
     [
-        (RDF.type, PPR.resource, "classes"),
-        (RDF.type, PPR.capability, "classes"),
-        (PPR.capableOf, PPR.process, "properties"),
-        (PPR.provides, PPR.capability, "properties"),
+        (RDF.type, PPR.resource),
+        (RDF.type, PPR.capability),
+        (PPR.capableOf, PPR.process),
+        (PPR.provides, PPR.capability),
     ],
 )
 def test_resource_catalog_assertion_is_rejected_from_the_pa_abox(
     tmp_path: Path,
     predicate: URIRef,
     object_iri: URIRef,
-    descriptor_key: str,
 ) -> None:
     tbox = _load_tbox()
     abox = initialize_interaction_abox(tmp_path, "resource-free requirement", tbox)
     evidence_ref = "resource_card"
-    descriptor_kwargs: dict[str, list[URIRef]] = {descriptor_key: [object_iri]}
-    if descriptor_key == "properties":
-        descriptor_kwargs[descriptor_key] = [predicate]
-    descriptor = _descriptor(**descriptor_kwargs)
     assertion = _iri_assertion(
         URIRef(f"{abox.namespace}forbidden_resource_fact"),
         predicate,
@@ -520,7 +406,7 @@ def test_resource_catalog_assertion_is_rejected_from_the_pa_abox(
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            "controlled_evidence",
             {"assertions": [assertion]},
             authorized_evidence_refs=[evidence_ref],
         )
@@ -541,14 +427,12 @@ def test_task_to_primitive_recipe_assertion_is_rejected_from_the_pa_abox(
     evidence_ref = "resource_catalog"
     primitive = URIRef(f"{abox.namespace}primitive_move_arm_xyz")
     requested_process = URIRef(f"{abox.namespace}requested_process")
-    descriptor = _descriptor(properties=[recipe_predicate])
-
     before = _ontology_file_bytes(abox)
     with pytest.raises(OntologyContextError):
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            "controlled_evidence",
             {
                 "assertions": [
                     _iri_assertion(
@@ -590,10 +474,7 @@ def test_declared_consists_of_cannot_decompose_a_process(tmp_path: Path) -> None
         validate_and_merge_triple_delta(
             interaction_root,
             tbox,
-            _descriptor(
-                classes=[PPR.process],
-                properties=[PPR.consistsOf],
-            ),
+            "controlled_evidence",
             {
                 "assertions": [
                     _iri_assertion(
@@ -632,14 +513,11 @@ def test_realizes_must_target_the_feature_defined_by_the_specification(
     other_feature = URIRef(f"{namespace}other_feature")
     process = URIRef(f"{namespace}requested_process")
     evidence_ref = "approved_document"
-    descriptor = _descriptor(
-        classes=[PPR.feature, PPR.process],
-        properties=[PPR.defines, PPR.realizes],
-    )
+    producer = "controlled_evidence"
     validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        descriptor,
+        producer,
         {
             "assertions": [
                 _iri_assertion(defined_feature, RDF.type, PPR.feature, evidence_ref),
@@ -659,7 +537,7 @@ def test_realizes_must_target_the_feature_defined_by_the_specification(
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            producer,
             {
                 "assertions": [
                     _iri_assertion(other_feature, RDF.type, PPR.feature, evidence_ref),
@@ -687,17 +565,13 @@ def test_defines_must_start_at_the_initialized_specification(tmp_path: Path) -> 
     feature = URIRef(f"{namespace}required_feature")
     wrong_subject = URIRef(f"{namespace}not_the_specification")
     evidence_ref = "approved_document"
-    descriptor = _descriptor(
-        classes=[PPR.feature, PPR.product],
-        properties=[PPR.defines],
-    )
     before = _ontology_file_bytes(abox)
 
     with pytest.raises(OntologyContextError):
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            descriptor,
+            "controlled_evidence",
             {
                 "assertions": [
                     _iri_assertion(feature, RDF.type, PPR.feature, evidence_ref),
@@ -735,7 +609,7 @@ def test_hidden_expected_answer_ref_is_never_authorized_by_the_delta(
         validate_and_merge_triple_delta(
             tmp_path,
             tbox,
-            _descriptor(classes=[PPR.feature]),
+            "controlled_evidence",
             {"assertions": [assertion]},
             authorized_evidence_refs=["approved_document"],
         )
@@ -756,7 +630,7 @@ def test_merges_do_not_modify_the_immutable_tbox_fixture(tmp_path: Path) -> None
     validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        _descriptor(classes=[PPR.feature]),
+        "controlled_evidence",
         {"assertions": [_iri_assertion(feature, RDF.type, PPR.feature, evidence_ref)]},
         authorized_evidence_refs=[evidence_ref],
     )
@@ -784,25 +658,6 @@ def _initialize(
         product_requirement,
         _load_tbox(),
     )
-
-
-def _descriptor(
-    *,
-    producer: str = "controlled_evidence",
-    classes: list[URIRef | str] | None = None,
-    properties: list[URIRef | str] | None = None,
-    typed_context_records: list[str] | None = None,
-    may_require: list[str] | None = None,
-) -> dict[str, object]:
-    return {
-        "producer": producer,
-        "can_produce": {
-            "classes": [str(value) for value in classes or []],
-            "properties": [str(value) for value in properties or []],
-            "typed_context_records": list(typed_context_records or []),
-        },
-        "may_require": list(may_require or ["approved_evidence"]),
-    }
 
 
 def _iri_assertion(

@@ -7,15 +7,23 @@ import logging
 from pathlib import Path
 from typing import Any, Protocol
 
+from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
+    PAOntologyConfig,
+    ProductContextGroundingRuntime,
+    compact_abox_view,
+    validated_grounding_producer_routes,
+)
+from cais_spade_llm.spec2primitives.agents.pa.product_context import (
+    initialize_interaction_abox,
+)
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    approved_context_ref_evidence_types,
     approved_context_refs,
 )
 
 logger = logging.getLogger(__name__)
 
-_PRODUCT_REQUIREMENT_PATH = Path(
-    "products/user_requirement/product_requirement.json"
-)
+_PRODUCT_REQUIREMENT_PATH = Path("products/user_requirement/product_requirement.json")
 _FIRST_TURN_PATH = Path("interaction_record/turn_0001.json")
 _NEEDED_CONTEXT_KEYS = {
     "context_ref",
@@ -41,6 +49,9 @@ async def start_pa_context_interaction(
     product_agent: ProductAgentContextRuntime,
     interaction_root: Path,
     product_requirement: str,
+    *,
+    ontology_config: PAOntologyConfig | None = None,
+    grounding_runtime: ProductContextGroundingRuntime | None = None,
 ) -> dict[str, object]:
     """Record a product requirement and request PA's first context decision.
 
@@ -50,6 +61,8 @@ async def start_pa_context_interaction(
         interaction_root: Caller-owned `contexts/<interaction_identifier>/`
             directory.
         product_requirement: Exact user-supplied product requirement.
+        ontology_config: Injected schema-only TBox location and namespace.
+        grounding_runtime: Injected controlled Phase 4 producer boundary.
 
     Returns:
         The validated `needed_context` response or a structured failure.
@@ -60,6 +73,14 @@ async def start_pa_context_interaction(
             "product_requirement must contain non-whitespace text.",
         )
 
+    if ontology_config is None or grounding_runtime is None:
+        return _failure(
+            "grounding_unavailable",
+            "An authoritative TBox and controlled Phase 4 grounding runtime are "
+            "required before the PA interaction can start.",
+        )
+
+    interaction_root = Path(interaction_root)
     requirement_path = interaction_root / _PRODUCT_REQUIREMENT_PATH
     turn_path = interaction_root / _FIRST_TURN_PATH
     if requirement_path.exists() or turn_path.exists():
@@ -67,14 +88,6 @@ async def start_pa_context_interaction(
             "interaction_exists",
             "Phase 3.1 records already exist for this interaction_root.",
         )
-
-    context_refs = approved_context_refs()
-    response_format = _needed_context_response_format(context_refs)
-    prompt = _needed_context_prompt(product_requirement, context_refs)
-    pa_input = {
-        "prompt": prompt,
-        "response_format": response_format,
-    }
 
     try:
         _write_json_exclusive(
@@ -86,6 +99,43 @@ async def start_pa_context_interaction(
             "interaction_exists",
             "Phase 3.1 records already exist for this interaction_root.",
         )
+
+    try:
+        tbox = ontology_config.load_tbox()
+        validated_grounding_producer_routes(grounding_runtime)
+        abox = initialize_interaction_abox(
+            interaction_root,
+            product_requirement,
+            tbox,
+        )
+        context_refs = approved_context_refs()
+        context_ref_evidence_types = approved_context_ref_evidence_types()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.exception("Phase 3.1 ontology initialization failed.")
+        failure = _failure(
+            "ontology_initialization_failed",
+            f"Phase 4.0 initialization failed: {type(exc).__name__}: {exc}",
+        )
+        _write_first_turn(
+            turn_path,
+            product_requirement,
+            None,
+            None,
+            failure,
+        )
+        return failure
+
+    response_format = _needed_context_response_format(context_refs)
+    prompt = _needed_context_prompt(
+        product_requirement,
+        context_refs,
+        abox_view=compact_abox_view(abox),
+        context_ref_evidence_types=context_ref_evidence_types,
+    )
+    pa_input = {
+        "prompt": prompt,
+        "response_format": response_format,
+    }
 
     try:
         pa_output = await product_agent.ask_llm_structured(
@@ -126,11 +176,16 @@ async def start_pa_context_interaction(
 def _needed_context_prompt(
     product_requirement: str,
     context_refs: tuple[str, ...],
+    *,
+    abox_view: dict[str, object],
+    context_ref_evidence_types: dict[str, str],
 ) -> str:
     pa_context = {
         "product_requirement": product_requirement,
         "approved_context_refs": list(context_refs),
+        "approved_context_ref_evidence_types": context_ref_evidence_types,
         "request_live_observation_available": True,
+        "product_context": abox_view,
         "permitted_request_shapes": {
             "approved context_ref": {
                 "context_ref": "<one exact approved_context_ref>",
@@ -142,19 +197,14 @@ def _needed_context_prompt(
                 "request_live_observation": True,
                 "clarification_question": None,
             },
-            "user clarification": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": "<one focused non-empty question>",
-            },
         },
     }
     return (
         "Make only the first Spec2Primitives needed_context decision. "
         "No document, CAD, or observation evidence has been served. Retrieve "
-        "permitted context before asking for clarification unless the exact "
-        "product_requirement itself is ambiguous. Treat user expertise as unknown. "
-        "Choose exactly one permitted request shape. Do not return context "
+        "one permitted evidence source before clarification can be considered. "
+        "Treat user expertise as unknown. Choose exactly one permitted evidence "
+        "request shape and leave clarification_question null. Do not return context "
         "understanding complete, grounding, an assembly plan, or primitive_steps.\n\n"
         "PA input:\n"
         f"{json.dumps(pa_context, indent=2, ensure_ascii=False)}"
@@ -186,10 +236,7 @@ def _needed_context_response_format(
                         },
                         "request_live_observation": {"type": "boolean"},
                         "clarification_question": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "null"},
-                            ]
+                            "type": "null",
                         },
                     },
                 }
@@ -206,10 +253,7 @@ def _needed_context_validation_error(
         return "PA output must contain only needed_context."
 
     needed_context = pa_output["needed_context"]
-    if (
-        not isinstance(needed_context, dict)
-        or set(needed_context) != _NEEDED_CONTEXT_KEYS
-    ):
+    if not isinstance(needed_context, dict) or set(needed_context) != _NEEDED_CONTEXT_KEYS:
         return "needed_context fields do not match the Phase 3.1 response shape."
 
     context_ref = needed_context["context_ref"]
@@ -222,18 +266,13 @@ def _needed_context_validation_error(
         return "context_ref is not an approved exact ref."
     if not isinstance(request_live_observation, bool):
         return "request_live_observation must be a boolean."
-    if clarification_question is not None and not isinstance(
-        clarification_question, str
-    ):
-        return "clarification_question must be null or a string."
-    if isinstance(clarification_question, str) and not clarification_question.strip():
-        return "clarification_question must contain non-whitespace text."
+    if clarification_question is not None:
+        return "Phase 3.1 clarification_question must remain null."
 
     active_values = sum(
         (
             context_ref is not None,
             request_live_observation is True,
-            clarification_question is not None,
         )
     )
     if active_values != 1:
@@ -244,7 +283,7 @@ def _needed_context_validation_error(
 def _write_first_turn(
     turn_path: Path,
     product_requirement: str,
-    pa_input: dict[str, Any],
+    pa_input: dict[str, Any] | None,
     pa_output: object,
     failure: dict[str, object] | None,
 ) -> None:

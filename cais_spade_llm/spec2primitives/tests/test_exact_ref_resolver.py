@@ -116,6 +116,7 @@ def test_all_approved_cad_refs_return_bounded_geometry() -> None:
         evidence = served_context["CAD_evidence"]
         assert evidence["filename"] == context_ref
         assert evidence["units"] == "mm"
+        assert len(evidence["source_sha256"]) == 64
         assert evidence["triangle_count"] > 0
         assert set(evidence["bounds_mm"]) == {"minimum", "maximum", "size"}
         assert all(size > 0 for size in evidence["bounds_mm"]["size"])

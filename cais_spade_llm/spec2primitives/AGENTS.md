@@ -51,8 +51,8 @@
 - Treat ProductAgent and RobotAgent as shared, read-only runtime authorities.
 - Put the future ProductAgent connection under `spec2primitives/agents/pa/` and the
   future RobotAgent connection under `spec2primitives/agents/ra/`.
-- Do not create ResourceAgent or CCA folders; they are outside the current
-  Spec2Primitives roadmap.
+- Do not create folders for unused shared-agent subsystems; they are outside the
+  current Spec2Primitives roadmap.
 - When a future adapter requires an existing public interface, inspect the exact
   external interface without asking. Do not modify it without explicit
   permission.
@@ -65,7 +65,7 @@
 - Do not import `SystemBridge` or issue direct ROS2 shell commands from this
   package. The application passes a runtime object that satisfies the narrow
   Spec2Primitives adapter protocol.
-- Do not add hardware launch, ResourceAgent, CCA, RobotAgent, or robot execution.
+- Do not add hardware launch, ResourceAgent, RobotAgent, or robot execution.
 - Keep ProductAgent access behind the Spec2Primitives-owned
   `ProductAgentContextRuntime` composition boundary. Do not start its lifecycle
   or expose other shared-agent operations.

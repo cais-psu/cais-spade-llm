@@ -58,6 +58,12 @@ Exact-ref retrieval, PA and RA live cards, ordered interaction records, and
 simulation are supporting infrastructure and evaluation evidence. They are not
 the fundamental contribution by themselves.
 
+Automatic RGB-D capture, deprojection, support-plane segmentation, exact-CAD
+size comparison, and camera-frame candidate-center measurement are also
+supporting perception infrastructure. A Phase 4.2B2A size match is not a
+complete pose, robot pick coordinate, task-completion assessment, or primitive
+composition result.
+
 ## Partial formal-model boundary
 
 Each of the exact eight resource-owned catalog entries exposes its fixed
@@ -139,14 +145,14 @@ Their authority and completion conditions differ:
 
 Ontology-assisted retrieval operates over semantic needs, not modality names.
 A primitive interface asks for a grounded typed input. If current ontology or
-typed context does not support it, PA matches that need to an authorized
-producer's `can_produce` descriptor and retrieves only the evidence listed by
-that producer's `may_require` descriptor. Thus documentation may be selected to
+typed context does not support it, PA selects one relevant approved evidence
+source and dispatches the application-owned route for that evidence type. Thus
+documentation may be selected to
 ground process or product meaning, while STL plus RGB-D and calibration may be
 selected to ground a scene binding or pose. These are runtime dependencies, not
-a fixed requirement that every interaction load every source. The descriptor
-fields are routing metadata outside the authoritative TBox; no new ontology
-predicate is invented.
+a fixed requirement that every interaction load every source. The routing map
+is ordinary application configuration outside the authoritative TBox; no new
+ontology predicate is invented.
 
 OWL provides type and relation inference but cannot use absence as a
 closed-world completeness decision. SHACL or an equivalent boundary validator
@@ -166,15 +172,25 @@ PA
 │   └── VLM diagram interpretation
 │
 └── RGB-D/CAD grounding tool
-    ├── RGB segmentation
-    ├── depth geometry
-    └── CAD registration
+    ├── RGB-D capture and preprocessing
+    ├── minimal camera-local segmentation
+    ├── one-CAD size association and camera-frame candidate center
+    └── future rotation, complete pose, and frame transformation
 ```
 
 Only PA and RA are agents. The observation provider and the perception
 components shown above are controlled tools invoked within the Spec2Primitives
 workflow. Related vision algorithms are combined into the two tools instead of
 being modeled as additional agents.
+
+RGB-D capture, calibrated deprojection, support-plane removal, connected-region
+segmentation, mask persistence, one-CAD principal-size comparison,
+camera-frame candidate-center measurement, and the read-only processing status
+are supporting infrastructure rather than the ICRA research contribution.
+Phase 4.2B2A can report an accepted, ambiguous, or rejected size
+correspondence, but it does not perform general identity recognition, rotation,
+complete pose estimation, frame transformation, context assessment, primitive
+composition, planning, or execution.
 
 Intermediate mask, depth, CAD-fit, uncertainty, and provenance evidence remains
 separately auditable even though the algorithms are grouped behind the two tool

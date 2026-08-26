@@ -1,0 +1,155 @@
+"""Load the model choices used by the isolated Spec2Primitives runtime."""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+DEFAULT_MODEL_RUNTIME_CONFIG_PATH = Path(__file__).with_name("model_runtime.json")
+
+_ROOT_KEYS = {"schema_version", "product_agent_llm", "document_vlm"}
+_PRODUCT_AGENT_KEYS = {"model"}
+_DOCUMENT_VLM_KEYS = {
+    "provider",
+    "model",
+    "reasoning_effort",
+    "image_detail",
+    "max_output_tokens",
+    "timeout_seconds",
+}
+
+
+@dataclass(frozen=True)
+class ProductAgentModelConfig:
+    """Select the shared ProductAgent LLM without changing its interface."""
+
+    model: str
+
+
+@dataclass(frozen=True)
+class DocumentVLMConfig:
+    """Configure the OpenAI document interpretation request."""
+
+    provider: str
+    model: str
+    reasoning_effort: str
+    image_detail: str
+    max_output_tokens: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class ModelRuntimeConfig:
+    """Hold all package-local model configuration."""
+
+    schema_version: int
+    product_agent_llm: ProductAgentModelConfig
+    document_vlm: DocumentVLMConfig
+
+
+def load_model_runtime_config(
+    config_path: Path = DEFAULT_MODEL_RUNTIME_CONFIG_PATH,
+) -> ModelRuntimeConfig:
+    """Read and strictly validate a model runtime JSON file.
+
+    Args:
+        config_path: JSON file containing only the supported model settings.
+
+    Returns:
+        Immutable validated model configuration.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If the JSON or any field is invalid.
+    """
+    path = Path(config_path)
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
+        raise ValueError("Model config fields are invalid.")
+    if value["schema_version"] != 1:
+        raise ValueError("Model config schema_version must be 1.")
+
+    product_agent = _required_mapping(
+        value["product_agent_llm"],
+        _PRODUCT_AGENT_KEYS,
+        "product_agent_llm",
+    )
+    document_vlm = _required_mapping(
+        value["document_vlm"],
+        _DOCUMENT_VLM_KEYS,
+        "document_vlm",
+    )
+    product_agent_model = _nonempty_string(product_agent["model"], "product_agent_llm.model")
+    provider = _nonempty_string(document_vlm["provider"], "document_vlm.provider")
+    if provider != "openai":
+        raise ValueError("document_vlm.provider must be openai.")
+    model = _nonempty_string(document_vlm["model"], "document_vlm.model")
+    reasoning_effort = _nonempty_string(
+        document_vlm["reasoning_effort"],
+        "document_vlm.reasoning_effort",
+    )
+    if reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
+        raise ValueError("document_vlm.reasoning_effort is invalid.")
+    image_detail = _nonempty_string(
+        document_vlm["image_detail"],
+        "document_vlm.image_detail",
+    )
+    if image_detail not in {"auto", "low", "high"}:
+        raise ValueError("document_vlm.image_detail is invalid.")
+    max_output_tokens = _positive_int(
+        document_vlm["max_output_tokens"],
+        "document_vlm.max_output_tokens",
+    )
+    timeout_seconds = _positive_number(
+        document_vlm["timeout_seconds"],
+        "document_vlm.timeout_seconds",
+    )
+    return ModelRuntimeConfig(
+        schema_version=1,
+        product_agent_llm=ProductAgentModelConfig(model=product_agent_model),
+        document_vlm=DocumentVLMConfig(
+            provider=provider,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            image_detail=image_detail,
+            max_output_tokens=max_output_tokens,
+            timeout_seconds=timeout_seconds,
+        ),
+    )
+
+
+def _required_mapping(
+    value: object,
+    expected_keys: set[str],
+    field_name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError(f"{field_name} fields are invalid.")
+    return value
+
+
+def _nonempty_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{field_name} must be a non-empty exact string.")
+    return value
+
+
+def _positive_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer.")
+    return value
+
+
+def _positive_number(value: object, field_name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ValueError(f"{field_name} must be a positive finite number.")
+    return float(value)

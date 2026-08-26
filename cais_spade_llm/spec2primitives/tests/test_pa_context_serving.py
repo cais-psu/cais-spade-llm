@@ -512,7 +512,6 @@ def test_phase_3_2_has_only_the_approved_dependencies_and_no_pa_turn() -> None:
             "document_evidence",
             ".ui",
             ".agents.ra",
-            "cca",
         )
     )
     for forbidden_source in (

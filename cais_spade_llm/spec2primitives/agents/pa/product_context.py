@@ -65,10 +65,6 @@ _PROVENANCE_KEYS = frozenset({"schema_version", "tbox_fingerprint", "assertions"
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]*$")
 
 
-class ToolCapabilityDescriptorError(OntologyContextError):
-    """Raised when a controlled-tool capability descriptor is invalid."""
-
-
 class TripleDeltaError(OntologyContextError):
     """Raised when a proposed evidence delta is invalid."""
 
@@ -90,24 +86,9 @@ class ABoxSnapshot:
     namespace: str
     specification_iri: str
     tbox_fingerprint: str
-
-
-@dataclass(frozen=True)
-class ToolOutputs:
-    """Fixed ontology and typed-context outputs advertised by one tool."""
-
-    classes: tuple[str, ...]
-    properties: tuple[str, ...]
-    typed_context_records: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ToolCapabilityDescriptor:
-    """Validated routing metadata for a controlled evidence tool."""
-
-    producer: str
-    can_produce: ToolOutputs
-    may_require: tuple[str, ...]
+    product_requirement: str
+    delta_count: int
+    accepted_assertion_count: int
 
 
 @dataclass(frozen=True)
@@ -211,105 +192,35 @@ def initialize_interaction_abox(
     return _snapshot_from_graph(root, graph, manifest)
 
 
-def validate_tool_capability_descriptor(
-    descriptor: ToolCapabilityDescriptor | Mapping[str, object],
+def load_interaction_abox(
+    interaction_root: Path,
     tbox: TBoxSnapshot,
-) -> ToolCapabilityDescriptor:
-    """Validate fixed-symbol routing metadata for one controlled tool.
+) -> ABoxSnapshot:
+    """Reload and validate one persisted PA interaction ABox.
 
     Args:
-        descriptor: Dataclass or JSON-shaped descriptor with `producer`,
-            `can_produce`, and `may_require` fields.
-        tbox: Validated immutable TBox snapshot.
+        interaction_root: Root containing the initialized ontology context.
+        tbox: The exact immutable TBox snapshot used at initialization.
 
     Returns:
-        A normalized immutable descriptor.
+        The validated current ABox snapshot.
 
     Raises:
-        ToolCapabilityDescriptorError: If the descriptor exceeds its authority.
+        OntologyContextError: If the graph, manifest, provenance, or TBox does
+            not match the initialized interaction.
     """
     _validate_tbox_snapshot(tbox)
-    normalized = _coerce_descriptor(descriptor)
-
-    if not _SAFE_IDENTIFIER.fullmatch(normalized.producer):
-        raise ToolCapabilityDescriptorError("producer must be a fixed non-path identifier.")
-    if not any(
-        (
-            normalized.can_produce.classes,
-            normalized.can_produce.properties,
-            normalized.can_produce.typed_context_records,
-        )
-    ):
-        raise ToolCapabilityDescriptorError("can_produce must not be empty.")
-
-    for class_iri in normalized.can_produce.classes:
-        _raise_if_primitive_symbol(class_iri, ToolCapabilityDescriptorError)
-        _require_absolute_iri(
-            class_iri,
-            "can_produce class",
-            ToolCapabilityDescriptorError,
-        )
-        if class_iri not in tbox.classes:
-            raise ToolCapabilityDescriptorError(
-                f"can_produce class is not declared by the TBox: {class_iri}"
-            )
-        if tbox.is_class_or_subclass(
-            URIRef(class_iri),
-            URIRef(f"{tbox.ppr_namespace}resource"),
-        ) or tbox.is_class_or_subclass(
-            URIRef(class_iri),
-            URIRef(f"{tbox.ppr_namespace}capability"),
-        ):
-            raise ToolCapabilityDescriptorError(
-                "PA evidence tools cannot produce resource or capability assertions."
-            )
-        if _class_is_primitive(tbox, URIRef(class_iri)):
-            raise ToolCapabilityDescriptorError(
-                "PA evidence tools cannot produce primitive assertions."
-            )
-
-    allowed_properties = (
-        set(tbox.object_properties) | set(tbox.datatype_properties) | {str(RDF.type)}
+    abox, _manifest, _provenance = _load_persisted_abox(
+        Path(interaction_root).resolve(),
+        tbox,
     )
-    for property_iri in normalized.can_produce.properties:
-        _raise_if_prohibited_property(property_iri, ToolCapabilityDescriptorError)
-        _require_absolute_iri(
-            property_iri,
-            "can_produce property",
-            ToolCapabilityDescriptorError,
-        )
-        if property_iri not in allowed_properties:
-            raise ToolCapabilityDescriptorError(
-                f"can_produce property is not declared by the TBox: {property_iri}"
-            )
-        if property_iri != str(RDF.type) and _property_implies_resource_catalog_fact(
-            tbox,
-            URIRef(property_iri),
-        ):
-            raise ToolCapabilityDescriptorError(
-                "PA evidence tools cannot produce resource-catalog assertions."
-            )
-
-    for symbol in normalized.can_produce.typed_context_records:
-        _require_nonempty_string(
-            symbol,
-            "typed_context_records entry",
-            ToolCapabilityDescriptorError,
-        )
-        _raise_if_primitive_symbol(symbol, ToolCapabilityDescriptorError)
-    for evidence_kind in normalized.may_require:
-        _require_nonempty_string(
-            evidence_kind,
-            "may_require entry",
-            ToolCapabilityDescriptorError,
-        )
-    return normalized
+    return abox
 
 
 def validate_and_merge_triple_delta(
     interaction_root: Path,
     tbox: TBoxSnapshot,
-    descriptor: ToolCapabilityDescriptor | Mapping[str, object],
+    producer: str,
     delta: TripleDelta | Mapping[str, object],
     *,
     authorized_evidence_refs: Iterable[str],
@@ -319,7 +230,7 @@ def validate_and_merge_triple_delta(
     Args:
         interaction_root: Root containing a previously initialized ABox.
         tbox: The exact TBox snapshot used to initialize that ABox.
-        descriptor: Authority advertised by the delta's controlled producer.
+        producer: Fixed application-owned producer symbol used for audit records.
         delta: Proposed assertions plus non-RDF uncertainty and context refs.
         authorized_evidence_refs: Exact evidence refs permitted this turn. The
             caller constructs this trusted allowlist; it must never come from
@@ -330,15 +241,22 @@ def validate_and_merge_triple_delta(
         partially accepted result.
 
     Raises:
-        OntologyContextError: If any descriptor, delta, ABox, or write is invalid.
+        OntologyContextError: If the producer, delta, ABox, or write is invalid.
     """
-    validated_descriptor = validate_tool_capability_descriptor(descriptor, tbox)
+    _validate_tbox_snapshot(tbox)
+    validated_producer = _require_nonempty_string(
+        producer,
+        "producer",
+        TripleDeltaError,
+    )
+    if not _SAFE_IDENTIFIER.fullmatch(validated_producer):
+        raise TripleDeltaError("producer must be a fixed non-path identifier.")
     authorized_refs = _validated_authorized_refs(authorized_evidence_refs)
     normalized_delta = _coerce_delta(delta)
     root = Path(interaction_root).resolve()
     abox, manifest, provenance = _load_persisted_abox(root, tbox)
 
-    _validate_delta_metadata(normalized_delta, validated_descriptor)
+    _validate_delta_metadata(normalized_delta)
     candidate = Graph()
     for prefix, namespace in abox.graph.namespaces():
         candidate.bind(prefix, namespace)
@@ -351,7 +269,6 @@ def validate_and_merge_triple_delta(
             assertion,
             abox,
             tbox,
-            validated_descriptor,
             authorized_refs,
         )
         candidate.add(triple)
@@ -366,8 +283,7 @@ def validate_and_merge_triple_delta(
     delta_record = {
         "schema_version": _SCHEMA_VERSION,
         "delta_number": next_delta_number,
-        "producer": validated_descriptor.producer,
-        "tool_capability_descriptor": _descriptor_record(validated_descriptor),
+        "producer": validated_producer,
         "assertions": normalized_assertions,
         "uncertainty": list(normalized_delta.uncertainty),
         "unresolved_evidence_needs": list(normalized_delta.unresolved_evidence_needs),
@@ -379,7 +295,7 @@ def validate_and_merge_triple_delta(
         provenance_assertions.append(
             {
                 **assertion,
-                "producer": validated_descriptor.producer,
+                "producer": validated_producer,
                 "delta_ref": delta_path.name,
             }
         )
@@ -485,74 +401,9 @@ def _snapshot_from_graph(
         namespace=str(manifest["interaction_namespace"]),
         specification_iri=str(manifest["specification_iri"]),
         tbox_fingerprint=str(manifest["tbox_fingerprint"]),
-    )
-
-
-def _coerce_descriptor(
-    descriptor: ToolCapabilityDescriptor | Mapping[str, object],
-) -> ToolCapabilityDescriptor:
-    if isinstance(descriptor, ToolCapabilityDescriptor):
-        if not isinstance(descriptor.can_produce, ToolOutputs):
-            raise ToolCapabilityDescriptorError("can_produce must be a ToolOutputs value.")
-        descriptor = {
-            "producer": descriptor.producer,
-            "can_produce": {
-                "classes": descriptor.can_produce.classes,
-                "properties": descriptor.can_produce.properties,
-                "typed_context_records": descriptor.can_produce.typed_context_records,
-            },
-            "may_require": descriptor.may_require,
-        }
-    if not isinstance(descriptor, Mapping) or set(descriptor) != {
-        "producer",
-        "can_produce",
-        "may_require",
-    }:
-        raise ToolCapabilityDescriptorError(
-            "Descriptor fields must be producer, can_produce, and may_require."
-        )
-    can_produce = descriptor["can_produce"]
-    if not isinstance(can_produce, Mapping):
-        raise ToolCapabilityDescriptorError("can_produce must be an object.")
-    allowed_can_produce_keys = {
-        "classes",
-        "properties",
-        "typed_context_records",
-    }
-    if not {"classes", "properties"}.issubset(can_produce) or not set(can_produce).issubset(
-        allowed_can_produce_keys
-    ):
-        raise ToolCapabilityDescriptorError(
-            "can_produce requires classes and properties and permits typed_context_records."
-        )
-    return ToolCapabilityDescriptor(
-        producer=_require_nonempty_string(
-            descriptor["producer"],
-            "producer",
-            ToolCapabilityDescriptorError,
-        ),
-        can_produce=ToolOutputs(
-            classes=_string_tuple(
-                can_produce["classes"],
-                "can_produce.classes",
-                ToolCapabilityDescriptorError,
-            ),
-            properties=_string_tuple(
-                can_produce["properties"],
-                "can_produce.properties",
-                ToolCapabilityDescriptorError,
-            ),
-            typed_context_records=_string_tuple(
-                can_produce.get("typed_context_records", []),
-                "can_produce.typed_context_records",
-                ToolCapabilityDescriptorError,
-            ),
-        ),
-        may_require=_string_tuple(
-            descriptor["may_require"],
-            "may_require",
-            ToolCapabilityDescriptorError,
-        ),
+        product_requirement=str(manifest["product_requirement"]),
+        delta_count=int(manifest["delta_count"]),
+        accepted_assertion_count=int(manifest["accepted_assertion_count"]),
     )
 
 
@@ -680,7 +531,6 @@ def _validated_authorized_refs(values: Iterable[str]) -> frozenset[str]:
 
 def _validate_delta_metadata(
     delta: TripleDelta,
-    descriptor: ToolCapabilityDescriptor,
 ) -> None:
     if not any(
         (
@@ -691,8 +541,6 @@ def _validate_delta_metadata(
         )
     ):
         raise TripleDeltaError("Delta must contain a result or unresolved record.")
-    if delta.typed_context_refs and not descriptor.can_produce.typed_context_records:
-        raise TripleDeltaError("Tool did not advertise a typed context record output.")
     for context_ref in delta.typed_context_refs:
         _validate_typed_context_ref(context_ref)
 
@@ -701,7 +549,6 @@ def _validated_assertion(
     assertion: TripleAssertion,
     abox: ABoxSnapshot,
     tbox: TBoxSnapshot,
-    descriptor: ToolCapabilityDescriptor,
     authorized_refs: frozenset[str],
 ) -> tuple[tuple[URIRef, URIRef, URIRef | Literal], dict[str, object]]:
     _raise_if_primitive_symbol(assertion.subject, TripleDeltaError)
@@ -719,10 +566,8 @@ def _validated_assertion(
             raise TripleDeltaError(f"Assertion evidence_ref is not authorized: {evidence_ref}")
 
     predicate = URIRef(assertion.predicate)
-    if predicate != RDF.type and assertion.predicate not in descriptor.can_produce.properties:
-        raise TripleDeltaError(f"Producer did not advertise predicate: {assertion.predicate}")
     if predicate == RDF.type:
-        object_node, object_record = _validated_type_object(assertion, tbox, descriptor)
+        object_node, object_record = _validated_type_object(assertion, tbox)
     elif assertion.predicate in tbox.object_properties:
         object_node, object_record = _validated_iri_object(assertion, abox)
     elif assertion.predicate in tbox.datatype_properties:
@@ -746,7 +591,6 @@ def _validated_assertion(
 def _validated_type_object(
     assertion: TripleAssertion,
     tbox: TBoxSnapshot,
-    descriptor: ToolCapabilityDescriptor,
 ) -> tuple[URIRef, dict[str, object]]:
     if assertion.object.kind != "iri" or not isinstance(assertion.object.value, str):
         raise TripleDeltaError("rdf:type object must be a declared class IRI.")
@@ -755,8 +599,6 @@ def _validated_type_object(
     _require_absolute_iri(class_iri, "rdf:type object", TripleDeltaError)
     if class_iri not in tbox.classes:
         raise TripleDeltaError(f"rdf:type class is not declared: {class_iri}")
-    if class_iri not in descriptor.can_produce.classes:
-        raise TripleDeltaError(f"Producer did not advertise class: {class_iri}")
     class_ref = URIRef(class_iri)
     if tbox.is_class_or_subclass(
         class_ref,
@@ -1065,20 +907,6 @@ def _write_json(path: Path, value: object) -> None:
         allow_nan=False,
     )
     path.write_text(serialized + "\n", encoding="utf-8")
-
-
-def _descriptor_record(descriptor: ToolCapabilityDescriptor) -> dict[str, object]:
-    can_produce: dict[str, object] = {
-        "classes": list(descriptor.can_produce.classes),
-        "properties": list(descriptor.can_produce.properties),
-    }
-    if descriptor.can_produce.typed_context_records:
-        can_produce["typed_context_records"] = list(descriptor.can_produce.typed_context_records)
-    return {
-        "producer": descriptor.producer,
-        "can_produce": can_produce,
-        "may_require": list(descriptor.may_require),
-    }
 
 
 def _instance_is_type(

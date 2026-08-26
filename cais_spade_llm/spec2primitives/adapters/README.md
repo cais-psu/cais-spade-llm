@@ -6,8 +6,13 @@ does not import `SystemBridge` or issue ROS2 shell commands. The registered
 process forces `run_perception:=false` and launches `table_spec2primitives.world`.
 
 `ui_runtime.py` composes that dual-Gazebo authority, the narrow ProductAgent
-context runtime, and the Spec2Primitives `contexts/` root for the Phase 2.1 UI
-connection.
+context runtime, validated package-local model configuration, the optional
+OpenAI document vision boundary, the request-scoped live observation capture
+boundary, and the Spec2Primitives `contexts/` root. The main PA loop, Phase 4.1
+document diagnostic, and Phase 4.2 geometry support remain independent. The UI
+does not invoke geometry processing: it only polls the compact Phase 4.2B1
+automatic segmentation status. A later authorized runtime caller may use the
+injected capture boundary to invoke the observation-only automatic pipeline.
 
 ProductAgent and future RobotAgent adapters belong under `../agents/pa/` and
 `../agents/ra/`, respectively. ProductAgent and RobotAgent remain shared,

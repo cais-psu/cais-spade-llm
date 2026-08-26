@@ -135,7 +135,6 @@ def test_phase_2_message_states_the_connected_and_unavailable_boundaries() -> No
         "grounding",
         "planning",
         "RA",
-        "CCA",
         "robot action",
     ):
         assert unavailable_boundary in message
@@ -172,7 +171,8 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
         assert exact_ui_term in source
 
     assert 'requirement_input.on_value_change' in source
-    assert ').props("outlined").classes("w-full")' in source
+    assert '.props("outlined")' in source
+    assert '.classes("w-full")' in source
     assert 'max_pa_turns_input.on_value_change' in source
     assert 'max_pa_turns_input.props("disable")' in source
     assert 'max_pa_turns_input.props(remove="disable")' in source
@@ -209,16 +209,7 @@ def test_phase_2_pa_ui_imports_only_the_authorized_phase_3_dependencies() -> Non
     assert (
         "cais_spade_llm.spec2primitives.adapters.ui_runtime" in imported_modules
     )
-    assert not any(
-        forbidden in module
-        for module in imported_modules
-        for forbidden in (
-            ".agents.ra",
-            "cca",
-            "document_evidence",
-            "grounding",
-        )
-    )
+    assert not any(".agents.ra" in module for module in imported_modules)
 
 
 def test_spec2primitives_does_not_import_bridge() -> None:

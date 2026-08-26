@@ -15,6 +15,12 @@ from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
     Spec2PrimitivesUIRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
+from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
+    ControlledGroundingRuntime,
+    complete_context,
+    ontology_config,
+    request_clarification,
+)
 
 
 class FakeProductAgent:
@@ -58,7 +64,7 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     product_agent = FakeProductAgent(
         responses=[
             _needed_context_response(context_ref="Gear_Medium.STL"),
-            _completion_response(),
+            complete_context(),
         ]
     )
     runtime = _runtime(tmp_path, product_agent)
@@ -75,9 +81,7 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert isinstance(interaction_identifier, str)
     assert interaction_identifier.startswith("interaction_")
     assert interaction_root == tmp_path / interaction_identifier
-    assert interaction["phase_3_1"] == _needed_context_response(
-        context_ref="Gear_Medium.STL"
-    )
+    assert interaction["phase_3_1"] == _needed_context_response(context_ref="Gear_Medium.STL")
     assert interaction["phase_3_3"] == _completion_response()
     assert interaction["max_pa_turns"] == 12
     served_context = interaction["phase_3_2"]["served_context"]
@@ -86,21 +90,17 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert served_context["provenance"]["repository_path"] == (
         "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL"
     )
-    assert _read_json(
-        interaction_root / "products/user_requirement/product_requirement.json"
-    ) == {"product_requirement": product_requirement}
-    assert (
-        interaction_root
-        / "products/served_references/Gear_Medium.STL.json"
-    ).is_file()
-    assert (
-        interaction_root / "interaction_record/retrieval_0001.json"
-    ).is_file()
+    assert _read_json(interaction_root / "products/user_requirement/product_requirement.json") == {
+        "product_requirement": product_requirement
+    }
+    assert (interaction_root / "products/served_references/Gear_Medium.STL.json").is_file()
+    assert (interaction_root / "interaction_record/retrieval_0001.json").is_file()
 
     view = spec2primitives_ui._pa_ui_view(interaction)
     assert view["activity_state"] == "context understanding complete"
-    assert "Ready for Phase 4 grounding" in view["activity_message"]
-    assert "robot actions are not known yet" in view["activity_message"]
+    assert "persisted Phase 4.3 assessment" in view["activity_message"]
+    assert "Phase 4.0 ontology initialized" in view["activity_message"]
+    assert "Phase 5 planning remains unavailable" in view["activity_message"]
     assert product_requirement in view["messages"]
     assert "context understanding complete" in view["messages"]
     assert "Gear_Medium.STL" in view["needed_context"]
@@ -109,6 +109,7 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert "turn_0001" in view["interaction_record"]
     assert "retrieval_0001" in view["interaction_record"]
     assert "pa_context_settings" in view["interaction_record"]
+    assert "ontology_initialization" in view["interaction_record"]
     assert '"max_pa_turns": 12' in view["interaction_record"]
 
 
@@ -118,7 +119,7 @@ def test_connected_ui_passes_and_displays_maximum_50_unchanged(
     product_agent = FakeProductAgent(
         responses=[
             _needed_context_response(context_ref="Gear_Medium.STL"),
-            _completion_response(),
+            complete_context(),
         ]
     )
     observed_turns: list[tuple[int, int]] = []
@@ -134,12 +135,9 @@ def test_connected_ui_passes_and_displays_maximum_50_unchanged(
 
     assert observed_turns == [(1, 50), (2, 50)]
     assert interaction["max_pa_turns"] == 50
-    assert "\"max_pa_turns\": 50" in spec2primitives_ui._pa_ui_view(interaction)[
-        "interaction_record"
-    ]
+    assert '"max_pa_turns": 50' in spec2primitives_ui._pa_ui_view(interaction)["interaction_record"]
     settings = _read_json(
-        interaction["interaction_root"]
-        / "interaction_record/pa_context_settings.json"
+        interaction["interaction_root"] / "interaction_record/pa_context_settings.json"
     )
     assert settings["max_pa_turns"] == 50
 
@@ -168,9 +166,8 @@ def test_connected_ui_stops_for_clarification_without_user_reply(
     clarification_question = "Which Medium Gear should be assembled?"
     product_agent = FakeProductAgent(
         responses=[
-            _needed_context_response(
-                clarification_question=clarification_question,
-            )
+            _needed_context_response(context_ref="NIST_assembly_instructions.pdf"),
+            request_clarification(clarification_question),
         ]
     )
     interaction = asyncio.run(
@@ -180,9 +177,10 @@ def test_connected_ui_stops_for_clarification_without_user_reply(
         )
     )
 
-    assert interaction["phase_3_2"]["failure"]["reason"] == (
-        "context_not_requested"
-    )
+    assert interaction["phase_3_3"] == {
+        "needed_context": request_clarification(clarification_question)["needed_context"],
+        "context understanding complete": False,
+    }
     view = spec2primitives_ui._pa_ui_view(interaction)
     assert view["activity_state"] == "clarification needed"
     assert view["clarification"] == clarification_question
@@ -216,18 +214,72 @@ def test_connected_ui_records_phase_3_1_failure_and_does_not_serve(
     assert serving_calls == []
     assert interaction["phase_3_1"]["failure"]["reason"] == "pa_call_failed"
     assert interaction["phase_3_2"] is None
-    assert spec2primitives_ui._pa_ui_view(interaction)["activity_state"] == (
-        "failed"
+    assert spec2primitives_ui._pa_ui_view(interaction)["activity_state"] == ("failed")
+
+
+def test_production_ui_fails_closed_when_grounding_is_unconfigured(
+    tmp_path: Path,
+) -> None:
+    product_agent = FakeProductAgent(
+        responses=[_needed_context_response(context_ref="Gear_Medium.STL")]
     )
+
+    interaction = asyncio.run(
+        spec2primitives_ui._run_pa_ui_interaction(
+            _runtime(tmp_path, product_agent, with_grounding=False),
+            "assemble Medium Gear",
+        )
+    )
+    view = spec2primitives_ui._pa_ui_view(interaction)
+
+    assert product_agent.calls == []
+    assert interaction["phase_3_1"]["failure"]["reason"] == "grounding_unavailable"
+    assert interaction["phase_3_2"] is None
+    assert interaction["phase_3_3"] is None
+    assert view["activity_state"] == "grounding unavailable"
+    assert "No PA evidence decision was requested" in view["activity_message"]
+    assert "context understanding complete" not in view["messages"]
+
+
+def test_ui_ignores_unbacked_completion_turn(tmp_path: Path) -> None:
+    interaction_root = tmp_path / "interaction_controlled"
+    record_root = interaction_root / "interaction_record"
+    record_root.mkdir(parents=True)
+    (record_root / "turn_0002.json").write_text(
+        json.dumps(
+            {
+                "turn": 2,
+                "product_requirement": "assemble Medium Gear",
+                "PA_input": {"assessment_ref": "missing_decision.json"},
+                "PA_output": _completion_response(),
+                "failure": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    interaction = {
+        "interaction_identifier": "interaction_controlled",
+        "interaction_root": interaction_root,
+        "product_requirement": "assemble Medium Gear",
+        "phase_3_1": {"needed_context": {}},
+        "phase_3_2": None,
+        "phase_3_3": None,
+        "max_pa_turns": 12,
+    }
+
+    view = spec2primitives_ui._pa_ui_view(interaction)
+
+    assert view["activity_state"] != "context understanding complete"
+    assert "context understanding complete" not in view["messages"]
 
 
 def test_connected_ui_uses_unique_no_overwrite_interaction_roots(
     tmp_path: Path,
 ) -> None:
-    response = _needed_context_response(
-        clarification_question="Which Medium Gear should be assembled?"
+    request = _needed_context_response(context_ref="Gear_Medium.STL")
+    product_agent = FakeProductAgent(
+        responses=[request, complete_context(), request, complete_context()]
     )
-    product_agent = FakeProductAgent(responses=[response, response])
     runtime = _runtime(tmp_path, product_agent)
 
     first = asyncio.run(
@@ -247,7 +299,7 @@ def test_connected_ui_uses_unique_no_overwrite_interaction_roots(
     assert first["interaction_root"] != second["interaction_root"]
     assert first["interaction_root"].is_dir()
     assert second["interaction_root"].is_dir()
-    assert len(product_agent.calls) == 2
+    assert len(product_agent.calls) == 4
     assert product_agent.setup_calls == 0
 
 
@@ -256,7 +308,10 @@ def test_connected_ui_routes_live_request_to_phase_3_2_once(
     tmp_path: Path,
 ) -> None:
     product_agent = FakeProductAgent(
-        responses=[_needed_context_response(request_live_observation=True)]
+        responses=[
+            _needed_context_response(request_live_observation=True),
+            complete_context(),
+        ]
     )
     serving_calls: list[Path] = []
 
@@ -269,9 +324,7 @@ def test_connected_ui_routes_live_request_to_phase_3_2_once(
                 "evidence_type": "observation",
                 "evidence_label": "live",
                 "provenance": {
-                    "manifest_path": (
-                        "products/observations/observation_0001/manifest.json"
-                    )
+                    "manifest_path": ("products/observations/observation_0001/manifest.json")
                 },
                 "observation_evidence": {},
             }
@@ -290,9 +343,7 @@ def test_connected_ui_routes_live_request_to_phase_3_2_once(
     )
 
     assert serving_calls == [interaction["interaction_root"]]
-    assert interaction["phase_3_2"]["served_context"]["observation_ref"] == (
-        "observation_0001"
-    )
+    assert interaction["phase_3_2"]["served_context"]["observation_ref"] == ("observation_0001")
 
 
 def test_product_agent_runtime_delegates_only_the_structured_call(
@@ -308,6 +359,7 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
             *,
             name: str,
             instruction_override: str,
+            model: str,
         ) -> None:
             constructed.append(
                 {
@@ -315,6 +367,7 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
                     "password": password,
                     "name": name,
                     "instruction_override": instruction_override,
+                    "model": model,
                 }
             )
             self.calls: list[dict[str, object]] = []
@@ -325,9 +378,7 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
             *,
             response_format: dict[str, Any],
         ) -> dict[str, Any]:
-            self.calls.append(
-                {"prompt": prompt, "response_format": response_format}
-            )
+            self.calls.append({"prompt": prompt, "response_format": response_format})
             return _needed_context_response(context_ref="Gear_Medium.STL")
 
     monkeypatch.setattr(
@@ -335,7 +386,7 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
         "ProductAgent",
         ControlledSharedProductAgent,
     )
-    runtime = product_agent_runtime.create_product_agent_context_runtime()
+    runtime = product_agent_runtime.create_product_agent_context_runtime(model="gpt-5.4")
     response_format = {"strict": True}
 
     result = asyncio.run(
@@ -356,6 +407,7 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
                 "needed_context prompt exactly. Do not plan, contact another "
                 "agent, or execute robot behavior."
             ),
+            "model": "gpt-5.4",
         }
     ]
     assert not hasattr(runtime, "setup")
@@ -366,10 +418,13 @@ def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
 ) -> None:
     dual_gazebo = object()
     product_agent = FakeProductAgent()
+    selected_models: list[str] = []
+    monkeypatch.delenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", raising=False)
+    monkeypatch.delenv("SPEC2PRIMITIVES_PPR_NAMESPACE", raising=False)
     monkeypatch.setattr(
         product_agent_runtime,
         "create_product_agent_context_runtime",
-        lambda: product_agent,
+        lambda *, model: selected_models.append(model) or product_agent,
     )
 
     runtime = ui_runtime.create_spec2primitives_ui_runtime(dual_gazebo)
@@ -377,6 +432,13 @@ def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
     assert runtime.dual_gazebo is dual_gazebo
     assert runtime.product_agent is product_agent
     assert runtime.contexts_root == ui_runtime.SPEC2PRIMITIVES_CONTEXTS_ROOT
+    assert selected_models == ["gpt-5.4"]
+    assert runtime.model_config is not None
+    assert runtime.ontology_config is None
+    assert runtime.grounding_runtime is None
+    assert runtime.document_vision_runtime is None
+    assert runtime.observation_capture_runtime is not None
+    assert "SPEC2PRIMITIVES_PPR_TBOX_PATH" in (runtime.document_diagnostic_unavailable_reason or "")
 
 
 def test_product_agent_runtime_has_no_setup_planning_or_execution_call() -> None:
@@ -389,7 +451,6 @@ def test_product_agent_runtime_has_no_setup_planning_or_execution_call() -> None
         "ProcessPlanner",
         "ResourceAgent",
         "RobotAgent",
-        "CCA",
         "primitive_steps",
         ".execute(",
     ):
@@ -399,11 +460,15 @@ def test_product_agent_runtime_has_no_setup_planning_or_execution_call() -> None
 def _runtime(
     contexts_root: Path,
     product_agent: FakeProductAgent,
+    *,
+    with_grounding: bool = True,
 ) -> Spec2PrimitivesUIRuntime:
     return Spec2PrimitivesUIRuntime(
         dual_gazebo=object(),
         product_agent=product_agent,
         contexts_root=contexts_root,
+        ontology_config=ontology_config() if with_grounding else None,
+        grounding_runtime=(ControlledGroundingRuntime() if with_grounding else None),
     )
 
 

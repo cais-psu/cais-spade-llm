@@ -25,6 +25,7 @@ inference-sdk = "0.37.1"
 numpy = ">=1.26,<2"
 opencv-contrib-python-headless = "4.10.0.84"
 rdflib = "^7.6.0"
+openai = ">=1.109.1,<2"
 
 [tool.ruff]
 target-version = "py310"

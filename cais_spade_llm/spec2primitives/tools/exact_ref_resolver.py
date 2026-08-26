@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import struct
@@ -36,6 +37,78 @@ _CAD_KEYS = {
 def approved_context_refs() -> tuple[str, ...]:
     """Return every exact ref in the fixed approved-source inventory."""
     return tuple(_load_sources())
+
+
+def approved_context_ref_evidence_types() -> dict[str, str]:
+    """Return exact approved refs mapped to their fixed evidence types."""
+    return {
+        context_ref: str(source["evidence_type"]) for context_ref, source in _load_sources().items()
+    }
+
+
+def approved_cad_refs() -> tuple[str, ...]:
+    """Return every exact approved CAD ref in inventory order."""
+    return tuple(
+        context_ref
+        for context_ref, source in _load_sources().items()
+        if source["evidence_type"] == "CAD"
+    )
+
+
+def approved_document_path(context_ref: str) -> Path:
+    """Return the local path for one exact approved document ref.
+
+    This boundary never resolves caller-supplied paths. The value must be an
+    exact document key from the fixed approved-source inventory.
+    """
+    if (
+        not isinstance(context_ref, str)
+        or not context_ref
+        or context_ref != context_ref.strip()
+        or _is_forbidden_ref(context_ref)
+    ):
+        raise ValueError("context_ref must be one exact approved document ref.")
+    source = _load_sources().get(context_ref)
+    if source is None or source.get("evidence_type") != "document":
+        raise ValueError("context_ref is not an approved document ref.")
+    source_path = (_REPOSITORY_ROOT / str(source["repository_path"])).resolve()
+    try:
+        source_path.relative_to(_REFERENCES_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("Approved document path is outside its permitted directory.") from exc
+    if source_path.name != context_ref or source_path.suffix.lower() != ".pdf":
+        raise ValueError("Approved document source does not match its exact ref.")
+    if not source_path.is_file():
+        raise OSError("Approved document source is missing.")
+    return source_path
+
+
+def approved_cad_path(context_ref: str) -> Path:
+    """Return the local path for one exact approved CAD ref.
+
+    The value must be an exact CAD key from the fixed approved-source inventory;
+    caller-supplied filesystem paths are never resolved.
+    """
+    if (
+        not isinstance(context_ref, str)
+        or not context_ref
+        or context_ref != context_ref.strip()
+        or _is_forbidden_ref(context_ref)
+    ):
+        raise ValueError("context_ref must be one exact approved CAD ref.")
+    source = _load_sources().get(context_ref)
+    if source is None or source.get("evidence_type") != "CAD":
+        raise ValueError("context_ref is not an approved CAD ref.")
+    source_path = (_REPOSITORY_ROOT / str(source["repository_path"])).resolve()
+    try:
+        source_path.relative_to(_CAD_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("Approved CAD path is outside its permitted directory.") from exc
+    if source_path.name != context_ref or source_path.suffix.lower() != ".stl":
+        raise ValueError("Approved CAD source does not match its exact ref.")
+    if not source_path.is_file():
+        raise OSError("Approved CAD source is missing.")
+    return source_path
 
 
 def resolve_context_ref(request: dict[str, object]) -> dict[str, object]:
@@ -95,9 +168,7 @@ def resolve_context_ref(request: dict[str, object]) -> dict[str, object]:
     evidence_type = source["evidence_type"]
     allowed_root = _REFERENCES_ROOT if evidence_type == "document" else _CAD_ROOT
     try:
-        source_path = (
-            _REPOSITORY_ROOT / str(source["repository_path"])
-        ).resolve()
+        source_path = (_REPOSITORY_ROOT / str(source["repository_path"])).resolve()
         source_path.relative_to(allowed_root.resolve())
     except (OSError, ValueError):
         return _rejection(
@@ -160,8 +231,7 @@ def _load_sources() -> dict[str, dict[str, Any]]:
         repository_path = entry["repository_path"]
         source_url = entry["source_url"]
         if not all(
-            isinstance(value, str) and value
-            for value in (context_ref, repository_path, source_url)
+            isinstance(value, str) and value for value in (context_ref, repository_path, source_url)
         ):
             raise ValueError("Approved source strings must be non-empty.")
         if context_ref in sources:
@@ -169,11 +239,7 @@ def _load_sources() -> dict[str, dict[str, Any]]:
 
         if evidence_type == "document":
             page_count = entry["page_count"]
-            if (
-                not isinstance(page_count, int)
-                or isinstance(page_count, bool)
-                or page_count <= 0
-            ):
+            if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count <= 0:
                 raise ValueError("Approved document page_count must be positive.")
         elif entry["units"] != "mm":
             raise ValueError("Approved CAD units must be mm.")
@@ -284,14 +350,12 @@ def _read_binary_stl(source_path: Path, units: str) -> dict[str, object]:
 
     return {
         "units": units,
+        "source_sha256": hashlib.sha256(data).hexdigest(),
         "triangle_count": triangle_count,
         "bounds_mm": {
             "minimum": [_clean_number(value) for value in minimum],
             "maximum": [_clean_number(value) for value in maximum],
-            "size": [
-                _clean_number(maximum[axis] - minimum[axis])
-                for axis in range(3)
-            ],
+            "size": [_clean_number(maximum[axis] - minimum[axis]) for axis in range(3)],
         },
     }
 
