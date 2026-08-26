@@ -26,7 +26,27 @@ enter clarification or completion.
 `ProductAgentContextRuntime` interface used by the Phase 2.1 UI connection. It
 delegates only `ask_llm_structured(...)` and never calls ProductAgent `setup()`.
 
-No implemented PA step starts ProductAgent SPADE behaviours, calls a VLM,
-retrieves the primitive catalog, builds an assembly plan, connects RA or CCA,
-performs grounding, or executes robot behavior. Those remain later, separately
-authorized phases.
+`product_context.py` implements the PA-owned part of the standalone Phase 4.0
+foundation. Shared immutable TBox loading, profile validation, fingerprinting,
+and class-hierarchy queries live in `ontology/ppr_tbox.py`. Product context
+creates an independent writable Turtle ABox from the exact unresolved
+requirement, validates controlled-tool descriptors and evidence-backed triple
+deltas, and persists accepted assertions with provenance. Its minimal semantic
+bridge is `specification defines required feature` and `requested process
+realizes the same feature`.
+
+PA owns and mutates only its interaction ABox. The PA ABox does not contain RA,
+primitive-offering, or `capableOf` assertions. A future RA resource ABox will
+have separate ownership; PA and RA share the immutable TBox rather than one
+writable graph. No PA-to-RA ontology projection is implemented in this phase.
+
+The merge caller supplies the trusted `authorized_evidence_refs` allowlist; a
+tool or its proposed delta cannot authorize its own evidence. Typed-context refs
+remain opaque JSON records under `products/grounding/` until their separately
+authorized producer contracts are implemented.
+
+Phase 4.0 is not yet called by `context_interaction.py` or
+`context_assessment.py`. No connected PA runtime step starts ProductAgent SPADE
+behaviours, calls a VLM, retrieves the primitive catalog, builds an assembly
+plan, connects RA or CCA, performs grounding, or executes robot behavior. Those
+remain later, separately authorized phases.

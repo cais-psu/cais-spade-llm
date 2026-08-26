@@ -1,8 +1,18 @@
 # Schemas
 
-This directory will contain future data templates and contracts. Schemas define
-the shape and required fields of stage inputs and outputs; they are not experiment
-results.
+This directory remains reserved for shared data templates and contracts. Schemas
+define the shape and required fields of stage inputs and outputs; they are not
+experiment results.
+
+Phase 4.0 ontology code is not stored as a schema in this directory. Shared
+immutable PPR TBox loading and validation live in `ontology/ppr_tbox.py`, while
+PA-owned writable interaction-ABox behavior lives in
+`agents/pa/product_context.py`. Together they represent `specification defines
+required feature` and `requested process realizes the same feature`, while
+rejecting RA, primitive-offering, and `capableOf` assertions from the PA ABox.
+A future RA resource ABox remains separately owned; only the TBox is shared.
+Phase 4.0 is not yet wired into the Phase 3 retrieval loop and adds no shared
+schema file here.
 
 Planned contracts cover:
 

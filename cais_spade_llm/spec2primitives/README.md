@@ -9,8 +9,12 @@ implementation plan, approved source references, demand-driven RGB-D context
 tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
 interaction UI connected through Phase 3.3, the Phase 3.1 product-requirement
 intake boundary, Phase 3.2 requested-context serving, and configurable Phase 3.3
-ProductAgent context reassessment mechanics. The retrieval-first clarification
-gate and all Phase 4 context understanding remain unimplemented.
+ProductAgent context reassessment mechanics. The Phase 4.0 RDFLib foundation
+now separates shared immutable TBox semantics from PA-owned product context,
+initializes independent interaction ABoxes, and validates evidence-backed fact
+deltas. It is not yet wired into the Phase 3 retrieval loop; the retrieval-first
+clarification gate and Phase 4.1 onward context understanding remain
+unimplemented.
 
 ## MUST: Do not leak the answer
 
@@ -65,18 +69,23 @@ insertion-physics, or robot-execution claim.
 ## Folder guide
 
 - `agents/pa/`: the Phase 3.1 ProductAgent composition boundary, Phase 3.2 exact
-  context serving, Phase 3.3 reassessment loop, and future PA workflow code.
+  context serving, Phase 3.3 reassessment loop, PA-owned Phase 4.0 product
+  context, and future PA workflow code.
 - `agents/ra/`: future Spec2Primitives RobotAgent adapter and RA workflow code.
 - `adapters/`: narrow runtime connections, beginning with
   `gazebo_dual_spec2primitives`.
 - `cases/`: case-study inputs, beginning with
   `product requirement: assemble Medium Gear`.
+- `ontology/`: shared immutable PPR TBox loading, profile validation,
+  fingerprinting, and class-hierarchy queries. It owns no writable ABox.
 - `tools/`: controlled retrieval, observation, and future perception tools.
 - `references/products/`: static product documents and approved CAD refs.
 - `references/resources/`: future static resource and primitive-catalog refs.
-- `contexts/`: ignored per-interaction product and resource runtime context.
+- `contexts/`: ignored per-interaction product and resource runtime context;
+  PA interaction ABoxes and future separately owned RA resource ABoxes remain
+  distinct here.
 - `evaluations/`: isolated post-prediction evaluation and ground truth.
-- `schemas/`: future data templates and contracts.
+- `schemas/`: status and boundaries for current and future data contracts.
 - `tests/fixtures/`: future controlled, repeatable inputs.
 - `RESEARCH_POSITIONING.md`: terminology, Manual2Skill comparison, research
   gap, primitive definition, and claim boundaries for the paper.

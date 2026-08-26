@@ -1,0 +1,1172 @@
+<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:xsd="http://www.w3.org/2001/XMLSchema#"
+         xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xml:base="http://PAonto.com"
+         xmlns="http://PAonto.com#">
+
+<owl:Ontology rdf:about="http://PAonto.com"/>
+
+<owl:ObjectProperty rdf:about="#defines"/>
+
+<owl:ObjectProperty rdf:about="#consistsOf">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#TransitiveProperty"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#has"/>
+
+<owl:ObjectProperty rdf:about="#realizes"/>
+
+<owl:ObjectProperty rdf:about="#describes"/>
+
+<owl:ObjectProperty rdf:about="#requires"/>
+
+<owl:ObjectProperty rdf:about="#neighbours">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#SymmetricProperty"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#capableOf"/>
+
+<owl:ObjectProperty rdf:about="#precedes">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#TransitiveProperty"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#fprecedes">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#TransitiveProperty"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#fconflicts">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#SymmetricProperty"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#frequires"/>
+
+<owl:ObjectProperty rdf:about="#hasObjectiveFunction">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:domain rdf:resource="#specification"/>
+  <rdfs:range rdf:resource="#objectiveFunction"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#runsOnResource">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="#resource"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#runsProcess">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="#process"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#hasPerformance"/>
+
+<owl:ObjectProperty rdf:about="#realPerformance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="#performance"/>
+  <rdfs:subPropertyOf rdf:resource="#hasPerformance"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#expectedPerformance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:domain rdf:resource="#process"/>
+  <rdfs:range rdf:resource="#performance"/>
+  <rdfs:subPropertyOf rdf:resource="#hasPerformance"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#originResource"/>
+
+<owl:ObjectProperty rdf:about="#targetResource"/>
+
+<owl:ObjectProperty rdf:about="#hasStartLocation"/>
+
+<owl:ObjectProperty rdf:about="#hasEndLocation"/>
+
+<owl:ObjectProperty rdf:about="#hasProcessExecution">
+  <rdfs:domain rdf:resource="#specification"/>
+  <rdfs:range rdf:resource="#processExecution"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#hasProposalGroup">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+  <rdfs:range rdf:resource="#proposalGroup"/>
+</owl:ObjectProperty>
+
+<owl:ObjectProperty rdf:about="#hasCoefficient">
+  <rdfs:domain rdf:resource="#objectiveFunction"/>
+  <rdfs:range rdf:resource="#coefficient"/>
+</owl:ObjectProperty>
+
+<owl:DatatypeProperty rdf:about="#length">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#width">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#height">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#xCoordinate">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#yCoordinate">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#zCoordinate">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#deadline">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#dateTime"/>
+  <rdfs:domain rdf:resource="#specification"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#realStartTime">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#dateTime"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#realEndTime">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#dateTime"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#duration">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+  <rdfs:domain rdf:resource="#performance"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#emissions">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+  <rdfs:domain rdf:resource="#performance"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#quality">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+  <rdfs:domain rdf:resource="#performance"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#costs">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+  <rdfs:domain rdf:resource="#performance"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#hasPriority">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#integer"/>
+  <rdfs:domain rdf:resource="#specification"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#isActive">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#boolean"/>
+  <rdfs:domain rdf:resource="#resource"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#plannedStartTime">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#dateTime"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#plannedEndTime">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#dateTime"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#hasErrorMessage">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#string"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#hasStatus">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#string"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#hasValue">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#decimal"/>
+  <rdfs:domain rdf:resource="#coefficient"/>
+</owl:DatatypeProperty>
+
+<owl:DatatypeProperty rdf:about="#coefficientFor">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#string"/>
+  <rdfs:domain rdf:resource="#coefficient"/>
+</owl:DatatypeProperty>
+
+<owl:Class rdf:about="#specification">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#capability">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#feature">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#product">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#process">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resource">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#objectiveFunction">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#performance">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#location">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#processExecution">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#proposalGroup">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+  <rdfs:range rdf:resource="http://www.w3.org/2001/XMLSchema#string"/>
+  <rdfs:domain rdf:resource="#processExecution"/>
+</owl:Class>
+
+<owl:Class rdf:about="#coefficient">
+  <rdfs:subClassOf rdf:resource="http://www.w3.org/2002/07/owl#Thing"/>
+</owl:Class>
+
+<owl:Class rdf:about="#none">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featConfl"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featLith"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featIonImplant"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featDiff"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#all"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#all">
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#featDiff">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featLith"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#all"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featConfl"/>
+      <owl:onProperty rdf:resource="#fconflicts"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#featIonImplant">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#all"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#featLith">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featIonImplant"/>
+      <owl:onProperty rdf:resource="#frequires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#all"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#featConfl">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#all"/>
+      <owl:onProperty rdf:resource="#fprecedes"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#featDiff"/>
+      <owl:onProperty rdf:resource="#fconflicts"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#feature"/>
+</owl:Class>
+
+<owl:Class rdf:about="#rollout">
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#diffusion">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#handling"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#ionImplantation">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#handling"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#lithography">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#handling"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#ionImplantation"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#diffusion"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#handling">
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#buffering">
+  <rdfs:subClassOf>
+    <owl:Restriction>
+      <owl:someValuesFrom rdf:resource="#handling"/>
+      <owl:onProperty rdf:resource="#requires"/>
+    </owl:Restriction>
+  </rdfs:subClassOf>
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#conflict">
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#initialize">
+  <rdfs:subClassOf rdf:resource="#process"/>
+</owl:Class>
+
+<owl:Class rdf:about="#lastResource">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resDiff">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resIonImplant">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resLith">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resHandl">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resBuff">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#resConfl">
+  <rdfs:subClassOf rdf:resource="#resource"/>
+</owl:Class>
+
+<owl:Class rdf:about="#specTypeA">
+  <rdfs:subClassOf rdf:resource="#specification"/>
+</owl:Class>
+
+<owl:Class rdf:about="#specTypeB">
+  <rdfs:subClassOf rdf:resource="#specification"/>
+</owl:Class>
+
+<none rdf:about="#start">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</none>
+
+<all rdf:about="#end">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</all>
+
+<featDiff rdf:about="#Fd1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featDiff>
+
+<featDiff rdf:about="#Fd2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featDiff>
+
+<featIonImplant rdf:about="#Fi1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featIonImplant>
+
+<featIonImplant rdf:about="#Fi2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featIonImplant>
+
+<featLith rdf:about="#Fl1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featLith>
+
+<featLith rdf:about="#Fl2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featLith>
+
+<featConfl rdf:about="#Fc1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+</featConfl>
+
+<rollout rdf:about="#partToStorage">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#end"/>
+  <expectedPerformance rdf:resource="#partToStorageperformance"/>
+</rollout>
+
+<diffusion rdf:about="#PD1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fd1"/>
+  <expectedPerformance rdf:resource="#PD1performance"/>
+</diffusion>
+
+<diffusion rdf:about="#PD2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fd1"/>
+  <expectedPerformance rdf:resource="#PD2performance"/>
+</diffusion>
+
+<diffusion rdf:about="#PD3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fd1"/>
+  <expectedPerformance rdf:resource="#PD3performance"/>
+</diffusion>
+
+<diffusion rdf:about="#PD4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fd2"/>
+  <expectedPerformance rdf:resource="#PD4performance"/>
+</diffusion>
+
+<diffusion rdf:about="#PD5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fd2"/>
+  <expectedPerformance rdf:resource="#PD5performance"/>
+</diffusion>
+
+<ionImplantation rdf:about="#PI1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fi1"/>
+  <expectedPerformance rdf:resource="#PI1performance"/>
+</ionImplantation>
+
+<ionImplantation rdf:about="#PI2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fi2"/>
+  <expectedPerformance rdf:resource="#PI2performance"/>
+</ionImplantation>
+
+<ionImplantation rdf:about="#PI3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fi2"/>
+  <expectedPerformance rdf:resource="#PI3performance"/>
+</ionImplantation>
+
+<lithography rdf:about="#PL1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fl1"/>
+  <expectedPerformance rdf:resource="#PL1performance"/>
+</lithography>
+
+<lithography rdf:about="#PL2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fl2"/>
+  <expectedPerformance rdf:resource="#PL2performance"/>
+</lithography>
+
+<handling rdf:about="#PH1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH1performance"/>
+</handling>
+
+<handling rdf:about="#PH2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH2performance"/>
+</handling>
+
+<handling rdf:about="#PH3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH3performance"/>
+</handling>
+
+<handling rdf:about="#PH4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH4performance"/>
+</handling>
+
+<handling rdf:about="#PH5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH5performance"/>
+</handling>
+
+<handling rdf:about="#PH6">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PH6performance"/>
+</handling>
+
+<buffering rdf:about="#PB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PB1performance"/>
+</buffering>
+
+<buffering rdf:about="#PB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PB2performance"/>
+</buffering>
+
+<buffering rdf:about="#PB3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PB3performance"/>
+</buffering>
+
+<buffering rdf:about="#PB4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PB4performance"/>
+</buffering>
+
+<buffering rdf:about="#PB5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <expectedPerformance rdf:resource="#PB5performance"/>
+</buffering>
+
+<conflict rdf:about="#PC1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#Fc1"/>
+  <expectedPerformance rdf:resource="#PC1performance"/>
+</conflict>
+
+<initialize rdf:about="#initPA">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <realizes rdf:resource="#start"/>
+  <expectedPerformance rdf:resource="#initPAperformance"/>
+</initialize>
+
+<performance rdf:about="#partToStorageperformance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">3.0</duration>
+</performance>
+
+<performance rdf:about="#PD1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">10.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">12.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">20.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">200.0</emissions>
+</performance>
+
+<performance rdf:about="#PD2performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.8</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">11.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">21.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">180.0</emissions>
+</performance>
+
+<performance rdf:about="#PD3performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.6</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">14.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">20.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">230.0</emissions>
+</performance>
+
+<performance rdf:about="#PD4performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.5</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">10.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">20.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">210.0</emissions>
+</performance>
+
+<performance rdf:about="#PD5performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.9</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">13.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">22.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">210.0</emissions>
+</performance>
+
+<performance rdf:about="#PI1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">8.1</quality>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">13.0</duration>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">30.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">340.0</emissions>
+</performance>
+
+<performance rdf:about="#PI2performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">8.0</quality>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">14.0</duration>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">32.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">400.0</emissions>
+</performance>
+
+<performance rdf:about="#PI3performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.0</quality>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">12.5</duration>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">31.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">389.0</emissions>
+</performance>
+
+<performance rdf:about="#PL1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">4.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">6.0</duration>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">8.5</quality>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">200.0</emissions>
+</performance>
+
+<performance rdf:about="#PL2performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">3.5</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">7.0</duration>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">8.4</quality>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">223.0</emissions>
+</performance>
+
+<performance rdf:about="#PH1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">40.0</duration>
+</performance>
+
+<performance rdf:about="#PH2performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">1.8</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">43.0</duration>
+</performance>
+
+<performance rdf:about="#PH3performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">1.9</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">46.0</duration>
+</performance>
+
+<performance rdf:about="#PH4performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">38.0</duration>
+</performance>
+
+<performance rdf:about="#PH5performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.3</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">39.0</duration>
+</performance>
+
+<performance rdf:about="#PH6performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.1</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">40.0</duration>
+</performance>
+
+<performance rdf:about="#PB1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">10.0</emissions>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">20.0</duration>
+</performance>
+
+<performance rdf:about="#PB2performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">12.0</emissions>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">23.0</duration>
+</performance>
+
+<performance rdf:about="#PB3performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">13.0</emissions>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">21.0</duration>
+</performance>
+
+<performance rdf:about="#PB4performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">11.0</emissions>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">22.0</duration>
+</performance>
+
+<performance rdf:about="#PB5performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.0</emissions>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">19.0</duration>
+</performance>
+
+<performance rdf:about="#PC1performance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</duration>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+</performance>
+
+<performance rdf:about="#initPAperformance">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <emissions rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</emissions>
+  <quality rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</quality>
+  <costs rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</costs>
+  <duration rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">1.0</duration>
+</performance>
+
+<lastResource rdf:about="#EndRobot">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#partToStorage"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</lastResource>
+
+<resDiff rdf:about="#D1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PD1"/>
+  <capableOf rdf:resource="#PD2"/>
+  <capableOf rdf:resource="#PD3"/>
+  <capableOf rdf:resource="#PD4"/>
+  <capableOf rdf:resource="#PD5"/>
+  <neighbours rdf:resource="#H1"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resDiff>
+
+<resDiff rdf:about="#D2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PD2"/>
+  <neighbours rdf:resource="#H1"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resDiff>
+
+<resDiff rdf:about="#D3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PD3"/>
+  <capableOf rdf:resource="#PD4"/>
+  <neighbours rdf:resource="#H1"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resDiff>
+
+<resDiff rdf:about="#D4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PD3"/>
+  <neighbours rdf:resource="#H2"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resDiff>
+
+<resDiff rdf:about="#D5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PD5"/>
+  <neighbours rdf:resource="#H2"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resDiff>
+
+<resIonImplant rdf:about="#I1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PI1"/>
+  <neighbours rdf:resource="#H2"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resIonImplant>
+
+<resIonImplant rdf:about="#I2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PI2"/>
+  <capableOf rdf:resource="#PI3"/>
+  <neighbours rdf:resource="#H2"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resIonImplant>
+
+<resIonImplant rdf:about="#I3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PI3"/>
+  <neighbours rdf:resource="#H3"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resIonImplant>
+
+<resLith rdf:about="#L1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PL1"/>
+  <neighbours rdf:resource="#H3"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resLith>
+
+<resLith rdf:about="#L2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PL1"/>
+  <capableOf rdf:resource="#PL2"/>
+  <neighbours rdf:resource="#H3"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resLith>
+
+<resHandl rdf:about="#H1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#initPA"/>
+  <neighbours rdf:resource="#B1"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resHandl rdf:about="#H2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <neighbours rdf:resource="#B2"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resHandl rdf:about="#H3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <neighbours rdf:resource="#B3"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resHandl rdf:about="#H4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <neighbours rdf:resource="#B1"/>
+  <neighbours rdf:resource="#B4"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resHandl rdf:about="#H5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <neighbours rdf:resource="#B2"/>
+  <neighbours rdf:resource="#B4"/>
+  <neighbours rdf:resource="#B5"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resHandl rdf:about="#H6">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <neighbours rdf:resource="#B3"/>
+  <neighbours rdf:resource="#B5"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resHandl>
+
+<resBuff rdf:about="#B1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resBuff>
+
+<resBuff rdf:about="#B2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resBuff>
+
+<resBuff rdf:about="#B3">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resBuff>
+
+<resBuff rdf:about="#B4">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resBuff>
+
+<resBuff rdf:about="#B5">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resBuff>
+
+<resConfl rdf:about="#C1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <capableOf rdf:resource="#PC1"/>
+  <isActive rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</isActive>
+</resConfl>
+
+<specTypeA rdf:about="#specA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <defines rdf:resource="#start"/>
+  <defines rdf:resource="#end"/>
+  <defines rdf:resource="#Fd1"/>
+  <defines rdf:resource="#Fi1"/>
+  <hasObjectiveFunction rdf:resource="#obFcA1"/>
+  <hasPriority rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">2</hasPriority>
+  <deadline rdf:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2020-12-31T23:59:59</deadline>
+</specTypeA>
+
+<specTypeA rdf:about="#specA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <defines rdf:resource="#start"/>
+  <defines rdf:resource="#end"/>
+  <defines rdf:resource="#Fd2"/>
+  <defines rdf:resource="#Fi2"/>
+  <defines rdf:resource="#Fl2"/>
+  <defines rdf:resource="#Fc1"/>
+  <hasObjectiveFunction rdf:resource="#obFcA2"/>
+  <hasPriority rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">3</hasPriority>
+  <deadline rdf:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2020-12-31T23:59:59</deadline>
+</specTypeA>
+
+<specTypeB rdf:about="#specB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <defines rdf:resource="#start"/>
+  <defines rdf:resource="#end"/>
+  <defines rdf:resource="#Fd1"/>
+  <defines rdf:resource="#Fi2"/>
+  <defines rdf:resource="#Fl1"/>
+  <hasObjectiveFunction rdf:resource="#obFcB1"/>
+  <hasPriority rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">2</hasPriority>
+  <deadline rdf:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2020-12-31T23:59:59</deadline>
+</specTypeB>
+
+<specTypeB rdf:about="#specB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <defines rdf:resource="#start"/>
+  <defines rdf:resource="#end"/>
+  <defines rdf:resource="#Fi2"/>
+  <defines rdf:resource="#Fl1"/>
+  <defines rdf:resource="#Fc1"/>
+  <hasObjectiveFunction rdf:resource="#obFcB2"/>
+  <hasPriority rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">4</hasPriority>
+  <deadline rdf:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2020-12-31T23:59:59</deadline>
+</specTypeB>
+
+<objectiveFunction rdf:about="#obFcA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasCoefficient rdf:resource="#costsA1"/>
+  <hasCoefficient rdf:resource="#emissionsA1"/>
+  <hasCoefficient rdf:resource="#qualityA1"/>
+  <hasCoefficient rdf:resource="#durationA1"/>
+</objectiveFunction>
+
+<objectiveFunction rdf:about="#obFcA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasCoefficient rdf:resource="#costsA2"/>
+  <hasCoefficient rdf:resource="#emissionsA2"/>
+  <hasCoefficient rdf:resource="#qualityA2"/>
+  <hasCoefficient rdf:resource="#durationA1"/>
+</objectiveFunction>
+
+<objectiveFunction rdf:about="#obFcB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasCoefficient rdf:resource="#costsB1"/>
+  <hasCoefficient rdf:resource="#emissionsB1"/>
+  <hasCoefficient rdf:resource="#qualityB1"/>
+  <hasCoefficient rdf:resource="#durationA1"/>
+</objectiveFunction>
+
+<objectiveFunction rdf:about="#obFcB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasCoefficient rdf:resource="#costsB2"/>
+  <hasCoefficient rdf:resource="#emissionsB2"/>
+  <hasCoefficient rdf:resource="#qualityB2"/>
+  <hasCoefficient rdf:resource="#durationA1"/>
+</objectiveFunction>
+
+<coefficient rdf:about="#costsA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">3.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">costs</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#costsA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">4.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">costs</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#costsB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">0.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">costs</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#costsB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">6.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">costs</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#emissionsA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">8.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">emissions</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#emissionsA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">5.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">emissions</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#emissionsB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">emissions</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#emissionsB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">4.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">emissions</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#qualityA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">quality</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#qualityA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">4.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">quality</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#qualityB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">9.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">quality</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#qualityB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">3.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">quality</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#durationA1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">1.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">duration</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#durationA2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">5.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">duration</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#durationB1">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">2.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">duration</coefficientFor>
+</coefficient>
+
+<coefficient rdf:about="#durationB2">
+  <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#NamedIndividual"/>
+  <hasValue rdf:datatype="http://www.w3.org/2001/XMLSchema#decimal">5.0</hasValue>
+  <coefficientFor rdf:datatype="http://www.w3.org/2001/XMLSchema#string">duration</coefficientFor>
+</coefficient>
+
+
+</rdf:RDF>
