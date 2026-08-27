@@ -18,12 +18,12 @@ specification.
 ## Proposed-versus-implemented status
 
 The dynamic PA-to-RA composition workflow in this document is the proposed
-ICRA architecture. The narrow PA context adapter and standalone supporting
-perception records exist, but production Phase 4.3 assessment, Phase 5 planning,
-the RA adapter, resource-catalog loading, `PrimitiveProgramDraft` authoring,
-batched context exchange, validation, and execution are not implemented. The
-production interaction still stops at `grounding_unavailable`; no Phase 5--9
-runtime behavior is claimed.
+ICRA architecture. The PA context adapter through Phase 3.5, supporting
+perception records, resumable user-intent clarification, tamper-checked PA
+grounding completion, and production pre-RA Phase 4.3 grounding runtime exist. Phase 5
+planning, the RA adapter, resource-catalog loading, `PrimitiveProgramDraft`
+authoring, batched context exchange, validation, and execution are not
+implemented; no Phase 5--9 runtime behavior is claimed.
 
 ## Abstraction level
 

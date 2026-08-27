@@ -7,12 +7,15 @@
 ## Proposed-versus-implemented status
 
 The end-to-end workflow in this document is proposed architecture. The current
-package implements the narrow PA context boundary through Phase 3.3, the Phase
-4.0 ontology foundation, separate document and geometry diagnostics, generalized
-camera-frame pose estimation, and camera-to-robot frame conversion. The live
-production path still stops at `grounding_unavailable`: no production Phase 4.3
-runtime, Phase 5 task contract, RA adapter, resource-catalog ABox, primitive
-composer, validator stack, or execution path is connected.
+package implements the PA interaction boundary through Phase 3.5, including
+resumable user-intent clarification and a tamper-checked grounding-completion
+record, together with the pre-RA Phase 4.3 grounding runtime, the Phase 4.0 ontology foundation, demand-driven document
+and geometry producers, generalized camera-frame pose estimation, and separate
+camera-to-robot frame-conversion infrastructure. The configured production path
+stops when the `TaskTransitionDraft` inputs are grounded and records readiness
+for Phase 5. No Phase 5 task
+contract, RA adapter, resource-catalog ABox, primitive composer, validator
+stack, or execution path is connected.
 
 ## Fundamental research challenge
 

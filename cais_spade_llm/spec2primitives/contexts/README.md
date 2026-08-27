@@ -12,6 +12,9 @@ contexts/<interaction_identifier>/
 │   ├── observations/
 │   ├── served_references/
 │   ├── grounding/
+│   │   ├── product_context/view_<number>.json
+│   │   ├── task_transition/draft_<number>.json
+│   │   └── <typed producer records>
 │   └── assembly_plan/                     # planned Phase 5
 ├── resources/                              # planned RA-owned context
 │   └── <exact_RA_identifier>/
@@ -25,10 +28,16 @@ contexts/<interaction_identifier>/
 │   ├── missing_context_batches/
 │   └── progress_decisions/
 └── interaction_record/
+    ├── clarification_<turn>.json
+    └── context_completion_0001.json
 ```
 
-The planned `ProductContextView` will aggregate the PA ABox with validated
-`TypedContextBinding` summaries. Planned `CompositionContextBundle` versions
+The implemented `ProductContextView` aggregates the PA ABox with validated
+`TypedContextBinding` summaries. Producer decisions are append-only records at
+`interaction_record/producer_selection_<number>.json`. Phase 3.4 clarification
+answers or cancellation and the single Phase 3.5 completion record are also
+append-only. Planned
+`CompositionContextBundle` versions
 will preserve task, ABox, typed-binding, catalog, and selected-resource
 fingerprints. Each RA `PrimitiveProgramDraft`, deduplicated
 `MissingContextBatch`, PA response, progress or no-progress decision, fully

@@ -7,6 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingContractError,
+    ProductContextView,
+)
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     approved_context_refs,
     resolve_context_ref,
@@ -40,6 +44,7 @@ _FIRST_TURN_KEYS = {
     "failure",
 }
 _FIRST_PA_INPUT_KEYS = {"prompt", "response_format"}
+_FIRST_PRODUCTION_PA_INPUT_KEYS = {"product_context_ref", "product_context"}
 _LATER_PA_INPUT_KEYS = {"assessment_ref"}
 _PROVENANCE_KEYS = {"repository_path", "source_url"}
 _REJECTION_KEYS = {"context_ref", "reason", "message"}
@@ -427,6 +432,19 @@ def _pa_input_validation_error(pa_input: object, turn_number: int) -> str | None
     if not isinstance(pa_input, dict):
         return f"turn_{turn_number:04d} PA_input is invalid."
     if turn_number == 1:
+        if (
+            set(pa_input) == _FIRST_PRODUCTION_PA_INPUT_KEYS
+            and pa_input.get("product_context_ref")
+            == "products/grounding/product_context/view_0000.json"
+            and isinstance(pa_input.get("product_context"), dict)
+        ):
+            try:
+                view = ProductContextView.from_mapping(pa_input["product_context"])
+            except GroundingContractError as exc:
+                return f"turn_0001 ProductContextView is invalid: {exc}"
+            if view.delta_count != 0:
+                return "turn_0001 ProductContextView must precede evidence deltas."
+            return None
         if (
             set(pa_input) != _FIRST_PA_INPUT_KEYS
             or not isinstance(pa_input["prompt"], str)

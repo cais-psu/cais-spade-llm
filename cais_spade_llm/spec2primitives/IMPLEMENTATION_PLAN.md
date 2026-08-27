@@ -2,19 +2,23 @@
 
 Phase 0, the Phase 0.1 operator shell, Phase 1, Phase 1.1, Phase 1.2, the Phase
 2 PA interaction UI, Phase 2.1, Phase 3.1, Phase 3.2, the Phase 3.3
-contract-first ontology integration, Phase 4.0, Phase 4.1, Phase 4.2A
+contract-first ontology integration, Phase 3.4, Phase 3.5, Phase 4.0, Phase
+4.1, Phase 4.2A
 preprocessing, Phase 4.2B1 minimal automatic RGB-D segmentation, and Phase
 4.2B2A CAD-size candidate association, the simple remaining Phase 4.2B2
-camera-frame pose increment, and simple camera-to-robot frame conversion are
-implemented. Phase 3.1
+camera-frame pose increment, simple camera-to-robot frame conversion, and the
+pre-RA Phase 4.3 grounding runtime are implemented. Phase 3.1
 now initializes Phase 4.0 before PA selects its first source and rejects
 first-turn clarification. Phase 3.3 now orchestrates numbered retrieval,
-controlled interpretation, validated ABox deltas, and persisted Phase 4.3-style
-decisions without assessing raw evidence summaries. The production UI remains
-fail-closed because no authoritative runtime TBox, registered complete
-grounding producers, or Phase 4.3 grounding runtime is configured. The separate Phase 4.1 UI diagnostic also
-fails closed until an authoritative TBox and `OPENAI_API_KEY` are configured.
-Phase 3.4 onward and later Phase 4.2 grounding work remain future work
+controlled interpretation, validated ABox deltas, and persisted Phase 4.3
+decisions without assessing raw evidence summaries. Phase 4.3 now evolves and
+persists a robot-independent `TaskTransitionDraft`, computes exact
+`ContextNeed` values from a validated `ProductContextView`, and selects only an
+authorized output-capable producer. The production runtime and its read-only
+ontology-grounding UI are enabled only when an authoritative runtime TBox and
+`OPENAI_API_KEY` are configured; otherwise the interaction fails closed. The
+separate Phase 4.1 UI diagnostic has the same configuration boundary.
+Phase 5 onward and later Phase 4.2 grounding work remain future work
 requiring separate, explicitly scoped implementation requests. Phase numbers
 identify capabilities, not a required one-way runtime order. This plan does not
 authorize an end-to-end implementation.
@@ -31,18 +35,18 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phase 2 and Phase 2.1 | implemented | PA UI, configurable turn limit, live PA turn counter, transcript, compact evidence summaries, and complete audit records. |
 | Phase 3.1 | implemented; production ontology configuration pending | Exact requirement intake loads an injected schema-only TBox, initializes the ABox before PA's first request, exposes the unresolved view and approved evidence types, and rejects first-turn clarification. |
 | Phase 3.2 | implemented | One persisted document, CAD, or live-observation request is served exactly and recorded without fallback evidence. |
-| Phase 3.3 | contract-first integration implemented | Each served result is routed by its evidence type to one injected producer, its delta is validated and merged, and only a persisted Phase 4.3-style decision can request more evidence, clarify, or complete. |
-| Phase 3.4 and Phase 3.5 | not implemented | User replies and the post-Phase 4 `context understanding complete` handoff are unavailable. |
-| Phase 4.0 | implemented and wired through injected contracts | Shared RDFLib TBox loading, independent PA ABoxes, safe reload, compact views, evidence-type routing, and atomic evidence-backed delta validation are used by Phase 3. |
+| Phase 3.3 | contract-first integration implemented | Each served result is routed through an authorized output-capable producer descriptor, its delta is validated and merged, and only a persisted Phase 4.3 decision can request more evidence, clarify, or complete. |
+| Phase 3.4 and Phase 3.5 | implemented | Exact user-intent replies and cancellation resume the same interaction; completion persists one fully referenced, tamper-checked `PAContextGroundingCompletion` that is ready only for Phase 5. |
+| Phase 4.0 | implemented and wired through injected contracts | Shared RDFLib TBox loading, independent PA ABoxes, safe reload, compact views, output-capable descriptor routing, and atomic evidence-backed delta validation are used by Phase 3. |
 | Phase 4.1 | implemented as a separate diagnostic | All six approved NIST PDF pages are rendered and sent through an injected OpenAI vision boundary in one structured request; its compiled delta is persisted and accepted only through the shared ABox validator. |
 | Phase 4.2A | implemented as a separate diagnostic | Exact approved binary STL meshes and fresh validated four-camera RGB-D bundles become atomic typed geometry records and assertion-free deltas; correspondence and pose remain not evaluated. |
 | Phase 4.2B1 | implemented supporting infrastructure | An observation-only entrypoint automatically captures, validates, preprocesses, and minimally segments four camera-local RGB-D views with fixed internal parameters. The UI is status-only. |
 | Phase 4.2B2A | implemented supporting infrastructure | One exact preprocessed approved CAD record is compared with validated segmented candidates by its two largest principal dimensions. A unique size match yields only a candidate center in its camera optical frame. |
 | Simple remaining Phase 4.2B2 pose increment | implemented supporting infrastructure | One intact size correspondence is refined across loose source candidates with deterministic principal-axis multistart and trimmed ICP. It persists an accepted, ambiguous, or rejected camera-frame pose without claiming a robot pose or pick point. |
 | Simple camera-to-robot frame conversion | implemented supporting infrastructure | One accepted camera-from-CAD transform is composed with one injected, hash-validated camera-to-robot calibration for an exact caller-selected target frame. Ambiguous and rejected poses remain coordinate-free. |
-| Later Phase 4.2 grounding | not implemented | No cross-camera transform, complete target grounding, or production product-context producer chain exists. |
-| Phase 4.3 production grounding | not implemented | No production assessor, `ProductContextView`, typed-binding index, or producer-descriptor registry is configured; the live path remains `grounding_unavailable`. |
-| Phase 5 | not implemented | No `TaskTransitionDraft`, `TaskTransitionContract`, or assembly-plan handoff record exists. |
+| Later Phase 4.2 grounding | partially implemented in the pre-RA producer chain | Approved CAD and fresh observations can be preprocessed on demand, then segmented, associated, and estimated in a camera frame only for a current need. No cross-camera transform or complete target grounding exists. |
+| Phase 4.3 production grounding | implemented pre-RA | `TaskTransitionDraft`, `ContextNeed`, `TypedContextBinding`, `ProductContextView`, and `GroundingProducerDescriptor` drive document and typed-geometry grounding, persistence, progress checks, and read-only UI inspection. |
+| Phase 5 | not implemented | No `TaskTransitionContract` or assembly-plan handoff record exists. |
 | Phases 6--9 | not implemented | No RA adapter, resource-catalog ABox, `CompositionContextBundle`, `PrimitiveProgramDraft`, `MissingContextBatch`, primitive composer, validator stack, or execution path exists. |
 
 The Phase 4.0 foundation separates shared immutable TBox semantics from the
@@ -52,18 +56,18 @@ persists generic evidence-backed triple-delta contracts. The pasted OWL serves
 only as an RDF/XML parser and mixed-graph test
 fixture until the authoritative TBox is provided: it contains both schema
 axioms and named individuals, so its ABox facts never become runtime task facts.
-The next separately authorized grounding capability is Phase 4.3 assessment.
-Production use also requires an authoritative schema-only TBox;
+The next separately authorized workflow capability is Phase 5.
+Production grounding requires an authoritative schema-only TBox;
 the mixed and minimal fixtures remain test-only.
 Controlled tests of retrieval and observation capture do not constitute
 document-diagram understanding, metric grounding, Gazebo task execution, or
 physical execution.
 
-The target architecture uses the planned contracts `ContextNeed`,
-`GroundingProducerDescriptor`, `TypedContextBinding`, `ProductContextView`,
-`TaskTransitionDraft`, `TaskTransitionContract`, `CompositionContextBundle`,
-`PrimitiveProgramDraft`, and `MissingContextBatch`. These names define future
-boundaries in this roadmap; they are not current runtime schemas.
+The runtime now implements `ContextNeed`, `GroundingProducerDescriptor`,
+`TypedContextBinding`, `ProductContextView`, `TaskTransitionDraft`, and
+`PAContextGroundingCompletion`. The
+planned contracts `TaskTransitionContract`, `CompositionContextBundle`,
+`PrimitiveProgramDraft`, and `MissingContextBatch` remain future boundaries.
 
 ## ICRA implementation scope
 
@@ -554,10 +558,9 @@ be reported.
 
 ## Phase 3: PA context retrieval and clarification
 
-Every Phase 3.x step requires a separate implementation request. Phase 3.1,
-Phase 3.2, and the contract-first Phase 3.3 ontology integration are
-implemented. Real Phase 4 producers, Phase 3.4, and Phase 3.5 are not
-implemented.
+Phase 3.1, Phase 3.2, the contract-first Phase 3.3 ontology integration, Phase
+3.4 clarification resumption, and the Phase 3.5 completion boundary are
+implemented together with the production Phase 4 grounding producers.
 
 In the target runtime, Phase 3 retrieval and Phase 4 grounding support PA while
 it evolves a `TaskTransitionDraft`. Phase 4.0 loads the fixed TBox and
@@ -584,7 +587,7 @@ question.
 
 - Add a Spec2Primitives-owned adapter under `agents/pa/` using composition with
   the shared ProductAgent. Do not subclass ProductAgent or LlmAgent.
-- Define the planned package-local entrypoint as:
+- Preserve the implemented package-local entrypoint:
 
   ```python
   async def start_pa_context_interaction(
@@ -709,13 +712,13 @@ question.
 - Stop on a terminal Phase 4.3 decision, unrecoverable PA, retrieval, or
   interpretation failure, invalid response, existing-record conflict, or
   `pa_turn_limit_reached`. Limit exhaustion never implies completion.
-- The production UI supplies no TBox or producer implementation and returns
-  `grounding_unavailable` before PA evidence selection. Controlled tests inject
-  the schema-only fixture and producer doubles; they do not constitute Phase
-  4.1 document understanding, Phase 4.2 scene grounding, or a production Phase
-  4.3 assessor.
+- The production UI loads a caller-configured authoritative TBox and production
+  producer runtime when model configuration is present. It returns
+  `grounding_unavailable` before PA evidence selection when that configuration
+  is absent. Controlled tests use schema-only fixtures and deterministic model
+  responses rather than claiming live perception or model validation.
 
-### Phase 3.4: user clarification
+### Phase 3.4: user clarification — implemented
 
 - Enter Phase 3.4 only from a persisted Phase 4.3 result showing that every
   relevant permitted source identified by the current knowledge need and tool
@@ -732,7 +735,7 @@ question.
 - If the user insists on a factual claim contradicted by approved evidence, do
   not allow `context understanding complete`; let the user revise or cancel.
 
-### Phase 3.5: `context understanding complete` handoff
+### Phase 3.5: `context understanding complete` handoff — implemented
 
 - Allow `context understanding complete` only after the Phase 4.0 PPR-aligned
   representation and every Phase 4.1 document-diagram or Phase 4.2 CAD/RGB-D
@@ -745,6 +748,10 @@ question.
 - Treat `context understanding complete` as ready for Phase 5 PA assembly
   planning. It does not produce an assembly plan or `primitive_steps`, and it
   does not guarantee that RA can bind or execute every required primitive.
+- Persist one `PAContextGroundingCompletion` only after independently reloading
+  its decision, draft, source and current product-context views, typed-record
+  hashes, and answered clarification refs. The UI consumes that validated
+  record rather than treating a bare model decision as completion.
 
 ### Phase 3.1 verification
 
@@ -848,11 +855,9 @@ accepted delta.
   `observed_feature_1`, an expected CAD match, a pose-record path, or a
   product-specific completion template. A failed or uncertain match produces no
   factual assertion and remains unresolved.
-- Preserve the implemented small application-owned map from `document`, `CAD`,
-  and `observation` to fixed producer identifiers as the current diagnostic
-  routing boundary. The planned production revision replaces this evidence-type
-  decision surface with `GroundingProducerDescriptor` records that advertise
-  the semantic or typed outputs each authorized producer can establish. Neither
+- Use the application-owned `GroundingProducerDescriptor` registry rather than
+  selecting a producer from evidence type alone. Each descriptor advertises the
+  exact semantic or typed outputs its authorized producer can establish. Neither
   representation is part of the TBox or ABox: the TBox defines valid meaning,
   not which sensor, document, or producer PA must use.
 - Use the PPR `product`, `feature`, `process`, `resource`, and `capability` types
@@ -1104,11 +1109,12 @@ accepted delta.
 - Keep recognition inputs within the approved document, candidate CAD, RGB,
   depth, and camera calibration boundary.
 
-### Phase 4.3: post-understanding decision
+### Phase 4.3: post-understanding decision — implemented pre-RA
 
-This production assessor and its `TaskTransitionDraft`/`ContextNeed` contract
-are planned and not implemented. The current production path still stops at
-`grounding_unavailable`.
+The production assessor and its `TaskTransitionDraft`/`ContextNeed` contract
+are implemented. The configured production path persists each draft, context
+view, producer choice, evidence result, and reassessment; an unconfigured path
+still stops at `grounding_unavailable`.
 
 - Assess the evolving `TaskTransitionDraft`, current interaction ABox,
   `ProductContextView`, unresolved assertions, evidence status, and authorized

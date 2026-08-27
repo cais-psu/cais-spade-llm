@@ -67,7 +67,8 @@ quaternion, and transform only when the camera pose is accepted. Its
 `robot_frame_conversion` state is `accepted`, `ambiguous`, or `rejected`; the
 compact status exposes only that state.
 
-Planned contracts cover:
+Implemented pre-RA grounding contracts in
+`agents/pa/grounding_contracts.py` cover:
 
 - `ContextNeed`, containing one consumer-required semantic or typed input,
   subject or task role, authority, frame or freshness constraints, and reason
@@ -75,7 +76,13 @@ Planned contracts cover:
   controlled producer and its evidence dependencies
 - `TypedContextBinding` and `ProductContextView`, joining compact ABox meaning
   with validated record refs, hashes, status, frames, validity, and provenance
-- `TaskTransitionDraft` and robot-independent `TaskTransitionContract`
+- robot-independent `TaskTransitionDraft`
+- append-only `PAClarification` records and the referenced, fingerprinted
+  `PAContextGroundingCompletion` readiness record
+
+Planned downstream contracts cover:
+
+- robot-independent `TaskTransitionContract`
 - versioned `CompositionContextBundle` records with task, ABox, binding,
   selected-resource, and catalog fingerprints
 - a complete selected-RA-authoritative primitive-only catalog snapshot with
@@ -85,8 +92,9 @@ Planned contracts cover:
 - fully bound `primitive_steps`, state checks, IK/collision/trajectory feedback,
   rejected candidate revision, and accepted candidate handoff
 
-These are planned names and boundaries, not current schema implementations. No
-RA resource ABox, composition bundle, missing-context batch, or primitive
-candidate is produced by the current runtime.
+The downstream names are planned boundaries, not current schema
+implementations. No RA resource ABox, task-transition contract, composition
+bundle, missing-context batch, or primitive candidate is produced by the
+current runtime.
 
 Phase 0 intentionally defines no JSON, YAML, or Python schema.

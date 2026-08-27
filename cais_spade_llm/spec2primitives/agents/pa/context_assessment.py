@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +16,23 @@ from cais_spade_llm.spec2primitives.agents.pa import context_serving
 from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
     ProductContextGroundingRuntime,
-    compact_abox_view,
-    validated_grounding_producer_routes,
+    producer_for_evidence_type,
+    validated_grounding_producer_descriptors,
 )
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
+)
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    ContextNeed,
+    GroundingContractError,
+    GroundingProducerDescriptor,
+    PAContextGroundingCompletion,
+    ProductContextView,
+    TaskTransitionDraft,
+    build_product_context_view,
+    load_pa_context_grounding_completion,
+    persist_product_context_view,
+    unresolved_context_needs,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     ABoxSnapshot,
@@ -46,6 +61,18 @@ _ASSESSMENT_KEYS = {
     "unresolved_semantic_need",
     "needed_context",
     "context understanding complete",
+}
+_CLARIFICATION_KEYS = {
+    "schema_version",
+    "record_type",
+    "product_requirement",
+    "question_turn",
+    "semantic_need",
+    "question",
+    "action",
+    "reply",
+    "recorded_at_ns",
+    "fingerprint",
 }
 
 
@@ -83,6 +110,132 @@ class _AuditedProductAgentRuntime:
             raise RuntimeError("ProductAgent structured assessment call failed.") from exc
         record["output"] = output
         return output
+
+
+async def submit_pa_clarification_reply(
+    product_agent: ProductAgentContextRuntime,
+    interaction_root: Path,
+    user_reply: str,
+    *,
+    ontology_config: PAOntologyConfig | None = None,
+    grounding_runtime: ProductContextGroundingRuntime | None = None,
+) -> dict[str, object]:
+    """Persist one exact user-intent reply and resume the same interaction."""
+    if not isinstance(user_reply, str) or not user_reply.strip():
+        return _failure(
+            "invalid_clarification",
+            "Phase 3.4 user_reply must be a non-empty string.",
+        )
+    interaction_root = Path(interaction_root)
+    settings, settings_error = _read_pa_context_settings(interaction_root)
+    if settings_error is not None or settings is None:
+        return _failure(
+            "invalid_interaction",
+            settings_error or "Phase 3.3 settings are unavailable.",
+        )
+    configuration_failure = _configuration_failure(
+        ontology_config=ontology_config,
+        grounding_runtime=grounding_runtime,
+        max_pa_turns=settings["max_pa_turns"],
+        live_observation_timeout_sec=settings["live_observation_timeout_sec"],
+    )
+    if configuration_failure is not None:
+        return configuration_failure
+    pending, pending_error = _pending_clarification(interaction_root)
+    if pending_error is not None or pending is None:
+        return _failure(
+            "invalid_clarification",
+            pending_error or "No pending user_intent clarification exists.",
+        )
+    question_turn = pending["question_turn"]
+    if not isinstance(question_turn, int) or question_turn >= settings["max_pa_turns"]:
+        return _failure(
+            "pa_turn_limit_reached",
+            "No ProductAgent turn remains for a Phase 3.4 clarification reply.",
+        )
+    record = _clarification_record(
+        product_requirement=str(pending["product_requirement"]),
+        question_turn=question_turn,
+        semantic_need=pending["semantic_need"],
+        question=str(pending["question"]),
+        action="answered",
+        reply=user_reply,
+    )
+    path = (
+        interaction_root
+        / "interaction_record"
+        / f"clarification_{question_turn:04d}.json"
+    )
+    existing, existing_error = _existing_clarification_record(path)
+    if existing_error is not None:
+        return _failure("invalid_clarification", existing_error)
+    if existing is not None:
+        if existing.get("action") != "answered" or existing.get("reply") != user_reply:
+            return _failure(
+                "clarification_exists",
+                "The pending clarification already has a different terminal action.",
+            )
+    else:
+        try:
+            _write_json_exclusive(path, record)
+        except (FileExistsError, OSError, TypeError, ValueError) as exc:
+            return _failure(
+                "invalid_interaction",
+                f"Phase 3.4 reply write failed: {type(exc).__name__}: {exc}",
+            )
+    return await continue_pa_context_interaction(
+        product_agent,
+        interaction_root,
+        ontology_config=ontology_config,
+        grounding_runtime=grounding_runtime,
+        max_pa_turns=settings["max_pa_turns"],
+        live_observation_timeout_sec=settings["live_observation_timeout_sec"],
+    )
+
+
+def cancel_pa_context_interaction(interaction_root: Path) -> dict[str, object]:
+    """Persist an explicit cancellation for one pending clarification."""
+    interaction_root = Path(interaction_root)
+    pending, pending_error = _pending_clarification(interaction_root)
+    if pending_error is not None or pending is None:
+        return _failure(
+            "invalid_clarification",
+            pending_error or "No pending user_intent clarification exists.",
+        )
+    question_turn = pending["question_turn"]
+    if not isinstance(question_turn, int):
+        return _failure("invalid_clarification", "Clarification turn is invalid.")
+    record = _clarification_record(
+        product_requirement=str(pending["product_requirement"]),
+        question_turn=question_turn,
+        semantic_need=pending["semantic_need"],
+        question=str(pending["question"]),
+        action="cancelled",
+        reply=None,
+    )
+    path = (
+        interaction_root
+        / "interaction_record"
+        / f"clarification_{question_turn:04d}.json"
+    )
+    existing, existing_error = _existing_clarification_record(path)
+    if existing_error is not None:
+        return _failure("invalid_clarification", existing_error)
+    if existing is not None:
+        if existing.get("action") != "cancelled":
+            return _failure(
+                "clarification_exists",
+                "The pending clarification already has a different terminal action.",
+            )
+    else:
+        try:
+            _write_json_exclusive(path, record)
+        except (FileExistsError, OSError, TypeError, ValueError) as exc:
+            return _failure(
+                "invalid_interaction",
+                f"Phase 3.4 cancellation write failed: {type(exc).__name__}: {exc}",
+            )
+    return {"status": "cancelled", "context understanding complete": False}
 
 
 async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
@@ -128,7 +281,14 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
     if initial is None:
         raise AssertionError("Validated Phase 3.1 and Phase 3.2 records are required.")
 
-    existing_record = _existing_phase_3_3_record(interaction_root)
+    resuming_clarification = any(
+        (interaction_root / "interaction_record").glob("clarification_*.json")
+    )
+    existing_record = (
+        None
+        if resuming_clarification
+        else _existing_phase_3_3_record(interaction_root)
+    )
     if existing_record is not None:
         return _failure(
             "interaction_exists",
@@ -137,7 +297,9 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
 
     try:
         tbox = ontology_config.load_tbox()
-        producer_routes = validated_grounding_producer_routes(grounding_runtime)
+        producer_descriptors = validated_grounding_producer_descriptors(
+            grounding_runtime
+        )
         abox = load_interaction_abox(interaction_root, tbox)
         context_ref_evidence_types = approved_context_ref_evidence_types()
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -152,7 +314,7 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             "ontology_context_invalid",
             "The interaction ABox product_requirement does not match Phase 3.1.",
         )
-    if abox.delta_count != 0:
+    if not resuming_clarification and abox.delta_count != 0:
         return _failure(
             "invalid_interaction",
             "Phase 3.3 must start before any interaction delta exists.",
@@ -162,52 +324,103 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
         "max_pa_turns": max_pa_turns,
         "live_observation_timeout_sec": float(live_observation_timeout_sec),
     }
-    try:
-        _write_json_exclusive(interaction_root / _SETTINGS_PATH, settings)
-    except FileExistsError:
-        return _failure(
-            "interaction_exists",
-            "Phase 3.3 pa_context_settings.json already exists.",
+    if resuming_clarification:
+        persisted_settings, settings_error = _read_pa_context_settings(interaction_root)
+        if settings_error is not None:
+            return _failure("invalid_interaction", settings_error)
+        if persisted_settings != settings:
+            return _failure(
+                "invalid_interaction",
+                "Phase 3.4 must preserve the original PA context settings.",
+            )
+        resume_state, resume_error = _clarification_resume_state(
+            interaction_root,
+            product_requirement=product_requirement,
+            max_pa_turns=max_pa_turns,
         )
-    except (OSError, TypeError, ValueError) as exc:
-        return _failure(
-            "invalid_interaction",
-            f"Phase 3.3 settings write failed: {type(exc).__name__}: {exc}",
-        )
+        if resume_error is not None:
+            return _failure("invalid_clarification", resume_error)
+        if resume_state is None:
+            raise AssertionError("Validated clarification resume state is required.")
+        served_context: dict[str, object] | None = None
+        attempted_evidence = list(resume_state["attempted_evidence"])
+        served_contexts = list(resume_state["served_contexts"])
+        served_static_refs = _served_static_refs(served_contexts)
+        live_request_history = set(resume_state["live_request_history"])
+        next_observation_number = _next_observation_number(served_contexts)
+        clarification_history = tuple(resume_state["clarification_history"])
+        start_operation_number = int(resume_state["operation_number"])
+    else:
+        try:
+            _write_json_exclusive(interaction_root / _SETTINGS_PATH, settings)
+        except FileExistsError:
+            return _failure(
+                "interaction_exists",
+                "Phase 3.3 pa_context_settings.json already exists.",
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return _failure(
+                "invalid_interaction",
+                f"Phase 3.3 settings write failed: {type(exc).__name__}: {exc}",
+            )
+        served_context = initial["served_context"]
+        attempted_evidence = []
+        served_static_refs = _served_static_refs([served_context])
+        live_request_history = set()
+        next_observation_number = _next_observation_number([served_context])
+        clarification_history = ()
+        start_operation_number = 1
 
-    served_context = initial["served_context"]
-    attempted_evidence: list[str] = []
-    served_static_refs = _served_static_refs([served_context])
-    live_request_history: set[str] = set()
-    next_observation_number = _next_observation_number([served_context])
-
-    for operation_number in range(1, max_pa_turns):
-        interpretation = await _interpret_and_merge(
-            grounding_runtime,
-            interaction_root=interaction_root,
-            tbox=tbox,
-            abox=abox,
-            producer_routes=producer_routes,
-            served_context=served_context,
-            attempted_evidence=tuple(attempted_evidence),
-            operation_number=operation_number,
-        )
-        if "failure" in interpretation:
-            return interpretation
-        updated_abox = interpretation.get("abox")
-        evidence_identifier = interpretation.get("evidence_identifier")
-        if not isinstance(updated_abox, ABoxSnapshot) or not isinstance(
-            evidence_identifier,
-            str,
-        ):
-            raise AssertionError("Validated interpretation result is incomplete.")
-        abox = updated_abox
-        attempted_evidence.append(evidence_identifier)
+    for operation_number in range(start_operation_number, max_pa_turns):
+        if served_context is not None:
+            interpretation = await _interpret_and_merge(
+                grounding_runtime,
+                interaction_root=interaction_root,
+                tbox=tbox,
+                abox=abox,
+                producer_descriptors=producer_descriptors,
+                served_context=served_context,
+                attempted_evidence=tuple(attempted_evidence),
+                operation_number=operation_number,
+            )
+            if "failure" in interpretation:
+                return interpretation
+            updated_abox = interpretation.get("abox")
+            evidence_identifier = interpretation.get("evidence_identifier")
+            if not isinstance(updated_abox, ABoxSnapshot) or not isinstance(
+                evidence_identifier,
+                str,
+            ):
+                raise AssertionError("Validated interpretation result is incomplete.")
+            abox = updated_abox
+            attempted_evidence.append(evidence_identifier)
+            served_context = None
 
         turn_number = operation_number + 1
+        try:
+            product_context_view = build_product_context_view(
+                interaction_root,
+                abox,
+                attempted_evidence=attempted_evidence,
+                assessed_at_ns=time.time_ns(),
+            )
+            product_context_view_path = persist_product_context_view(
+                interaction_root,
+                product_context_view,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            logger.exception("Phase 4.3 ProductContextView construction failed.")
+            return _failure(
+                "product_context_invalid",
+                f"ProductContextView could not be validated: {type(exc).__name__}: {exc}",
+            )
         assessment_input = {
-            "product_context": compact_abox_view(abox),
+            "product_context": product_context_view.to_record(),
+            "product_context_ref": str(
+                product_context_view_path.relative_to(interaction_root)
+            ),
             "attempted_evidence": list(attempted_evidence),
+            "clarification_history": [dict(item) for item in clarification_history],
             "turn": turn_number,
             "max_pa_turns": max_pa_turns,
         }
@@ -230,6 +443,7 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
                 abox=abox,
                 abox_view=assessment_input["product_context"],
                 attempted_evidence=tuple(attempted_evidence),
+                clarification_history=clarification_history,
                 turn_number=turn_number,
                 max_pa_turns=max_pa_turns,
             )
@@ -262,9 +476,19 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             return failure if turn_failure is None else turn_failure
 
         assessment_input["ProductAgent_calls"] = assessment_product_agent.calls
+        try:
+            assessed_abox = load_interaction_abox(interaction_root, tbox)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _failure(
+                "product_context_invalid",
+                f"Post-assessment ABox could not be reloaded: {type(exc).__name__}: {exc}",
+            )
+        if assessed_abox.delta_count != abox.delta_count:
+            abox = assessed_abox
+            assessment_input["post_assessment_delta_count"] = abox.delta_count
         validation_error = _assessment_validation_error(
             assessment_value,
-            producer_routes=producer_routes,
+            producer_descriptors=producer_descriptors,
             context_refs=tuple(context_ref_evidence_types),
             context_ref_evidence_types=context_ref_evidence_types,
             served_static_refs=served_static_refs,
@@ -315,7 +539,10 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             "context understanding complete": assessment_output["context understanding complete"],
         }
         terminal = _is_terminal_assessment(assessment_output)
-        limit_reached = turn_number == max_pa_turns and not terminal
+        limit_reached = (
+            turn_number == max_pa_turns
+            and assessment_output["context understanding complete"] is False
+        )
         turn_failure_value = (
             _failure(
                 "pa_turn_limit_reached",
@@ -334,10 +561,22 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
         )
         if turn_failure is not None:
             return turn_failure
-        if terminal:
-            return pa_output
         if turn_failure_value is not None:
             return turn_failure_value
+        if terminal:
+            if assessment_output["context understanding complete"] is True:
+                completion_error = _persist_pa_context_grounding_completion(
+                    interaction_root,
+                    tbox=tbox,
+                    product_requirement=product_requirement,
+                    completion_turn=turn_number,
+                    decision_path=decision_path,
+                    attempted_evidence=tuple(attempted_evidence),
+                    clarification_history=clarification_history,
+                )
+                if completion_error is not None:
+                    return _failure("context_completion_failed", completion_error)
+            return pa_output
 
         needed_context = assessment_output["needed_context"]
         if not isinstance(needed_context, dict):
@@ -379,7 +618,7 @@ async def _interpret_and_merge(  # noqa: PLR0913
     interaction_root: Path,
     tbox: TBoxSnapshot,
     abox: ABoxSnapshot,
-    producer_routes: Mapping[str, str],
+    producer_descriptors: tuple[GroundingProducerDescriptor, ...],
     served_context: dict[str, object],
     attempted_evidence: tuple[str, ...],
     operation_number: int,
@@ -392,12 +631,6 @@ async def _interpret_and_merge(  # noqa: PLR0913
             "interaction_exists",
             f"Phase 3.3 interpretation_{operation_number:04d} already exists.",
         )
-    if abox.delta_count != operation_number - 1:
-        return _failure(
-            "invalid_interaction",
-            "ABox delta numbering is not aligned with Phase 3.3 retrievals.",
-        )
-
     evidence_kind = served_context.get("evidence_type")
     if evidence_kind not in {"document", "CAD", "observation"}:
         return _failure("invalid_interaction", "served_context evidence_type is invalid.")
@@ -410,11 +643,15 @@ async def _interpret_and_merge(  # noqa: PLR0913
             f"Evidence was already interpreted: {evidence_identifier}.",
         )
 
-    producer = producer_routes.get(str(evidence_kind))
-    if not isinstance(producer, str):
+    try:
+        producer = producer_for_evidence_type(
+            producer_descriptors,
+            str(evidence_kind),
+        )
+    except (TypeError, ValueError) as exc:
         return _failure(
             "grounding_unavailable",
-            f"No controlled producer is configured for {evidence_kind}.",
+            f"No unambiguous controlled producer is configured for {evidence_kind}: {exc}",
         )
     authorized_evidence_refs = _authorized_evidence_refs(served_context)
     try:
@@ -543,7 +780,7 @@ def _configuration_failure(
 def _assessment_validation_error(  # noqa: C901
     assessment: object,
     *,
-    producer_routes: Mapping[str, str],
+    producer_descriptors: tuple[GroundingProducerDescriptor, ...],
     context_refs: tuple[str, ...],
     context_ref_evidence_types: Mapping[str, str],
     served_static_refs: set[str],
@@ -584,12 +821,52 @@ def _assessment_validation_error(  # noqa: C901
         if isinstance(context_ref, str)
         else "observation"
     )
-    if evidence_kind not in producer_routes:
-        return "No controlled producer is configured for the requested evidence."
+    descriptor_error = _descriptor_request_validation_error(
+        semantic_need,
+        evidence_kind=evidence_kind,
+        producer_descriptors=producer_descriptors,
+    )
+    if descriptor_error is not None:
+        return descriptor_error
     if isinstance(context_ref, str) and context_ref in served_static_refs:
         return f"Phase 4.3 context_ref was already served: {context_ref}."
     if context_ref is None and _semantic_need_key(semantic_need) in live_request_history:
         return "A repeated live observation requires a new semantic need."
+    return None
+
+
+def _descriptor_request_validation_error(
+    semantic_need: object,
+    *,
+    evidence_kind: object,
+    producer_descriptors: tuple[GroundingProducerDescriptor, ...],
+) -> str | None:
+    if not isinstance(semantic_need, Mapping) or not isinstance(evidence_kind, str):
+        return "A producer request requires one structured semantic need."
+    try:
+        need = ContextNeed.from_mapping(
+            {
+                "kind": semantic_need["kind"],
+                "symbol": semantic_need["symbol"],
+                "subject_role": "product_context",
+                "authority": "PA",
+                "frame": None,
+                "maximum_age_ns": None,
+                "reason": semantic_need["description"],
+            }
+        )
+    except (GroundingContractError, KeyError, TypeError) as exc:
+        return f"Phase 4.3 semantic need cannot be routed: {exc}"
+    matches = [
+        descriptor
+        for descriptor in producer_descriptors
+        if descriptor.supports(need) and evidence_kind in descriptor.evidence_types
+    ]
+    if not matches:
+        return (
+            "No controlled producer advertises the unresolved output and "
+            "requested evidence type."
+        )
     return None
 
 
@@ -730,6 +1007,431 @@ def _initial_served_context_error(
     ):
         return "retrieval_0001 live served_context is invalid."
     return None
+
+
+def _read_pa_context_settings(
+    interaction_root: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        settings = _read_json(interaction_root / _SETTINGS_PATH)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "Phase 3.3 settings could not be read."
+    if not isinstance(settings, dict) or set(settings) != {
+        "max_pa_turns",
+        "live_observation_timeout_sec",
+    }:
+        return None, "Phase 3.3 settings fields are invalid."
+    max_pa_turns = settings["max_pa_turns"]
+    timeout = settings["live_observation_timeout_sec"]
+    validation_error = _configuration_failure(
+        ontology_config=object(),
+        grounding_runtime=object(),
+        max_pa_turns=max_pa_turns,
+        live_observation_timeout_sec=timeout,
+    )
+    if validation_error is not None:
+        return None, str(validation_error["failure"]["message"])
+    return {
+        "max_pa_turns": max_pa_turns,
+        "live_observation_timeout_sec": float(timeout),
+    }, None
+
+
+def _persist_pa_context_grounding_completion(  # noqa: PLR0913
+    interaction_root: Path,
+    *,
+    tbox: TBoxSnapshot,
+    product_requirement: str,
+    completion_turn: int,
+    decision_path: Path,
+    attempted_evidence: tuple[str, ...],
+    clarification_history: tuple[Mapping[str, object], ...],
+) -> str | None:
+    try:
+        tbox.assert_unchanged()
+        abox = load_interaction_abox(interaction_root, tbox)
+        draft_paths = sorted(
+            (
+                interaction_root / "products/grounding/task_transition"
+            ).glob("draft_*.json")
+        )
+        if not draft_paths:
+            return "No persisted TaskTransitionDraft is available for Phase 3.5."
+        draft_path = draft_paths[-1]
+        draft_source = draft_path.read_bytes()
+        draft_value = json.loads(draft_source.decode("utf-8"))
+        if not isinstance(draft_value, Mapping):
+            return "Persisted TaskTransitionDraft is not an object."
+        draft = TaskTransitionDraft.from_mapping(draft_value)
+        if draft.product_requirement != product_requirement:
+            return "TaskTransitionDraft product_requirement does not match Phase 3.5."
+
+        source_view_path: Path | None = None
+        source_view: ProductContextView | None = None
+        for path in sorted(
+            (interaction_root / "products/grounding/product_context").glob(
+                "view_*.json"
+            )
+        ):
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, Mapping):
+                return "Persisted ProductContextView is not an object."
+            candidate = ProductContextView.from_mapping(value)
+            if candidate.fingerprint == draft.source_view_fingerprint:
+                source_view_path = path
+                source_view = candidate
+        if source_view_path is None or source_view is None:
+            return "TaskTransitionDraft source ProductContextView is unavailable."
+
+        fresh_view = build_product_context_view(
+            interaction_root,
+            abox,
+            attempted_evidence=attempted_evidence,
+            assessed_at_ns=time.time_ns(),
+        )
+        if (
+            source_view.tbox_fingerprint != fresh_view.tbox_fingerprint
+            or source_view.abox_fingerprint != fresh_view.abox_fingerprint
+            or source_view.delta_count != fresh_view.delta_count
+            or source_view.assertions != fresh_view.assertions
+        ):
+            return "TaskTransitionDraft source context is not the current PA context."
+        current_draft = replace(
+            draft,
+            source_view_fingerprint=fresh_view.fingerprint,
+        )
+        unresolved = unresolved_context_needs(current_draft, fresh_view)
+        if unresolved or draft.unresolved_user_intent is not None:
+            return "TaskTransitionDraft still has unresolved context needs."
+
+        fresh_view_path = persist_product_context_view(
+            interaction_root,
+            fresh_view,
+        )
+        clarification_refs: list[str] = []
+        for item in clarification_history:
+            question_turn = item.get("question_turn")
+            if not isinstance(question_turn, int) or isinstance(question_turn, bool):
+                return "Clarification history contains an invalid question turn."
+            path = (
+                interaction_root
+                / "interaction_record"
+                / f"clarification_{question_turn:04d}.json"
+            )
+            persisted, error = _existing_clarification_record(path)
+            if error is not None or persisted != item:
+                return error or "Clarification history does not match its persisted record."
+            if persisted.get("action") != "answered":
+                return "Cancelled clarification cannot enter Phase 3.5."
+            clarification_refs.append(str(path.relative_to(interaction_root)))
+
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "record_type": "PAContextGroundingCompletion",
+            "status": "context understanding complete",
+            "product_requirement": product_requirement,
+            "completion_turn": completion_turn,
+            "decision_ref": str(decision_path.relative_to(interaction_root)),
+            "task_transition_draft_ref": str(draft_path.relative_to(interaction_root)),
+            "task_transition_draft_sha256": hashlib.sha256(draft_source).hexdigest(),
+            "product_context_ref": str(
+                fresh_view_path.relative_to(interaction_root)
+            ),
+            "product_context_fingerprint": fresh_view.fingerprint,
+            "tbox_fingerprint": fresh_view.tbox_fingerprint,
+            "abox_fingerprint": fresh_view.abox_fingerprint,
+            "attempted_evidence": list(fresh_view.attempted_evidence),
+            "typed_context_refs": [
+                {
+                    "ref": binding.record_ref,
+                    "sha256": binding.record_sha256,
+                }
+                for binding in fresh_view.typed_bindings
+            ],
+            "clarification_refs": clarification_refs,
+            "unresolved_context_needs": [],
+            "completed_at_ns": time.time_ns(),
+        }
+        payload["fingerprint"] = _record_fingerprint(payload)
+        completion = PAContextGroundingCompletion.from_mapping(payload)
+        _write_json_exclusive(
+            interaction_root
+            / "interaction_record"
+            / "context_completion_0001.json",
+            completion.to_record(),
+        )
+        load_pa_context_grounding_completion(interaction_root)
+    except (
+        FileExistsError,
+        GroundingContractError,
+        OSError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        return f"Phase 3.5 validation failed: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _pending_clarification(
+    interaction_root: Path,
+) -> tuple[dict[str, object] | None, str | None]:
+    decision_paths = sorted(
+        (interaction_root / "interaction_record").glob("decision_*.json")
+    )
+    if not decision_paths:
+        return None, "No persisted Phase 4.3 decision exists."
+    try:
+        decision = _read_json(decision_paths[-1])
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "The latest Phase 4.3 decision could not be read."
+    expected_keys = {
+        "decision",
+        "turn",
+        "product_requirement",
+        "Phase_4_3_input",
+        "Phase_4_3_output",
+        "failure",
+    }
+    if not isinstance(decision, dict) or set(decision) != expected_keys:
+        return None, "The latest Phase 4.3 decision fields are invalid."
+    if decision["failure"] is not None:
+        return None, "A failed interaction cannot enter Phase 3.4."
+    turn = decision["turn"]
+    output = decision["Phase_4_3_output"]
+    if not isinstance(turn, int) or isinstance(turn, bool):
+        return None, "The latest clarification turn is invalid."
+    if not isinstance(output, dict) or set(output) != _ASSESSMENT_KEYS:
+        return None, "The latest Phase 4.3 output is invalid."
+    semantic_need = output["unresolved_semantic_need"]
+    needed_context = output["needed_context"]
+    if output["context understanding complete"] is not False:
+        return None, "A completed interaction cannot enter Phase 3.4."
+    if (
+        not isinstance(semantic_need, dict)
+        or semantic_need.get("kind") != "user_intent"
+        or set(semantic_need) != {"kind", "symbol", "description"}
+    ):
+        return None, "Phase 3.4 requires one pending user_intent need."
+    if (
+        not isinstance(needed_context, dict)
+        or set(needed_context)
+        != {"context_ref", "request_live_observation", "clarification_question"}
+        or needed_context["context_ref"] is not None
+        or needed_context["request_live_observation"] is not False
+        or not isinstance(needed_context["clarification_question"], str)
+        or not needed_context["clarification_question"].strip()
+    ):
+        return None, "The latest decision has no valid clarification question."
+    turn_path = interaction_root / "interaction_record" / f"turn_{turn:04d}.json"
+    try:
+        turn_record = _read_json(turn_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "The clarification ProductAgent turn could not be read."
+    if (
+        not isinstance(turn_record, dict)
+        or set(turn_record) != _TURN_KEYS
+        or turn_record["failure"] is not None
+        or turn_record["product_requirement"] != decision["product_requirement"]
+        or turn_record["PA_output"]
+        != {
+            "needed_context": needed_context,
+            "context understanding complete": False,
+        }
+    ):
+        return None, "The clarification ProductAgent turn is invalid."
+    return {
+        "product_requirement": decision["product_requirement"],
+        "question_turn": turn,
+        "semantic_need": semantic_need,
+        "question": needed_context["clarification_question"],
+    }, None
+
+
+def _clarification_record(
+    *,
+    product_requirement: str,
+    question_turn: int,
+    semantic_need: object,
+    question: str,
+    action: str,
+    reply: str | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "record_type": "PAClarification",
+        "product_requirement": product_requirement,
+        "question_turn": question_turn,
+        "semantic_need": semantic_need,
+        "question": question,
+        "action": action,
+        "reply": reply,
+        "recorded_at_ns": time.time_ns(),
+    }
+    payload["fingerprint"] = _record_fingerprint(payload)
+    return payload
+
+
+def _existing_clarification_record(
+    path: Path,
+) -> tuple[dict[str, object] | None, str | None]:
+    if not path.exists():
+        return None, None
+    try:
+        value = _read_json(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, f"Clarification record is unreadable: {path.name}."
+    error = _clarification_record_validation_error(value)
+    return (None, error) if error is not None else (value, None)
+
+
+def _clarification_record_validation_error(value: object) -> str | None:
+    if not isinstance(value, dict) or set(value) != _CLARIFICATION_KEYS:
+        return "Clarification record fields are invalid."
+    if value["schema_version"] != 1 or value["record_type"] != "PAClarification":
+        return "Clarification record identity is invalid."
+    if not isinstance(value["product_requirement"], str) or not value[
+        "product_requirement"
+    ]:
+        return "Clarification product_requirement is invalid."
+    if (
+        not isinstance(value["question_turn"], int)
+        or isinstance(value["question_turn"], bool)
+        or value["question_turn"] < 2
+    ):
+        return "Clarification question_turn is invalid."
+    semantic_need = value["semantic_need"]
+    if (
+        not isinstance(semantic_need, dict)
+        or set(semantic_need) != {"kind", "symbol", "description"}
+        or semantic_need.get("kind") != "user_intent"
+    ):
+        return "Clarification semantic_need is invalid."
+    if not isinstance(value["question"], str) or not value["question"].strip():
+        return "Clarification question is invalid."
+    action = value["action"]
+    reply = value["reply"]
+    if action not in {"answered", "cancelled"}:
+        return "Clarification action is invalid."
+    if action == "answered" and (
+        not isinstance(reply, str) or not reply.strip()
+    ):
+        return "Answered clarification reply is invalid."
+    if action == "cancelled" and reply is not None:
+        return "Cancelled clarification must not contain a reply."
+    if not isinstance(value["recorded_at_ns"], int) or isinstance(
+        value["recorded_at_ns"], bool
+    ):
+        return "Clarification timestamp is invalid."
+    fingerprint = value["fingerprint"]
+    payload = {key: item for key, item in value.items() if key != "fingerprint"}
+    if not isinstance(fingerprint, str) or fingerprint != _record_fingerprint(payload):
+        return "Clarification fingerprint is invalid."
+    return None
+
+
+def _clarification_resume_state(  # noqa: C901
+    interaction_root: Path,
+    *,
+    product_requirement: str,
+    max_pa_turns: int,
+) -> tuple[dict[str, object] | None, str | None]:
+    pending, pending_error = _pending_clarification(interaction_root)
+    if pending_error is not None or pending is None:
+        return None, pending_error or "No clarification can be resumed."
+    history: list[dict[str, object]] = []
+    for path in sorted(
+        (interaction_root / "interaction_record").glob("clarification_*.json")
+    ):
+        record, record_error = _existing_clarification_record(path)
+        if record_error is not None or record is None:
+            return None, record_error or f"Clarification record is invalid: {path.name}."
+        if record["product_requirement"] != product_requirement:
+            return None, "Clarification history product_requirement is inconsistent."
+        history.append(record)
+    if not history:
+        return None, "The pending clarification has no persisted user reply."
+    latest = history[-1]
+    if latest["action"] != "answered":
+        return None, "A cancelled interaction cannot be resumed."
+    if (
+        latest["question_turn"] != pending["question_turn"]
+        or latest["semantic_need"] != pending["semantic_need"]
+        or latest["question"] != pending["question"]
+    ):
+        return None, "The latest clarification reply does not match the pending question."
+    operation_number = int(latest["question_turn"])
+    if operation_number >= max_pa_turns:
+        return None, "No ProductAgent turn remains after clarification."
+
+    attempted_evidence: list[str] = []
+    for path in sorted(
+        (interaction_root / "interaction_record").glob("interpretation_*.json")
+    ):
+        try:
+            record = _read_json(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, f"Interpretation history is unreadable: {path.name}."
+        if (
+            not isinstance(record, dict)
+            or record.get("accepted") is not True
+            or record.get("failure") is not None
+            or not isinstance(record.get("evidence_identifier"), str)
+        ):
+            return None, f"Interpretation history is invalid: {path.name}."
+        attempted_evidence.append(record["evidence_identifier"])
+
+    served_contexts: list[dict[str, object]] = []
+    for path in sorted(
+        (interaction_root / "interaction_record").glob("retrieval_*.json")
+    ):
+        try:
+            record = _read_json(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, f"Retrieval history is unreadable: {path.name}."
+        served = record.get("served_context") if isinstance(record, dict) else None
+        if not isinstance(served, dict):
+            return None, f"Retrieval history is invalid: {path.name}."
+        served_contexts.append(served)
+
+    live_request_history: set[str] = set()
+    for path in sorted(
+        (interaction_root / "interaction_record").glob("decision_*.json")
+    ):
+        try:
+            decision = _read_json(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, f"Decision history is unreadable: {path.name}."
+        output = decision.get("Phase_4_3_output") if isinstance(decision, dict) else None
+        if not isinstance(output, dict):
+            continue
+        needed = output.get("needed_context")
+        semantic_need = output.get("unresolved_semantic_need")
+        if (
+            isinstance(needed, dict)
+            and needed.get("request_live_observation") is True
+            and isinstance(semantic_need, Mapping)
+        ):
+            live_request_history.add(_semantic_need_key(semantic_need))
+    return {
+        "operation_number": operation_number,
+        "attempted_evidence": attempted_evidence,
+        "served_contexts": served_contexts,
+        "live_request_history": live_request_history,
+        "clarification_history": history,
+    }, None
+
+
+def _record_fingerprint(value: Mapping[str, object]) -> str:
+    serialized = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def _served_static_refs(served_contexts: list[dict[str, object]]) -> set[str]:

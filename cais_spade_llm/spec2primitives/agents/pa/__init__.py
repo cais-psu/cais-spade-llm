@@ -1,7 +1,9 @@
 """Spec2Primitives PA context-interaction boundary."""
 
 from cais_spade_llm.spec2primitives.agents.pa.context_assessment import (
+    cancel_pa_context_interaction,
     continue_pa_context_interaction,
+    submit_pa_clarification_reply,
 )
 from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
@@ -14,12 +16,34 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
 from cais_spade_llm.spec2primitives.agents.pa.context_serving import (
     serve_pa_requested_context,
 )
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    ContextNeed,
+    GroundingProducerDescriptor,
+    PAContextGroundingCompletion,
+    ProductContextView,
+    TaskTransitionDraft,
+    TypedContextBinding,
+    load_pa_context_grounding_completion,
+)
+from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+    ProductionProductContextGroundingRuntime,
+)
 
 __all__ = [
     "ProductAgentContextRuntime",
+    "ContextNeed",
+    "GroundingProducerDescriptor",
     "PAOntologyConfig",
+    "PAContextGroundingCompletion",
+    "ProductContextView",
     "ProductContextGroundingRuntime",
+    "ProductionProductContextGroundingRuntime",
+    "TaskTransitionDraft",
+    "TypedContextBinding",
+    "cancel_pa_context_interaction",
     "continue_pa_context_interaction",
+    "load_pa_context_grounding_completion",
     "serve_pa_requested_context",
     "start_pa_context_interaction",
+    "submit_pa_clarification_reply",
 ]

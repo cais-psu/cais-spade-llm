@@ -7,9 +7,10 @@ Spec2Primitives is the isolated workspace for
 The current implementation contains the project skeleton, research scope,
 implementation plan, approved source references, demand-driven RGB-D context
 tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
-interaction UI connected through Phase 3.3, the Phase 3.1 product-requirement
+interaction UI connected through Phase 3.5, the Phase 3.1 product-requirement
 intake boundary, Phase 3.2 requested-context serving, and contract-first Phase
-3.3 ontology orchestration. The Phase 4.0 RDFLib foundation separates shared
+3.3 ontology orchestration, Phase 3.4 clarification resumption, and the
+tamper-checked Phase 3.5 PA grounding-completion boundary. The Phase 4.0 RDFLib foundation separates shared
 immutable TBox semantics from PA-owned product context, initializes independent
 interaction ABoxes before PA's first request, and validates evidence-backed fact
 deltas inside the loop. Phase 4.1 adds an injected OpenAI document interpreter
@@ -20,10 +21,12 @@ size-only matching against one requested approved CAD and returns a unique
 candidate center in its camera optical frame. The remaining simple Phase 4.2B2
 pose increment adds deterministic generalized CAD registration for loose source
 candidates and returns an accepted, ambiguous, or rejected camera-frame pose.
-The UI remains status-only. Only
-persisted Phase 4.3-style assessments can clarify or complete. The main live
-loop fails closed until an authoritative TBox, registered complete grounding
-producers, and Phase 4.3 grounding runtime are configured.
+Phase 4.3 adds a production pre-RA grounding runtime with persisted
+`TaskTransitionDraft`, `ContextNeed`, `TypedContextBinding`,
+`ProductContextView`, and output-capable producer descriptors. The UI exposes
+the resulting assertions, provenance, bindings, needs, producer choices, and
+timeline read-only. The live loop remains fail-closed unless an authoritative
+TBox and `OPENAI_API_KEY` configure that runtime.
 
 ## MUST: Do not leak the answer
 
@@ -64,9 +67,12 @@ navigation item.
 The page can start and stop the no-hardware `gazebo_dual_spec2primitives` simulation,
 which launches `table_spec2primitives.world` with Gazebo, MoveIt, and RViz while
 forcing `run_perception:=false`. Its Phase 2 PA interaction workspace exposes
-the Phase 3.1--3.3 contract and displays `grounding_unavailable` because no
-production ontology or complete grounding producers are configured. Controlled tests
-inject a schema-only fixture and producer doubles to exercise the complete
+the Phase 3.1--3.5 workflow with its nested Phase 4 grounding contract. It uses the production grounding runtime when the
+authoritative ontology and model configuration are present, and otherwise
+displays `grounding_unavailable`. Pending user-intent questions can be answered
+or cancelled in the same interaction; completion is shown only from a verified
+`PAContextGroundingCompletion`. Controlled tests use a schema-only fixture,
+deterministic model responses, and producer inputs to exercise the complete
 orchestration record. A separate Phase 4.1 diagnostic can interpret the approved
 NIST PDF when an authoritative TBox and `OPENAI_API_KEY` are configured. It does
 not authorize PA completion. RGB-D capture, preprocessing, and minimal
@@ -75,15 +81,16 @@ The operator card is read-only and displays `idle`, `running`, `ready`, or
 `failed`, source and assembly candidate counts, CAD-correspondence and location
 states, compact pose state, and robot-frame conversion state. It has no CAD,
 coordinate, score, timeout, camera-role, threshold, mask, or artifact controls.
-The production card remains
-`idle` until an authorized runtime caller invokes the supporting path. CAD
+The geometry status card remains `idle` until an authorized runtime caller
+invokes the supporting path. CAD
 preprocessing stays separate and size association processes only the exact CAD
 provided by its future caller. A controlled pose caller can update the same card
 with only the compact pose state; coordinates and rotations remain in the typed
 record. A separate controlled caller can inject one approved camera-to-robot
 calibration and persist a robot-frame transform while the card exposes only its
-status. No cross-camera transform, PA integration, planning, RA, or robot
-execution occurs.
+status. Pre-RA PA grounding stops at an accepted camera-frame pose and does not
+perform robot-frame conversion. No cross-camera transform, Phase 5 planning,
+RA communication, or robot execution occurs.
 
 ## Planned dynamic PA/RA workflow
 
@@ -97,8 +104,8 @@ product or scene inputs return to PA in a deduplicated `MissingContextBatch`.
 PA may invoke several auditable single-source producers before returning a
 versioned `CompositionContextBundle`. Batched rounds have no fixed semantic
 count, but repeated, ambiguous, unsupported, or non-progressing requests stop
-fail-closed. Production Phase 4.3, Phase 5, the RA workflow, validation, and
-execution are not implemented.
+fail-closed. Phase 5, the RA workflow, validation, and execution are not
+implemented.
 
 The dedicated scene uses the actual NIST plate, pin, gear fixture, shaft, and
 gear STL visuals. `Gear_Plate` and three `Gear_Shaft` instances are pre-installed
@@ -109,9 +116,9 @@ insertion-physics, or robot-execution claim.
 
 ## Folder guide
 
-- `agents/pa/`: the Phase 3.1 ProductAgent composition boundary, Phase 3.2 exact
-  context serving, Phase 3.3 controlled grounding orchestration contracts,
-  PA-owned Phase 4.0 product context, and future PA workflow code.
+- `agents/pa/`: the Phase 3.1 ProductAgent boundary, Phase 3.2 exact context
+  serving, Phase 3.3--3.5 orchestration and completion, PA-owned Phase 4.0 product context, and the
+  production pre-RA Phase 4.3 grounding contracts and runtime.
 - `agents/ra/`: future Spec2Primitives RobotAgent adapter and RA workflow code.
 - `adapters/`: narrow runtime connections, beginning with
   `gazebo_dual_spec2primitives`.

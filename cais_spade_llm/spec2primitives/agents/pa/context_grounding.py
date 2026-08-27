@@ -1,22 +1,25 @@
 """Define injected ontology and controlled PA grounding boundaries.
 
-The main PA UI intentionally supplies no complete grounding runtime until an
-authoritative schema-only TBox and the correspondence, pose, and Phase 4.3
-producers exist. Tests
-and future adapters may inject implementations without widening ProductAgent's
-public surface.
+The main PA UI supplies the production grounding runtime only when an
+authoritative schema-only TBox and model configuration are present. Tests may
+inject controlled implementations without widening ProductAgent's public
+surface.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from rdflib import Literal, URIRef
 
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingContractError,
+    GroundingProducerDescriptor,
+)
 from cais_spade_llm.spec2primitives.agents.pa.product_context import ABoxSnapshot
 from cais_spade_llm.spec2primitives.ontology import (
     OntologyContextError,
@@ -51,8 +54,23 @@ class PAOntologyConfig:
 class ProductContextGroundingRuntime(Protocol):
     """Expose only controlled Phase 4 interpretation and assessment calls."""
 
-    def grounding_producer_routes(self) -> Mapping[str, str]:
-        """Map each evidence type to its application-owned producer symbol."""
+    def grounding_producer_descriptors(
+        self,
+    ) -> Sequence[GroundingProducerDescriptor | Mapping[str, object]]:
+        """Return the application-owned output-capable producer registry."""
+        ...
+
+    async def initial_product_context_decision(
+        self,
+        product_agent: ProductAgentContextRuntime,
+        *,
+        interaction_root: Path,
+        tbox: TBoxSnapshot,
+        abox: ABoxSnapshot,
+        product_context: Mapping[str, object],
+        max_pa_turns: int,
+    ) -> Mapping[str, object]:
+        """Optionally make the first request from a TaskTransitionDraft."""
         ...
 
     async def interpret_served_context(
@@ -68,7 +86,7 @@ class ProductContextGroundingRuntime(Protocol):
         """Interpret one served result without mutating the interaction ABox."""
         ...
 
-    async def assess_product_context(
+    async def assess_product_context(  # noqa: PLR0913
         self,
         product_agent: ProductAgentContextRuntime,
         *,
@@ -77,6 +95,7 @@ class ProductContextGroundingRuntime(Protocol):
         abox: ABoxSnapshot,
         abox_view: Mapping[str, object],
         attempted_evidence: tuple[str, ...],
+        clarification_history: tuple[Mapping[str, object], ...] = (),
         turn_number: int,
         max_pa_turns: int,
     ) -> Mapping[str, object]:
@@ -122,21 +141,59 @@ def compact_abox_view(abox: ABoxSnapshot) -> dict[str, object]:
     }
 
 
-def validated_grounding_producer_routes(
+def validated_grounding_producer_descriptors(
     grounding_runtime: ProductContextGroundingRuntime,
-) -> dict[str, str]:
-    """Validate the complete evidence-type routing table."""
-    routes = grounding_runtime.grounding_producer_routes()
-    if not isinstance(routes, Mapping) or set(routes) != _EVIDENCE_TYPES:
-        raise OntologyContextError(
-            "grounding_producer_routes must map document, CAD, and observation."
-        )
-    validated: dict[str, str] = {}
-    for evidence_type in sorted(_EVIDENCE_TYPES):
-        producer = routes[evidence_type]
-        if not isinstance(producer, str) or not _PRODUCER_SYMBOL.fullmatch(producer):
-            raise OntologyContextError(
-                f"Producer for {evidence_type} must be a fixed non-path identifier."
+) -> tuple[GroundingProducerDescriptor, ...]:
+    """Validate the output-capable producer registry and evidence coverage."""
+    values = grounding_runtime.grounding_producer_descriptors()
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values:
+        raise OntologyContextError("grounding_producer_descriptors must be non-empty.")
+    validated: list[GroundingProducerDescriptor] = []
+    for value in values:
+        try:
+            descriptor = (
+                value
+                if isinstance(value, GroundingProducerDescriptor)
+                else GroundingProducerDescriptor.from_mapping(value)
             )
-        validated[evidence_type] = producer
-    return validated
+        except (GroundingContractError, TypeError) as exc:
+            raise OntologyContextError(
+                f"Grounding producer descriptor is invalid: {exc}"
+            ) from exc
+        if not _PRODUCER_SYMBOL.fullmatch(descriptor.producer):
+            raise OntologyContextError(
+                "Grounding producer must be a fixed non-path identifier."
+            )
+        if not set(descriptor.evidence_types).issubset(_EVIDENCE_TYPES | {"existing_record"}):
+            raise OntologyContextError(
+                f"{descriptor.producer} advertises an invalid evidence type."
+            )
+        validated.append(descriptor)
+    covered_evidence = {
+        evidence_type
+        for descriptor in validated
+        for evidence_type in descriptor.evidence_types
+        if evidence_type != "existing_record"
+    }
+    if covered_evidence != _EVIDENCE_TYPES:
+        raise OntologyContextError(
+            "Grounding producer descriptors must cover document, CAD, and observation."
+        )
+    return tuple(validated)
+
+
+def producer_for_evidence_type(
+    descriptors: Sequence[GroundingProducerDescriptor],
+    evidence_type: str,
+) -> str:
+    """Resolve one unambiguous producer symbol for served raw evidence."""
+    producers = {
+        descriptor.producer
+        for descriptor in descriptors
+        if evidence_type in descriptor.evidence_types
+    }
+    if len(producers) != 1:
+        raise OntologyContextError(
+            f"Served {evidence_type} evidence must route to exactly one producer."
+        )
+    return next(iter(producers))

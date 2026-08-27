@@ -130,7 +130,7 @@ def test_stop_uses_exact_dual_gazebo_name() -> None:
 def test_phase_2_message_states_the_connected_and_unavailable_boundaries() -> None:
     message = _phase_2_connection_message()
 
-    assert "Connected through Phase 3.3" in message
+    assert "Connected through Phase 3.5" in message
     for unavailable_boundary in (
         "grounding",
         "planning",
@@ -150,7 +150,7 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
         '"Start PA Context Interaction"',
         'ui.label("PA Interaction")',
         'ui.label("ProductAgent")',
-        'ui.badge("connected through Phase 3.3")',
+        'ui.badge("connected through Phase 3.5")',
         'ui.badge("idle")',
         '"needed_context"',
         '"served context"',

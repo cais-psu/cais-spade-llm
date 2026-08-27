@@ -15,11 +15,17 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
+from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+    ProductionProductContextGroundingRuntime,
+)
 from cais_spade_llm.spec2primitives.config import (
     ModelRuntimeConfig,
     load_model_runtime_config,
 )
-from cais_spade_llm.spec2primitives.ontology import OntologyContextError
+from cais_spade_llm.spec2primitives.ontology import (
+    OntologyContextError,
+    TBoxSnapshot,
+)
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
     DocumentVisionRuntime,
     OpenAIDocumentVisionRuntime,
@@ -41,6 +47,7 @@ class Spec2PrimitivesUIRuntime:
     contexts_root: Path
     ontology_config: PAOntologyConfig | None = None
     grounding_runtime: ProductContextGroundingRuntime | None = None
+    tbox: TBoxSnapshot | None = None
     model_config: ModelRuntimeConfig | None = None
     document_vision_runtime: DocumentVisionRuntime | None = None
     document_diagnostic_unavailable_reason: str | None = None
@@ -70,6 +77,7 @@ def create_spec2primitives_ui_runtime(
 
     model_config: ModelRuntimeConfig | None = None
     ontology_config: PAOntologyConfig | None = None
+    grounding_runtime: ProductContextGroundingRuntime | None = None
     vision_runtime: DocumentVisionRuntime | None = None
     unavailable_reason: str | None = None
     product_agent: ProductAgentContextRuntime = _UnavailableProductAgentRuntime()
@@ -94,20 +102,29 @@ def create_spec2primitives_ui_runtime(
         else:
             ontology_config = PAOntologyConfig(Path(tbox_path), ppr_namespace)
             try:
-                ontology_config.load_tbox()
+                tbox = ontology_config.load_tbox()
             except (OSError, OntologyContextError) as exc:
                 unavailable_reason = f"Authoritative TBox is invalid: {type(exc).__name__}: {exc}"
 
     if unavailable_reason is None and not os.environ.get("OPENAI_API_KEY"):
-        unavailable_reason = "Set OPENAI_API_KEY to enable the OpenAI document diagnostic."
-    if unavailable_reason is None and model_config is not None:
+        unavailable_reason = (
+            "Set OPENAI_API_KEY to enable production grounding and the "
+            "OpenAI document diagnostic."
+        )
+    if unavailable_reason is None and model_config is not None and tbox is not None:
         vision_runtime = OpenAIDocumentVisionRuntime(model_config.document_vlm)
+        grounding_runtime = ProductionProductContextGroundingRuntime(
+            tbox=tbox,
+            document_config=model_config.document_vlm,
+            document_vision_runtime=vision_runtime,
+        )
 
     return Spec2PrimitivesUIRuntime(
         dual_gazebo=dual_gazebo,
         product_agent=product_agent,
         contexts_root=SPEC2PRIMITIVES_CONTEXTS_ROOT,
         ontology_config=ontology_config,
+        grounding_runtime=grounding_runtime,
         model_config=model_config,
         document_vision_runtime=vision_runtime,
         document_diagnostic_unavailable_reason=unavailable_reason,

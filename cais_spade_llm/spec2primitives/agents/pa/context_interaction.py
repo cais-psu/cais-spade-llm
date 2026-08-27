@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -11,7 +12,11 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
     ProductContextGroundingRuntime,
     compact_abox_view,
-    validated_grounding_producer_routes,
+    validated_grounding_producer_descriptors,
+)
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    build_product_context_view,
+    persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
@@ -102,7 +107,7 @@ async def start_pa_context_interaction(
 
     try:
         tbox = ontology_config.load_tbox()
-        validated_grounding_producer_routes(grounding_runtime)
+        validated_grounding_producer_descriptors(grounding_runtime)
         abox = initialize_interaction_abox(
             interaction_root,
             product_requirement,
@@ -125,23 +130,56 @@ async def start_pa_context_interaction(
         )
         return failure
 
-    response_format = _needed_context_response_format(context_refs)
-    prompt = _needed_context_prompt(
-        product_requirement,
-        context_refs,
-        abox_view=compact_abox_view(abox),
-        context_ref_evidence_types=context_ref_evidence_types,
-    )
-    pa_input = {
-        "prompt": prompt,
-        "response_format": response_format,
-    }
-
+    initial_decision = getattr(grounding_runtime, "initial_product_context_decision", None)
     try:
-        pa_output = await product_agent.ask_llm_structured(
-            prompt,
-            response_format=response_format,
-        )
+        if callable(initial_decision):
+            product_context = build_product_context_view(
+                interaction_root,
+                abox,
+                attempted_evidence=(),
+                assessed_at_ns=time.time_ns(),
+            )
+            product_context_path = persist_product_context_view(
+                interaction_root,
+                product_context,
+            )
+            pa_input = {
+                "product_context_ref": str(
+                    product_context_path.relative_to(interaction_root)
+                ),
+                "product_context": product_context.to_record(),
+            }
+            assessment = await initial_decision(
+                product_agent,
+                interaction_root=interaction_root,
+                tbox=tbox,
+                abox=abox,
+                product_context=product_context.to_record(),
+                max_pa_turns=12,
+            )
+            if not isinstance(assessment, dict) or not isinstance(
+                assessment.get("needed_context"), dict
+            ):
+                raise RuntimeError(
+                    "Production Phase 4.3 returned no initial needed_context."
+                )
+            pa_output = {"needed_context": assessment["needed_context"]}
+        else:
+            response_format = _needed_context_response_format(context_refs)
+            prompt = _needed_context_prompt(
+                product_requirement,
+                context_refs,
+                abox_view=compact_abox_view(abox),
+                context_ref_evidence_types=context_ref_evidence_types,
+            )
+            pa_input = {
+                "prompt": prompt,
+                "response_format": response_format,
+            }
+            pa_output = await product_agent.ask_llm_structured(
+                prompt,
+                response_format=response_format,
+            )
     except Exception as exc:
         logger.exception("Phase 3.1 ProductAgent structured call failed.")
         failure = _failure(

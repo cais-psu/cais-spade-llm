@@ -14,13 +14,31 @@ substituting fallback evidence. The public Phase 3.2 entrypoint retains its exac
 one-request behavior.
 
 `context_grounding.py` defines the injected schema-only TBox configuration and
-the narrow controlled interpretation/assessment protocol. `context_assessment.py`
-implements the Phase 3.3 outer loop: serve one selected source, dispatch exactly
-one evidence-type-routed producer, validate and merge its generic triple delta,
-then persist one Phase 4.3-style assessment over the updated ABox. Raw served
-summaries cannot directly authorize clarification or completion.
+the narrow controlled interpretation/assessment protocol. `grounding_contracts.py`
+implements `TaskTransitionDraft`, `ContextNeed`, `TypedContextBinding`,
+`ProductContextView`, `GroundingProducerDescriptor`, and
+`PAContextGroundingCompletion` with strict persistence and validation.
+`context_assessment.py` implements the Phase 3.3--3.5 outer loop:
+serve one selected source, dispatch the authorized descriptor capable of the
+current output, validate and merge its generic triple delta, rebuild the product
+context view, and persist the Phase 4.3 decision. Raw served summaries cannot
+directly authorize clarification or completion.
 
-## Planned production behavior: how PA determines needed information
+Phase 3.4 persists exact user-intent replies or cancellation and resumes the
+same interaction with a freshly rebuilt product-context view. Replies remain
+user intent rather than ABox evidence. Phase 3.5 independently reloads the
+terminal decision, latest draft, current view, typed records, and clarification
+history before writing the single completion record consumed by the UI.
+
+`production_grounding.py` supplies the production pre-RA Phase 4.3 runtime. It
+evolves a robot-independent draft through ProductAgent, computes missing inputs
+deterministically, invokes the existing NIST document interpreter or exact
+approved CAD/fresh RGB-D producers only when needed, and derives segmentation,
+size correspondence, and camera-frame pose records on demand. It does not
+produce a robot-frame pose, task-transition contract, primitive program, or RA
+message.
+
+## Production behavior: how PA determines needed information
 
 PA does not infer a universal input checklist from the TBox. The TBox defines
 legal meaning, not which document, sensor, CAD, or calibration operation is
@@ -41,7 +59,7 @@ constraint, or task binding needed for a robot-independent
 product or scene inputs they expose into a `MissingContextBatch`; robot-owned
 state, limits, IK, collision, and trajectory inputs remain local to RA.
 
-`ProductContextView` will combine the compact ABox with validated
+`ProductContextView` combines the compact ABox with validated
 `TypedContextBinding` entries. Each binding records its subject or task role,
 record type, ref, hash, status, frame, time or validity, producer, and
 provenance. An ambiguous, rejected, stale, wrong-frame, missing, or tampered
@@ -88,11 +106,12 @@ producer, or no new accepted binding stops fail-closed.
 PA-owned need referenced by the `TaskTransitionDraft` is satisfied for Phase 5.
 It does not mean that every later primitive input is already available.
 
-This production mechanism is not implemented. The current Phase 4.3 assessor,
-typed-context index, producer-descriptor registry, complete document/scene/pose/
-frame producer chain, Phase 5 handoff, and downstream batch-resumption path are
-absent. Controlled tests inject assessment and grounding doubles, so the live UI
-remains fail-closed rather than making these decisions from raw summaries.
+The pre-RA production mechanism, typed-context index, producer-descriptor
+registry, document producer, and demand-driven CAD/observation/segmentation/
+correspondence/camera-pose chain are implemented. Robot-frame grounding remains
+outside this pre-RA runtime because no RA/resource target frame has been
+selected. The Phase 5 task contract and downstream batch resumption remain
+absent; Phase 3.5 only records readiness for that future work.
 
 `product_agent_runtime.py` composes one shared ProductAgent behind the narrow
 `ProductAgentContextRuntime` interface used by the Phase 2.1 UI connection. It
@@ -114,13 +133,15 @@ writable graph. No PA-to-RA ontology projection is implemented in this phase.
 
 The merge caller supplies the trusted `authorized_evidence_refs` allowlist; a
 tool or its proposed delta cannot authorize its own evidence. Typed-context refs
-remain opaque JSON records under `products/grounding/` until their separately
-authorized producer contracts are implemented.
+remain opaque, hash-validated JSON records under `products/grounding/`; numeric
+geometry is not copied into the ABox or the read-only UI summary.
 
 Phase 4.0 is called by `context_interaction.py` before the first PA request and
 reloaded by `context_assessment.py` before interpretation. The production UI
-injects no complete grounding runtime, so it stops with
-`grounding_unavailable`. No connected PA runtime step starts ProductAgent SPADE
-behaviours, calls a VLM, retrieves the primitive catalog, builds an assembly
-plan, connects RA, performs real grounding, or executes robot behavior. The
-separate Phase 4.1 diagnostic does not call ProductAgent or assess completion.
+injects `ProductionProductContextGroundingRuntime` only when an authoritative
+TBox and model configuration are present; otherwise it stops with
+`grounding_unavailable`. The configured path calls ProductAgent structured
+reasoning and controlled grounding producers but never starts SPADE behaviours,
+retrieves a primitive catalog, builds an assembly plan, contacts RA, converts a
+pose to a robot frame, or executes robot behavior. The separate Phase 4.1
+diagnostic does not call ProductAgent or assess completion.

@@ -26,9 +26,12 @@ from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
 )
 from cais_spade_llm.spec2primitives.agents.pa import (
     ProductAgentContextRuntime,
+    cancel_pa_context_interaction,
     continue_pa_context_interaction,
+    load_pa_context_grounding_completion,
     serve_pa_requested_context,
     start_pa_context_interaction,
+    submit_pa_clarification_reply,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
     DOCUMENT_CONTEXT_REF,
@@ -47,10 +50,11 @@ _FLOW_STEPS = (
     "state checks + IK/collision/trajectory validation",
 )
 _PHASE_2_CONNECTED_MESSAGE = (
-    "Connected through Phase 3.3's ontology-backed orchestration boundary. The "
-    "live grounding workflow remains fail-closed until an authoritative TBox and "
-    "controlled Phase 4 producers are configured; planning, RA, and robot "
-    "action remain unavailable."
+    "Connected through Phase 3.5 and the pre-RA Phase 4.3 grounding boundary. "
+    "The production runtime is available only with an authoritative TBox and "
+    "controlled Phase 4 producers; Phase 5 planning, RA, primitive composition, "
+    "and robot action remain unavailable. Phase 3.4 clarification replies and "
+    "cancellation stay inside the same PA interaction."
 )
 _PHASE_2_RESULT_AREAS = (
     ("needed_context", "No needed_context decision is available."),
@@ -61,6 +65,10 @@ _PHASE_2_RESULT_AREAS = (
     ),
     ("retrieval error", "No retrieval was attempted."),
     ("clarification", "No clarification_question is available."),
+    ("Ontology Grounding", "No validated ProductContextView is available."),
+    ("Typed Runtime Context", "No typed runtime context is available."),
+    ("Grounding Decisions", "No task draft or producer selection is available."),
+    ("PA Grounding Completion", "No Phase 3.5 completion record is available."),
 )
 _ASSEMBLY_PLAN_COLUMNS = (
     "Step",
@@ -79,11 +87,12 @@ class _PAUIRuntimeObserver:
         *,
         max_pa_turns: int,
         on_pa_turn: Callable[[int, int], None],
+        starting_turn: int = 0,
     ) -> None:
         self._product_agent = product_agent
         self._max_pa_turns = max_pa_turns
         self._on_pa_turn = on_pa_turn
-        self._turn_number = 0
+        self._turn_number = starting_turn
 
     async def ask_llm_structured(
         self,
@@ -263,7 +272,7 @@ async def _run_pa_ui_interaction(
     max_pa_turns: int = 12,
     on_pa_turn: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
-    """Run the connected Phase 3.1 through Phase 3.3 backend workflow."""
+    """Run the connected Phase 3.1 through Phase 3.5 backend workflow."""
     interaction_identifier = f"interaction_{uuid.uuid4().hex}"
     interaction_root = runtime.contexts_root / interaction_identifier
     product_agent = runtime.product_agent
@@ -301,6 +310,61 @@ async def _run_pa_ui_interaction(
         "phase_3_3": phase_3_3,
         "max_pa_turns": max_pa_turns,
     }
+
+
+async def _submit_pa_ui_clarification(
+    runtime: Spec2PrimitivesUIRuntime,
+    interaction: dict[str, object],
+    user_reply: str,
+    *,
+    on_pa_turn: Callable[[int, int], None] | None = None,
+) -> dict[str, object]:
+    """Submit one clarification reply and update the same UI interaction."""
+    interaction_root = interaction.get("interaction_root")
+    max_pa_turns = interaction.get("max_pa_turns")
+    if not isinstance(interaction_root, Path) or not isinstance(max_pa_turns, int):
+        raise ValueError("PA UI clarification interaction is malformed.")
+    product_agent = runtime.product_agent
+    if on_pa_turn is not None:
+        current_turn = _latest_turn_number(interaction_root)
+        product_agent = _PAUIRuntimeObserver(
+            product_agent,
+            max_pa_turns=max_pa_turns,
+            on_pa_turn=on_pa_turn,
+            starting_turn=current_turn,
+        )
+    result = await submit_pa_clarification_reply(
+        product_agent,
+        interaction_root,
+        user_reply,
+        ontology_config=runtime.ontology_config,
+        grounding_runtime=runtime.grounding_runtime,
+    )
+    interaction["phase_3_4"] = result
+    interaction["phase_3_3"] = result
+    return interaction
+
+
+def _cancel_pa_ui_interaction(
+    interaction: dict[str, object],
+) -> dict[str, object]:
+    """Cancel one pending clarification without invoking ProductAgent."""
+    interaction_root = interaction.get("interaction_root")
+    if not isinstance(interaction_root, Path):
+        raise ValueError("PA UI cancellation interaction is malformed.")
+    result = cancel_pa_context_interaction(interaction_root)
+    interaction["phase_3_4"] = result
+    interaction["phase_3_3"] = result
+    return interaction
+
+
+def _latest_turn_number(interaction_root: Path) -> int:
+    numbers = [
+        int(path.stem.removeprefix("turn_"))
+        for path in (interaction_root / "interaction_record").glob("turn_*.json")
+        if path.stem.removeprefix("turn_").isdigit()
+    ]
+    return max(numbers, default=0)
 
 
 async def _run_document_diagnostic_ui(
@@ -377,6 +441,11 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         for name, record in records.items()
         if name.startswith("decision_") and isinstance(record, dict)
     ]
+    clarifications = [
+        record
+        for name, record in records.items()
+        if name.startswith("clarification_") and isinstance(record, dict)
+    ]
     needed_contexts = [
         needed_context
         for turn in turns
@@ -398,31 +467,37 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         for served_context in served_contexts
         if isinstance((provenance := served_context.get("provenance")), dict)
     ]
-    persisted_assessments = [
-        assessment
-        for decision in decisions
-        if isinstance((assessment := _validated_persisted_assessment(decision)), dict)
-    ]
-    clarification_question = next(
-        (
-            clarification
-            for assessment in reversed(persisted_assessments)
-            if isinstance(
-                (needed_context := assessment.get("needed_context")),
-                dict,
-            )
-            and isinstance(
-                (clarification := needed_context.get("clarification_question")),
-                str,
-            )
-        ),
-        None,
+    grounding_values = _grounding_result_values(records, interaction_root)
+    clarification_by_turn = {
+        record.get("question_turn"): record
+        for record in clarifications
+        if isinstance(record.get("question_turn"), int)
+    }
+    pending_clarification_turn: int | None = None
+    clarification_question: str | None = None
+    for decision in reversed(decisions):
+        assessment = _validated_persisted_assessment(decision)
+        needed_context = (
+            assessment.get("needed_context") if isinstance(assessment, dict) else None
+        )
+        question = (
+            needed_context.get("clarification_question")
+            if isinstance(needed_context, dict)
+            else None
+        )
+        turn = decision.get("turn")
+        if isinstance(question, str) and isinstance(turn, int):
+            if turn not in clarification_by_turn:
+                pending_clarification_turn = turn
+                clarification_question = question
+            break
+    latest_clarification = clarifications[-1] if clarifications else None
+    cancelled = (
+        isinstance(latest_clarification, dict)
+        and latest_clarification.get("action") == "cancelled"
     )
-    completed = any(
-        assessment.get("context understanding complete") is True
-        and assessment.get("needed_context") is None
-        for assessment in persisted_assessments
-    )
+    completion_record = _validated_persisted_completion(records, interaction_root)
+    completed = completion_record is not None
     completed_turns = {
         decision.get("turn")
         for decision in decisions
@@ -443,6 +518,7 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         retrievals=retrievals,
         completed_turns=completed_turns,
         clarification_turns=clarification_turns,
+        clarifications=clarifications,
         max_pa_turns=max_pa_turns,
     )
     if ontology_initialized:
@@ -475,6 +551,12 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     elif terminal_failure is not None:
         activity_state, activity_color = "failed", "red"
         activity_message = f"{turn_status} {_failure_message(terminal_failure)}"
+    elif cancelled:
+        activity_state, activity_color = "cancelled", "grey"
+        activity_message = (
+            f"{turn_status} The operator cancelled the pending Phase 3.4 "
+            "clarification. No later phase was invoked."
+        )
     elif isinstance(clarification_question, str):
         activity_state, activity_color = "clarification needed", "amber"
         activity_message = (
@@ -484,8 +566,8 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     elif completed:
         activity_state, activity_color = "context understanding complete", "green"
         activity_message = (
-            f"{turn_status} The persisted Phase 4.3 assessment reports complete "
-            "product context. Phase 5 planning remains unavailable."
+            f"{turn_status} The validated Phase 3.5 record reports complete "
+            "product context. Ready for Phase 5; Phase 5 remains unavailable."
         )
     elif served_contexts:
         activity_state, activity_color = "context served", "green"
@@ -527,8 +609,14 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         "clarification": (
             clarification_question
             if isinstance(clarification_question, str)
-            else "No clarification_question is available."
+            else (
+                _json_text(latest_clarification)
+                if isinstance(latest_clarification, dict)
+                else "No clarification_question is available."
+            )
         ),
+        "pending_clarification_turn": str(pending_clarification_turn or ""),
+        **grounding_values,
         "interaction_record": _ordered_interaction_record_text(
             interaction_identifier,
             interaction_root,
@@ -602,11 +690,52 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
     paths.extend(record_root.glob("retrieval_*.json"))
     paths.extend(record_root.glob("interpretation_*.json"))
     paths.extend(record_root.glob("decision_*.json"))
+    paths.extend(record_root.glob("clarification_*.json"))
+    paths.extend(record_root.glob("context_completion_*.json"))
+    paths.extend(record_root.glob("producer_selection_*.json"))
     settings_path = record_root / "pa_context_settings.json"
     if settings_path.is_file():
         paths.append(settings_path)
     for record_path in sorted(paths, key=_interaction_record_sort_key):
         record_name = record_path.stem
+        try:
+            records[record_name] = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            records[record_name] = {
+                "record_error": f"{type(exc).__name__}: {exc}",
+            }
+    grounding_paths = [
+        (
+            "ontology_assertion_provenance",
+            interaction_root
+            / "products/grounding/ontology/assertion_provenance.json",
+        )
+    ]
+    grounding_paths.extend(
+        (f"ontology_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/ontology").glob("delta_*.json")
+        )
+    )
+    grounding_paths.extend(
+        (f"product_context_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/product_context").glob(
+                "view_*.json"
+            )
+        )
+    )
+    grounding_paths.extend(
+        (f"task_transition_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/task_transition").glob(
+                "draft_*.json"
+            )
+        )
+    )
+    for record_name, record_path in grounding_paths:
+        if not record_path.is_file():
+            continue
         try:
             records[record_name] = json.loads(record_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -619,14 +748,101 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
 def _interaction_record_sort_key(path: Path) -> tuple[int, int]:
     if path.stem == "pa_context_settings":
         return (0, 0)
-    prefix, _, suffix = path.stem.partition("_")
+    prefix, _, suffix = path.stem.rpartition("_")
     order = {
         "turn": 0,
         "retrieval": 1,
         "interpretation": 2,
         "decision": 3,
+        "clarification": 4,
+        "context_completion": 5,
+        "producer_selection": 6,
     }.get(prefix, 4)
     return (int(suffix), order)
+
+
+def _grounding_result_values(
+    records: dict[str, object],
+    interaction_root: Path,
+) -> dict[str, str]:
+    views = [
+        value
+        for name, value in records.items()
+        if name.startswith("product_context_view_") and isinstance(value, dict)
+    ]
+    latest_view = views[-1] if views else None
+    if latest_view is None:
+        ontology_text = "No validated ProductContextView is available."
+        typed_text = "No typed runtime context is available."
+    else:
+        ontology_text = _json_text(
+            {
+                "tbox_fingerprint": latest_view.get("tbox_fingerprint"),
+                "abox_fingerprint": latest_view.get("abox_fingerprint"),
+                "delta_count": latest_view.get("delta_count"),
+                "assertions": latest_view.get("assertions"),
+                "uncertainty": latest_view.get("uncertainty"),
+                "unresolved_evidence_needs": latest_view.get(
+                    "unresolved_evidence_needs"
+                ),
+                "assertion_provenance": records.get(
+                    "ontology_assertion_provenance"
+                ),
+            }
+        )
+        typed_text = _json_text(latest_view.get("typed_bindings", []))
+    drafts = [
+        value
+        for name, value in records.items()
+        if name.startswith("task_transition_draft_") and isinstance(value, dict)
+    ]
+    selections = [
+        value
+        for name, value in records.items()
+        if name.startswith("producer_selection_") and isinstance(value, dict)
+    ]
+    decisions_text = (
+        _json_text(
+            {
+                "latest_TaskTransitionDraft": drafts[-1] if drafts else None,
+                "GroundingProducerSelections": selections,
+            }
+        )
+        if drafts or selections
+        else "No task draft or producer selection is available."
+    )
+    return {
+        "Ontology Grounding": ontology_text,
+        "Typed Runtime Context": typed_text,
+        "Grounding Decisions": decisions_text,
+        "PA Grounding Completion": (
+            "Ready for Phase 5\n\n" + _json_text(completion)
+            if (
+                completion := _validated_persisted_completion(
+                    records, interaction_root
+                )
+            )
+            is not None
+            else "No Phase 3.5 completion record is available."
+        ),
+    }
+
+
+def _validated_persisted_completion(
+    records: dict[str, object],
+    interaction_root: Path,
+) -> dict[str, object] | None:
+    values = [
+        value
+        for name, value in records.items()
+        if name.startswith("context_completion_") and isinstance(value, dict)
+    ]
+    if len(values) != 1:
+        return None
+    try:
+        return load_pa_context_grounding_completion(interaction_root).to_record()
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _pa_messages(
@@ -636,6 +852,7 @@ def _pa_messages(
     retrievals: list[dict[str, object]],
     completed_turns: set[object],
     clarification_turns: set[object],
+    clarifications: list[dict[str, object]],
     max_pa_turns: object,
 ) -> str:
     retrieval_by_number = {
@@ -649,6 +866,11 @@ def _pa_messages(
         "Operator Maximum PA turns",
         str(max_pa_turns),
     ]
+    clarification_by_turn = {
+        record.get("question_turn"): record
+        for record in clarifications
+        if isinstance(record.get("question_turn"), int)
+    }
     for turn in turns:
         turn_number = turn.get("turn")
         pa_output = turn.get("PA_output")
@@ -663,12 +885,14 @@ def _pa_messages(
                 )
                 clarification = needed_context.get("clarification_question")
                 if isinstance(clarification, str) and turn_number in clarification_turns:
-                    messages.extend(
-                        [
-                            "User reply",
-                            "Not available until Phase 3.4 is implemented.",
-                        ]
-                    )
+                    clarification_record = clarification_by_turn.get(turn_number)
+                    if isinstance(clarification_record, dict):
+                        if clarification_record.get("action") == "answered":
+                            messages.extend(
+                                ["User clarification reply", str(clarification_record["reply"])]
+                            )
+                        elif clarification_record.get("action") == "cancelled":
+                            messages.extend(["User clarification action", "cancelled"])
             if (
                 pa_output.get("context understanding complete") is True
                 and turn_number in completed_turns
@@ -677,8 +901,8 @@ def _pa_messages(
                     [
                         f"ProductAgent turn {turn_number} context understanding complete",
                         (
-                            "Persisted Phase 4.3 product-context assessment is "
-                            "complete; Phase 5 planning remains unavailable."
+                            "Validated Phase 3.5 PA grounding completion is ready "
+                            "for Phase 5; Phase 5 remains unavailable."
                         ),
                     ]
                 )
@@ -785,14 +1009,16 @@ def _render_assembly_plan_preview() -> None:
         ui.button("Open Assembly Plan", icon="description").props("disable outline")
 
 
-def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Render the Phase 2 UI connected through Phase 3.3."""
+def _render_pa_interaction(  # noqa: C901, PLR0915
+    runtime: Spec2PrimitivesUIRuntime,
+) -> None:
+    """Render the Phase 2 UI connected through Phase 3.5."""
     with ui.card().classes("flex-[2] min-w-96 border border-slate-200 shadow-sm"):
         with ui.row().classes("w-full items-start justify-between gap-3"):
             with ui.column().classes("gap-0"):
                 ui.label("PA Interaction").classes("text-lg font-semibold text-slate-900")
                 ui.label("Phase 2 PA interaction UI").classes("text-xs text-slate-500")
-            ui.badge("connected through Phase 3.3").props("color=green outline")
+            ui.badge("connected through Phase 3.5").props("color=green outline")
 
         ui.label(_phase_2_connection_message()).classes("text-sm text-emerald-700")
 
@@ -844,6 +1070,25 @@ def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
 
         message_badge, message_value = _render_pa_messages()
 
+        with ui.card().classes(
+            "w-full border border-amber-200 bg-amber-50 shadow-none"
+        ) as clarification_card:
+            ui.label("Phase 3.4 User Clarification").classes(
+                "text-sm font-semibold text-amber-900"
+            )
+            clarification_prompt = ui.label("").classes("text-xs text-amber-800")
+            clarification_reply_input = (
+                ui.input(label="User reply").props("outlined").classes("w-full")
+            )
+            with ui.row().classes("items-center gap-2"):
+                submit_reply_button = ui.button(
+                    "Submit Reply", icon="send"
+                ).props("disable")
+                cancel_interaction_button = ui.button(
+                    "Cancel Interaction", icon="cancel"
+                ).props("outline disable")
+        clarification_card.set_visibility(False)
+
         result_values: dict[str, Label] = {}
         with ui.row().classes("w-full gap-2 items-stretch flex-wrap"):
             for title, message in _PHASE_2_RESULT_AREAS:
@@ -858,7 +1103,11 @@ def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
                 "No interaction record exists because Phase 3 was not started."
             ).classes("text-xs text-slate-500 p-2 whitespace-pre-wrap break-all")
 
-        action_state = {"busy": False}
+        action_state: dict[str, object] = {
+            "busy": False,
+            "pending_clarification": False,
+            "interaction": None,
+        }
 
         def _update_start_enabled() -> None:
             value = requirement_input.value
@@ -866,10 +1115,38 @@ def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
             _set_enabled(
                 start_button,
                 not action_state["busy"]
+                and not action_state["pending_clarification"]
                 and isinstance(value, str)
                 and bool(value.strip())
                 and max_pa_turns is not None,
             )
+
+        def _apply_pa_view(
+            interaction: dict[str, object],
+            view: dict[str, str],
+        ) -> None:
+            action_state["interaction"] = interaction
+            pending = view["activity_state"] == "clarification needed"
+            action_state["pending_clarification"] = pending
+            activity_badge.set_text(view["activity_state"])
+            activity_badge.props(f"color={view['activity_color']}")
+            activity_message.set_text(view["activity_message"])
+            message_badge.set_text("interaction recorded")
+            message_badge.props("color=indigo")
+            message_value.set_text(view["messages"])
+            for title, value_label in result_values.items():
+                value_label.set_text(view[title])
+            interaction_record_value.set_text(view["interaction_record"])
+            clarification_card.set_visibility(pending)
+            if pending:
+                clarification_prompt.set_text(view["clarification"])
+                clarification_reply_input.props(remove="disable")
+                cancel_interaction_button.props(remove="disable")
+            else:
+                clarification_reply_input.value = ""
+                clarification_reply_input.props("disable")
+                submit_reply_button.props("disable")
+                cancel_interaction_button.props("disable")
 
         async def _start_pa_interaction() -> None:
             value = requirement_input.value
@@ -914,15 +1191,7 @@ def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
                 )
                 ui.notify("Connected PA workflow failed.", type="negative")
             else:
-                activity_badge.set_text(view["activity_state"])
-                activity_badge.props(f"color={view['activity_color']}")
-                activity_message.set_text(view["activity_message"])
-                message_badge.set_text("interaction recorded")
-                message_badge.props("color=indigo")
-                message_value.set_text(view["messages"])
-                for title, value_label in result_values.items():
-                    value_label.set_text(view[title])
-                interaction_record_value.set_text(view["interaction_record"])
+                _apply_pa_view(interaction, view)
                 notification_type = (
                     "positive"
                     if view["activity_state"]
@@ -935,13 +1204,99 @@ def _render_pa_interaction(runtime: Spec2PrimitivesUIRuntime) -> None:
                 ui.notify(view["activity_state"], type=notification_type)
             finally:
                 action_state["busy"] = False
+                if action_state["pending_clarification"]:
+                    requirement_input.props("disable")
+                    max_pa_turns_input.props("disable")
+                else:
+                    requirement_input.props(remove="disable")
+                    max_pa_turns_input.props(remove="disable")
+                _update_start_enabled()
+
+        def _update_reply_enabled() -> None:
+            value = clarification_reply_input.value
+            _set_enabled(
+                submit_reply_button,
+                not action_state["busy"]
+                and bool(action_state["pending_clarification"])
+                and isinstance(value, str)
+                and bool(value.strip()),
+            )
+
+        async def _submit_clarification() -> None:
+            interaction = action_state["interaction"]
+            reply = clarification_reply_input.value
+            if (
+                action_state["busy"]
+                or not action_state["pending_clarification"]
+                or not isinstance(interaction, dict)
+                or not isinstance(reply, str)
+                or not reply.strip()
+            ):
+                return
+            action_state["busy"] = True
+            submit_reply_button.props("disable")
+            cancel_interaction_button.props("disable")
+            activity_badge.set_text("resuming")
+            activity_badge.props("color=indigo")
+            activity_message.set_text(
+                "ProductAgent is reassessing the same interaction with the exact user reply."
+            )
+
+            def _show_pa_turn(turn_number: int, turn_limit: int) -> None:
+                activity_badge.set_text(f"PA turn {turn_number} of {turn_limit}")
+
+            try:
+                interaction = await _submit_pa_ui_clarification(
+                    runtime,
+                    interaction,
+                    reply,
+                    on_pa_turn=_show_pa_turn,
+                )
+                view = _pa_ui_view(interaction)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                activity_badge.set_text("failed")
+                activity_badge.props("color=red")
+                activity_message.set_text(
+                    f"Phase 3.4 failed: {type(exc).__name__}: {exc}"
+                )
+                ui.notify("Phase 3.4 clarification failed.", type="negative")
+            else:
+                _apply_pa_view(interaction, view)
+                ui.notify(view["activity_state"], type="positive")
+            finally:
+                action_state["busy"] = False
+                _update_reply_enabled()
+                if not action_state["pending_clarification"]:
+                    requirement_input.props(remove="disable")
+                    max_pa_turns_input.props(remove="disable")
+                _update_start_enabled()
+
+        def _cancel_clarification() -> None:
+            interaction = action_state["interaction"]
+            if (
+                action_state["busy"]
+                or not action_state["pending_clarification"]
+                or not isinstance(interaction, dict)
+            ):
+                return
+            action_state["busy"] = True
+            try:
+                interaction = _cancel_pa_ui_interaction(interaction)
+                view = _pa_ui_view(interaction)
+                _apply_pa_view(interaction, view)
+                ui.notify("cancelled", type="info")
+            finally:
+                action_state["busy"] = False
                 requirement_input.props(remove="disable")
                 max_pa_turns_input.props(remove="disable")
                 _update_start_enabled()
 
         requirement_input.on_value_change(lambda _: _update_start_enabled())
         max_pa_turns_input.on_value_change(lambda _: _update_start_enabled())
+        clarification_reply_input.on_value_change(lambda _: _update_reply_enabled())
         start_button.on_click(_start_pa_interaction)
+        submit_reply_button.on_click(_submit_clarification)
+        cancel_interaction_button.on_click(_cancel_clarification)
 
 
 def _render_document_interpretation_diagnostic(
@@ -1175,7 +1530,7 @@ def _render_rgbd_segmentation_status(runtime: Spec2PrimitivesUIRuntime) -> None:
 
 
 def render(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Render the Spec2Primitives PA UI connected through Phase 3.3."""
+    """Render the Spec2Primitives PA UI connected through Phase 3.5."""
     with ui.column().classes("w-full max-w-6xl mx-auto gap-6 p-6"):
         with ui.row().classes("w-full items-start justify-between gap-4"):
             with ui.column().classes("gap-1"):

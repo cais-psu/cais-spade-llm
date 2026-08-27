@@ -22,7 +22,7 @@ cover exact document, CAD, and controlled live observation serving, preserved
 records, no fallback evidence, and the absence of PA turns, VLM, UI, grounding,
 planning, RA, forbidden Gazebo-state inputs, or execution. Phase 3.3 tests
 inject only the schema-only fixture and controlled producer doubles; they cover
-configurable limits, evidence-type routing, numbered source serving,
+configurable limits, output-capable producer-descriptor routing, numbered source serving,
 cumulative atomic ABox deltas, aligned interpretation and decision records,
 alternative source order, duplicate prevention, limits, clarification, and
 completion only from persisted assessment, without concrete Phase 4 producer,
@@ -57,16 +57,27 @@ changing camera-frame poses without code changes, calibration and frame
 validation, observation-time validity, payload and input-hash tampering,
 ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
 no-overwrite behavior, and status-only UI output.
-The PA UI tests cover the turn
-control, live turn counter, compact served-context summaries, full audit
-records, production `grounding_unavailable` state, and rejection of an unbacked
-completion turn.
+Phase 4.3 contract tests cover deterministic need computation, exact fixed
+symbols, authorized descriptor selection, PA-only authority, typed-binding
+status/frame/freshness validation, and artifact tamper rejection. Production
+grounding tests cover document-only completion; dynamically ordered CAD,
+observation, segmentation, size-correspondence, and camera-frame-pose paths;
+unused-modality exclusion; and ambiguous pose failure without user
+clarification. The PA UI tests cover the turn control, live turn counter,
+compact served-context summaries, full audit records, configured production
+grounding, fail-closed unconfigured state, read-only ontology assertions,
+provenance, typed bindings, unresolved needs, producer decisions, and rejection
+of an unbacked completion turn.
+Phase 3.4 tests cover same-interaction answers, repeated questions, new evidence
+after a reply, exact history, cancellation, interruption recovery, and rejection
+of system-evidence clarification. Phase 3.5 tests cover referenced completion,
+empty current draft needs, document and typed-geometry paths, UI readiness, and
+completion, draft, clarification, and typed-record tampering.
 
-Later phases will add focused tests for user clarification replies, formal
-handoff, cross-camera transformation, the production Phase 4.3 assessment and
-producer-descriptor registry, aggregated typed-context bindings, schemas, later
-agent adapters, validation feedback, revision behavior, and accepted candidate
-handoff. Composition coverage will exercise multiple catalog cardinalities
+Later phases will add focused tests for the Phase 5 task handoff,
+cross-camera transformation, robot-frame grounding after resource
+selection, later agent adapters, validation feedback, revision behavior, and
+accepted candidate handoff. Composition coverage will exercise multiple catalog cardinalities
 without an eight-entry invariant, exact symbol membership, pinned catalog and
 bundle fingerprints, ownership routing, draft-derived batch aggregation and
 stable deduplication, replay rejection, stale versions, catalog changes,

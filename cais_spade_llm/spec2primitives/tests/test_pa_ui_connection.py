@@ -15,6 +15,9 @@ from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
     Spec2PrimitivesUIRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
+from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+    ProductionProductContextGroundingRuntime,
+)
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
     ControlledGroundingRuntime,
     complete_context,
@@ -98,9 +101,10 @@ def test_connected_ui_runs_through_phase_3_3_completion(
 
     view = spec2primitives_ui._pa_ui_view(interaction)
     assert view["activity_state"] == "context understanding complete"
-    assert "persisted Phase 4.3 assessment" in view["activity_message"]
+    assert "validated Phase 3.5 record" in view["activity_message"]
     assert "Phase 4.0 ontology initialized" in view["activity_message"]
-    assert "Phase 5 planning remains unavailable" in view["activity_message"]
+    assert "Ready for Phase 5" in view["activity_message"]
+    assert "Phase 5 remains unavailable" in view["activity_message"]
     assert product_requirement in view["messages"]
     assert "context understanding complete" in view["messages"]
     assert "Gear_Medium.STL" in view["needed_context"]
@@ -110,6 +114,9 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert "retrieval_0001" in view["interaction_record"]
     assert "pa_context_settings" in view["interaction_record"]
     assert "ontology_initialization" in view["interaction_record"]
+    assert "delta_count" in view["Ontology Grounding"]
+    assert view["Typed Runtime Context"] == "[]"
+    assert "Ready for Phase 5" in view["PA Grounding Completion"]
     assert '"max_pa_turns": 12' in view["interaction_record"]
 
 
@@ -185,7 +192,64 @@ def test_connected_ui_stops_for_clarification_without_user_reply(
     assert view["activity_state"] == "clarification needed"
     assert view["clarification"] == clarification_question
     assert clarification_question in view["messages"]
-    assert "Not available until Phase 3.4 is implemented." in view["messages"]
+    assert "Not available until Phase 3.4 is implemented." not in view["messages"]
+    assert view["pending_clarification_turn"] == "2"
+
+
+def test_connected_ui_submits_reply_in_same_interaction(tmp_path: Path) -> None:
+    grounding = ControlledGroundingRuntime(
+        assessments=[
+            request_clarification("Which gear size should be assembled?"),
+            complete_context(),
+        ]
+    )
+    product_agent = FakeProductAgent(
+        responses=[_needed_context_response(context_ref="NIST_assembly_instructions.pdf")]
+    )
+    runtime = _runtime(tmp_path, product_agent, grounding=grounding)
+    interaction = asyncio.run(
+        spec2primitives_ui._run_pa_ui_interaction(
+            runtime,
+            "assemble gear",
+        )
+    )
+    interaction_root = interaction["interaction_root"]
+
+    resumed = asyncio.run(
+        spec2primitives_ui._submit_pa_ui_clarification(
+            runtime,
+            interaction,
+            "Medium Gear",
+        )
+    )
+
+    assert resumed["interaction_root"] == interaction_root
+    view = spec2primitives_ui._pa_ui_view(resumed)
+    assert view["activity_state"] == "context understanding complete"
+    assert "User clarification reply" in view["messages"]
+    assert "Medium Gear" in view["messages"]
+    assert "clarification_0002" in view["interaction_record"]
+
+
+def test_connected_ui_cancels_without_product_agent_call(tmp_path: Path) -> None:
+    grounding = ControlledGroundingRuntime(
+        assessments=[request_clarification("Which gear size should be assembled?")]
+    )
+    product_agent = FakeProductAgent(
+        responses=[_needed_context_response(context_ref="NIST_assembly_instructions.pdf")]
+    )
+    runtime = _runtime(tmp_path, product_agent, grounding=grounding)
+    interaction = asyncio.run(
+        spec2primitives_ui._run_pa_ui_interaction(runtime, "assemble gear")
+    )
+    calls_before = len(product_agent.calls)
+
+    cancelled = spec2primitives_ui._cancel_pa_ui_interaction(interaction)
+
+    assert len(product_agent.calls) == calls_before
+    view = spec2primitives_ui._pa_ui_view(cancelled)
+    assert view["activity_state"] == "cancelled"
+    assert '"action": "cancelled"' in view["clarification"]
 
 
 def test_connected_ui_records_phase_3_1_failure_and_does_not_serve(
@@ -441,6 +505,31 @@ def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
     assert "SPEC2PRIMITIVES_PPR_TBOX_PATH" in (runtime.document_diagnostic_unavailable_reason or "")
 
 
+def test_ui_runtime_factory_enables_verified_production_grounding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    product_agent = FakeProductAgent()
+    config = ontology_config()
+    monkeypatch.setenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", str(config.tbox_path))
+    monkeypatch.setenv("SPEC2PRIMITIVES_PPR_NAMESPACE", config.ppr_namespace)
+    monkeypatch.setenv("OPENAI_API_KEY", "controlled-test-key")
+    monkeypatch.setattr(
+        product_agent_runtime,
+        "create_product_agent_context_runtime",
+        lambda *, model: product_agent,
+    )
+
+    runtime = ui_runtime.create_spec2primitives_ui_runtime(object())
+
+    assert runtime.ontology_config is not None
+    assert isinstance(
+        runtime.grounding_runtime,
+        ProductionProductContextGroundingRuntime,
+    )
+    assert runtime.document_vision_runtime is not None
+    assert runtime.document_diagnostic_unavailable_reason is None
+
+
 def test_product_agent_runtime_has_no_setup_planning_or_execution_call() -> None:
     source = Path(product_agent_runtime.__file__).read_text(encoding="utf-8")
 
@@ -462,13 +551,16 @@ def _runtime(
     product_agent: FakeProductAgent,
     *,
     with_grounding: bool = True,
+    grounding: ControlledGroundingRuntime | None = None,
 ) -> Spec2PrimitivesUIRuntime:
     return Spec2PrimitivesUIRuntime(
         dual_gazebo=object(),
         product_agent=product_agent,
         contexts_root=contexts_root,
         ontology_config=ontology_config() if with_grounding else None,
-        grounding_runtime=(ControlledGroundingRuntime() if with_grounding else None),
+        grounding_runtime=(
+            grounding or ControlledGroundingRuntime() if with_grounding else None
+        ),
     )
 
 
