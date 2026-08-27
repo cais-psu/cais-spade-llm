@@ -1234,26 +1234,41 @@ class UR5eHardwareController(HardwarePickPlaceController):
             return False
         if self._services_ready:
             return True
-        timeout = max(0.0, float(timeout_sec))
-        arm_client = self._ur5e_hardware_trajectory_client
-        cartesian_client = self._ur5e_hardware_cartesian_client
-        gripper_client = self._rg2_action_client
-        try:
-            arm_ready = bool(
-                arm_client is not None
-                and arm_client.wait_for_server(timeout_sec=min(8.0, timeout))
-            )
-            gripper_ready = bool(
-                gripper_client is not None
-                and gripper_client.wait_for_server(timeout_sec=min(8.0, timeout))
-            )
-            cartesian_ready = bool(
-                cartesian_client is not None
-                and cartesian_client.wait_for_server(timeout_sec=min(8.0, timeout))
-            )
-        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-            self._last_failure_message = f"physical UR5e action readiness failed: {exc}"
-            return False
+        timeout = min(8.0, max(0.0, float(timeout_sec)))
+        deadline = time.monotonic() + timeout
+        action_clients = {
+            "arm": self._ur5e_hardware_trajectory_client,
+            "gripper": self._rg2_action_client,
+            "cartesian": self._ur5e_hardware_cartesian_client,
+        }
+        action_ready = {name: False for name in action_clients}
+        while True:
+            for name, client in action_clients.items():
+                if action_ready[name] or client is None:
+                    continue
+                try:
+                    server_is_ready = getattr(client, "server_is_ready", None)
+                    if callable(server_is_ready):
+                        action_ready[name] = bool(server_is_ready())
+                    else:
+                        remaining_sec = max(0.0, deadline - time.monotonic())
+                        action_ready[name] = bool(
+                            client.wait_for_server(
+                                timeout_sec=min(0.1, remaining_sec)
+                            )
+                        )
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    self._last_failure_message = (
+                        f"physical UR5e action readiness failed: {exc}"
+                    )
+                    return False
+            if all(action_ready.values()) or time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
+        arm_ready = action_ready["arm"]
+        gripper_ready = action_ready["gripper"]
+        cartesian_ready = action_ready["cartesian"]
         if not arm_ready:
             self._last_failure_message = (
                 f"{self._ur5e_hardware_trajectory_action} is unavailable"
@@ -1267,8 +1282,9 @@ class UR5eHardwareController(HardwarePickPlaceController):
                 f"{self._ur5e_hardware_cartesian_action} is unavailable"
             )
             return False
+        remaining_sec = max(0.0, deadline - time.monotonic())
         positions, missing = self._get_arm_joint_positions(
-            timeout_sec=min(2.0, timeout)
+            timeout_sec=min(2.0, remaining_sec)
         )
         if positions is None:
             missing_text = ", ".join(missing) if missing else "unknown"
@@ -1279,6 +1295,24 @@ class UR5eHardwareController(HardwarePickPlaceController):
         self._services_ready = True
         self._last_failure_message = ""
         return True
+
+    @staticmethod
+    def _prepared_action_client_ready(
+        client: Any,
+        *,
+        timeout_sec: float,
+    ) -> bool:
+        """Reuse one prepared action client before bounded discovery fallback."""
+        server_is_ready = getattr(client, "server_is_ready", None)
+        if callable(server_is_ready):
+            try:
+                if bool(server_is_ready()):
+                    return True
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+        return bool(
+            client.wait_for_server(timeout_sec=max(0.0, float(timeout_sec)))
+        )
 
     def reset_ur5e_hardware_trajectory_client(
         self,
@@ -1511,7 +1545,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
             self._last_failure_message = "UR5e current joint state contains invalid values"
             return False
         try:
-            action_ready = bool(client.wait_for_server(timeout_sec=2.0))
+            action_ready = self._prepared_action_client_ready(
+                client,
+                timeout_sec=2.0,
+            )
         except (RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = (
                 f"{self._ur5e_hardware_trajectory_action}: wait failed ({exc})"
@@ -1683,7 +1720,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
             getattr(self, "_ur5e_action_send_timeout_sec", 10.0)
         )
         try:
-            if not client.wait_for_server(timeout_sec=2.0):
+            if not self._prepared_action_client_ready(
+                client,
+                timeout_sec=2.0,
+            ):
                 self._last_failure_message = (
                     f"{self._ur5e_hardware_cartesian_action} is unavailable"
                 )
@@ -3172,7 +3212,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
             }
         send_attempted = False
         try:
-            if not client.wait_for_server(timeout_sec=2.0):
+            if not self._prepared_action_client_ready(
+                client,
+                timeout_sec=2.0,
+            ):
                 self._clear_move_insert_goal(None)
                 return {
                     "success": False,
@@ -3940,7 +3983,10 @@ class UR5eHardwareController(HardwarePickPlaceController):
             self._last_failure_message = "RG2 gripper action client is unavailable"
             return False
         try:
-            action_ready = bool(client.wait_for_server(timeout_sec=2.0))
+            action_ready = self._prepared_action_client_ready(
+                client,
+                timeout_sec=2.0,
+            )
         except (RuntimeError, TypeError, ValueError) as exc:
             self._last_failure_message = f"{self._rg2_action_name}: wait failed ({exc})"
             return False

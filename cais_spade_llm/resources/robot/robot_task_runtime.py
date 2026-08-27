@@ -944,6 +944,45 @@ def _robot_name(agent: Any) -> str:
     return token.split("@", 1)[0]
 
 
+def _physical_place_insert_release_only(agent: Any) -> bool:
+    """Return whether the exact physical controller enables release-only placement."""
+    if (
+        str(getattr(agent, "execution_mode", "") or "").strip().lower()
+        != "physical"
+    ):
+        return False
+    controller = getattr(agent, "_controller", None)
+    raw_controller_config = (
+        getattr(agent, "controller_config", {})
+        or getattr(controller, "controller_config", {})
+        or {}
+    )
+    if not isinstance(raw_controller_config, dict):
+        return False
+    controller_config = dict(raw_controller_config)
+    return controller_config.get("place_insert_release_only") is True
+
+
+def _physical_xarm6_skip_assembly_board_localization(agent: Any) -> bool:
+    """Return the exact physical xarm6 board-localization demo override."""
+    if (
+        str(getattr(agent, "execution_mode", "") or "").strip().lower()
+        != "physical"
+        or _robot_name(agent) != "xarm6"
+    ):
+        return False
+    controller = getattr(agent, "_controller", None)
+    raw_controller_config = (
+        getattr(agent, "controller_config", {})
+        or getattr(controller, "controller_config", {})
+        or {}
+    )
+    if not isinstance(raw_controller_config, dict):
+        return False
+    controller_config = dict(raw_controller_config)
+    return controller_config.get("place_approach_skip_board_localization") is True
+
+
 def _cartesian_position_steps(task: RobotTaskDefinition) -> tuple[RobotTaskStep, ...]:
     return tuple(step for step in task.program.steps if step.op == "move_cartesian")
 
@@ -2472,8 +2511,11 @@ async def _execute_task_step(  # noqa: C901 - task execution gates stay explicit
     if (
         task.name == "place_approach"
         and step.id == "localize_assembly_board_v1"
-        and str(args.get("destination_location") or "").strip()
-        != "assembly_board-v1"
+        and (
+            str(args.get("destination_location") or "").strip()
+            != "assembly_board-v1"
+            or _physical_xarm6_skip_assembly_board_localization(agent)
+        )
     ):
         return {"success": True, "skipped": True}
 
@@ -2624,7 +2666,14 @@ def _physical_place_insert_board_lock_error(  # noqa: C901, PLR0912 - irreversib
     if handoff_error:
         return handoff_error
     move_insert_mode = str(task_context.get("move_insert_mode") or "")
-    if move_insert_mode in {"force_limited", "force_limited_trial"}:
+    place_insert_release_only = _physical_place_insert_release_only(agent)
+    move_insert_enabled = bool(
+        not place_insert_release_only and move_insert_mode == "force_limited"
+    )
+    if not place_insert_release_only and move_insert_mode in {
+        "force_limited",
+        "force_limited_trial",
+    }:
         boundary_error = str(
             task_context.get("move_insert_boundary_error") or ""
         ).strip()
@@ -2635,7 +2684,6 @@ def _physical_place_insert_board_lock_error(  # noqa: C901, PLR0912 - irreversib
                 "place_insert move_insert boundary is not ready; run place_approach "
                 "with verified live RTDE insertion hard caps"
             )
-    move_insert_enabled = task_context.get("move_insert_mode") == "force_limited"
     profile: dict[str, Any] = {}
     profile_hash = ""
     if move_insert_enabled:
@@ -2712,6 +2760,13 @@ def _physical_place_insert_board_lock_error(  # noqa: C901, PLR0912 - irreversib
         )
         if start_error or target_error:
             return start_error or target_error
+    if (
+        place_insert_release_only
+        and _physical_xarm6_skip_assembly_board_localization(agent)
+        and str(args.get("destination_location") or "").strip()
+        == "assembly_board-v1"
+    ):
+        return ""
     localization, localization_error = _assembly_board_v1_aruco_payload(
         task_context.get("assembly_board_v1_aruco"),
         robot=_robot_name(agent),
@@ -2861,6 +2916,18 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     runtime_state = _build_runtime_state(agent)
     step_outputs: dict[str, Any] = {}
     task_context = dict(runtime_state.get("_task_ctx") or {})
+    place_insert_release_only = _physical_place_insert_release_only(agent)
+
+    def _release_only_result_fields(result: dict[str, Any]) -> dict[str, Any]:
+        if place_insert_release_only and task.name == "place_insert":
+            result.update(
+                {
+                    "place_insert_release_only": True,
+                    "move_insert_dispatched": False,
+                }
+            )
+        return result
+
     if not isinstance(operator_confirmed_held_part, bool):
         return {
             "status": "blocked",
@@ -3018,6 +3085,7 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
         str(getattr(agent, "execution_mode", "") or "") == "physical"
         and _robot_name(agent) == "xarm6"
         and task.name in {"place_approach", "place_insert"}
+        and not place_insert_release_only
         and not independent_place_approach
         and not independent_place_insert
         and runtime_state.get("_held_part") not in (None, "")
@@ -3098,6 +3166,7 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     if (
         str(getattr(agent, "execution_mode", "") or "") == "physical"
         and task.name == "place_insert"
+        and not place_insert_release_only
         and not independent_place_insert
         and assembly_surface_role == "assembly_slot"
     ):
@@ -3153,14 +3222,23 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
             runtime_state=runtime_state,
         )
         if board_lock_error:
-            return agent._task_failure(
-                board_lock_error,
-                step="place_insert.assembly_board_v1_aruco_generation_lock",
-                observations={
-                    "destination_location": str(args.get("destination_location") or ""),
-                    "part_name": str(args.get("part_name") or ""),
-                    "move_insert_dispatched": False,
-                },
+            return _release_only_result_fields(
+                agent._task_failure(
+                    board_lock_error,
+                    step="place_insert.assembly_board_v1_aruco_generation_lock",
+                    observations={
+                        "destination_location": str(
+                            args.get("destination_location") or ""
+                        ),
+                        "part_name": str(args.get("part_name") or ""),
+                        "move_insert_dispatched": False,
+                        **(
+                            {"place_insert_release_only": True}
+                            if place_insert_release_only
+                            else {}
+                        ),
+                    },
+                )
             )
     if execution_mode == "physical" and _cartesian_position_steps(task):
         physical_overrides, physical_recording_path, preflight_error = (
@@ -3240,6 +3318,28 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     computed_cartesian_at = 0.0
     resolved_cartesian_positions: dict[str, dict[str, float]] = {}
     for step in task.program.steps:
+        if (
+            place_insert_release_only
+            and task.name == "place_insert"
+            and step.id == "move_insert"
+        ):
+            agent.logger.warning(
+                "[Robot] place_insert_release_only is enabled for physical %s; "
+                "skipping place_insert.move_insert before dispatch.",
+                _robot_name(agent),
+            )
+            continue
+        if (
+            task.name == "place_approach"
+            and step.id == "localize_assembly_board_v1"
+            and _physical_xarm6_skip_assembly_board_localization(agent)
+        ):
+            agent.logger.warning(
+                "[Robot] place_approach_skip_board_localization is enabled for "
+                "physical xarm6; skipping "
+                "place_approach.localize_assembly_board_v1 before dispatch."
+            )
+            continue
         progress_callback = getattr(agent, "_robot_task_progress_callback", None)
         if callable(progress_callback):
             try:
@@ -3266,18 +3366,25 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                 require_seated_pose=step.id == "release_part",
             )
             if board_lock_error:
-                return agent._task_failure(
-                    board_lock_error,
-                    step="place_insert.assembly_board_v1_aruco_generation_lock",
-                    observations={
-                        "destination_location": str(
-                            args.get("destination_location") or ""
-                        ),
-                        "part_name": str(args.get("part_name") or ""),
-                        "move_insert_dispatched": (
-                            "move_insert" in completed_step_ids
-                        ),
-                    },
+                return _release_only_result_fields(
+                    agent._task_failure(
+                        board_lock_error,
+                        step="place_insert.assembly_board_v1_aruco_generation_lock",
+                        observations={
+                            "destination_location": str(
+                                args.get("destination_location") or ""
+                            ),
+                            "part_name": str(args.get("part_name") or ""),
+                            "move_insert_dispatched": (
+                                "move_insert" in completed_step_ids
+                            ),
+                            **(
+                                {"place_insert_release_only": True}
+                                if place_insert_release_only
+                                else {}
+                            ),
+                        },
+                    )
                 )
         original_task_context: dict[str, Any] | None = None
         if (
@@ -3387,6 +3494,16 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                     "lift were not commanded. The robot remains positioned with the "
                     "part held and the gripper closed."
                 )
+            elif (
+                task.name == "place_insert"
+                and place_insert_release_only
+                and step.id == "release_part"
+            ):
+                failure_message = (
+                    f"{failure_message} move_insert was intentionally skipped because "
+                    "place_insert_release_only is enabled; lift was not commanded. "
+                    "Inspect the gripper and part custody before retrying."
+                )
             elif task.name == "place_insert" and "release_part" in completed_step_ids:
                 failure_message = (
                     f"{failure_message} release_part already completed; the part is no "
@@ -3426,14 +3543,18 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                     "move_insert" in completed_step_ids
                     or step.id == "move_insert"
                 )
+                if place_insert_release_only:
+                    failure_observations["place_insert_release_only"] = True
             if task.name == "place_insert" and step.id == "move_insert":
                 failure_observations["move_insert_result"] = (
                     _sanitized_move_insert_result(raw)
                 )
-            return agent._task_failure(
-                failure_message,
-                step=f"{task.name}.{step.id}",
-                observations=failure_observations,
+            return _release_only_result_fields(
+                agent._task_failure(
+                    failure_message,
+                    step=f"{task.name}.{step.id}",
+                    observations=failure_observations,
+                )
             )
         payload = result.get("payload")
         if (
@@ -3740,6 +3861,20 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
             "and retreated 0.08 m without advancing the RobotAgent pick/place context."
         )
         response.pop("placed_location", None)
+    if place_insert_release_only and task.name == "place_insert":
+        response.update(
+            {
+                "place_insert_release_only": True,
+                "move_insert_dispatched": False,
+            }
+        )
+        if not independent_place_insert:
+            response["content"] = (
+                f"Released {str(args.get('part_name') or 'part')} at "
+                f"{str(args.get('destination_location') or 'destination')} without "
+                "move_insert because place_insert_release_only is enabled, then "
+                "completed the existing lift."
+            )
     return response
 
 

@@ -226,6 +226,8 @@
         }
       },
       "controller": {
+        "place_insert_release_only": true,
+        "place_approach_skip_board_localization": true,
         "hardware_cartesian_service": "/xarm6/xarm/set_position",
         "hardware_cartesian_velocity_service": "/xarm6/xarm/vc_set_cartesian_velocity",
         "hardware_robot_states_topic": "/xarm6/xarm/robot_states",
@@ -347,6 +349,14 @@
           0.000519,
           1.497461,
           -0.673809
+        ],
+        "prusa-mk4-1": [
+          -0.139137,
+          -0.512025,
+          -0.582554,
+          0.000503,
+          1.094319,
+          -0.139239
         ]
       }
     }

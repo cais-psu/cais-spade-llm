@@ -191,6 +191,7 @@
         }
       },
       "controller": {
+        "place_insert_release_only": true,
         "hardware_trajectory_action": "/cais_ur5e_rtde_trajectory_controller/follow_joint_trajectory",
         "hardware_cartesian_action": "/cais_ur5e_rtde_cartesian_controller/move_cartesian",
         "hardware_insert_action": "/cais_ur5e_rtde_cartesian_controller/move_insert",

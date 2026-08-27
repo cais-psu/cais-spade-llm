@@ -5,16 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from openai import BadRequestError
 
+from cais_spade_llm.agents.shared_information import llm_agent
 from cais_spade_llm.spec2primitives import spec2primitives_ui
 from cais_spade_llm.spec2primitives.adapters import ui_runtime
 from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
     Spec2PrimitivesUIRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
+from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
+    PAOntologyConfig,
+)
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     ProductionProductContextGroundingRuntime,
 )
@@ -108,16 +115,28 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert product_requirement in view["messages"]
     assert "context understanding complete" in view["messages"]
     assert "Gear_Medium.STL" in view["needed_context"]
-    assert "Gear_Medium.STL" in view["served_context"]
+    assert "Gear_Medium.STL" in view["served context"]
     assert "repository_path" in view["Evidence Sources"]
     assert "turn_0001" in view["interaction_record"]
     assert "retrieval_0001" in view["interaction_record"]
     assert "pa_context_settings" in view["interaction_record"]
     assert "ontology_initialization" in view["interaction_record"]
-    assert "delta_count" in view["Ontology Grounding"]
+    assert "ProductContextView" in view["Ontology Grounding"]
+    assert f"product_requirement: {json.dumps(product_requirement)}" in view[
+        "Ontology Grounding"
+    ]
+    assert "delta_count: 1" in view["Ontology Grounding"]
+    assert str(PAOntologyConfig) not in view["Ontology Grounding"]
+    assert "http://PAonto.com#specification" in view["Ontology Grounding"]
+    assert "assertion_provenance" in view["Ontology Grounding"]
+    assert "producer: \"interaction_initializer\"" in view["Ontology Grounding"]
     assert view["Typed Runtime Context"] == "[]"
+    assert view["ProductAgent Request Failure"] == ""
     assert "Ready for Phase 5" in view["PA Grounding Completion"]
     assert '"max_pa_turns": 12' in view["interaction_record"]
+    assert all(
+        title in view for title, _ in spec2primitives_ui._PHASE_2_RESULT_AREAS
+    )
 
 
 def test_connected_ui_passes_and_displays_maximum_50_unchanged(
@@ -256,7 +275,19 @@ def test_connected_ui_records_phase_3_1_failure_and_does_not_serve(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    product_agent = FakeProductAgent(error=RuntimeError("controlled PA failure"))
+    api_error = RuntimeError("schema must have a 'type' key")
+    api_error.status_code = 400  # type: ignore[attr-defined]
+    api_error.request_id = "req_controlled"  # type: ignore[attr-defined]
+    api_error.type = "invalid_request_error"  # type: ignore[attr-defined]
+    api_error.param = "response_format"  # type: ignore[attr-defined]
+    api_error.code = None  # type: ignore[attr-defined]
+    api_error.body = {  # type: ignore[attr-defined]
+        "message": "schema must have a 'type' key",
+        "private_body_field": "must not render",
+    }
+    wrapped = RuntimeError("LLM call failed")
+    wrapped.__cause__ = api_error
+    product_agent = FakeProductAgent(error=wrapped)
     serving_calls: list[Path] = []
 
     def unexpected_serving(interaction_root: Path) -> dict[str, object]:
@@ -278,7 +309,25 @@ def test_connected_ui_records_phase_3_1_failure_and_does_not_serve(
     assert serving_calls == []
     assert interaction["phase_3_1"]["failure"]["reason"] == "pa_call_failed"
     assert interaction["phase_3_2"] is None
-    assert spec2primitives_ui._pa_ui_view(interaction)["activity_state"] == ("failed")
+    view = spec2primitives_ui._pa_ui_view(interaction)
+    assert view["activity_state"] == "failed"
+    assert "status_code: 400" in view["ProductAgent Request Failure"]
+    assert 'param: "response_format"' in view["ProductAgent Request Failure"]
+    assert "schema must have a 'type' key" in view["ProductAgent Request Failure"]
+    assert "private_body_field" not in view["ProductAgent Request Failure"]
+
+
+def test_product_agent_failure_text_supports_older_records() -> None:
+    text = spec2primitives_ui._product_agent_request_failure_text(
+        {
+            "reason": "pa_call_failed",
+            "message": "controlled legacy failure",
+        }
+    )
+
+    assert 'reason: "pa_call_failed"' in text
+    assert 'message: "controlled legacy failure"' in text
+    assert "diagnostic: unavailable for this record" in text
 
 
 def test_production_ui_fails_closed_when_grounding_is_unconfigured(
@@ -477,7 +526,83 @@ def test_product_agent_runtime_delegates_only_the_structured_call(
     assert not hasattr(runtime, "setup")
 
 
-def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
+def test_shared_structured_call_reports_bad_request_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(
+        400,
+        request=request,
+        headers={"x-request-id": "req_controlled"},
+    )
+    api_error = BadRequestError(
+        "Error code: 400",
+        response=response,
+        body={
+            "message": "schema must have a 'type' key",
+            "type": "invalid_request_error",
+            "param": "response_format",
+            "code": None,
+            "private_body_field": "must not surface",
+        },
+    )
+    calls: list[dict[str, object]] = []
+
+    class ControlledCompletions:
+        def create(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            raise api_error
+
+    monkeypatch.setattr(
+        llm_agent,
+        "_client",
+        SimpleNamespace(
+            chat=SimpleNamespace(completions=ControlledCompletions())
+        ),
+    )
+
+    async def controlled_to_thread(function: object, *args: object) -> object:
+        assert callable(function)
+        return function(*args)
+
+    monkeypatch.setattr(llm_agent.asyncio, "to_thread", controlled_to_thread)
+    runtime = SimpleNamespace(
+        instructions="",
+        model="gpt-5.4",
+        reasoning_effort="medium",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            llm_agent.LlmAgent.ask_llm_structured(
+                runtime,
+                "controlled prompt that must not surface",
+                response_format={
+                    "name": "controlled_schema",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [],
+                        "properties": {},
+                    },
+                },
+            )
+        )
+
+    assert len(calls) == 1
+    assert exc_info.value.__cause__ is api_error
+    message = str(exc_info.value)
+    assert "BadRequestError" in message
+    assert "status_code=400" in message
+    assert "request_id=req_controlled" in message
+    assert "param=response_format" in message
+    assert "schema must have a 'type' key" in message
+    assert "controlled prompt" not in message
+    assert "private_body_field" not in message
+
+
+def test_ui_runtime_factory_uses_project_tbox_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dual_gazebo = object()
@@ -485,6 +610,7 @@ def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
     selected_models: list[str] = []
     monkeypatch.delenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", raising=False)
     monkeypatch.delenv("SPEC2PRIMITIVES_PPR_NAMESPACE", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "controlled-test-key")
     monkeypatch.setattr(
         product_agent_runtime,
         "create_product_agent_context_runtime",
@@ -498,14 +624,24 @@ def test_ui_runtime_factory_composes_existing_dual_gazebo_and_product_agent(
     assert runtime.contexts_root == ui_runtime.SPEC2PRIMITIVES_CONTEXTS_ROOT
     assert selected_models == ["gpt-5.4"]
     assert runtime.model_config is not None
-    assert runtime.ontology_config is None
-    assert runtime.grounding_runtime is None
-    assert runtime.document_vision_runtime is None
+    assert runtime.ontology_config == PAOntologyConfig(
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH,
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_NAMESPACE,
+    )
+    assert isinstance(
+        runtime.grounding_runtime,
+        ProductionProductContextGroundingRuntime,
+    )
+    assert runtime.tbox is not None
+    assert runtime.tbox.source_path == (
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH.resolve()
+    )
+    assert runtime.document_vision_runtime is not None
     assert runtime.observation_capture_runtime is not None
-    assert "SPEC2PRIMITIVES_PPR_TBOX_PATH" in (runtime.document_diagnostic_unavailable_reason or "")
+    assert runtime.document_diagnostic_unavailable_reason is None
 
 
-def test_ui_runtime_factory_enables_verified_production_grounding(
+def test_ui_runtime_factory_honors_paired_tbox_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     product_agent = FakeProductAgent()
@@ -521,13 +657,109 @@ def test_ui_runtime_factory_enables_verified_production_grounding(
 
     runtime = ui_runtime.create_spec2primitives_ui_runtime(object())
 
-    assert runtime.ontology_config is not None
+    assert runtime.ontology_config == config
     assert isinstance(
         runtime.grounding_runtime,
         ProductionProductContextGroundingRuntime,
     )
+    assert runtime.tbox is not None
+    assert runtime.tbox.source_path == config.tbox_path.resolve()
     assert runtime.document_vision_runtime is not None
     assert runtime.document_diagnostic_unavailable_reason is None
+
+
+@pytest.mark.parametrize(
+    ("tbox_path", "ppr_namespace"),
+    [
+        ("/tmp/override.owl", None),
+        (None, "http://PAonto.com#"),
+    ],
+)
+def test_ui_runtime_factory_rejects_partial_tbox_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tbox_path: str | None,
+    ppr_namespace: str | None,
+) -> None:
+    if tbox_path is None:
+        monkeypatch.delenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", raising=False)
+    else:
+        monkeypatch.setenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", tbox_path)
+    if ppr_namespace is None:
+        monkeypatch.delenv("SPEC2PRIMITIVES_PPR_NAMESPACE", raising=False)
+    else:
+        monkeypatch.setenv("SPEC2PRIMITIVES_PPR_NAMESPACE", ppr_namespace)
+    monkeypatch.setenv("OPENAI_API_KEY", "controlled-test-key")
+    monkeypatch.setattr(
+        product_agent_runtime,
+        "create_product_agent_context_runtime",
+        lambda *, model: FakeProductAgent(),
+    )
+
+    runtime = ui_runtime.create_spec2primitives_ui_runtime(object())
+
+    assert runtime.ontology_config is None
+    assert runtime.grounding_runtime is None
+    assert runtime.tbox is None
+    assert runtime.document_vision_runtime is None
+    assert "Set both SPEC2PRIMITIVES_PPR_TBOX_PATH" in (
+        runtime.document_diagnostic_unavailable_reason or ""
+    )
+
+
+def test_ui_runtime_factory_rejects_invalid_paired_tbox_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "SPEC2PRIMITIVES_PPR_TBOX_PATH",
+        str(tmp_path / "missing.owl"),
+    )
+    monkeypatch.setenv("SPEC2PRIMITIVES_PPR_NAMESPACE", "http://PAonto.com#")
+    monkeypatch.setenv("OPENAI_API_KEY", "controlled-test-key")
+    monkeypatch.setattr(
+        product_agent_runtime,
+        "create_product_agent_context_runtime",
+        lambda *, model: FakeProductAgent(),
+    )
+
+    runtime = ui_runtime.create_spec2primitives_ui_runtime(object())
+
+    assert runtime.ontology_config is not None
+    assert runtime.grounding_runtime is None
+    assert runtime.tbox is None
+    assert runtime.document_vision_runtime is None
+    assert "Authoritative TBox is invalid" in (
+        runtime.document_diagnostic_unavailable_reason or ""
+    )
+
+
+def test_ui_runtime_factory_requires_openai_key_with_project_tbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", raising=False)
+    monkeypatch.delenv("SPEC2PRIMITIVES_PPR_NAMESPACE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        product_agent_runtime,
+        "create_product_agent_context_runtime",
+        lambda *, model: FakeProductAgent(),
+    )
+
+    runtime = ui_runtime.create_spec2primitives_ui_runtime(object())
+
+    assert runtime.ontology_config == PAOntologyConfig(
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH,
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_NAMESPACE,
+    )
+    assert runtime.grounding_runtime is None
+    assert runtime.tbox is not None
+    assert runtime.tbox.source_path == (
+        ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH.resolve()
+    )
+    assert runtime.document_vision_runtime is None
+    assert "Set OPENAI_API_KEY" in (
+        runtime.document_diagnostic_unavailable_reason or ""
+    )
 
 
 def test_product_agent_runtime_has_no_setup_planning_or_execution_call() -> None:

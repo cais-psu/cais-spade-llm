@@ -116,6 +116,51 @@ def _runtime() -> ProductionProductContextGroundingRuntime:
     )
 
 
+def test_openai_response_schema_constraints_have_explicit_types(
+    tmp_path: Path,
+) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
+    view = build_product_context_view(
+        tmp_path,
+        abox,
+        attempted_evidence=(),
+        assessed_at_ns=1_000,
+    )
+    task_format = production_grounding._task_draft_response_format(
+        view,
+        version=1,
+        classes=sorted(tbox.classes),
+        properties=sorted(tbox.object_properties | tbox.datatype_properties),
+    )
+    selection_format = production_grounding._evidence_selection_response_format(
+        ["Gear_Medium.STL"]
+    )
+
+    def assert_constrained_nodes_are_typed(value: object) -> None:
+        if isinstance(value, dict):
+            if "const" in value or "enum" in value:
+                assert "type" in value
+            for nested in value.values():
+                assert_constrained_nodes_are_typed(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_constrained_nodes_are_typed(nested)
+
+    assert_constrained_nodes_are_typed(task_format["schema"])
+    assert_constrained_nodes_are_typed(selection_format["schema"])
+    properties = task_format["schema"]["properties"]["task_transition_draft"][
+        "properties"
+    ]
+    assert properties["version"]["type"] == "integer"
+    assert properties["product_requirement"]["type"] == "string"
+    assert properties["requested_process"]["type"] == ["string", "null"]
+    assert properties["source_view_fingerprint"]["type"] == "string"
+    assert selection_format["schema"]["properties"]["context_ref"]["type"] == (
+        "string"
+    )
+
+
 def test_document_grounding_runs_in_main_pa_loop_and_completes(tmp_path: Path) -> None:
     agent = DraftProductAgent([_need("class", str(PPR.feature))])
     runtime = _runtime()

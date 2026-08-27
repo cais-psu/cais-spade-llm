@@ -185,6 +185,7 @@ async def start_pa_context_interaction(
         failure = _failure(
             "pa_call_failed",
             f"ProductAgent ask_llm_structured failed: {type(exc).__name__}: {exc}",
+            diagnostic=_pa_call_diagnostic(exc),
         )
         _write_first_turn(turn_path, product_requirement, pa_input, None, failure)
         return failure
@@ -270,6 +271,7 @@ def _needed_context_response_format(
                     ],
                     "properties": {
                         "context_ref": {
+                            "type": ["string", "null"],
                             "enum": [None, *context_refs],
                         },
                         "request_live_observation": {"type": "boolean"},
@@ -344,10 +346,48 @@ def _write_json_exclusive(path: Path, value: object) -> None:
         stream.write(serialized)
 
 
-def _failure(reason: str, message: str) -> dict[str, object]:
+def _pa_call_diagnostic(error: Exception) -> dict[str, object]:
+    """Return safe structured metadata for one failed ProductAgent call."""
+    cause = error
+    while isinstance(cause.__cause__, Exception):
+        cause = cause.__cause__
+
+    body = getattr(cause, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    body_message = body.get("message") if isinstance(body, dict) else None
+    message = body_message if isinstance(body_message, str) else getattr(cause, "message", None)
+    if not isinstance(message, str) or not message:
+        message = str(cause)
+
+    def _metadata(name: str) -> object:
+        value = getattr(cause, name, None)
+        if value is None and isinstance(body, dict):
+            value = body.get(name)
+        return value if isinstance(value, (int, str)) and not isinstance(value, bool) else None
+
     return {
-        "failure": {
-            "reason": reason,
-            "message": message,
-        }
+        "stage": "Phase 3.1 ProductAgent structured call",
+        "exception": type(cause).__name__,
+        "status_code": _metadata("status_code"),
+        "request_id": _metadata("request_id"),
+        "error_type": _metadata("type"),
+        "param": _metadata("param"),
+        "code": _metadata("code"),
+        "message": message[:2000],
     }
+
+
+def _failure(
+    reason: str,
+    message: str,
+    *,
+    diagnostic: dict[str, object] | None = None,
+) -> dict[str, object]:
+    failure: dict[str, object] = {
+        "reason": reason,
+        "message": message,
+    }
+    if diagnostic is not None:
+        failure["diagnostic"] = diagnostic
+    return {"failure": failure}

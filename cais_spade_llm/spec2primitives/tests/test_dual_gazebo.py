@@ -145,11 +145,13 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
 
     for exact_ui_term in (
         'label="product_requirement"',
+        'value="assemble medium gear"',
         'ui.label("Run settings")',
         'label="Maximum PA turns"',
         '"Start PA Context Interaction"',
         'ui.label("PA Interaction")',
         'ui.label("ProductAgent")',
+        'ui.label("ProductAgent Request Failure")',
         'ui.badge("connected through Phase 3.5")',
         'ui.badge("idle")',
         '"needed_context"',
@@ -177,6 +179,13 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
     assert 'max_pa_turns_input.props("disable")' in source
     assert 'max_pa_turns_input.props(remove="disable")' in source
     assert 'start_button.on_click(_start_pa_interaction)' in source
+    assert 'product_agent_failure_card.set_visibility(False)' in source
+    assert 'if title == "Ontology Grounding"' in source
+    assert '"w-full border border-red-200 bg-red-50 shadow-none"' in source
+    assert (
+        "        cancel_interaction_button.on_click(_cancel_clarification)\n"
+        "        _update_start_enabled()"
+    ) in source
     assert "start_pa_context_interaction(" in source
     assert "serve_pa_requested_context," in source
     assert "continue_pa_context_interaction," in source
@@ -186,6 +195,55 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
     assert "_render_ra" not in source
     assert '"RA Interaction"' not in source
     assert 'ui.badge("not connected")' not in source
+
+
+def test_phase_2_top_controls_are_full_width_and_responsive() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    functions = {
+        node.name: ast.get_source_segment(source, node)
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    dual_gazebo_source = functions["_render_dual_gazebo"]
+    pa_source = functions["_render_pa_interaction"]
+    render_source = functions["render"]
+
+    assert dual_gazebo_source is not None
+    assert pa_source is not None
+    assert render_source is not None
+    assert 'ui.card().classes("w-full border border-slate-200 shadow-sm")' in (
+        dual_gazebo_source
+    )
+    assert '"w-full items-center justify-between gap-4 flex-wrap"' in (
+        dual_gazebo_source
+    )
+    assert 'ui.card().classes("w-full border border-slate-200 shadow-sm")' in pa_source
+    assert render_source.index("_render_dual_gazebo") < render_source.index(
+        "_render_pa_interaction"
+    )
+    assert (
+        "        _render_dual_gazebo(runtime.dual_gazebo)\n"
+        "        _render_pa_interaction(runtime)"
+    ) in render_source
+
+
+def test_phase_2_pa_start_requires_configured_grounding() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    pa_source = next(
+        ast.get_source_segment(source, node)
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_render_pa_interaction"
+    )
+
+    assert pa_source is not None
+    assert "runtime.ontology_config is not None" in pa_source
+    assert "runtime.grounding_runtime is not None" in pa_source
+    assert "runtime.document_diagnostic_unavailable_reason" in pa_source
+    assert '"grounding unavailable"' in pa_source
+    assert "grounding_ready\n                and not action_state" in pa_source
+    assert "not grounding_ready\n                or action_state" in pa_source
 
 
 def test_phase_2_pa_ui_imports_only_the_authorized_phase_3_dependencies() -> None:

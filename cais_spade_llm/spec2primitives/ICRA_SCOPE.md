@@ -105,8 +105,9 @@ The ontology split is:
 
 The pasted OWL is a mixed schema-and-instance graph rather than a pure TBox. It
 remains a parser fixture only; its named individuals and task-specific
-restrictions are not runtime context. The production ontology input must expose
-an approved schema-only TBox view.
+restrictions are not runtime context. The project-authoritative production TBox
+is `ontology/spec2primitives_ppr_tbox.owl`; it contains only the approved
+schema-only PPR view.
 
 The requested assembly process may be linked through `realizes` to its grounded
 outcome. It must not be linked to primitive offerings through `requires`,

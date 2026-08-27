@@ -619,9 +619,15 @@ def _task_draft_response_format(
                         "source_view_fingerprint",
                     ],
                     "properties": {
-                        "version": {"const": version},
-                        "product_requirement": {"const": view.product_requirement},
-                        "requested_process": {"enum": [None, *classes]},
+                        "version": {"type": "integer", "const": version},
+                        "product_requirement": {
+                            "type": "string",
+                            "const": view.product_requirement,
+                        },
+                        "requested_process": {
+                            "type": ["string", "null"],
+                            "enum": [None, *classes],
+                        },
                         "required_outcome": {"type": ["string", "null"]},
                         "required_inputs": {
                             "type": "array",
@@ -639,6 +645,7 @@ def _task_draft_response_format(
                                 ],
                                 "properties": {
                                     "kind": {
+                                        "type": "string",
                                         "enum": [
                                             "class",
                                             "property",
@@ -646,9 +653,9 @@ def _task_draft_response_format(
                                             "user_intent",
                                         ]
                                     },
-                                    "symbol": {"enum": symbols},
+                                    "symbol": {"type": "string", "enum": symbols},
                                     "subject_role": {"type": "string", "minLength": 1},
-                                    "authority": {"const": "PA"},
+                                    "authority": {"type": "string", "const": "PA"},
                                     "frame": {"type": ["string", "null"]},
                                     "maximum_age_ns": {
                                         "type": ["integer", "null"],
@@ -659,7 +666,10 @@ def _task_draft_response_format(
                             },
                         },
                         "unresolved_user_intent": {"type": ["string", "null"]},
-                        "source_view_fingerprint": {"const": view.fingerprint},
+                        "source_view_fingerprint": {
+                            "type": "string",
+                            "const": view.fingerprint,
+                        },
                     },
                 }
             },
@@ -675,7 +685,9 @@ def _evidence_selection_response_format(candidates: list[str]) -> dict[str, Any]
             "type": "object",
             "additionalProperties": False,
             "required": ["context_ref"],
-            "properties": {"context_ref": {"enum": candidates}},
+            "properties": {
+                "context_ref": {"type": "string", "enum": candidates}
+            },
         },
     }
 

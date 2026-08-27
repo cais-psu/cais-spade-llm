@@ -1408,6 +1408,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     }
     pending_execution: dict[str, object] = {}
     pending_assembly: dict[str, str] = {}
+    pending_dual_assembly: dict[str, bool] = {}
     pending_move_insert_trial: dict[str, str] = {}
     pending_move_insert_recovery: dict[str, str] = {}
     assembly_functions = (
@@ -2060,8 +2061,12 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 _render_steps()
 
     def _default_location(function_name: str, options: list[str]) -> str:
-        if function_name in {"pick_approach", "pick_grasp"} and "prusa-mk4-2" in options:
-            return "prusa-mk4-2"
+        if function_name in {"pick_approach", "pick_grasp"}:
+            preferred_origin = (
+                "prusa-mk4-1" if _current_robot() == "xarm6" else "prusa-mk4-2"
+            )
+            if preferred_origin in options:
+                return preferred_origin
         if function_name in {"place_approach", "place_insert"} and "assembly_board-v1" in options:
             return "assembly_board-v1"
         return options[0] if options else ""
@@ -2132,6 +2137,8 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             )
             if held_part in options:
                 part_select.value = held_part
+            elif _current_robot() == "xarm6" and "SG" in options:
+                part_select.value = "SG"
             elif part_select.value not in options:
                 part_select.value = (
                     "MG" if "MG" in options else (options[0] if options else "")
@@ -2190,6 +2197,17 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         if function_name == "place_approach":
             destination_location = str(values.get("destination_location") or "")
             if operator_confirmed_held_part:
+                if bridge.physical_place_insert_release_only(robot):
+                    return (
+                        f"This standalone place_approach run assumes {part_name} is "
+                        "physically clamped in the UR5e gripper. The UR5e will verify "
+                        "the confirmed pick_approach.descend handoff and fresh robot TF "
+                        f"using the confirmed pick recording from "
+                        f"{operator_handoff_origin_resource_location or 'unavailable'} "
+                        "before motion. On success, place_insert will skip move_insert, "
+                        "release the part irreversibly at place_approach.descend, and "
+                        "perform the existing lift."
+                    )
                 return (
                     f"This standalone place_approach run assumes {part_name} is physically "
                     "clamped in "
@@ -2216,6 +2234,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     "without a part."
                 )
             if destination_location == "assembly_board-v1":
+                if (
+                    robot == "xarm6"
+                    and bridge.physical_xarm6_skip_assembly_board_localization()
+                ):
+                    return (
+                        "The physical xarm6 demo override skips "
+                        "place_approach.localize_assembly_board_v1 and uses the "
+                        "configured world-frame SG placement geometry. It still runs "
+                        "the computed approach and descend motions."
+                    )
                 return (
                     f"The {robot} will first stage {part_name} at the configured "
                     "assembly_board-v1 observation position, collect ten fresh ArUco ID 70 "
@@ -2241,6 +2269,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     f"The {robot} will run place_insert independently with held_part empty. "
                     "It will open the empty gripper and retreat 0.08 m without advancing "
                     "the pick/place sequence."
+                )
+            if bridge.physical_place_insert_release_only(robot):
+                return (
+                    f"The physical {robot} has place_insert_release_only enabled. "
+                    "place_insert will skip move_insert, release "
+                    f"{part_name} irreversibly at the existing place_approach.descend "
+                    "pose, and then perform the existing 0.08 m lift. This does not "
+                    "claim physical insertion or seating."
                 )
             return (
                 f"The {robot} will keep {part_name} clamped while the internal move_insert "
@@ -2402,10 +2438,16 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 part_options = []
 
             assembly_origin_select.options = origin_options
-            if assembly_origin_select.value not in origin_options:
+            preferred_origin = (
+                "prusa-mk4-1" if robot == "xarm6" else "prusa-mk4-2"
+            )
+            if (
+                assembly_origin_select.value not in origin_options
+                or preferred_origin in origin_options
+            ):
                 assembly_origin_select.value = (
-                    "prusa-mk4-2"
-                    if "prusa-mk4-2" in origin_options
+                    preferred_origin
+                    if preferred_origin in origin_options
                     else (origin_options[0] if origin_options else "")
                 )
             assembly_origin_select.update()
@@ -2420,10 +2462,14 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             assembly_destination_select.update()
 
             assembly_part_select.options = part_options
-            if assembly_part_select.value not in part_options:
+            preferred_part = "SG" if robot == "xarm6" else "MG"
+            if (
+                assembly_part_select.value not in part_options
+                or preferred_part in part_options
+            ):
                 assembly_part_select.value = (
-                    "MG"
-                    if "MG" in part_options
+                    preferred_part
+                    if preferred_part in part_options
                     else (part_options[0] if part_options else "")
                 )
             assembly_part_select.update()
@@ -4297,11 +4343,30 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                     assembly_confirm_title.set_text(
                         f"Run Assembly on the physical {robot}?"
                     )
-                    assembly_confirm_move_insert_status.set_text(
-                        "Assembly readiness verified the protected move_insert recipe and "
-                        f"qualification for exact part {values['part_name']}. No operator "
-                        "tuning values are required."
-                    )
+                    if result.get("place_insert_release_only") is True:
+                        assembly_confirm_place_insert_policy.set_text(
+                            "place_insert_release_only is enabled. place_insert will skip "
+                            "move_insert, release the part irreversibly at the existing "
+                            "place_approach.descend pose, and perform the existing lift. "
+                            "This does not claim physical insertion or seating."
+                        )
+                        assembly_confirm_move_insert_status.set_text(
+                            "Assembly readiness did not require a move_insert profile, "
+                            "qualification, insertion geometry, or live insertion readiness."
+                        )
+                    else:
+                        assembly_confirm_place_insert_policy.set_text(
+                            "place_insert.move_insert keeps the part gripped while it "
+                            "searches and inserts. place_insert releases the part "
+                            "irreversibly only after move_insert succeeds. Assembly stops "
+                            "immediately if any function fails and never retries or "
+                            "continues automatically."
+                        )
+                        assembly_confirm_move_insert_status.set_text(
+                            "Assembly readiness verified the protected move_insert recipe "
+                            f"and qualification for exact part {values['part_name']}. No "
+                            "operator tuning values are required."
+                        )
                     assembly_confirm.open()
                 except Exception as exc:
                     log.exception("Assembly readiness check failed")
@@ -4325,7 +4390,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 ui.label(
                     "pick_approach → pick_grasp → place_approach → place_insert → move_home"
                 ).classes("text-sm font-semibold")
-                ui.label(
+                assembly_confirm_place_insert_policy = ui.label(
                     "place_insert.move_insert keeps the part gripped while it searches and "
                     "inserts. place_insert releases the part irreversibly "
                     "only after move_insert succeeds. Assembly stops immediately if any "
@@ -4474,8 +4539,216 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 .props("outline dense")
                 .classes("text-red-600")
             )
+            ui.separator()
+            ui.label("Dual Assembly Demo").classes("text-xs font-semibold")
+            ui.label(
+                "Runs both physical arms concurrently: xarm6 picks and places SG from "
+                "prusa-mk4-1 while ur5e runs the MG Assembly from prusa-mk4-2. "
+                "The shared assembly-board approach/release/home zone is serialized."
+            ).classes("text-xs text-slate-500")
+            dual_assembly_status = ui.label(
+                "Dual Assembly readiness has not been checked."
+            ).classes("text-xs text-slate-500")
 
-    def _render_execution() -> None:  # noqa: C901 - one render owns every motion gate.
+            async def _check_dual_assembly_readiness() -> None:
+                client = _current_client()
+                if execution.get("busy") or execution.get("checking"):
+                    _notify(
+                        "A robot function check or execution is already active.",
+                        type="warning",
+                        client=client,
+                    )
+                    return
+                execution.update(
+                    {"checking": True, "active_function": "Dual Assembly"}
+                )
+                pending_dual_assembly.clear()
+                dual_assembly_run_button.props("loading")
+                _render_execution()
+                dual_assembly_status.set_text(
+                    "Checking xarm6 SG and ur5e MG readiness without motion..."
+                )
+                dual_assembly_status.classes(replace="text-xs text-amber-700")
+                try:
+                    result = await bridge.digital_twin_dual_assembly_readiness(
+                        target
+                    )
+                    message = str(result.get("message") or "")
+                    if not _client_alive(dual_assembly_status):
+                        return
+                    dual_assembly_status.set_text(message)
+                    dual_assembly_status.classes(
+                        replace=(
+                            "text-xs text-green-700"
+                            if result.get("success")
+                            else "text-xs text-red-700"
+                        )
+                    )
+                    if not result.get("success"):
+                        _notify(
+                            message,
+                            type="warning",
+                            timeout=7000,
+                            client=client,
+                        )
+                        return
+                    pending_dual_assembly["ready"] = True
+                    dual_assembly_confirm.open()
+                except Exception as exc:
+                    log.exception("Dual Assembly readiness check failed")
+                    message = f"Dual Assembly readiness check failed: {exc}"
+                    if _client_alive(dual_assembly_status):
+                        dual_assembly_status.set_text(message)
+                        dual_assembly_status.classes(
+                            replace="text-xs text-red-700"
+                        )
+                    _notify(
+                        message,
+                        type="negative",
+                        timeout=7000,
+                        client=client,
+                    )
+                finally:
+                    execution.update({"checking": False, "active_function": ""})
+                    if _client_alive(dual_assembly_run_button):
+                        dual_assembly_run_button.props(remove="loading")
+                        _render_execution()
+
+            with ui.dialog() as dual_assembly_confirm, ui.card().classes(
+                "gap-3 max-w-xl"
+            ):
+                ui.label("Run both physical Assemblies concurrently?").classes(
+                    "font-semibold"
+                )
+                ui.label(
+                    "xarm6: SG, prusa-mk4-1 → assembly_board-v1. "
+                    "ur5e: MG, prusa-mk4-2 → assembly_board-v1."
+                ).classes("text-sm font-semibold")
+                ui.label(
+                    "Both place_insert functions use place_insert_release_only: "
+                    "move_insert is skipped, release_part is irreversible, and the "
+                    "existing lift follows. xarm6 also skips "
+                    "place_approach.localize_assembly_board_v1. Clear both robot "
+                    "workspaces before continuing. The two pick phases may overlap, but "
+                    "only one arm enters and clears the assembly-board zone at a time."
+                ).classes("text-xs text-red-700")
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Cancel", on_click=dual_assembly_confirm.close).props(
+                        "flat"
+                    )
+
+                    async def _confirmed_dual_assembly() -> None:
+                        client = _current_client()
+                        dual_assembly_confirm.close()
+                        if (
+                            execution.get("busy")
+                            or execution.get("checking")
+                            or not pending_dual_assembly.get("ready")
+                        ):
+                            _notify(
+                                "Dual Assembly readiness must complete before confirmation.",
+                                type="warning",
+                                client=client,
+                            )
+                            return
+                        execution.update(
+                            {"busy": True, "active_function": "Dual Assembly"}
+                        )
+                        dual_assembly_run_button.props("loading")
+                        _render_execution()
+                        dual_assembly_status.set_text(
+                            "Dispatching concurrent xarm6 SG and ur5e MG Assemblies."
+                        )
+                        dual_assembly_status.classes(
+                            replace="text-xs text-amber-700"
+                        )
+                        assembly_task: asyncio.Task | None = None
+                        try:
+                            assembly_task = asyncio.create_task(
+                                bridge.digital_twin_execute_dual_assembly(
+                                    target,
+                                    confirmed=True,
+                                )
+                            )
+                            execution["assembly_task"] = assembly_task
+                            result = await assembly_task
+                            message = str(
+                                result.get("message")
+                                or "Dual Assembly completed."
+                            )
+                            xarm6_message = str(
+                                dict(result.get("xarm6") or {}).get("message")
+                                or ""
+                            )
+                            ur5e_message = str(
+                                dict(result.get("ur5e") or {}).get("message")
+                                or ""
+                            )
+                            detail = (
+                                f"{message} xarm6: {xarm6_message} "
+                                f"ur5e: {ur5e_message}"
+                            ).strip()
+                            if _client_alive(dual_assembly_status):
+                                dual_assembly_status.set_text(detail)
+                                dual_assembly_status.classes(
+                                    replace=(
+                                        "text-xs text-green-700"
+                                        if result.get("success")
+                                        else "text-xs text-red-700"
+                                    )
+                                )
+                            _notify(
+                                message,
+                                type=(
+                                    "positive"
+                                    if result.get("success")
+                                    else "negative"
+                                ),
+                                timeout=7000,
+                                client=client,
+                            )
+                        except Exception as exc:
+                            log.exception("Dual Assembly UI execution failed")
+                            message = f"Dual Assembly failed: {exc}"
+                            if _client_alive(dual_assembly_status):
+                                dual_assembly_status.set_text(message)
+                                dual_assembly_status.classes(
+                                    replace="text-xs text-red-700"
+                                )
+                            _notify(
+                                message,
+                                type="negative",
+                                timeout=7000,
+                                client=client,
+                            )
+                        finally:
+                            if execution.get("assembly_task") is assembly_task:
+                                execution["assembly_task"] = None
+                            pending_dual_assembly.clear()
+                            execution.update(
+                                {"busy": False, "active_function": ""}
+                            )
+                            if _client_alive(dual_assembly_run_button):
+                                dual_assembly_run_button.props(remove="loading")
+                                _render_execution()
+
+                    ui.button(
+                        "Confirm Run Dual Assembly",
+                        on_click=_confirmed_dual_assembly,
+                        icon="play_arrow",
+                    ).props("color=red")
+
+            dual_assembly_run_button = (
+                ui.button(
+                    "Run Dual Assembly",
+                    on_click=_check_dual_assembly_readiness,
+                    icon="precision_manufacturing",
+                )
+                .props("outline dense")
+                .classes("text-red-600")
+            )
+
+    def _render_execution() -> None:  # noqa: C901, PLR0912, PLR0915 - one render owns every motion gate.
         function_name = _current_function()
         run_button.set_text(f"Run {function_name}" if function_name else "Run")
         controls_enabled = (
@@ -4576,6 +4849,10 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         if (
             function_name == "place_approach"
             and _current_destination_location() == "assembly_board-v1"
+            and not (
+                _current_robot() == "xarm6"
+                and bridge.physical_xarm6_skip_assembly_board_localization()
+            )
         ):
             invalid_recordings = [
                 str(step.get("invalid_reason") or "").strip()
@@ -4630,30 +4907,36 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             and _current_destination_location() == "assembly_board-v1"
         ):
             place_insert_run_blocked = True
+            place_insert_release_only = (
+                bridge.physical_place_insert_release_only(_current_robot())
+            )
             held_part = str(
                 bridge.digital_twin_function_held_part(_current_robot()) or ""
             ).strip()
-            if _current_robot() == "xarm6":
-                place_insert_blocker = (
-                    "Physical xarm6 move_insert remains blocked in this version. The "
-                    "installed UFactory six-axis force/torque sensor still requires "
-                    "verified CAIS wrench feedback, zeroing, force control, cancellation, "
-                    "and a serialized xarm6 insertion action."
-                )
-            elif not held_part:
+            if not held_part:
                 if _current_part_name() in _MOVE_INSERT_SUPPORTED_PARTS:
                     place_insert_blocker = (
                         "Standalone Run place_insert is blocked because Function Execution "
                         "has no retained held_part context. Select place_approach and Confirm "
                         "Run place_approach once; that standalone run assumes exact part "
                         f"{_current_part_name()} is already "
-                        "physically clamped. Then test move_insert."
+                        "physically clamped. Then run place_insert."
                     )
                 else:
                     place_insert_blocker = (
                         f"Standalone Run place_insert for exact part {_current_part_name()} "
                         "requires its retained pick_grasp and place_approach context."
                     )
+            elif place_insert_release_only:
+                place_insert_run_blocked = False
+                place_insert_blocker = ""
+            elif _current_robot() == "xarm6":
+                place_insert_blocker = (
+                    "Physical xarm6 move_insert remains blocked in this version. The "
+                    "installed UFactory six-axis force/torque sensor still requires "
+                    "verified CAIS wrench feedback, zeroing, force control, cancellation, "
+                    "and a serialized xarm6 insertion action."
+                )
             elif not _move_insert_trial_is_qualified():
                 place_insert_blocker = (
                     f"Run place_insert is blocked until Supervised Test move_insert for exact "
@@ -4683,6 +4966,13 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
                 and _current_assembly_origin_resource_location()
                 and _current_assembly_destination_location()
                 and _current_assembly_part_name()
+                and controls_enabled
+                and not demonstration_blocks_functions
+            )
+        )
+        dual_assembly_run_button.set_enabled(
+            bool(
+                target == "dual robots"
                 and controls_enabled
                 and not demonstration_blocks_functions
             )

@@ -9,6 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import pytest
+from openai import BadRequestError
 from PIL import Image
 from rdflib import RDF, Graph, Namespace
 
@@ -16,19 +19,29 @@ from cais_spade_llm.spec2primitives import spec2primitives_ui
 from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
     Spec2PrimitivesUIRuntime,
 )
+from cais_spade_llm.spec2primitives.agents.pa.product_context import (
+    initialize_interaction_abox,
+)
 from cais_spade_llm.spec2primitives.config import load_model_runtime_config
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
     PPR_NAMESPACE,
     ontology_config,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
+    DOCUMENT_CONTEXT_REF,
+    DocumentInterpretationError,
     DocumentVisionRequest,
     DocumentVisionResponse,
     OpenAIDocumentVisionRuntime,
+    interpret_document_evidence,
     run_document_interpretation_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
     RenderedDocumentPage,
+    document_interpretation_schema,
+)
+from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    resolve_context_ref,
 )
 
 PPR = Namespace(PPR_NAMESPACE)
@@ -107,6 +120,140 @@ def test_openai_adapter_sends_one_nonstored_structured_six_page_request() -> Non
     assert [item["detail"] for item in content[1:]] == ["high"] * 6
     assert call["text"]["format"]["strict"] is True
     assert call["text"]["format"]["schema"]["additionalProperties"] is False
+
+
+def test_openai_document_schema_uses_supported_constraints() -> None:
+    schema = document_interpretation_schema()
+    schema_text = json.dumps(schema)
+
+    assert "uniqueItems" not in schema_text
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    literal_facts = properties["literal_facts"]
+    assert isinstance(literal_facts, dict)
+    literal_items = literal_facts["items"]
+    assert isinstance(literal_items, dict)
+    literal_properties = literal_items["properties"]
+    assert isinstance(literal_properties, dict)
+    assert literal_properties["value"] == {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+        ]
+    }
+    entities = properties["entities"]
+    assert isinstance(entities, dict)
+    entity_items = entities["items"]
+    assert isinstance(entity_items, dict)
+    entity_properties = entity_items["properties"]
+    assert isinstance(entity_properties, dict)
+    assert entity_properties["evidence_pages"] == {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 1},
+        "minItems": 1,
+    }
+
+
+def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
+    tmp_path: Path,
+) -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(
+        400,
+        request=request,
+        headers={"x-request-id": "req_document_controlled"},
+    )
+    api_error = BadRequestError(
+        "raw exception text that must not persist",
+        response=response,
+        body={
+            "message": "Unsupported schema keyword: uniqueItems",
+            "type": "invalid_request_error",
+            "param": "text.format.schema",
+            "code": "invalid_json_schema",
+            "private_body_field": "must not persist",
+            "prompt": "controlled prompt that must not persist",
+            "image_url": "data:image/png;base64,must-not-persist",
+        },
+    )
+    calls: list[dict[str, object]] = []
+
+    class ControlledResponses:
+        async def create(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            raise api_error
+
+    config = load_model_runtime_config().document_vlm
+    vision_runtime = OpenAIDocumentVisionRuntime(
+        config,
+        client=SimpleNamespace(responses=ControlledResponses()),
+    )
+    interaction_root = tmp_path / "bad_request"
+    configured_ontology = ontology_config()
+    tbox = configured_ontology.load_tbox()
+    abox = initialize_interaction_abox(
+        interaction_root,
+        "assemble Medium Gear",
+        tbox,
+    )
+    resolved = resolve_context_ref({"context_ref": DOCUMENT_CONTEXT_REF})
+    served_context = resolved["served_context"]
+    assert isinstance(served_context, dict)
+
+    with pytest.raises(DocumentInterpretationError) as exc_info:
+        asyncio.run(
+            interpret_document_evidence(
+                interaction_root=interaction_root,
+                tbox=tbox,
+                abox=abox,
+                served_context=served_context,
+                operation_number=1,
+                config=config,
+                vision_runtime=vision_runtime,
+            )
+        )
+
+    assert len(calls) == 1
+    assert exc_info.value.__cause__ is api_error
+    expected_diagnostic = {
+        "stage": "Phase 4.1 document_evidence OpenAI Responses call",
+        "exception": "BadRequestError",
+        "status_code": 400,
+        "request_id": "req_document_controlled",
+        "error_type": "invalid_request_error",
+        "param": "text.format.schema",
+        "code": "invalid_json_schema",
+        "message": "Unsupported schema keyword: uniqueItems",
+    }
+    assert exc_info.value.diagnostic == expected_diagnostic
+    assert "status_code=400" in str(exc_info.value)
+    assert "param=text.format.schema" in str(exc_info.value)
+
+    trace_path = (
+        interaction_root
+        / "products/grounding/document_evidence/interpretation_0001.json"
+    )
+    trace = _read_json(trace_path)
+    assert trace["diagnostic"] == expected_diagnostic
+    trace_text = trace_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "private_body_field",
+        "controlled prompt",
+        "raw exception text",
+        "OPENAI_API_KEY",
+        "data:image",
+        "base64",
+    ):
+        assert forbidden not in trace_text
+
+    manifest = _read_json(
+        interaction_root / "products/grounding/ontology/abox_manifest.json"
+    )
+    assert manifest["delta_count"] == 0
+    assert not list(
+        (interaction_root / "products/grounding/ontology").glob("delta_*.json")
+    )
 
 
 def test_diagnostic_renders_all_pages_and_merges_validated_delta(
@@ -193,6 +340,43 @@ def test_invalid_vision_vocabulary_is_rejected_without_abox_delta(
         interaction_root / "products/grounding/document_evidence/interpretation_0001.json"
     )
     assert "not declared in the TBox" in trace["failure"]
+
+
+def test_duplicate_evidence_pages_remain_rejected_without_abox_delta(
+    tmp_path: Path,
+) -> None:
+    output = _valid_output()
+    entities = output["entities"]
+    assert isinstance(entities, list)
+    first_entity = entities[0]
+    assert isinstance(first_entity, dict)
+    first_entity["evidence_pages"] = [4, 4]
+    interaction_root = tmp_path / "duplicate_pages"
+
+    result = asyncio.run(
+        run_document_interpretation_diagnostic(
+            interaction_root=interaction_root,
+            product_requirement="assemble Medium Gear",
+            ontology_config=ontology_config(),
+            config=load_model_runtime_config().document_vlm,
+            vision_runtime=ControlledVisionRuntime(output),
+        )
+    )
+
+    assert result["status"] == "rejected"
+    assert "evidence pages must be unique" in result["failure"]["message"]
+    manifest = _read_json(
+        interaction_root / "products/grounding/ontology/abox_manifest.json"
+    )
+    assert manifest["delta_count"] == 0
+    assert not list(
+        (interaction_root / "products/grounding/ontology").glob("delta_*.json")
+    )
+    trace = _read_json(
+        interaction_root
+        / "products/grounding/document_evidence/interpretation_0001.json"
+    )
+    assert trace["diagnostic"] is None
 
 
 def test_ui_document_diagnostic_is_separate_and_fails_closed(

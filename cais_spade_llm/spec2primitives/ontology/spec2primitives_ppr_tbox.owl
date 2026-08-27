@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xml:base="http://PAonto.com"
+         xmlns="http://PAonto.com#">
+
+  <owl:Ontology rdf:about="http://PAonto.com"/>
+
+  <owl:Class rdf:about="#specification"/>
+  <owl:Class rdf:about="#product"/>
+  <owl:Class rdf:about="#feature"/>
+  <owl:Class rdf:about="#process"/>
+  <owl:Class rdf:about="#resource"/>
+  <owl:Class rdf:about="#capability"/>
+
+  <owl:ObjectProperty rdf:about="#defines">
+    <rdfs:domain rdf:resource="#specification"/>
+    <rdfs:range rdf:resource="#feature"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#realizes">
+    <rdfs:domain rdf:resource="#process"/>
+    <rdfs:range rdf:resource="#feature"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#capableOf">
+    <rdfs:domain rdf:resource="#resource"/>
+    <rdfs:range rdf:resource="#process"/>
+  </owl:ObjectProperty>
+
+</rdf:RDF>

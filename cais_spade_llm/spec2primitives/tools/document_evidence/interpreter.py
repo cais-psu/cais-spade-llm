@@ -55,6 +55,16 @@ _NOTE_KEYS = {"description", "evidence_pages"}
 class DocumentInterpretationError(ValueError):
     """Raised when approved document evidence cannot be interpreted safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic: Mapping[str, object] | None = None,
+    ) -> None:
+        """Create an error with optional sanitized provider diagnostics."""
+        super().__init__(message)
+        self.diagnostic = None if diagnostic is None else dict(diagnostic)
+
 
 @dataclass(frozen=True)
 class RenderedDocumentPage:
@@ -167,8 +177,11 @@ class OpenAIDocumentVisionRuntime:
                 store=False,
             )
         except OpenAIError as exc:
+            diagnostic = _openai_error_diagnostic(exc)
             raise DocumentInterpretationError(
-                f"OpenAI document interpretation failed: {type(exc).__name__}."
+                "OpenAI document interpretation failed: "
+                f"{_diagnostic_summary(diagnostic)}",
+                diagnostic=diagnostic,
             ) from exc
 
         output_text = getattr(response, "output_text", None)
@@ -256,6 +269,9 @@ async def interpret_document_evidence(
             operation_number=operation_number,
         )
     except (DocumentInterpretationError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        diagnostic = (
+            exc.diagnostic if isinstance(exc, DocumentInterpretationError) else None
+        )
         _write_trace_exclusive(
             trace_path,
             _trace_record(
@@ -265,6 +281,7 @@ async def interpret_document_evidence(
                 output=None if response is None else response.output,
                 delta=None,
                 failure=f"{type(exc).__name__}: {exc}",
+                diagnostic=diagnostic,
             ),
         )
         if isinstance(exc, DocumentInterpretationError):
@@ -282,6 +299,7 @@ async def interpret_document_evidence(
             output=output,
             delta=delta,
             failure=None,
+            diagnostic=None,
         ),
     )
     return DocumentInterpretationResult(
@@ -305,7 +323,6 @@ def document_interpretation_schema() -> dict[str, object]:
         "type": "array",
         "items": {"type": "integer", "minimum": 1},
         "minItems": 1,
-        "uniqueItems": True,
     }
     return {
         "type": "object",
@@ -348,7 +365,13 @@ def document_interpretation_schema() -> dict[str, object]:
                     "properties": {
                         "subject_key": {"type": "string"},
                         "predicate_iri": {"type": "string"},
-                        "value": {"type": ["string", "number", "integer", "boolean"]},
+                        "value": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "number"},
+                                {"type": "boolean"},
+                            ]
+                        },
                         "datatype_iri": {"type": ["string", "null"]},
                         "language": {"type": ["string", "null"]},
                         "evidence_pages": page_numbers,
@@ -668,6 +691,7 @@ def _trace_record(
     output: Mapping[str, object] | None,
     delta: Mapping[str, object] | None,
     failure: str | None,
+    diagnostic: Mapping[str, object] | None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -689,7 +713,58 @@ def _trace_record(
         "structured_output": output,
         "compiled_delta": delta,
         "failure": failure,
+        "diagnostic": None if diagnostic is None else dict(diagnostic),
     }
+
+
+def _openai_error_diagnostic(error: OpenAIError) -> dict[str, object]:
+    """Extract bounded OpenAI error fields without persisting request data."""
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping) and isinstance(body.get("error"), Mapping):
+        body = body["error"]
+
+    def _metadata(attribute: str, body_field: str | None = None) -> object:
+        value = getattr(error, attribute, None)
+        if value is None and isinstance(body, Mapping):
+            value = body.get(body_field or attribute)
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return None
+        return value
+
+    body_message = body.get("message") if isinstance(body, Mapping) else None
+    error_message = getattr(error, "message", None)
+    message = body_message if isinstance(body_message, str) else error_message
+    if not isinstance(message, str) or not message:
+        message = "OpenAI request failed without a message."
+
+    return {
+        "stage": "Phase 4.1 document_evidence OpenAI Responses call",
+        "exception": type(error).__name__,
+        "status_code": _metadata("status_code"),
+        "request_id": _metadata("request_id"),
+        "error_type": _metadata("type"),
+        "param": _metadata("param"),
+        "code": _metadata("code"),
+        "message": message[:2000],
+    }
+
+
+def _diagnostic_summary(diagnostic: Mapping[str, object]) -> str:
+    """Format only the approved diagnostic fields for operator visibility."""
+    return "; ".join(
+        f"{field}={diagnostic[field]}"
+        for field in (
+            "stage",
+            "exception",
+            "status_code",
+            "request_id",
+            "error_type",
+            "param",
+            "code",
+            "message",
+        )
+        if diagnostic.get(field) is not None
+    )
 
 
 def _write_trace_exclusive(path: Path, record: Mapping[str, object]) -> None:

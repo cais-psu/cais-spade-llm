@@ -19,8 +19,38 @@ from cais_spade_llm.spec2primitives.ontology import (
 FIXTURE_ROOT = Path(__file__).parent / "fixtures/ontology"
 MINIMAL_TBOX_PATH = FIXTURE_ROOT / "minimal_ppr_tbox.owl"
 MIXED_PAONTO_PATH = FIXTURE_ROOT / "mixed_paonto_sample.owl"
+PROJECT_TBOX_PATH = Path(__file__).parents[1] / "ontology/spec2primitives_ppr_tbox.owl"
 PPR_NAMESPACE = "http://PAonto.com#"
 PPR = Namespace(PPR_NAMESPACE)
+
+
+def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> None:
+    tbox = load_ppr_tbox(PROJECT_TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
+    expected_classes = {
+        PPR.specification,
+        PPR.product,
+        PPR.feature,
+        PPR.process,
+        PPR.resource,
+        PPR.capability,
+    }
+    expected_properties = {PPR.defines, PPR.realizes, PPR.capableOf}
+
+    assert set(tbox.classes) == {str(value) for value in expected_classes}
+    assert set(tbox.object_properties) == {
+        str(value) for value in expected_properties
+    }
+    assert tbox.datatype_properties == frozenset()
+    assert set(tbox.graph.objects(PPR.defines, RDFS.domain)) == {PPR.specification}
+    assert set(tbox.graph.objects(PPR.defines, RDFS.range)) == {PPR.feature}
+    assert set(tbox.graph.objects(PPR.realizes, RDFS.domain)) == {PPR.process}
+    assert set(tbox.graph.objects(PPR.realizes, RDFS.range)) == {PPR.feature}
+    assert set(tbox.graph.objects(PPR.capableOf, RDFS.domain)) == {PPR.resource}
+    assert set(tbox.graph.objects(PPR.capableOf, RDFS.range)) == {PPR.process}
+    assert not any(tbox.graph.subjects(RDF.type, OWL.NamedIndividual))
+    assert not any(tbox.graph.subjects(RDF.type, OWL.Restriction))
+    for recipe_property in (PPR.requires, PPR.precedes, PPR.consistsOf):
+        assert not any(tbox.graph.triples((None, recipe_property, None)))
 
 
 def test_schema_only_tbox_loads_with_exact_required_vocabulary() -> None:

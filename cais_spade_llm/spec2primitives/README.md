@@ -26,7 +26,10 @@ Phase 4.3 adds a production pre-RA grounding runtime with persisted
 `ProductContextView`, and output-capable producer descriptors. The UI exposes
 the resulting assertions, provenance, bindings, needs, producer choices, and
 timeline read-only. The live loop remains fail-closed unless an authoritative
-TBox and `OPENAI_API_KEY` configure that runtime.
+TBox and `OPENAI_API_KEY` configure that runtime. The project-authoritative
+schema-only TBox is `ontology/spec2primitives_ppr_tbox.owl`; paired
+`SPEC2PRIMITIVES_PPR_TBOX_PATH` and `SPEC2PRIMITIVES_PPR_NAMESPACE` values may
+override it.
 
 ## MUST: Do not leak the answer
 
@@ -67,14 +70,16 @@ navigation item.
 The page can start and stop the no-hardware `gazebo_dual_spec2primitives` simulation,
 which launches `table_spec2primitives.world` with Gazebo, MoveIt, and RViz while
 forcing `run_perception:=false`. Its Phase 2 PA interaction workspace exposes
-the Phase 3.1--3.5 workflow with its nested Phase 4 grounding contract. It uses the production grounding runtime when the
-authoritative ontology and model configuration are present, and otherwise
-displays `grounding_unavailable`. Pending user-intent questions can be answered
+the Phase 3.1--3.5 workflow with its nested Phase 4 grounding contract. It loads
+the project-authoritative `ontology/spec2primitives_ppr_tbox.owl` by default and
+uses the production grounding runtime when model configuration and
+`OPENAI_API_KEY` are present. Invalid or partial TBox overrides and missing
+model authority display `grounding_unavailable`. Pending user-intent questions can be answered
 or cancelled in the same interaction; completion is shown only from a verified
 `PAContextGroundingCompletion`. Controlled tests use a schema-only fixture,
 deterministic model responses, and producer inputs to exercise the complete
 orchestration record. A separate Phase 4.1 diagnostic can interpret the approved
-NIST PDF when an authoritative TBox and `OPENAI_API_KEY` are configured. It does
+NIST PDF when the project TBox and `OPENAI_API_KEY` are available. It does
 not authorize PA completion. RGB-D capture, preprocessing, and minimal
 segmentation run automatically only when the observation pipeline is invoked.
 The operator card is read-only and displays `idle`, `running`, `ready`, or

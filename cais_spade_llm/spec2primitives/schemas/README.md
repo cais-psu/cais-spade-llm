@@ -6,13 +6,15 @@ experiment results.
 
 Phase 4.0 ontology code is not stored as a schema in this directory. Shared
 immutable PPR TBox loading and validation live in `ontology/ppr_tbox.py`, while
+the project-authoritative schema-only vocabulary lives in
+`ontology/spec2primitives_ppr_tbox.owl`, and
 PA-owned writable interaction-ABox behavior lives in
 `agents/pa/product_context.py`. Together they represent `specification defines
 required feature` and `requested process realizes the same feature`, while
 rejecting RA, primitive-offering, and `capableOf` assertions from the PA ABox.
 A future RA resource ABox remains separately owned; only the TBox is shared.
 Phase 4.0 is wired into Phase 3 through package-local Python contracts and adds
-no shared schema file here. Retrieval, interpretation, ontology delta, and
+no ontology file to this directory. Retrieval, interpretation, ontology delta, and
 Phase 4.3-style decision records share an aligned operation number.
 
 Phase 4.1 uses a strict structured-output schema owned by

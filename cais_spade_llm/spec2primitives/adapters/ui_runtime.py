@@ -36,6 +36,10 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
 )
 
 SPEC2PRIMITIVES_CONTEXTS_ROOT = Path(__file__).resolve().parents[1] / "contexts"
+DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH = (
+    Path(__file__).resolve().parents[1] / "ontology" / "spec2primitives_ppr_tbox.owl"
+)
+DEFAULT_SPEC2PRIMITIVES_PPR_NAMESPACE = "http://PAonto.com#"
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,7 @@ def create_spec2primitives_ui_runtime(
     ontology_config: PAOntologyConfig | None = None
     grounding_runtime: ProductContextGroundingRuntime | None = None
     vision_runtime: DocumentVisionRuntime | None = None
+    tbox: TBoxSnapshot | None = None
     unavailable_reason: str | None = None
     product_agent: ProductAgentContextRuntime = _UnavailableProductAgentRuntime()
 
@@ -91,15 +96,25 @@ def create_spec2primitives_ui_runtime(
             model=model_config.product_agent_llm.model
         )
 
-    tbox_path = os.environ.get("SPEC2PRIMITIVES_PPR_TBOX_PATH")
-    ppr_namespace = os.environ.get("SPEC2PRIMITIVES_PPR_NAMESPACE")
+    tbox_path_override = os.environ.get("SPEC2PRIMITIVES_PPR_TBOX_PATH")
+    ppr_namespace_override = os.environ.get("SPEC2PRIMITIVES_PPR_NAMESPACE")
     if unavailable_reason is None:
-        if not tbox_path or not ppr_namespace:
+        if bool(tbox_path_override) != bool(ppr_namespace_override):
             unavailable_reason = (
-                "Set SPEC2PRIMITIVES_PPR_TBOX_PATH and "
-                "SPEC2PRIMITIVES_PPR_NAMESPACE to an authoritative schema-only TBox."
+                "Set both SPEC2PRIMITIVES_PPR_TBOX_PATH and "
+                "SPEC2PRIMITIVES_PPR_NAMESPACE to override the project TBox."
             )
         else:
+            tbox_path = (
+                Path(tbox_path_override)
+                if tbox_path_override
+                else DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH
+            )
+            ppr_namespace = (
+                ppr_namespace_override
+                if ppr_namespace_override
+                else DEFAULT_SPEC2PRIMITIVES_PPR_NAMESPACE
+            )
             ontology_config = PAOntologyConfig(Path(tbox_path), ppr_namespace)
             try:
                 tbox = ontology_config.load_tbox()
@@ -125,6 +140,7 @@ def create_spec2primitives_ui_runtime(
         contexts_root=SPEC2PRIMITIVES_CONTEXTS_ROOT,
         ontology_config=ontology_config,
         grounding_runtime=grounding_runtime,
+        tbox=tbox,
         model_config=model_config,
         document_vision_runtime=vision_runtime,
         document_diagnostic_unavailable_reason=unavailable_reason,

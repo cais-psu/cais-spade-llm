@@ -138,8 +138,10 @@ geometry is not copied into the ABox or the read-only UI summary.
 
 Phase 4.0 is called by `context_interaction.py` before the first PA request and
 reloaded by `context_assessment.py` before interpretation. The production UI
-injects `ProductionProductContextGroundingRuntime` only when an authoritative
-TBox and model configuration are present; otherwise it stops with
+loads the project-authoritative `ontology/spec2primitives_ppr_tbox.owl` by
+default, accepts only paired path-and-namespace overrides, and injects
+`ProductionProductContextGroundingRuntime` only when TBox validation and model
+configuration are present; otherwise it stops with
 `grounding_unavailable`. The configured path calls ProductAgent structured
 reasoning and controlled grounding producers but never starts SPADE behaviours,
 retrieves a primitive catalog, builds an assembly plan, contacts RA, converts a

@@ -2832,6 +2832,7 @@ class GazeboPickPlaceController:
 
         self._joint_lock = threading.Lock()
         self._joint_positions: dict[str, float] = {}
+        self._joint_state_received_monotonic = 0.0
 
         # Remembered start pose for move_home (set externally or by UI recovery).
         self._last_start_pose = None
@@ -5100,11 +5101,24 @@ class GazeboPickPlaceController:
         world_board_pose: dict[str, float] = {}
         board_registration: dict[str, Any] = {}
         move_insert_profile: dict[str, Any] = {}
+        place_insert_release_only = bool(
+            self.execution_mode == "physical"
+            and self.controller_config.get("place_insert_release_only") is True
+        )
+        place_approach_skip_board_localization = bool(
+            self.execution_mode == "physical"
+            and str(self.robot_name or "").strip() == "xarm6"
+            and self.controller_config.get(
+                "place_approach_skip_board_localization"
+            )
+            is True
+        )
         physical_ur5e_board = (
             self.execution_mode == "physical"
             and str(self.robot_name or "").strip() == "ur5e"
             and symbolic_destination == _ASSEMBLY_BOARD_V1
             and bool(pick_ctx)
+            and not place_insert_release_only
         )
         if physical_ur5e_board:
             raw_registration = geo.get(
@@ -5146,6 +5160,7 @@ class GazeboPickPlaceController:
             and str(self.robot_name or "").strip() == "xarm6"
             and symbolic_destination == _ASSEMBLY_BOARD_V1
             and bool(pick_ctx)
+            and not place_insert_release_only
             and str(
                 dict(geo.get("target_reference") or {}).get("surface_role") or ""
             )
@@ -5156,7 +5171,11 @@ class GazeboPickPlaceController:
                 "success": False,
                 "message": _PHYSICAL_XARM6_ASSEMBLY_SLOT_INSERT_ERROR,
             }
-        if self.execution_mode == "physical" and symbolic_destination == _ASSEMBLY_BOARD_V1:
+        if (
+            self.execution_mode == "physical"
+            and symbolic_destination == _ASSEMBLY_BOARD_V1
+            and not place_approach_skip_board_localization
+        ):
             if not frozen_board_pose:
                 return {
                     "success": False,
@@ -5552,6 +5571,8 @@ class GazeboPickPlaceController:
             "target_origin_pose": target_origin_pose,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
+        if place_approach_skip_board_localization:
+            result["place_approach_skip_board_localization"] = True
         if frozen_board_pose:
             result["assembly_board_v1_aruco"] = frozen_board_pose
         if world_board_pose:
@@ -6006,6 +6027,7 @@ class GazeboPickPlaceController:
         with self._joint_lock:
             for name, pos in zip(msg.name, msg.position):
                 self._joint_positions[name] = pos
+            self._joint_state_received_monotonic = time.monotonic()
 
     def _get_joint_position(self, joint_name: str) -> float | None:
         with self._joint_lock:

@@ -7,13 +7,13 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI  # REST client for GPT models.
+from openai import BadRequestError, OpenAI  # REST client for GPT models.
 from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 
 from cais_spade_llm.function_analyzer import (
@@ -49,6 +49,29 @@ def _parse_structured_json_text(raw_text: str) -> Any:
                 )
             return parsed
         raise exc
+
+
+def _structured_call_error_summary(error: Exception | None) -> str:
+    """Return bounded OpenAI error metadata without request or credential data."""
+    if error is None:
+        return "unknown error"
+
+    details = [type(error).__name__]
+    for name in ("status_code", "request_id", "type", "param", "code"):
+        value = getattr(error, name, None)
+        if isinstance(value, (int, str)) and value != "":
+            details.append(f"{name}={value}")
+
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping) and isinstance(body.get("error"), Mapping):
+        body = body["error"]
+    body_message = body.get("message") if isinstance(body, Mapping) else None
+    message = body_message if isinstance(body_message, str) else getattr(error, "message", None)
+    if not isinstance(message, str) or not message:
+        message = str(error)
+    if message:
+        details.append(f"message={message[:2000]}")
+    return "; ".join(details)
 
 
 def _default_model_name(*env_names: str, fallback: str) -> str:
@@ -359,7 +382,7 @@ class LlmAgent(Agent):
                         }
                     # Otherwise it's a plain completion.
                     return (choice.content or "").strip()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     # Simple exponential backoff to smooth out transient OpenAI errors or rate limits.
                     time.sleep(back)
                     back = min(back * 2, 8.0)
@@ -442,12 +465,19 @@ class LlmAgent(Agent):
                     try:
                         r = _client.chat.completions.create(**kwargs)
                         break
-                    except Exception as e:
+                    except BadRequestError as exc:
+                        raise RuntimeError(
+                            f"LLM call failed: {_structured_call_error_summary(exc)}"
+                        ) from exc
+                    except Exception as e:  # noqa: BLE001
                         time.sleep(back)
                         back = min(back * 2, 8.0)
                         last_err = e
                 else:
-                    raise RuntimeError(f"LLM call failed after retries: {type(last_err).__name__}")
+                    raise RuntimeError(
+                        "LLM call failed after retries: "
+                        f"{_structured_call_error_summary(last_err)}"
+                    ) from last_err
 
                 choice = r.choices[0].message
 

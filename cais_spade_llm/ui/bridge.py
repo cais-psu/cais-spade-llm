@@ -68,6 +68,15 @@ log = logging.getLogger("ui.bridge")
 _ROBOT_FUNCTION_EXECUTION_LOCK_CONTEXT: ContextVar[dict[str, Any] | None] = (
     ContextVar("robot_function_execution_lock_context", default=None)
 )
+_ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE: ContextVar[threading.Lock | None] = (
+    ContextVar("robot_function_execution_lock_override", default=None)
+)
+_DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT: ContextVar[asyncio.Lock | None] = (
+    ContextVar("dual_assembly_board_zone_lock_context", default=None)
+)
+_DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT: ContextVar[asyncio.Event | None] = (
+    ContextVar("dual_assembly_abort_event_context", default=None)
+)
 _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT: ContextVar[bool] = ContextVar(
     "move_insert_preflight_required_context",
     default=False,
@@ -9934,7 +9943,20 @@ class SystemBridge:
             return prereq_err
         command = self._render_ros2_launch_cmd(launch_name)
         if extra_args.strip():
-            command = f"{command} {extra_args.strip()}"
+            extra_tokens = shlex.split(extra_args)
+            overridden_launch_args = {
+                token.partition(":=")[0]
+                for token in extra_tokens
+                if ":=" in token
+            }
+            if overridden_launch_args:
+                command_tokens = [
+                    token
+                    for token in shlex.split(command)
+                    if token.partition(":=")[0] not in overridden_launch_args
+                ]
+                command = shlex.join(command_tokens)
+            command = f"{command} {shlex.join(extra_tokens)}"
         return self._start_tracked_ros2_command(
             process_name,
             command,
@@ -10173,7 +10195,7 @@ class SystemBridge:
             moveit_process,
             "hardware_dual_robots_moveit",
             ros_domain_id=ros_domain_id,
-            extra_args="" if launch_rviz else "launch_rviz:=false",
+            extra_args="launch_rviz:=true" if launch_rviz else "launch_rviz:=false",
         )
         if err:
             return err
@@ -13861,6 +13883,13 @@ class SystemBridge:
         """Probe an initialized controller action client without ROS CLI discovery."""
         if client is None:
             return None, ""
+        server_is_ready = getattr(client, "server_is_ready", None)
+        if callable(server_is_ready):
+            try:
+                if bool(server_is_ready()):
+                    return True, ""
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
         wait_for_server = getattr(client, "wait_for_server", None)
         if not callable(wait_for_server):
             return None, ""
@@ -14121,6 +14150,7 @@ class SystemBridge:
         move_insert_confirmation = bool(
             robot == "ur5e"
             and function_name == "place_insert"
+            and not self._physical_place_insert_release_only(robot, resource_agent)
             and _MOVE_INSERT_CONFIRMATION_PREFLIGHT_CONTEXT.get()
         )
         preceding_function = (
@@ -15005,17 +15035,71 @@ class SystemBridge:
             )
         readiness["trajectory_action_ready"] = True
 
-        waypoint = self._snapshot_robot_waypoint(
-            "xarm6",
-            source="hardware",
-            hardware_domain_id=hardware_domain_id,
-            include_world_tool_pose=False,
+        get_arm_joint_positions = getattr(
+            controller,
+            "_get_arm_joint_positions",
+            None,
         )
-        positions = list(waypoint.get("positions") or [])
-        if len(positions) != 6:
-            return readiness, str(
-                waypoint.get("error") or "xArm6 joint feedback is not fresh."
+        if callable(get_arm_joint_positions):
+            positions, missing = get_arm_joint_positions(timeout_sec=0.2)
+            try:
+                joint_state_received_monotonic = float(
+                    getattr(controller, "_joint_state_received_monotonic", 0.0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                joint_state_received_monotonic = 0.0
+            joint_state_age_sec = (
+                time.monotonic() - joint_state_received_monotonic
+                if joint_state_received_monotonic > 0.0
+                else None
             )
+            try:
+                finite_positions = bool(
+                    positions is not None
+                    and len(positions) == 6
+                    and all(math.isfinite(float(value)) for value in positions)
+                )
+            except (TypeError, ValueError, OverflowError):
+                finite_positions = False
+            readiness.update(
+                {
+                    "joint_state_source": "prepared_controller",
+                    "joint_state_age_sec": joint_state_age_sec,
+                    "actual_positions_rad": list(positions or []),
+                }
+            )
+            if (
+                positions is None
+                or missing
+                or not finite_positions
+                or joint_state_age_sec is None
+                or not math.isfinite(joint_state_age_sec)
+                or joint_state_age_sec < 0.0
+                or joint_state_age_sec > 2.0
+            ):
+                detail = ", ".join(str(value) for value in list(missing or []))
+                return readiness, (
+                    "xArm6 joint feedback is not fresh."
+                    + (f" Missing joints: {detail}." if detail else "")
+                )
+        else:
+            waypoint = self._snapshot_robot_waypoint(
+                "xarm6",
+                source="hardware",
+                hardware_domain_id=hardware_domain_id,
+                include_world_tool_pose=False,
+            )
+            positions = list(waypoint.get("positions") or [])
+            readiness.update(
+                {
+                    "joint_state_source": "hardware_snapshot",
+                    "actual_positions_rad": positions,
+                }
+            )
+            if len(positions) != 6:
+                return readiness, str(
+                    waypoint.get("error") or "xArm6 joint feedback is not fresh."
+                )
         readiness["joint_states_fresh"] = True
 
         pose_readiness = self._robot_function_execution_pose_readiness(
@@ -15639,6 +15723,7 @@ class SystemBridge:
         *,
         operator_confirmed_held_part: bool = False,
         defer_manual_pre_execute_checks: bool = False,
+        assembly_resource_agent: Any | None = None,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Validate every no-motion gate and build exact generated-method arguments."""
         if not isinstance(operator_confirmed_held_part, bool):
@@ -15655,21 +15740,26 @@ class SystemBridge:
                 "operator_confirmed_held_part is available only for standalone ur5e "
                 "place_approach at assembly_board-v1 with one exact supported part_name."
             )
-        cfg, error = self._digital_twin_robot_function_request_error(
-            target,
-            robot,
-            function_name,
-            (
-                ""
-                if operator_confirmed_held_part is True
-                and function_name == "place_approach"
-                else origin_resource_location
-            ),
-            destination_location,
-            part_name,
-        )
-        if error or cfg is None:
-            return None, {}, {}, error
+        if assembly_resource_agent is None:
+            cfg, error = self._digital_twin_robot_function_request_error(
+                target,
+                robot,
+                function_name,
+                (
+                    ""
+                    if operator_confirmed_held_part is True
+                    and function_name == "place_approach"
+                    else origin_resource_location
+                ),
+                destination_location,
+                part_name,
+            )
+            if error or cfg is None:
+                return None, {}, {}, error
+        else:
+            cfg = self._digital_twin_target(target)
+            if cfg is None:
+                return None, {}, {}, f"unknown digital twin target: {target}"
 
         target_error = self._digital_twin_robot_function_target_error(target, cfg)
         if target_error:
@@ -15678,11 +15768,22 @@ class SystemBridge:
         if cartesian_error:
             return None, {}, {}, cartesian_error
 
-        resource_agent = self._physical_robot_agent(robot)
+        resource_agent = (
+            assembly_resource_agent
+            if assembly_resource_agent is not None
+            else self._physical_robot_agent(robot)
+        )
         if resource_agent is None:
             return None, {}, {}, (
                 f"Start the {robot} robot agent in Physical mode before executing motion."
             )
+        if assembly_resource_agent is not None:
+            active_agent = self._physical_robot_agent(robot)
+            if active_agent is not assembly_resource_agent:
+                return None, {}, {}, (
+                    "Assembly physical RobotAgent changed between functions; inspect "
+                    "the robot before retrying."
+                )
         running_agent = (
             self._running_physical_ur5e_robot_agent()
             if robot == "ur5e"
@@ -15716,11 +15817,6 @@ class SystemBridge:
         state_uncertain = bool(
             getattr(self, uncertain_attribute, False) if uncertain_attribute else False
         )
-        if state_uncertain and robot == "xarm6" and function_name != "move_home":
-            return None, {}, {}, (
-                f"The manual {robot} physical state is uncertain. Inspect the robot and complete "
-                "move_home before executing another robot function."
-            )
         if getattr(resource_agent, "_controller", None) is None:
             return None, {}, {}, f"The physical {robot} controller is unavailable."
         agent_motion_lock = getattr(resource_agent, "_robot_motion_lock", None)
@@ -15751,7 +15847,10 @@ class SystemBridge:
         gripper_state = str(getattr(resource_agent, "_gripper_state", "") or "")
         task_context = dict(getattr(resource_agent, "_task_ctx", {}) or {})
         call_kwargs: dict[str, Any] = {}
-        readiness: dict[str, Any] = {}
+        readiness: dict[str, Any] = {
+            "assembly_continuation_preflight": assembly_resource_agent is not None,
+            "state_uncertain": state_uncertain,
+        }
 
         if function_name == "pick_approach":
             if held_part not in (None, ""):
@@ -15926,7 +16025,19 @@ class SystemBridge:
                     f"{destination_location} is outside {robot} "
                     "static_capabilities.reachability."
                 )
-            if destination_location == "assembly_board-v1":
+            skip_board_localization = bool(
+                robot == "xarm6"
+                and self._physical_xarm6_skip_assembly_board_localization(
+                    resource_agent
+                )
+            )
+            readiness["place_approach_skip_board_localization"] = (
+                skip_board_localization
+            )
+            if (
+                destination_location == "assembly_board-v1"
+                and not skip_board_localization
+            ):
                 board_status, board_error = (
                     self._digital_twin_assembly_board_v1_accepted_status(
                         robot,
@@ -15991,7 +16102,20 @@ class SystemBridge:
                 return None, {}, {}, (
                     "place_insert destination_location does not match the active place context."
                 )
-            if not independent_commissioning and destination_location == "assembly_board-v1":
+            skip_board_localization = bool(
+                robot == "xarm6"
+                and self._physical_xarm6_skip_assembly_board_localization(
+                    resource_agent
+                )
+            )
+            readiness["place_approach_skip_board_localization"] = (
+                skip_board_localization
+            )
+            if (
+                not independent_commissioning
+                and destination_location == "assembly_board-v1"
+                and not skip_board_localization
+            ):
                 board_status, board_error = (
                     self._digital_twin_assembly_board_v1_accepted_status(robot)
                 )
@@ -16369,12 +16493,15 @@ class SystemBridge:
         )
         async with lifecycle_lock:
             if robot == "ur5e":
-                if bool(
-                    getattr(
-                        self,
-                        "_ur5e_move_insert_profile_reload_required",
-                        False,
+                if (
+                    bool(
+                        getattr(
+                            self,
+                            "_ur5e_move_insert_profile_reload_required",
+                            False,
+                        )
                     )
+                    and not self._physical_place_insert_release_only(robot)
                 ):
                     cached_agent = getattr(
                         self,
@@ -16458,6 +16585,7 @@ class SystemBridge:
         *,
         operator_confirmed_held_part: bool = False,
         defer_manual_pre_execute_checks: bool = False,
+        assembly_resource_agent: Any | None = None,
     ) -> tuple[Any | None, dict[str, Any], dict[str, Any], str]:
         """Run blocking ROS readiness probes without blocking the NiceGUI event loop."""
         result: tuple[Any | None, dict[str, Any], dict[str, Any], str] | None = None
@@ -16473,6 +16601,7 @@ class SystemBridge:
         )
         assembly_requires_move_insert = bool(
             robot == "ur5e"
+            and not self._physical_place_insert_release_only(robot)
             and (
                 move_insert_preflight_required
                 or (
@@ -16514,12 +16643,17 @@ class SystemBridge:
                         defer_manual_pre_execute_checks=(
                             defer_manual_pre_execute_checks
                         ),
+                        assembly_resource_agent=assembly_resource_agent,
                     )
                     if result is not None:
                         resource_agent, call_kwargs, readiness, preflight_error = result
                         insertion_function = bool(
                             assembly_context is None
                             and robot == "ur5e"
+                            and not self._physical_place_insert_release_only(
+                                robot,
+                                resource_agent,
+                            )
                             and destination_location == "assembly_board-v1"
                             and function_name in {"place_approach", "place_insert"}
                             and not bool(readiness.get("independent_commissioning"))
@@ -16736,6 +16870,9 @@ class SystemBridge:
 
     def _get_robot_function_execution_lock(self) -> threading.Lock:
         """Return the lock shared by physical motion, startup, and profile edits."""
+        override = _ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE.get()
+        if override is not None:
+            return override
         lock = getattr(self, "_ur5e_robot_function_execution_lock", None)
         if lock is None:
             lock = threading.Lock()
@@ -17879,6 +18016,8 @@ class SystemBridge:
         readiness: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
         """Validate the profile snapshot required by place_insert or Assembly."""
+        if self._physical_place_insert_release_only(robot, resource_agent):
+            return {}, ""
         if (
             function_name == "place_approach"
             and not _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.get()
@@ -28339,6 +28478,116 @@ class SystemBridge:
             return "", destination_location, part_name
         return "", "", ""
 
+    def _physical_place_insert_release_only(
+        self,
+        robot: str,
+        resource_agent: Any | None = None,
+    ) -> bool:
+        """Return the exact active or configured physical release-only override."""
+        robot_key = str(robot or "").strip().lower()
+        if robot_key not in {"xarm6", "ur5e"}:
+            return False
+        active_agent = resource_agent or self._physical_robot_agent(robot_key)
+        if active_agent is not None:
+            controller = getattr(active_agent, "_controller", None)
+            raw_controller_config = (
+                getattr(active_agent, "controller_config", {})
+                or getattr(controller, "controller_config", {})
+                or {}
+            )
+            if not isinstance(raw_controller_config, dict):
+                return False
+            controller_config = dict(raw_controller_config)
+            return bool(
+                str(getattr(active_agent, "execution_mode", "") or "")
+                .strip()
+                .lower()
+                == "physical"
+                and controller_config.get("place_insert_release_only") is True
+            )
+        resource_path = {
+            "xarm6": _XARM6_RESOURCE,
+            "ur5e": _UR5E_RESOURCE,
+        }[robot_key]
+        try:
+            resource = self.load_config(str(resource_path))
+        except (OSError, TypeError, ValueError):
+            log.exception(
+                "Could not read place_insert_release_only for physical %s",
+                robot_key,
+            )
+            return False
+        if not isinstance(resource, dict):
+            return False
+        robot_resource = resource.get(robot_key)
+        if not isinstance(robot_resource, dict):
+            return False
+        real_resource = robot_resource.get("real")
+        if not isinstance(real_resource, dict):
+            return False
+        raw_controller_config = real_resource.get("controller")
+        if not isinstance(raw_controller_config, dict):
+            return False
+        controller_config = dict(raw_controller_config)
+        return controller_config.get("place_insert_release_only") is True
+
+    def physical_place_insert_release_only(self, robot: str) -> bool:
+        """Expose the exact physical release-only override to the operator UI."""
+        return self._physical_place_insert_release_only(robot)
+
+    def _physical_xarm6_skip_assembly_board_localization(
+        self,
+        resource_agent: Any | None = None,
+    ) -> bool:
+        """Return the exact physical xarm6 board-localization demo override."""
+        active_agent = resource_agent or self._physical_robot_agent("xarm6")
+        if active_agent is not None:
+            controller = getattr(active_agent, "_controller", None)
+            raw_controller_config = (
+                getattr(active_agent, "controller_config", {})
+                or getattr(controller, "controller_config", {})
+                or {}
+            )
+            if not isinstance(raw_controller_config, dict):
+                return False
+            return bool(
+                str(getattr(active_agent, "execution_mode", "") or "")
+                .strip()
+                .lower()
+                == "physical"
+                and raw_controller_config.get(
+                    "place_approach_skip_board_localization"
+                )
+                is True
+            )
+        try:
+            resource = self.load_config(str(_XARM6_RESOURCE))
+        except (OSError, TypeError, ValueError):
+            log.exception(
+                "Could not read place_approach_skip_board_localization for physical xarm6"
+            )
+            return False
+        if not isinstance(resource, dict):
+            return False
+        xarm6_resource = resource.get("xarm6")
+        if not isinstance(xarm6_resource, dict):
+            return False
+        real_resource = xarm6_resource.get("real")
+        if not isinstance(real_resource, dict):
+            return False
+        controller_config = real_resource.get("controller")
+        return bool(
+            isinstance(controller_config, dict)
+            and controller_config.get(
+                "place_approach_skip_board_localization"
+            )
+            is True
+        )
+
+    def physical_xarm6_skip_assembly_board_localization(self) -> bool:
+        """Expose the exact physical xarm6 board-localization demo override."""
+        return self._physical_xarm6_skip_assembly_board_localization()
+
     def _digital_twin_assembly_lifecycle_error(self) -> str:
         """Return why manual Assembly cannot own physical motion now."""
         demonstration_error = self._insertion_demonstration_blocking_error()
@@ -28364,7 +28613,7 @@ class SystemBridge:
         part_name: str,
     ) -> str:
         """Validate the exact arguments for every fixed Assembly function."""
-        if robot != "ur5e":
+        if robot != "ur5e" and not self._physical_place_insert_release_only(robot):
             return (
                 "Assembly requires robot 'ur5e' because move_insert is only "
                 "commissioned for ur5e."
@@ -28835,6 +29084,11 @@ class SystemBridge:
         part_name: str = "",
     ) -> dict[str, Any]:
         """Report no-motion readiness for one complete fixed Assembly run."""
+        place_insert_release_only = self._physical_place_insert_release_only(robot)
+        skip_board_localization = bool(
+            robot == "xarm6"
+            and self._physical_xarm6_skip_assembly_board_localization()
+        )
         base = {
             "success": False,
             "ready": False,
@@ -28847,6 +29101,13 @@ class SystemBridge:
             "assembly_step_count": len(self._ASSEMBLY_FUNCTION_ORDER),
             "move_insert_profile_sha256": "",
             "move_insert_effective": {},
+            "place_insert_release_only": place_insert_release_only,
+            "place_approach_skip_board_localization": skip_board_localization,
+            **(
+                {"move_insert_dispatched": False}
+                if place_insert_release_only
+                else {}
+            ),
         }
         lifecycle_error = self._digital_twin_assembly_lifecycle_error()
         if lifecycle_error:
@@ -28861,7 +29122,7 @@ class SystemBridge:
         if request_error:
             return {**base, "message": request_error}
         move_insert_settings: dict[str, Any] = {}
-        if robot == "ur5e":
+        if robot == "ur5e" and not place_insert_release_only:
             move_insert_settings = self.digital_twin_move_insert_settings(
                 target,
                 robot,
@@ -28930,7 +29191,7 @@ class SystemBridge:
         if correction_error:
             return {**base, "message": correction_error}
         move_insert_preflight_token = _MOVE_INSERT_PREFLIGHT_REQUIRED_CONTEXT.set(
-            robot == "ur5e"
+            robot == "ur5e" and not place_insert_release_only
         )
         try:
             resource_agent, _call_kwargs, readiness, error = (
@@ -28992,7 +29253,10 @@ class SystemBridge:
         if place_recording_error:
             return {**base, **readiness, "message": place_recording_error}
         board_status: dict[str, Any] = {}
-        if destination_location == "assembly_board-v1":
+        if (
+            destination_location == "assembly_board-v1"
+            and not skip_board_localization
+        ):
             board_status, board_error = (
                 self._digital_twin_assembly_board_v1_accepted_status(
                     robot,
@@ -29036,7 +29300,7 @@ class SystemBridge:
         )
         if correction_error:
             return {**base, **readiness, "message": correction_error}
-        if robot == "ur5e":
+        if robot == "ur5e" and not place_insert_release_only:
             current_settings = self.digital_twin_move_insert_settings(
                 target,
                 robot,
@@ -29074,10 +29338,92 @@ class SystemBridge:
             "success": True,
             "ready": True,
             "message": (
-                "Assembly is ready for operator confirmation using fresh computed "
-                "targets. Missing optional robot corrections are allowed; every present "
-                "correction is confirmed. place_insert will release the part irreversibly."
+                (
+                    "Assembly is ready for operator confirmation using fresh computed "
+                    "targets. place_insert_release_only is enabled: place_insert will "
+                    "skip move_insert, release the part irreversibly at the existing "
+                    "place_approach.descend pose, and perform the existing lift."
+                )
+                if place_insert_release_only
+                else (
+                    "Assembly is ready for operator confirmation using fresh computed "
+                    "targets. Missing optional robot corrections are allowed; every "
+                    "present correction is confirmed. place_insert will release the "
+                    "part irreversibly."
+                )
             ),
+        }
+
+    async def digital_twin_dual_assembly_readiness(
+        self,
+        target: str,
+    ) -> dict[str, Any]:
+        """Report no-motion readiness for the fixed concurrent demo pair."""
+        base = {
+            "success": False,
+            "ready": False,
+            "target": target,
+            "xarm6": {},
+            "ur5e": {},
+        }
+        if target != "dual robots":
+            return {
+                **base,
+                "message": "Run Dual Assembly requires target 'dual robots'.",
+            }
+        lifecycle_error = self._digital_twin_assembly_lifecycle_error()
+        if lifecycle_error:
+            return {**base, "message": lifecycle_error}
+        execution_lock = self._get_robot_function_execution_lock()
+        if execution_lock.locked():
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+            }
+        xarm6_result, ur5e_result = await asyncio.gather(
+            self.digital_twin_assembly_readiness(
+                target,
+                "xarm6",
+                origin_resource_location="prusa-mk4-1",
+                destination_location="assembly_board-v1",
+                part_name="SG",
+            ),
+            self.digital_twin_assembly_readiness(
+                target,
+                "ur5e",
+                origin_resource_location="prusa-mk4-2",
+                destination_location="assembly_board-v1",
+                part_name="MG",
+            ),
+        )
+        success = bool(xarm6_result.get("success") and ur5e_result.get("success"))
+        if success:
+            message = (
+                "Dual Assembly is ready: xarm6 will run SG from prusa-mk4-1 while "
+                "ur5e runs MG from prusa-mk4-2. Both place at assembly_board-v1; "
+                "the shared board approach/release/home zone is serialized."
+            )
+        else:
+            failures = [
+                f"{robot}: {str(result.get('message') or 'not ready')}"
+                for robot, result in (
+                    ("xarm6", xarm6_result),
+                    ("ur5e", ur5e_result),
+                )
+                if not result.get("success")
+            ]
+            message = "Dual Assembly is not ready. " + " ".join(failures)
+        return {
+            **base,
+            "success": success,
+            "ready": success,
+            "xarm6": deepcopy(xarm6_result),
+            "ur5e": deepcopy(ur5e_result),
+            "message": message,
         }
 
     def digital_twin_robot_function_execution_progress(self) -> dict[str, Any]:
@@ -29180,6 +29526,7 @@ class SystemBridge:
         operator_confirmed_held_part: bool = False,
     ) -> dict[str, Any]:
         """Execute one exact generated physical function after operator confirmation."""
+        place_insert_release_only = self._physical_place_insert_release_only(robot)
         base = {
             "success": False,
             "target": target,
@@ -29188,6 +29535,14 @@ class SystemBridge:
             "origin_resource_location": origin_resource_location,
             "destination_location": destination_location,
             "part_name": part_name,
+            **(
+                {
+                    "place_insert_release_only": True,
+                    "move_insert_dispatched": False,
+                }
+                if function_name == "place_insert" and place_insert_release_only
+                else {}
+            ),
         }
         if confirmed is not True:
             return {
@@ -29198,6 +29553,15 @@ class SystemBridge:
         execution_lock_held = bool(
             execution_context is not None
             and execution_context.get("bridge") is self
+        )
+        assembly_resource_agent = (
+            execution_context.get("resource_agent")
+            if execution_lock_held and execution_context is not None
+            else None
+        )
+        assembly_continuation_preflight = assembly_resource_agent is not None
+        base["assembly_continuation_preflight"] = (
+            assembly_continuation_preflight
         )
         if not execution_lock_held:
             demonstration_error = self._insertion_demonstration_blocking_error()
@@ -29245,6 +29609,8 @@ class SystemBridge:
                 )
 
         def _automatic_move_insert_was_not_dispatched(result: Any) -> bool:
+            if place_insert_release_only:
+                return False
             if not isinstance(result, dict):
                 return False
             failure_context = dict(result.get("failure_context") or {})
@@ -29262,6 +29628,7 @@ class SystemBridge:
             if not (
                 robot == "ur5e"
                 and function_name == "place_insert"
+                and not place_insert_release_only
                 and destination_location == "assembly_board-v1"
                 and isinstance(result, dict)
                 and not bool(result.get("manual_pre_execute_blocked"))
@@ -29329,26 +29696,47 @@ class SystemBridge:
             self._assembly_move_insert_effective = {}
         self._robot_function_execution_active_step = ""
         release_lock_here = not execution_lock_held
+        function_started_monotonic = time.monotonic()
         try:
-            preflight_task = asyncio.create_task(
-                self._digital_twin_robot_function_execution_preflight_async(
-                    target,
-                    robot,
-                    function_name,
-                    origin_resource_location,
-                    destination_location,
-                    part_name,
-                    **(
-                        {
-                            "operator_confirmed_held_part": (
-                                operator_confirmed_held_part
-                            )
-                        }
-                        if operator_confirmed_held_part is not False
-                        else {}
-                    ),
-                    defer_manual_pre_execute_checks=True,
+            preflight_started_monotonic = time.monotonic()
+            operator_preflight_kwargs = (
+                {
+                    "operator_confirmed_held_part": (
+                        operator_confirmed_held_part
+                    )
+                }
+                if operator_confirmed_held_part is not False
+                else {}
+            )
+            if assembly_continuation_preflight:
+                preflight_coroutine = (
+                    self._digital_twin_robot_function_execution_preflight_prepared_async(
+                        target,
+                        robot,
+                        function_name,
+                        origin_resource_location,
+                        destination_location,
+                        part_name,
+                        assembly_resource_agent=assembly_resource_agent,
+                        **operator_preflight_kwargs,
+                        defer_manual_pre_execute_checks=True,
+                    )
                 )
+            else:
+                preflight_coroutine = (
+                    self._digital_twin_robot_function_execution_preflight_async(
+                        target,
+                        robot,
+                        function_name,
+                        origin_resource_location,
+                        destination_location,
+                        part_name,
+                        **operator_preflight_kwargs,
+                        defer_manual_pre_execute_checks=True,
+                    )
+                )
+            preflight_task = asyncio.create_task(
+                preflight_coroutine
             )
             try:
                 resource_agent, call_kwargs, readiness, error = await asyncio.shield(
@@ -29379,6 +29767,9 @@ class SystemBridge:
 
                 preflight_task.add_done_callback(_release_after_preflight)
                 raise
+            base["preflight_duration_sec"] = (
+                time.monotonic() - preflight_started_monotonic
+            )
             if error or resource_agent is None:
                 return {
                     **base,
@@ -29407,6 +29798,7 @@ class SystemBridge:
                 if (
                     function_name == "place_approach"
                     and robot == "ur5e"
+                    and not place_insert_release_only
                     and move_insert_readiness
                 ):
                     product_geometry = dict(
@@ -29473,7 +29865,11 @@ class SystemBridge:
                             **readiness,
                             "message": correction_error,
                         }
-                if function_name == "place_approach" and robot == "ur5e":
+                if (
+                    function_name == "place_approach"
+                    and robot == "ur5e"
+                    and not place_insert_release_only
+                ):
                     product_geometry = dict(call_kwargs.get("product_geometry") or {})
                     product_geometry.update(
                         {
@@ -29487,7 +29883,11 @@ class SystemBridge:
                         }
                     )
                     call_kwargs["product_geometry"] = product_geometry
-                elif function_name == "place_insert" and robot == "ur5e":
+                elif (
+                    function_name == "place_insert"
+                    and robot == "ur5e"
+                    and not place_insert_release_only
+                ):
                     move_insert_readiness, move_insert_error = (
                         self._digital_twin_assembly_move_insert_recheck(
                             execution_context,
@@ -29674,6 +30074,8 @@ class SystemBridge:
                 )
                 if pose_error:
                     return pose_error
+                if place_insert_release_only and function_name == "place_insert":
+                    return ""
                 if not (
                     robot == "ur5e"
                     and function_name == "place_insert"
@@ -29713,6 +30115,27 @@ class SystemBridge:
                         )
                 return ""
 
+            dispatch_started_monotonic = time.monotonic()
+            base["pre_dispatch_duration_sec"] = (
+                dispatch_started_monotonic - function_started_monotonic
+            )
+            if execution_context is not None:
+                try:
+                    previous_function_completed_monotonic = float(
+                        execution_context.get(
+                            "previous_function_completed_monotonic",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    previous_function_completed_monotonic = 0.0
+                if previous_function_completed_monotonic > 0.0:
+                    base["inter_function_delay_sec"] = max(
+                        0.0,
+                        dispatch_started_monotonic
+                        - previous_function_completed_monotonic,
+                    )
             runtime_task = asyncio.create_task(
                 self._run_on_agent_runtime(
                     manual_function(
@@ -29806,6 +30229,9 @@ class SystemBridge:
                 runtime_task.add_done_callback(_release_after_runtime)
                 raise
             except Exception as exc:  # noqa: BLE001 - agent runtime boundary.
+                base["function_duration_sec"] = (
+                    time.monotonic() - function_started_monotonic
+                )
                 _restore_runtime_callbacks()
                 _suspend_failed_automatic_move_insert({"status": "failed"})
                 record_result(
@@ -29823,6 +30249,9 @@ class SystemBridge:
                     ),
                 }
 
+            base["function_duration_sec"] = (
+                time.monotonic() - function_started_monotonic
+            )
             _restore_runtime_callbacks()
 
             if not isinstance(result, dict):
@@ -30014,6 +30443,11 @@ class SystemBridge:
     ) -> dict[str, Any]:
         """Execute the five exact physical Assembly functions under one lock."""
         assembly_step_count = len(self._ASSEMBLY_FUNCTION_ORDER)
+        place_insert_release_only = self._physical_place_insert_release_only(robot)
+        skip_board_localization = bool(
+            robot == "xarm6"
+            and self._physical_xarm6_skip_assembly_board_localization()
+        )
         base = {
             "success": False,
             "target": target,
@@ -30029,6 +30463,13 @@ class SystemBridge:
             "state": "",
             "move_insert_profile_sha256": "",
             "move_insert_effective": {},
+            "place_insert_release_only": place_insert_release_only,
+            "place_approach_skip_board_localization": skip_board_localization,
+            **(
+                {"move_insert_dispatched": False}
+                if place_insert_release_only
+                else {}
+            ),
         }
         if confirmed is not True:
             return {
@@ -30089,6 +30530,12 @@ class SystemBridge:
         function_results: list[dict[str, Any]] = []
         current_function = ""
         release_lock_here = True
+        dual_board_zone_lock = _DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT.get()
+        dual_abort_event = _DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT.get()
+        dual_board_zone_lock_held = False
+        assembly_completed_successfully = False
+        if dual_board_zone_lock is not None:
+            base["dual_assembly_board_zone_serialized"] = True
         execution_context: dict[str, Any] = {
             "bridge": self,
             "resource_agent": None,
@@ -30102,7 +30549,7 @@ class SystemBridge:
             lifecycle_error = self._digital_twin_assembly_lifecycle_error()
             if lifecycle_error:
                 return {**base, "message": lifecycle_error}
-            if robot == "ur5e":
+            if robot == "ur5e" and not place_insert_release_only:
                 move_insert_settings = self.digital_twin_move_insert_settings(
                     target,
                     robot,
@@ -30197,6 +30644,46 @@ class SystemBridge:
                 self._ASSEMBLY_FUNCTION_ORDER,
                 start=1,
             ):
+                if (
+                    dual_board_zone_lock is not None
+                    and not dual_board_zone_lock_held
+                    and function_name == "place_approach"
+                ):
+                    if dual_abort_event is not None and dual_abort_event.is_set():
+                        return {
+                            **base,
+                            "assembly_step_index": step_index,
+                            "completed_functions": list(completed_functions),
+                            "failed_function": function_name,
+                            "function_results": function_results,
+                            "status": "failed",
+                            "message": (
+                                "Dual Assembly stopped before place_approach because "
+                                "the other robot failed. No assembly-board motion was "
+                                "requested for this robot."
+                            ),
+                        }
+                    self._ur5e_robot_function_execution_stage = (
+                        "waiting_assembly_board_zone"
+                    )
+                    await dual_board_zone_lock.acquire()
+                    dual_board_zone_lock_held = True
+                    if dual_abort_event is not None and dual_abort_event.is_set():
+                        dual_board_zone_lock.release()
+                        dual_board_zone_lock_held = False
+                        return {
+                            **base,
+                            "assembly_step_index": step_index,
+                            "completed_functions": list(completed_functions),
+                            "failed_function": function_name,
+                            "function_results": function_results,
+                            "status": "failed",
+                            "message": (
+                                "Dual Assembly stopped before place_approach because "
+                                "the other robot failed while this robot waited for "
+                                "the assembly-board zone."
+                            ),
+                        }
                 current_function = function_name
                 self._assembly_step_index = step_index
                 self._assembly_completed_functions = list(completed_functions)
@@ -30209,7 +30696,11 @@ class SystemBridge:
                         part_name,
                     )
                 )
-                if robot == "ur5e" and function_name == "place_approach":
+                if (
+                    robot == "ur5e"
+                    and function_name == "place_approach"
+                    and not place_insert_release_only
+                ):
                     resource_agent = execution_context.get("resource_agent")
                     current_settings = self.digital_twin_move_insert_settings(
                         target,
@@ -30343,6 +30834,7 @@ class SystemBridge:
                     if (
                         robot == "ur5e"
                         and function_name == "place_insert"
+                        and not place_insert_release_only
                         and destination_location == "assembly_board-v1"
                     ):
                         suspension_error = (
@@ -30396,11 +30888,22 @@ class SystemBridge:
 
                 completed_functions.append(function_name)
                 self._assembly_completed_functions = list(completed_functions)
+                execution_context["previous_function_completed_monotonic"] = (
+                    time.monotonic()
+                )
+                if (
+                    dual_board_zone_lock is not None
+                    and dual_board_zone_lock_held
+                    and function_name == "move_home"
+                ):
+                    dual_board_zone_lock.release()
+                    dual_board_zone_lock_held = False
 
             resource_agent = execution_context.get("resource_agent")
             final_state = str(
                 getattr(resource_agent, "_current_state", "") or ""
             ).strip()
+            assembly_completed_successfully = True
             return {
                 **base,
                 "success": True,
@@ -30409,13 +30912,23 @@ class SystemBridge:
                 "function_results": function_results,
                 "state": final_state,
                 "status": "completed",
-                "message": "Assembly completed.",
+                "message": (
+                    "Assembly completed with place_insert_release_only enabled: "
+                    "move_insert was skipped, release_part completed, and the existing "
+                    "lift completed. This does not claim physical insertion or seating."
+                    if place_insert_release_only
+                    else "Assembly completed."
+                ),
             }
         except asyncio.CancelledError:
             self._assembly_failed_function = current_function
             release_lock_here = False
             raise
         finally:
+            if dual_abort_event is not None and not assembly_completed_successfully:
+                dual_abort_event.set()
+            if dual_board_zone_lock is not None and dual_board_zone_lock_held:
+                dual_board_zone_lock.release()
             if release_lock_here:
                 self._ur5e_robot_function_execution_active = None
                 self._ur5e_robot_function_execution_stage = ""
@@ -30425,6 +30938,158 @@ class SystemBridge:
                 self._assembly_move_insert_profile_sha256 = ""
                 self._assembly_move_insert_effective = {}
                 lock.release()
+
+    async def digital_twin_execute_dual_assembly(
+        self,
+        target: str,
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Run the fixed physical xarm6 SG and ur5e MG Assemblies concurrently."""
+        base = {
+            "success": False,
+            "status": "failed",
+            "target": target,
+            "xarm6": {},
+            "ur5e": {},
+        }
+        if confirmed is not True:
+            return {
+                **base,
+                "message": "Explicit operator confirmation is required for Dual Assembly.",
+            }
+        readiness = await self.digital_twin_dual_assembly_readiness(target)
+        if not readiness.get("success"):
+            return {**base, "readiness": readiness, "message": readiness.get("message")}
+
+        global_lock = self._get_robot_function_execution_lock()
+        if not global_lock.acquire(blocking=False):
+            active = str(
+                getattr(self, "_ur5e_robot_function_execution_active", None)
+                or "Physical robot motion"
+            )
+            return {
+                **base,
+                "message": f"Physical robot motion is already active: {active}.",
+            }
+
+        self._ur5e_robot_function_execution_active = "Dual Assembly"
+        self._ur5e_robot_function_execution_stage = "fresh_readiness"
+        self._ur5e_robot_function_execution_started_at = time.time()
+        self._robot_function_execution_robot = "dual robots"
+        board_zone_lock = asyncio.Lock()
+        abort_event = asyncio.Event()
+
+        async def _run_xarm6() -> dict[str, Any]:
+            lock_token = _ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE.set(
+                threading.Lock()
+            )
+            board_zone_token = _DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT.set(
+                board_zone_lock
+            )
+            abort_token = _DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT.set(abort_event)
+            try:
+                return await self.digital_twin_execute_assembly(
+                    target,
+                    "xarm6",
+                    origin_resource_location="prusa-mk4-1",
+                    destination_location="assembly_board-v1",
+                    part_name="SG",
+                    confirmed=True,
+                )
+            finally:
+                _DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT.reset(abort_token)
+                _DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT.reset(board_zone_token)
+                _ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE.reset(lock_token)
+
+        async def _run_ur5e() -> dict[str, Any]:
+            lock_token = _ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE.set(
+                threading.Lock()
+            )
+            board_zone_token = _DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT.set(
+                board_zone_lock
+            )
+            abort_token = _DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT.set(abort_event)
+            try:
+                return await self.digital_twin_execute_assembly(
+                    target,
+                    "ur5e",
+                    origin_resource_location="prusa-mk4-2",
+                    destination_location="assembly_board-v1",
+                    part_name="MG",
+                    confirmed=True,
+                )
+            finally:
+                _DUAL_ASSEMBLY_ABORT_EVENT_CONTEXT.reset(abort_token)
+                _DUAL_ASSEMBLY_BOARD_ZONE_LOCK_CONTEXT.reset(board_zone_token)
+                _ROBOT_FUNCTION_EXECUTION_LOCK_OVERRIDE.reset(lock_token)
+
+        try:
+            child_tasks = (
+                asyncio.create_task(_run_xarm6()),
+                asyncio.create_task(_run_ur5e()),
+            )
+            child_results = asyncio.gather(
+                *child_tasks,
+                return_exceptions=True,
+            )
+            try:
+                raw_results = await asyncio.shield(child_results)
+            except asyncio.CancelledError:
+                await child_results
+                raise
+            results: dict[str, dict[str, Any]] = {}
+            for robot, raw_result in zip(
+                ("xarm6", "ur5e"),
+                raw_results,
+                strict=True,
+            ):
+                if isinstance(raw_result, BaseException):
+                    log.error(
+                        "Dual Assembly %s execution failed: %s",
+                        robot,
+                        raw_result,
+                    )
+                    results[robot] = {
+                        "success": False,
+                        "status": "failed",
+                        "message": f"{robot} Assembly failed: {raw_result}",
+                    }
+                else:
+                    results[robot] = dict(raw_result)
+            success = bool(
+                results["xarm6"].get("success")
+                and results["ur5e"].get("success")
+            )
+            if success:
+                message = "Dual Assembly completed for xarm6 SG and ur5e MG."
+            else:
+                failures = [
+                    f"{robot}: {str(result.get('message') or 'failed')}"
+                    for robot, result in results.items()
+                    if not result.get("success")
+                ]
+                message = (
+                    "Dual Assembly finished with one or more failures. "
+                    + " ".join(failures)
+                )
+            return {
+                **base,
+                "success": success,
+                "status": "completed" if success else "failed",
+                "xarm6": deepcopy(results["xarm6"]),
+                "ur5e": deepcopy(results["ur5e"]),
+                "message": message,
+            }
+        finally:
+            self._ur5e_robot_function_execution_active = None
+            self._ur5e_robot_function_execution_stage = ""
+            self._ur5e_robot_function_execution_started_at = 0.0
+            self._robot_function_execution_robot = ""
+            self._robot_function_execution_active_step = ""
+            self._assembly_move_insert_profile_sha256 = ""
+            self._assembly_move_insert_effective = {}
+            global_lock.release()
 
     async def digital_twin_execute_pick_approach(
         self,

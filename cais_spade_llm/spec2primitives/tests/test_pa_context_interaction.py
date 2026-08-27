@@ -95,6 +95,7 @@ def test_each_valid_first_decision_is_returned_and_recorded(
     context_ref_schema = response_format["schema"]["properties"]["needed_context"]["properties"][
         "context_ref"
     ]
+    assert context_ref_schema["type"] == ["string", "null"]
     assert context_ref_schema["enum"] == [None, *approved_context_refs()]
     assert response_format["schema"]["properties"]["needed_context"]["properties"][
         "clarification_question"
@@ -233,9 +234,58 @@ def test_pa_call_failure_is_returned_and_recorded(tmp_path: Path) -> None:
 
     assert result["failure"]["reason"] == "pa_call_failed"
     assert "RuntimeError: controlled PA failure" in result["failure"]["message"]
+    assert result["failure"]["diagnostic"] == {
+        "stage": "Phase 3.1 ProductAgent structured call",
+        "exception": "RuntimeError",
+        "status_code": None,
+        "request_id": None,
+        "error_type": None,
+        "param": None,
+        "code": None,
+        "message": "controlled PA failure",
+    }
     turn_record = _read_json(tmp_path / "interaction_record/turn_0001.json")
     assert turn_record["PA_output"] is None
     assert turn_record["failure"] == result["failure"]
+
+
+def test_pa_call_failure_persists_only_sanitized_api_diagnostic(
+    tmp_path: Path,
+) -> None:
+    class ControlledBadRequestError(Exception):
+        pass
+
+    api_error = ControlledBadRequestError("raw exception text")
+    api_error.status_code = 400  # type: ignore[attr-defined]
+    api_error.request_id = "req_controlled"  # type: ignore[attr-defined]
+    api_error.type = "invalid_request_error"  # type: ignore[attr-defined]
+    api_error.param = "response_format"  # type: ignore[attr-defined]
+    api_error.code = None  # type: ignore[attr-defined]
+    api_error.body = {  # type: ignore[attr-defined]
+        "message": "schema must have a 'type' key",
+        "private_body_field": "must not persist",
+    }
+    wrapped = RuntimeError("LLM call failed")
+    wrapped.__cause__ = api_error
+    product_agent = FakeProductAgent(error=wrapped)
+
+    result = _start(product_agent, tmp_path, "assemble Medium Gear")
+
+    assert result["failure"]["diagnostic"] == {
+        "stage": "Phase 3.1 ProductAgent structured call",
+        "exception": "ControlledBadRequestError",
+        "status_code": 400,
+        "request_id": "req_controlled",
+        "error_type": "invalid_request_error",
+        "param": "response_format",
+        "code": None,
+        "message": "schema must have a 'type' key",
+    }
+    turn_text = (tmp_path / "interaction_record/turn_0001.json").read_text(
+        encoding="utf-8"
+    )
+    assert "private_body_field" not in turn_text
+    assert "raw exception text" not in turn_text
 
 
 @pytest.mark.parametrize(

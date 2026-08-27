@@ -175,28 +175,30 @@ def _apply_dual_gazebo_status(
 
 def _render_dual_gazebo(runtime: DualGazeboRuntime) -> None:
     """Render the isolated `gazebo_dual_spec2primitives` launcher and controls."""
-    with ui.card().classes("flex-1 min-w-80 border border-slate-200 shadow-sm"):
-        with ui.row().classes("w-full items-center justify-between gap-3"):
-            with ui.column().classes("gap-0"):
+    with ui.card().classes("w-full border border-slate-200 shadow-sm"):
+        with ui.row().classes("w-full items-center justify-between gap-4 flex-wrap"):
+            with ui.column().classes("flex-1 min-w-72 gap-0"):
                 ui.label("Dual Gazebo Environment").classes("text-lg font-semibold text-slate-900")
                 ui.label("xArm6 + UR5e · NIST CAD · Gazebo + MoveIt/RViz · No hardware").classes(
                     "text-xs text-slate-500"
                 )
-            status_badge = ui.badge("checking").props("color=grey outline")
 
-        status_message = ui.label("Reading fresh runtime status...").classes(
-            "text-sm text-slate-600"
-        )
+            with ui.row().classes("flex-1 min-w-72 items-center gap-3 flex-wrap"):
+                status_badge = ui.badge("checking").props("color=grey outline")
+                status_message = ui.label("Reading fresh runtime status...").classes(
+                    "flex-1 min-w-48 text-sm text-slate-600"
+                )
+
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                start_button = ui.button("Start", icon="play_arrow").props("disable")
+                stop_button = ui.button("Stop", icon="stop").props("outline disable")
+                refresh_button = ui.button("Refresh", icon="refresh").props("flat")
+
         action_state = {
             "busy": False,
             "refreshing": False,
             "status": DualGazeboStatus(state="checking"),
         }
-
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            start_button = ui.button("Start", icon="play_arrow").props("disable")
-            stop_button = ui.button("Stop", icon="stop").props("outline disable")
-            refresh_button = ui.button("Refresh", icon="refresh").props("flat")
 
         def _apply_status(status: DualGazeboStatus) -> None:
             action_state["status"] = status
@@ -593,7 +595,7 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
                 else "No needed_context decision is available."
             )
         ),
-        "served_context": (
+        "served context": (
             "\n".join(_compact_served_context(value) for value in served_contexts)
             if served_contexts
             else "No document, CAD, or observation context was served."
@@ -616,6 +618,9 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
             )
         ),
         "pending_clarification_turn": str(pending_clarification_turn or ""),
+        "ProductAgent Request Failure": _product_agent_request_failure_text(
+            terminal_failure
+        ),
         **grounding_values,
         "interaction_record": _ordered_interaction_record_text(
             interaction_identifier,
@@ -775,20 +780,9 @@ def _grounding_result_values(
         ontology_text = "No validated ProductContextView is available."
         typed_text = "No typed runtime context is available."
     else:
-        ontology_text = _json_text(
-            {
-                "tbox_fingerprint": latest_view.get("tbox_fingerprint"),
-                "abox_fingerprint": latest_view.get("abox_fingerprint"),
-                "delta_count": latest_view.get("delta_count"),
-                "assertions": latest_view.get("assertions"),
-                "uncertainty": latest_view.get("uncertainty"),
-                "unresolved_evidence_needs": latest_view.get(
-                    "unresolved_evidence_needs"
-                ),
-                "assertion_provenance": records.get(
-                    "ontology_assertion_provenance"
-                ),
-            }
+        ontology_text = _ontology_grounding_text(
+            latest_view,
+            records.get("ontology_assertion_provenance"),
         )
         typed_text = _json_text(latest_view.get("typed_bindings", []))
     drafts = [
@@ -826,6 +820,82 @@ def _grounding_result_values(
             else "No Phase 3.5 completion record is available."
         ),
     }
+
+
+def _ontology_grounding_text(
+    latest_view: dict[str, object],
+    assertion_provenance: object,
+) -> str:
+    """Format exact ontology values into readable operator-facing sections."""
+    lines = [
+        "ProductContextView",
+        f"product_requirement: {_json_text(latest_view.get('product_requirement'))}",
+        f"tbox_fingerprint: {_json_text(latest_view.get('tbox_fingerprint'))}",
+        f"abox_fingerprint: {_json_text(latest_view.get('abox_fingerprint'))}",
+        f"delta_count: {_json_text(latest_view.get('delta_count'))}",
+    ]
+
+    assertions = latest_view.get("assertions")
+    assertion_values = assertions if isinstance(assertions, list) else []
+    lines.extend(("", f"assertions: {len(assertion_values)}"))
+    for index, assertion in enumerate(assertion_values):
+        lines.extend(("", f"assertions[{index}]"))
+        if not isinstance(assertion, dict):
+            lines.append(_json_text(assertion))
+            continue
+        lines.append(f"subject: {_json_text(assertion.get('subject'))}")
+        lines.append(f"predicate: {_json_text(assertion.get('predicate'))}")
+        object_value = assertion.get("object")
+        if not isinstance(object_value, dict):
+            lines.append(f"object: {_json_text(object_value)}")
+            continue
+        for field in ("kind", "value", "datatype", "language"):
+            if field in object_value:
+                lines.append(
+                    f"object.{field}: {_json_text(object_value.get(field))}"
+                )
+
+    lines.extend(
+        (
+            "",
+            f"uncertainty: {_json_text(latest_view.get('uncertainty'))}",
+            "unresolved_evidence_needs: "
+            f"{_json_text(latest_view.get('unresolved_evidence_needs'))}",
+            "",
+            "assertion_provenance",
+        )
+    )
+    if not isinstance(assertion_provenance, dict):
+        lines.append(_json_text(assertion_provenance))
+        return "\n".join(lines)
+
+    lines.append(
+        f"schema_version: {_json_text(assertion_provenance.get('schema_version'))}"
+    )
+    lines.append(
+        "tbox_fingerprint: "
+        f"{_json_text(assertion_provenance.get('tbox_fingerprint'))}"
+    )
+    provenance_assertions = assertion_provenance.get("assertions")
+    provenance_values = (
+        provenance_assertions if isinstance(provenance_assertions, list) else []
+    )
+    lines.append(f"assertions: {len(provenance_values)}")
+    for index, assertion in enumerate(provenance_values):
+        lines.extend(("", f"assertion_provenance.assertions[{index}]"))
+        if not isinstance(assertion, dict):
+            lines.append(_json_text(assertion))
+            continue
+        for field in (
+            "subject",
+            "predicate",
+            "object",
+            "producer",
+            "evidence_refs",
+            "delta_ref",
+        ):
+            lines.append(f"{field}: {_json_text(assertion.get(field))}")
+    return "\n".join(lines)
 
 
 def _validated_persisted_completion(
@@ -965,15 +1035,52 @@ def _failure_message(failure: object) -> str:
     return message if isinstance(message, str) else _json_text(failure)
 
 
+def _product_agent_request_failure_text(failure: object) -> str:
+    """Format one ProductAgent request failure without exposing request data."""
+    if not isinstance(failure, dict) or failure.get("reason") != "pa_call_failed":
+        return ""
+    lines = [
+        f"reason: {_json_text(failure.get('reason'))}",
+        f"message: {_json_text(failure.get('message'))}",
+    ]
+    diagnostic = failure.get("diagnostic")
+    if not isinstance(diagnostic, dict):
+        lines.append("diagnostic: unavailable for this record")
+        return "\n".join(lines)
+    lines.append("diagnostic")
+    for field in (
+        "stage",
+        "exception",
+        "status_code",
+        "request_id",
+        "error_type",
+        "param",
+        "code",
+        "message",
+    ):
+        lines.append(f"{field}: {_json_text(diagnostic.get(field))}")
+    return "\n".join(lines)
+
+
 def _json_text(value: object) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
 
 
 def _render_pa_result_area(title: str, message: str) -> Label:
     """Render one PA result area and return its updateable value label."""
-    with ui.card().classes("flex-1 min-w-56 border border-slate-200 bg-slate-50 shadow-none"):
+    card_classes = (
+        "w-full border border-slate-200 bg-slate-50 shadow-none"
+        if title == "Ontology Grounding"
+        else "flex-1 min-w-56 border border-slate-200 bg-slate-50 shadow-none"
+    )
+    with ui.card().classes(card_classes):
         ui.label(title).classes("text-sm font-semibold text-slate-800")
-        return ui.label(message).classes("text-xs text-slate-500 whitespace-pre-wrap break-all")
+        value_classes = (
+            "text-xs text-slate-500 whitespace-pre-wrap break-words"
+            if title == "Ontology Grounding"
+            else "text-xs text-slate-500 whitespace-pre-wrap break-all"
+        )
+        return ui.label(message).classes(value_classes)
 
 
 def _render_pa_messages() -> tuple[Badge, Label]:
@@ -1013,7 +1120,15 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
     runtime: Spec2PrimitivesUIRuntime,
 ) -> None:
     """Render the Phase 2 UI connected through Phase 3.5."""
-    with ui.card().classes("flex-[2] min-w-96 border border-slate-200 shadow-sm"):
+    grounding_ready = (
+        runtime.ontology_config is not None and runtime.grounding_runtime is not None
+    )
+    grounding_unavailable_reason = (
+        runtime.document_diagnostic_unavailable_reason
+        or "Authoritative TBox and controlled Phase 4 grounding runtime are unavailable."
+    )
+
+    with ui.card().classes("w-full border border-slate-200 shadow-sm"):
         with ui.row().classes("w-full items-start justify-between gap-3"):
             with ui.column().classes("gap-0"):
                 ui.label("PA Interaction").classes("text-lg font-semibold text-slate-900")
@@ -1025,6 +1140,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         requirement_input = (
             ui.input(
                 label="product_requirement",
+                value="assemble medium gear",
                 placeholder="assemble Medium Gear",
             )
             .props("outlined")
@@ -1063,9 +1179,17 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         with ui.card().classes("w-full border border-indigo-100 bg-indigo-50 shadow-none"):
             with ui.row().classes("w-full items-center justify-between gap-2"):
                 ui.label("ProductAgent").classes("text-sm font-semibold text-indigo-900")
-                activity_badge = ui.badge("idle").props("color=indigo outline")
-            activity_message = ui.label("No PA retrieval or clarification activity.").classes(
+                activity_badge = ui.badge(
+                    "idle" if grounding_ready else "grounding unavailable"
+                ).props(f"color={'indigo' if grounding_ready else 'amber'} outline")
+            activity_message = ui.label(
+                "No PA retrieval or clarification activity."
+                if grounding_ready
+                else grounding_unavailable_reason
+            ).classes(
                 "text-xs text-indigo-700"
+                if grounding_ready
+                else "text-xs text-amber-700"
             )
 
         message_badge, message_value = _render_pa_messages()
@@ -1088,6 +1212,17 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                     "Cancel Interaction", icon="cancel"
                 ).props("outline disable")
         clarification_card.set_visibility(False)
+
+        with ui.card().classes(
+            "w-full border border-red-200 bg-red-50 shadow-none"
+        ) as product_agent_failure_card:
+            ui.label("ProductAgent Request Failure").classes(
+                "text-sm font-semibold text-red-900"
+            )
+            product_agent_failure_value = ui.label("").classes(
+                "text-xs text-red-800 whitespace-pre-wrap break-words"
+            )
+        product_agent_failure_card.set_visibility(False)
 
         result_values: dict[str, Label] = {}
         with ui.row().classes("w-full gap-2 items-stretch flex-wrap"):
@@ -1114,7 +1249,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             max_pa_turns = _validated_max_pa_turns(max_pa_turns_input.value)
             _set_enabled(
                 start_button,
-                not action_state["busy"]
+                grounding_ready
+                and not action_state["busy"]
                 and not action_state["pending_clarification"]
                 and isinstance(value, str)
                 and bool(value.strip())
@@ -1136,6 +1272,11 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             message_value.set_text(view["messages"])
             for title, value_label in result_values.items():
                 value_label.set_text(view[title])
+            product_agent_failure_text = view["ProductAgent Request Failure"]
+            product_agent_failure_value.set_text(product_agent_failure_text)
+            product_agent_failure_card.set_visibility(
+                bool(product_agent_failure_text)
+            )
             interaction_record_value.set_text(view["interaction_record"])
             clarification_card.set_visibility(pending)
             if pending:
@@ -1152,7 +1293,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             value = requirement_input.value
             max_pa_turns = _validated_max_pa_turns(max_pa_turns_input.value)
             if (
-                action_state["busy"]
+                not grounding_ready
+                or action_state["busy"]
                 or not isinstance(value, str)
                 or not value.strip()
                 or max_pa_turns is None
@@ -1162,6 +1304,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             _set_enabled(start_button, False)
             requirement_input.props("disable")
             max_pa_turns_input.props("disable")
+            product_agent_failure_card.set_visibility(False)
             activity_badge.set_text(f"PA turn 1 of {max_pa_turns}")
             activity_badge.props("color=indigo")
             activity_message.set_text("ProductAgent is assessing and requesting context.")
@@ -1297,6 +1440,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         start_button.on_click(_start_pa_interaction)
         submit_reply_button.on_click(_submit_clarification)
         cancel_interaction_button.on_click(_cancel_clarification)
+        _update_start_enabled()
 
 
 def _render_document_interpretation_diagnostic(
@@ -1554,9 +1698,8 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
                 "remain unavailable."
             ).classes("text-sm text-indigo-800")
 
-        with ui.row().classes("w-full gap-4 items-stretch flex-wrap"):
-            _render_dual_gazebo(runtime.dual_gazebo)
-            _render_pa_interaction(runtime)
+        _render_dual_gazebo(runtime.dual_gazebo)
+        _render_pa_interaction(runtime)
 
         _render_document_interpretation_diagnostic(runtime)
         _render_rgbd_segmentation_status(runtime)

@@ -15,8 +15,9 @@ decisions without assessing raw evidence summaries. Phase 4.3 now evolves and
 persists a robot-independent `TaskTransitionDraft`, computes exact
 `ContextNeed` values from a validated `ProductContextView`, and selects only an
 authorized output-capable producer. The production runtime and its read-only
-ontology-grounding UI are enabled only when an authoritative runtime TBox and
-`OPENAI_API_KEY` are configured; otherwise the interaction fails closed. The
+ontology-grounding UI use the project-authoritative
+`ontology/spec2primitives_ppr_tbox.owl` by default and are enabled only when it
+passes the schema-only profile and `OPENAI_API_KEY` is configured; otherwise the interaction fails closed. The
 separate Phase 4.1 UI diagnostic has the same configuration boundary.
 Phase 5 onward and later Phase 4.2 grounding work remain future work
 requiring separate, explicitly scoped implementation requests. Phase numbers
@@ -33,7 +34,7 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phase 0 and Phase 0.1 | implemented | Isolated package and no-hardware NIST operator scene. |
 | Phase 1, Phase 1.1, and Phase 1.2 | implemented | Approved exact-ref retrieval plus stored and request-scoped live RGB-D observations. |
 | Phase 2 and Phase 2.1 | implemented | PA UI, configurable turn limit, live PA turn counter, transcript, compact evidence summaries, and complete audit records. |
-| Phase 3.1 | implemented; production ontology configuration pending | Exact requirement intake loads an injected schema-only TBox, initializes the ABox before PA's first request, exposes the unresolved view and approved evidence types, and rejects first-turn clarification. |
+| Phase 3.1 | implemented with project-authoritative TBox | Exact requirement intake loads `ontology/spec2primitives_ppr_tbox.owl` by default, initializes the ABox before PA's first request, exposes the unresolved view and approved evidence types, and rejects first-turn clarification. |
 | Phase 3.2 | implemented | One persisted document, CAD, or live-observation request is served exactly and recorded without fallback evidence. |
 | Phase 3.3 | contract-first integration implemented | Each served result is routed through an authorized output-capable producer descriptor, its delta is validated and merged, and only a persisted Phase 4.3 decision can request more evidence, clarify, or complete. |
 | Phase 3.4 and Phase 3.5 | implemented | Exact user-intent replies and cancellation resume the same interaction; completion persists one fully referenced, tamper-checked `PAContextGroundingCompletion` that is ready only for Phase 5. |
@@ -50,15 +51,15 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phases 6--9 | not implemented | No RA adapter, resource-catalog ABox, `CompositionContextBundle`, `PrimitiveProgramDraft`, `MissingContextBatch`, primitive composer, validator stack, or execution path exists. |
 
 The Phase 4.0 foundation separates shared immutable TBox semantics from the
-PA-owned writable product context. It loads a caller-supplied TBox, initializes
+PA-owned writable product context. It loads the project-authoritative TBox or an
+explicit paired override, initializes
 an independent interaction ABox from the exact requirement, and validates and
-persists generic evidence-backed triple-delta contracts. The pasted OWL serves
-only as an RDF/XML parser and mixed-graph test
-fixture until the authoritative TBox is provided: it contains both schema
+persists generic evidence-backed triple-delta contracts. The pasted OWL remains
+only an RDF/XML parser and mixed-graph test fixture: it contains both schema
 axioms and named individuals, so its ABox facts never become runtime task facts.
 The next separately authorized workflow capability is Phase 5.
-Production grounding requires an authoritative schema-only TBox;
-the mixed and minimal fixtures remain test-only.
+Production grounding uses `ontology/spec2primitives_ppr_tbox.owl`; the mixed and
+minimal fixtures remain test-only.
 Controlled tests of retrieval and observation capture do not constitute
 document-diagram understanding, metric grounding, Gazebo task execution, or
 physical execution.
@@ -609,8 +610,10 @@ question.
 - In the ontology-backed revision, invoke Phase 4.0 after preserving the exact
   requirement and before the first source decision. Seed the interaction ABox
   with the request as an unresolved goal or claim, not as evidence-backed facts.
-- Configure the authoritative schema-only TBox path and namespace explicitly;
-  never promote either test fixture to runtime status. Fail the interaction
+- Load `ontology/spec2primitives_ppr_tbox.owl` and `http://PAonto.com#` by
+  default. Accept only paired `SPEC2PRIMITIVES_PPR_TBOX_PATH` and
+  `SPEC2PRIMITIVES_PPR_NAMESPACE` overrides; never promote either test fixture
+  to runtime status. Fail the interaction
   closed on TBox loading, profile validation, or ABox initialization errors,
   before PA can choose an evidence source.
 - Give PA the unchanged `product_requirement`, `approved_context_refs()`, the
@@ -712,10 +715,10 @@ question.
 - Stop on a terminal Phase 4.3 decision, unrecoverable PA, retrieval, or
   interpretation failure, invalid response, existing-record conflict, or
   `pa_turn_limit_reached`. Limit exhaustion never implies completion.
-- The production UI loads a caller-configured authoritative TBox and production
-  producer runtime when model configuration is present. It returns
-  `grounding_unavailable` before PA evidence selection when that configuration
-  is absent. Controlled tests use schema-only fixtures and deterministic model
+- The production UI loads the project-authoritative TBox by default and accepts
+  only a complete path-and-namespace override. It returns `grounding_unavailable`
+  before PA evidence selection when TBox validation or model authority is
+  unavailable. Controlled tests use schema-only fixtures and deterministic model
   responses rather than claiming live perception or model validation.
 
 ### Phase 3.4: user clarification — implemented
@@ -830,8 +833,8 @@ accepted delta.
 - Use the minimal semantic bridge `specification defines required feature` and
   `requested process realizes the same feature`. These assertions express the
   requested outcome, not proof that execution has achieved it.
-- Treat the pasted OWL as a parser and mixed-graph test sample until the
-  authoritative TBox is provided. It combines classes and properties with named
+- Treat the pasted OWL as a parser and mixed-graph test sample, not the
+  project-authoritative `ontology/spec2primitives_ppr_tbox.owl`. It combines classes and properties with named
   process, resource, feature, and performance individuals. Do not copy those
   individuals, their `capableOf` or `realizes` assertions, or task-specific
   `requires` and `precedes` restrictions into an interaction ABox. Preserve all
