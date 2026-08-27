@@ -1073,6 +1073,9 @@ def _render_rgbd_segmentation_status(runtime: Spec2PrimitivesUIRuntime) -> None:
         pose_status = ui.label("Pose: not_evaluated").classes(
             "text-sm text-amber-700"
         )
+        robot_frame_conversion_status = ui.label(
+            "Robot-frame conversion: not_evaluated"
+        ).classes("text-sm text-amber-700")
 
         async def _refresh_status() -> None:
             try:
@@ -1122,7 +1125,23 @@ def _render_rgbd_segmentation_status(runtime: Spec2PrimitivesUIRuntime) -> None:
                     else str(location)
                 )
             )
-            pose_status.set_text("Pose: not_evaluated")
+            pose = record.get("pose", "not_evaluated")
+            pose_status.set_text(
+                "Pose: "
+                + ("not_requested" if pose == "not_evaluated" else str(pose))
+            )
+            robot_frame_conversion = record.get(
+                "robot_frame_conversion",
+                "not_evaluated",
+            )
+            robot_frame_conversion_status.set_text(
+                "Robot-frame conversion: "
+                + (
+                    "not_requested"
+                    if robot_frame_conversion == "not_evaluated"
+                    else str(robot_frame_conversion)
+                )
+            )
             failure = record.get("failure")
             if status == "idle":
                 message = "Waiting for an observation request from the runtime."
@@ -1130,7 +1149,11 @@ def _render_rgbd_segmentation_status(runtime: Spec2PrimitivesUIRuntime) -> None:
                 message = "Capturing and processing fresh RGB-D evidence automatically."
             elif status == "ready":
                 message = (
-                    "CAD-size association status is ready for later use."
+                    "Robot-frame conversion status is ready for later use."
+                    if robot_frame_conversion != "not_evaluated"
+                    else "CAD pose status is ready for later use."
+                    if pose != "not_evaluated"
+                    else "CAD-size association status is ready for later use."
                     if CAD_correspondence != "not_evaluated"
                     else "Minimal segmentation records are ready for later use."
                 )

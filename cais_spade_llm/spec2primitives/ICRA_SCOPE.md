@@ -4,13 +4,24 @@
 
 **Spec2Primitives: A Multi-Agent Framework for Dynamic Primitive Composition in Industrial Robotic Assembly**
 
+## Proposed-versus-implemented status
+
+The end-to-end workflow in this document is proposed architecture. The current
+package implements the narrow PA context boundary through Phase 3.3, the Phase
+4.0 ontology foundation, separate document and geometry diagnostics, generalized
+camera-frame pose estimation, and camera-to-robot frame conversion. The live
+production path still stops at `grounding_unavailable`: no production Phase 4.3
+runtime, Phase 5 task contract, RA adapter, resource-catalog ABox, primitive
+composer, validator stack, or execution path is connected.
+
 ## Fundamental research challenge
 
 The central research question is:
 
-> Given a grounded task transition, fresh selected-resource context, and exactly
-> eight semantic primitive interfaces with partial local executable contracts,
-> can one RA-owned LLM composer author and revise validator-accepted
+> Given a grounded task transition, fresh selected-resource context, and the
+> complete selected-RA-authoritative primitive-only catalog with partial local
+> executable contracts, can one RA-owned LLM composer author and revise
+> validator-accepted
 > `primitive_steps` without a product-specific recipe, completed
 > `primitive_steps`, complete PDDL domain/problem, or hidden ground truth?
 
@@ -47,9 +58,10 @@ combination of:
    relevant approved document, CAD, and RGB-D evidence into a provenance-backed,
    robot-independent task-transition contract.
 2. RA, where RA means RobotAgent, interpreting that required transition against
-   fresh selected-resource state and the current exact-eight semantic primitive
-   interfaces with partial local executable contracts, then agentically
-   authoring primitive selection, order, bindings, and parameters.
+   fresh selected-resource state and the complete current semantic primitive
+   catalog with partial local executable contracts, then agentically authoring
+   primitive selection, order, bindings, and parameters. Catalog cardinality is
+   runtime-determined rather than part of the research claim.
 3. Non-synthesizing contract and robot-local validators returning concrete
    findings so the same RA LLM can author a revised complete candidate without
    a validator inserting or repairing steps.
@@ -66,7 +78,7 @@ composition result.
 
 ## Partial formal-model boundary
 
-Each of the exact eight resource-owned catalog entries exposes its fixed
+Each entry in the complete resource-owned catalog snapshot exposes its exact
 primitive symbol, operation description, typed parameters and results,
 invocation binding, truthful limits, direct evidence, applicable evaluator
 endpoints, and only the local conditions or effects explicitly modeled. An
@@ -84,8 +96,9 @@ The ontology split is:
 - PA fills a per-interaction ABox with evidence-backed requested-process,
   product, feature, and grounded-outcome individuals.
 - The selected RA supplies a separate versioned resource-catalog ABox snapshot
-  containing its resource individual, the exact eight primitive-process
-  interface individuals, and `resource capableOf primitive` assertions.
+  containing its resource individual, every primitive-process interface
+  individual in that snapshot, and `resource capableOf primitive` assertions.
+  The snapshot pins its fingerprint and cardinality for one composition attempt.
 
 The pasted OWL is a mixed schema-and-instance graph rather than a pure TBox. It
 remains a parser fixture only; its named individuals and task-specific
@@ -110,54 +123,47 @@ an LLM is universally necessary.
 
 ## Dynamic context-retrieval boundary
 
-PA and RA use the same bounded pattern:
+The next consumer, not the TBox, exposes required context. The TBox defines
+legal meaning; it does not prescribe a document, CAD, observation, calibration,
+or primitive recipe. Before allocation, PA evolves a `TaskTransitionDraft` and
+compares its blocking inputs with a validated `ProductContextView`. After
+allocation, the selected RA's `PrimitiveProgramDraft` and primitive interfaces
+expose further runtime inputs.
 
 ```text
-objective + accumulated authority-owned context
+required consumer inputs - valid current context = ContextNeeds
         ↓
-identify one concrete missing input
+GroundingProducerDescriptor selects an authorized output-capable producer
         ↓
-retrieve or compute one result through its owning authority
+producer retrieves permitted evidence and returns supported facts or records
         ↓
-validate, persist, and reassess
-        ↓
-repeat, hand off, return missing_context, or stop fail-closed
+validate, fingerprint, persist, and reassess
 ```
 
-Their authority and completion conditions differ:
+PA may dynamically choose approved document, exact caller- or corpus-authorized
+CAD, fresh RGB-D, matching injected calibration, or an existing accepted record.
+Those modalities are producer inputs, not the semantic needs exchanged by PA
+and RA. Numeric values remain in `TypedContextBinding` records associated with
+the ABox context. OWL open-world absence is never treated as completeness, and
+no static all-modality checklist or expected primitive sequence is encoded.
 
-- PA selects relevant approved document, CAD, or fresh RGB-D evidence from the
-  evolving requirement and ABox. It finishes when it can project a grounded
-  robot-independent task-transition contract with no currently identified
-  blocking product or scene ambiguity.
-- The selected RA first retrieves three mandatory prerequisites: a bounded
-  read-only projection of the current task and selected-resource ABoxes, a fresh
-  selected-resource snapshot, and the complete exact-eight interface catalog.
-  The projection contains the requested process and outcome plus all eight
-  available offerings, but no process recipe. RA then retrieves only
-  resource-local context identified by an unbound input, stale state, interface
-  need, or validator finding. It finishes only when one unchanged, fully bound
-  candidate passes every applicable declared-contract and resource-owned check.
-- Product or scene gaps return to PA as structured `missing_context`; robot
-  state, resource limits, IK, collision, grasp, release, trajectory, and
-  execution gaps stay with RA. PA never authors `primitive_steps`, and RA never
-  reinterprets raw product evidence or asks the user directly.
+The PA handoff requires only the minimum evidence-backed task identity, outcome,
+and bindings needed for a robot-independent `TaskTransitionContract`. The
+selected RA then retrieves a bounded task/resource projection, fresh state, and
+its complete current primitive-only catalog. RA authors a structural
+`PrimitiveProgramDraft`; a deterministic binding preflight gathers all currently
+unbound inputs without creating or repairing steps. Robot state, limits, IK,
+collision, grasp, release, trajectory, and execution gaps remain RA-owned.
+Product or scene gaps are deduplicated into one `MissingContextBatch` per round.
 
-Ontology-assisted retrieval operates over semantic needs, not modality names.
-A primitive interface asks for a grounded typed input. If current ontology or
-typed context does not support it, PA selects one relevant approved evidence
-source and dispatches the application-owned route for that evidence type. Thus
-documentation may be selected to
-ground process or product meaning, while STL plus RGB-D and calibration may be
-selected to ground a scene binding or pose. These are runtime dependencies, not
-a fixed requirement that every interaction load every source. The routing map
-is ordinary application configuration outside the authoritative TBox; no new
-ontology predicate is invented.
-
-OWL provides type and relation inference but cannot use absence as a
-closed-world completeness decision. SHACL or an equivalent boundary validator
-may flag a currently requested input as missing; it must not encode a static
-all-modality checklist or the expected primitive sequence.
+PA may service one batch through several existing single-source audited
+operations, then returns one new versioned `CompositionContextBundle`. There is
+no fixed semantic round count. Another batch round is allowed only after a new
+accepted binding, changed need classification, or structurally different RA
+draft demonstrates progress. Ambiguous or unavailable evidence, an unsupported
+need, an identical request against unchanged context, or no new accepted result
+stops fail-closed. `context understanding complete` means readiness for Phase 5,
+not that every later primitive input is already available.
 
 Resource discovery and allocation remain inherited prior work. Both nominal
 and recovery cases consume the selected exact `resource_jid` and use unicast;
@@ -175,7 +181,8 @@ PA
     ├── RGB-D capture and preprocessing
     ├── minimal camera-local segmentation
     ├── one-CAD size association and camera-frame candidate center
-    └── future rotation, complete pose, and frame transformation
+    ├── generalized camera-frame pose estimation
+    └── camera-to-robot frame conversion from injected calibration
 ```
 
 Only PA and RA are agents. The observation provider and the perception
@@ -185,12 +192,13 @@ being modeled as additional agents.
 
 RGB-D capture, calibrated deprojection, support-plane removal, connected-region
 segmentation, mask persistence, one-CAD principal-size comparison,
-camera-frame candidate-center measurement, and the read-only processing status
-are supporting infrastructure rather than the ICRA research contribution.
-Phase 4.2B2A can report an accepted, ambiguous, or rejected size
-correspondence, but it does not perform general identity recognition, rotation,
-complete pose estimation, frame transformation, context assessment, primitive
-composition, planning, or execution.
+camera-frame candidate-center measurement, generalized camera-frame
+registration, injected-calibration frame conversion, and read-only processing
+status are supporting infrastructure rather than the ICRA research
+contribution. These standalone tools can report accepted, ambiguous, or
+rejected records but do not establish general identity recognition, a pick
+point, complete scene grounding, context assessment, primitive composition,
+planning, or execution. They are not connected to the production PA/RA path.
 
 Intermediate mask, depth, CAD-fit, uncertainty, and provenance evidence remains
 separately auditable even though the algorithms are grouped behind the two tool
@@ -202,7 +210,7 @@ the grounded assembly task and its provenance-backed requirements.
 The paper thesis is:
 
 > Given a grounded task-transition contract, RA-owned agentic composition over
-> exact-eight semantic primitive interfaces, coupled to non-synthesizing
+> the complete selected-resource semantic primitive catalog, coupled to non-synthesizing
 > resource-validator feedback, improves candidate validity and robot-local
 > feasibility relative to the same-input LLM composer without
 > validation-driven revision.
@@ -210,8 +218,9 @@ The paper thesis is:
 The controlled Medium Gear case is the development starting point, not
 sufficient evidence of general primitive composition. The final evaluation must
 withhold product-specific assembly programs, completed `primitive_steps`, and a
-complete task-specific action model; provide only the exact-eight executable
-primitive interfaces and partial contracts; include CAD distractors; vary
+complete task-specific action model; provide only the complete selected-RA
+primitive-only catalog and partial contracts; record its cardinality and
+fingerprint; include CAD distractors; vary
 observations, object placements, and fresh resource state; exercise vague or
 incomplete requirements; and require different composition structures beyond
 Small, Medium, and Large variants of one gear sequence.
@@ -230,9 +239,12 @@ an interface-only symbolic composer, bounded black-box sequence search with the
 same validator access and query budget, LLM-only generation, and the full LLM
 composition plus validator-feedback revision loop. A separately engineered
 complete PDDL domain is an optional extra-information oracle, not an equal-input
-baseline. Monolithic, no-retrieval, and stale-context conditions are supporting
-PA-pipeline ablations. Retrieval, schema validation, simulation, observed
-outcome, and physical execution remain distinct claims.
+baseline. Every equal-input comparison pins the same per-case selected-RA
+catalog snapshot, fingerprint, cardinality, and exact symbols. Cross-resource
+experiments may vary catalog size and symbols and must report those differences.
+Monolithic, no-retrieval, and stale-context conditions are supporting PA-pipeline
+ablations. Retrieval, schema validation, simulation, observed outcome, and
+physical execution remain distinct claims.
 
 ## Starting case
 
@@ -262,28 +274,36 @@ exact product_requirement: assemble Medium Gear
         ↓
 PA loads the fixed TBox and initializes one interaction ABox
         ↓
-PA identifies one unresolved product or scene need
+PA evolves a TaskTransitionDraft over its ProductContextView
         ↓
-PA retrieves one relevant approved source and invokes its controlled tool
+PA resolves currently blocking ContextNeeds through authorized producers
         ↓
 PA validates and persists evidence-backed facts, then reassesses
-        ↺ another document, CAD, or RGB-D request only if still needed
+        ↺ each producer retrieval remains one auditable source operation
         ↓
-PA projects a versioned robot-independent task-transition contract
+PA projects a robot-independent TaskTransitionContract
         ↓
 inherited allocation supplies one selected resource_jid; PA unicasts
         ↓
 selected RA retrieves the current task/resource ontology projection
-        + fresh state + complete exact-eight interface catalog
+        + fresh state + complete current primitive-only catalog
         ↓
-RA dynamically retrieves any additional selected-resource context it needs
+RA LLM authors a structural PrimitiveProgramDraft
         ↓
-RA LLM authors one complete candidate primitive_steps program
+binding preflight gathers every currently unbound input
+        ├── RA-owned gaps resolve locally
+        └── product/scene gaps form one MissingContextBatch
+                                      ↓
+                         PA runs required controlled producers
+                                      ↓
+                         versioned CompositionContextBundle
+        ↓
+RA LLM authors a fully bound primitive_steps candidate
         ↓
 non-mutating declared-contract + resource + physical + outcome checks
-   ↙ product/scene gap       ↓ robot-local finding        ↘ accepted unchanged
-PA grounds and versions    finding returns to the RA         fresh-state recheck
-the task update            LLM for a new candidate                    ↓
+   ↙ new product/scene gap   ↓ robot-local finding        ↘ accepted unchanged
+new batched PA round only   finding returns to the RA         fresh-state recheck
+after measurable progress  LLM for a new candidate                    ↓
         └───────────────────────────↺                         RA execution
                                                                     ↓
                                              observation-backed realized outcome
@@ -297,13 +317,14 @@ the recovery event's semantics, feasibility, outcome, or assigned resource, the
 transfer stops until the existing recovery framework supplies a newly validated
 event.
 
-## Scene-only milestone boundary
+## Historical scene-only milestone boundary
 
-The scene-only milestone provides the isolated structure, the research workflow,
-a narrow launcher for the no-hardware `gazebo_dual_spec2primitives` simulation, the
-dedicated `table_spec2primitives.world`, and a local placeholder chat. It does not
-define functional schemas, implement recognition, VLM, PA or RA behavior,
-validate insertion physics, or execute robots.
+The initial scene-only milestone provided the isolated structure, research
+workflow, narrow no-hardware `gazebo_dual_spec2primitives` launcher, dedicated
+`table_spec2primitives.world`, and local placeholder chat. Later milestones added
+the narrow PA context boundary and standalone supporting perception records.
+The current production path still has no RA behavior, insertion-physics
+validation, or robot execution.
 
 The starting scene pre-installs the static NIST `Gear_Plate` and three
 `Gear_Shaft` fixtures while leaving `gear_small`, `gear_medium`, and

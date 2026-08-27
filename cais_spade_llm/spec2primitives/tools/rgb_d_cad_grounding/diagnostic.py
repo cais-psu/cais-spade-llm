@@ -24,6 +24,14 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation
     GazeboObservationProviderError,
     capture_gazebo_observation,
 )
+from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.frame_conversion import (
+    RobotFrameConversionError,
+    transform_camera_pose_to_robot_frame,
+)
+from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.pose_estimation import (
+    CADPoseEstimationError,
+    estimate_camera_frame_pose,
+)
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.preprocessor import (
     GeometryPreprocessingError,
     preprocess_served_geometry,
@@ -52,10 +60,12 @@ _STATUS_KEYS = {
     "CAD_correspondence",
     "location",
     "pose",
+    "robot_frame_conversion",
     "failure",
     "updated_at_ns",
 }
-_LEGACY_STATUS_KEYS = _STATUS_KEYS - {"location"}
+_PRE_CONVERSION_STATUS_KEYS = _STATUS_KEYS - {"robot_frame_conversion"}
+_LEGACY_STATUS_KEYS = _PRE_CONVERSION_STATUS_KEYS - {"location"}
 
 
 class ObservationCaptureRuntime(Protocol):
@@ -195,8 +205,11 @@ def read_rgbd_segmentation_status(contexts_root: Path) -> dict[str, object]:
                 "message": f"{type(exc).__name__}: {exc}",
             },
         )
-    if isinstance(record, dict) and set(record) == _LEGACY_STATUS_KEYS:
-        record["location"] = "not_evaluated"
+    if isinstance(record, dict):
+        if set(record) == _LEGACY_STATUS_KEYS:
+            record["location"] = "not_evaluated"
+        if set(record) == _PRE_CONVERSION_STATUS_KEYS:
+            record["robot_frame_conversion"] = "not_evaluated"
     if not _valid_status_record(record):
         return _status_record(
             "failed",
@@ -286,6 +299,192 @@ def run_cad_size_association_pipeline(
         "CAD_correspondence": association.CAD_correspondence,
         "location": association.location,
         "pose": "not_evaluated",
+        "failure": None,
+    }
+
+
+def run_cad_pose_estimation_pipeline(
+    *,
+    contexts_root: Path,
+    interaction_root: Path,
+    correspondence_record_path: Path,
+    pose_number: int = 1,
+) -> dict[str, object]:
+    """Estimate one pose and update only the compact read-only UI status."""
+    root = Path(contexts_root).resolve()
+    interaction = Path(interaction_root).resolve()
+    try:
+        interaction.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("interaction_root must be inside contexts_root.") from exc
+    current_status = read_rgbd_segmentation_status(root)
+    source_count = int(current_status["source_candidate_count"])
+    assembly_count = int(current_status["assembly_candidate_count"])
+    CAD_correspondence = str(current_status["CAD_correspondence"])
+    location = str(current_status["location"])
+    _write_latest_status(
+        root,
+        _status_record(
+            "running",
+            source_candidate_count=source_count,
+            assembly_candidate_count=assembly_count,
+            CAD_correspondence=CAD_correspondence,
+            location=location,
+            pose="running",
+        ),
+    )
+    try:
+        estimation = estimate_camera_frame_pose(
+            interaction_root=interaction,
+            correspondence_record_path=correspondence_record_path,
+            pose_number=pose_number,
+        )
+    except (CADPoseEstimationError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        failure = {
+            "reason": "cad_pose_estimation_rejected",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+        _write_latest_status(
+            root,
+            _status_record(
+                "failed",
+                source_candidate_count=source_count,
+                assembly_candidate_count=assembly_count,
+                CAD_correspondence=CAD_correspondence,
+                location=location,
+                pose="failed",
+                failure=failure,
+            ),
+        )
+        return {
+            "status": "failed",
+            "interaction_root": str(interaction),
+            "pose_record_path": None,
+            "CAD_correspondence": CAD_correspondence,
+            "location": location,
+            "pose": "failed",
+            "failure": failure,
+        }
+
+    _write_latest_status(
+        root,
+        _status_record(
+            "ready",
+            source_candidate_count=source_count,
+            assembly_candidate_count=assembly_count,
+            CAD_correspondence=estimation.CAD_correspondence,
+            location=estimation.location,
+            pose=estimation.pose,
+        ),
+    )
+    return {
+        "status": "ready",
+        "interaction_root": str(interaction),
+        "pose_record_path": str(estimation.record_path),
+        "CAD_correspondence": estimation.CAD_correspondence,
+        "location": estimation.location,
+        "pose": estimation.pose,
+        "failure": None,
+    }
+
+
+def run_robot_frame_pose_conversion_pipeline(
+    *,
+    contexts_root: Path,
+    interaction_root: Path,
+    pose_record_path: Path,
+    calibration_record_path: Path,
+    target_frame: str,
+    conversion_number: int = 1,
+) -> dict[str, object]:
+    """Convert one pose and update only the compact read-only UI status."""
+    root = Path(contexts_root).resolve()
+    interaction = Path(interaction_root).resolve()
+    try:
+        interaction.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("interaction_root must be inside contexts_root.") from exc
+    current_status = read_rgbd_segmentation_status(root)
+    source_count = int(current_status["source_candidate_count"])
+    assembly_count = int(current_status["assembly_candidate_count"])
+    CAD_correspondence = str(current_status["CAD_correspondence"])
+    location = str(current_status["location"])
+    pose = str(current_status["pose"])
+    _write_latest_status(
+        root,
+        _status_record(
+            "running",
+            source_candidate_count=source_count,
+            assembly_candidate_count=assembly_count,
+            CAD_correspondence=CAD_correspondence,
+            location=location,
+            pose=pose,
+            robot_frame_conversion="running",
+        ),
+    )
+    try:
+        conversion = transform_camera_pose_to_robot_frame(
+            interaction_root=interaction,
+            pose_record_path=pose_record_path,
+            calibration_record_path=calibration_record_path,
+            target_frame=target_frame,
+            conversion_number=conversion_number,
+        )
+    except (
+        RobotFrameConversionError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        failure = {
+            "reason": "robot_frame_pose_conversion_rejected",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+        _write_latest_status(
+            root,
+            _status_record(
+                "failed",
+                source_candidate_count=source_count,
+                assembly_candidate_count=assembly_count,
+                CAD_correspondence=CAD_correspondence,
+                location=location,
+                pose=pose,
+                robot_frame_conversion="failed",
+                failure=failure,
+            ),
+        )
+        return {
+            "status": "failed",
+            "interaction_root": str(interaction),
+            "robot_frame_pose_record_path": None,
+            "CAD_correspondence": CAD_correspondence,
+            "location": location,
+            "pose": pose,
+            "robot_frame_conversion": "failed",
+            "failure": failure,
+        }
+
+    _write_latest_status(
+        root,
+        _status_record(
+            "ready",
+            source_candidate_count=source_count,
+            assembly_candidate_count=assembly_count,
+            CAD_correspondence=conversion.CAD_correspondence,
+            location=conversion.location,
+            pose=conversion.pose,
+            robot_frame_conversion=conversion.robot_frame_conversion,
+        ),
+    )
+    return {
+        "status": "ready",
+        "interaction_root": str(interaction),
+        "robot_frame_pose_record_path": str(conversion.record_path),
+        "CAD_correspondence": conversion.CAD_correspondence,
+        "location": conversion.location,
+        "pose": conversion.pose,
+        "robot_frame_conversion": conversion.robot_frame_conversion,
         "failure": None,
     }
 
@@ -561,6 +760,8 @@ def _status_record(
     assembly_candidate_count: int = 0,
     CAD_correspondence: str = "not_evaluated",
     location: str = "not_evaluated",
+    pose: str = "not_evaluated",
+    robot_frame_conversion: str = "not_evaluated",
     failure: object = None,
     updated_at_ns: int | None = None,
 ) -> dict[str, object]:
@@ -573,7 +774,8 @@ def _status_record(
         "identity": "not_evaluated",
         "CAD_correspondence": CAD_correspondence,
         "location": location,
-        "pose": "not_evaluated",
+        "pose": pose,
+        "robot_frame_conversion": robot_frame_conversion,
         "failure": failure,
         "updated_at_ns": time.time_ns() if updated_at_ns is None else updated_at_ns,
     }
@@ -599,6 +801,22 @@ def _valid_status_record(value: object) -> bool:
         "unavailable",
         "failed",
     }
+    pose_states = {
+        "not_evaluated",
+        "running",
+        "accepted",
+        "ambiguous",
+        "rejected",
+        "failed",
+    }
+    robot_frame_conversion_states = {
+        "not_evaluated",
+        "running",
+        "accepted",
+        "ambiguous",
+        "rejected",
+        "failed",
+    }
     if (
         value["schema_version"] != 1
         or value["record_type"] != "RGBDSegmentationStatus"
@@ -609,7 +827,10 @@ def _valid_status_record(value: object) -> bool:
         or value["CAD_correspondence"] not in correspondence_states
         or not isinstance(value["location"], str)
         or value["location"] not in location_states
-        or value["pose"] != "not_evaluated"
+        or not isinstance(value["pose"], str)
+        or value["pose"] not in pose_states
+        or not isinstance(value["robot_frame_conversion"], str)
+        or value["robot_frame_conversion"] not in robot_frame_conversion_states
     ):
         return False
     counts = (value["source_candidate_count"], value["assembly_candidate_count"])

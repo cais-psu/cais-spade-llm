@@ -319,6 +319,7 @@ def test_ui_rgbd_card_is_status_only() -> None:
         "CAD correspondence: not_requested",
         "Location: not_requested",
         "Pose: not_evaluated",
+        "Robot-frame conversion: not_evaluated",
         "read_rgbd_segmentation_status",
     ):
         assert required_term in source

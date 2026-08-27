@@ -12,17 +12,22 @@ here. They are tools used by the Spec2Primitives workflow, not agents.
   diagnostic ABox.
 - `rgb_d_cad_grounding/` captures one fresh live Gazebo RGB-D bundle only when
   invoked, implements Phase 4.2A preprocessing, and implements Phase 4.2B1
-  minimal camera-local segmentation plus Phase 4.2B2A size-only association.
+  minimal camera-local segmentation, Phase 4.2B2A size-only association, and
+  simple generalized camera-frame pose estimation and frame conversion for
+  loose source candidates.
   It atomically persists complete approved CAD meshes, calibrated colored point
   clouds, compact candidate records, label masks, and deterministic
-  `CADSizeCorrespondenceRecord` results. Association compares only one exact
-  caller-supplied CAD record and can return a candidate center in that camera's
-  optical frame; rotation and complete pose remain unevaluated.
+  `CADSizeCorrespondenceRecord`, `CADPoseEstimationRecord`,
+  `CameraToRobotCalibrationRecord`, and `RobotFramePoseRecord` results. Pose
+  estimation compares only one exact caller-supplied CAD record, returns a
+  complete camera-from-CAD transform only for a clear fit, and preserves
+  candidate or rotation ambiguity. Frame conversion consumes only a separate
+  caller-approved calibration record.
 
 The live observation provider creates no background subscription and supplies
 no observation to PA or RA. The automatic observation entrypoint performs
 capture → validation → preprocessing → segmentation only when called. The UI
 polls compact status and exposes no processing controls. CAD preprocessing stays
 separate; the association entrypoint is invoked only by a future caller that
-already selected one CAD record. Complete pose, frame transformation, PA
-integration, and assessment still require later separately authorized work.
+already selected one CAD record. Cross-camera transformation, PA integration,
+and assessment still require later separately authorized work.

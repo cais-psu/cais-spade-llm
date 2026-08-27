@@ -4,16 +4,17 @@ Phase 0, the Phase 0.1 operator shell, Phase 1, Phase 1.1, Phase 1.2, the Phase
 2 PA interaction UI, Phase 2.1, Phase 3.1, Phase 3.2, the Phase 3.3
 contract-first ontology integration, Phase 4.0, Phase 4.1, Phase 4.2A
 preprocessing, Phase 4.2B1 minimal automatic RGB-D segmentation, and Phase
-4.2B2A CAD-size candidate association are implemented. Phase 3.1
+4.2B2A CAD-size candidate association, the simple remaining Phase 4.2B2
+camera-frame pose increment, and simple camera-to-robot frame conversion are
+implemented. Phase 3.1
 now initializes Phase 4.0 before PA selects its first source and rejects
 first-turn clarification. Phase 3.3 now orchestrates numbered retrieval,
 controlled interpretation, validated ABox deltas, and persisted Phase 4.3-style
 decisions without assessing raw evidence summaries. The production UI remains
-fail-closed because no authoritative runtime TBox or complete correspondence,
-complete pose, and Phase 4.3
-grounding runtime is configured. The separate Phase 4.1 UI diagnostic also
+fail-closed because no authoritative runtime TBox, registered complete
+grounding producers, or Phase 4.3 grounding runtime is configured. The separate Phase 4.1 UI diagnostic also
 fails closed until an authoritative TBox and `OPENAI_API_KEY` are configured.
-Phase 3.4 onward and the remaining Phase 4.2B2 work remain future work
+Phase 3.4 onward and later Phase 4.2 grounding work remain future work
 requiring separate, explicitly scoped implementation requests. Phase numbers
 identify capabilities, not a required one-way runtime order. This plan does not
 authorize an end-to-end implementation.
@@ -21,7 +22,7 @@ authorize an end-to-end implementation.
 `PA` refers to ProductAgent and `RA` refers to RobotAgent throughout this plan.
 Only PA and RA participate in the current Spec2Primitives roadmap.
 
-## Current implementation status
+## Proposed-versus-implemented status
 
 | Phase | Status | Current boundary |
 |---|---|---|
@@ -37,7 +38,12 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phase 4.2A | implemented as a separate diagnostic | Exact approved binary STL meshes and fresh validated four-camera RGB-D bundles become atomic typed geometry records and assertion-free deltas; correspondence and pose remain not evaluated. |
 | Phase 4.2B1 | implemented supporting infrastructure | An observation-only entrypoint automatically captures, validates, preprocesses, and minimally segments four camera-local RGB-D views with fixed internal parameters. The UI is status-only. |
 | Phase 4.2B2A | implemented supporting infrastructure | One exact preprocessed approved CAD record is compared with validated segmented candidates by its two largest principal dimensions. A unique size match yields only a candidate center in its camera optical frame. |
-| Remaining Phase 4.2B2 onward | not implemented | No rotation, complete pose, cross-camera or robot-frame transform, complete scene grounding, assembly plan, RA communication, primitive composition, validation, or execution exists. |
+| Simple remaining Phase 4.2B2 pose increment | implemented supporting infrastructure | One intact size correspondence is refined across loose source candidates with deterministic principal-axis multistart and trimmed ICP. It persists an accepted, ambiguous, or rejected camera-frame pose without claiming a robot pose or pick point. |
+| Simple camera-to-robot frame conversion | implemented supporting infrastructure | One accepted camera-from-CAD transform is composed with one injected, hash-validated camera-to-robot calibration for an exact caller-selected target frame. Ambiguous and rejected poses remain coordinate-free. |
+| Later Phase 4.2 grounding | not implemented | No cross-camera transform, complete target grounding, or production product-context producer chain exists. |
+| Phase 4.3 production grounding | not implemented | No production assessor, `ProductContextView`, typed-binding index, or producer-descriptor registry is configured; the live path remains `grounding_unavailable`. |
+| Phase 5 | not implemented | No `TaskTransitionDraft`, `TaskTransitionContract`, or assembly-plan handoff record exists. |
+| Phases 6--9 | not implemented | No RA adapter, resource-catalog ABox, `CompositionContextBundle`, `PrimitiveProgramDraft`, `MissingContextBatch`, primitive composer, validator stack, or execution path exists. |
 
 The Phase 4.0 foundation separates shared immutable TBox semantics from the
 PA-owned writable product context. It loads a caller-supplied TBox, initializes
@@ -46,14 +52,18 @@ persists generic evidence-backed triple-delta contracts. The pasted OWL serves
 only as an RDF/XML parser and mixed-graph test
 fixture until the authoritative TBox is provided: it contains both schema
 axioms and named individuals, so its ABox facts never become runtime task facts.
-The next separately authorized geometry capability is rotation and complete
-camera-frame pose estimation, followed by camera-to-robot transformation and
-Phase 4.3 assessment.
+The next separately authorized grounding capability is Phase 4.3 assessment.
 Production use also requires an authoritative schema-only TBox;
 the mixed and minimal fixtures remain test-only.
 Controlled tests of retrieval and observation capture do not constitute
 document-diagram understanding, metric grounding, Gazebo task execution, or
 physical execution.
+
+The target architecture uses the planned contracts `ContextNeed`,
+`GroundingProducerDescriptor`, `TypedContextBinding`, `ProductContextView`,
+`TaskTransitionDraft`, `TaskTransitionContract`, `CompositionContextBundle`,
+`PrimitiveProgramDraft`, and `MissingContextBatch`. These names define future
+boundaries in this roadmap; they are not current runtime schemas.
 
 ## ICRA implementation scope
 
@@ -65,11 +75,18 @@ grounded task transition for which the selected RA has no matching
 predefined composite function, or selected recovery event with the same gap
         + required outcome and grounded context refs
         + fresh selected-RA state
-        + a primitive-only catalog of exactly eight resource-owned
-          semantic primitive interfaces
+        + the complete selected-RA-authoritative primitive-only catalog
+          of semantic executable interfaces
         + partial local executable contracts and validator endpoints
         ↓
-RA LLM authors one complete candidate primitive_steps program
+RA LLM authors a structural PrimitiveProgramDraft
+        ↓
+binding preflight resolves RA-owned inputs locally
+        + batches product/scene ContextNeeds to PA when required
+        ↓
+PA returns a versioned CompositionContextBundle
+        ↓
+RA LLM authors one fully bound candidate primitive_steps program
         ↓
 non-mutating contract, backward, forward, physical, and outcome validation
         ↓
@@ -88,7 +105,7 @@ as shortcuts in an evaluated composition.
 The earlier RCIM workflow plans with and assigns predefined composite functions.
 Spec2Primitives begins at the unresolved next layer: inherited allocation has
 selected an RA, but that RA has no matching predefined composite function and
-exposes only the exact eight execution primitives. The accepted
+exposes only its complete current primitive-only catalog. The accepted
 `primitive_steps` is a newly authored task-specific composite program for the
 current interaction. Requirement interpretation, document retrieval, capability
 matching, and resource assignment remain inherited or supporting mechanisms,
@@ -104,7 +121,7 @@ execution evidence described in Phases 8 and 9.
 Each primitive interface exposes its exact symbol, an operation description,
 accepted parameter names and types, callable resource-owned validators or
 executor, and direct returned evidence or guaranteed local result where one is
-truthful. The eight interfaces do not collectively supply a complete symbolic
+truthful. The catalog interfaces do not collectively supply a complete symbolic
 state vocabulary, task-specific goal decomposition, global transition model,
 complete action preconditions and effects, primitive order, or a rule mapping a
 product outcome to an expected primitive sequence. They are executable
@@ -129,9 +146,11 @@ The ICRA implementation uses one composition core for two task origins:
   to the same task-transition contract without supplying a primitive
   decomposition.
 
-Both cases must use the same RA composition entrypoint, exact eight primitive
-symbols, prompt policy, context-request protocol, candidate schema, validator
-sequence, revision loop, and execution boundary. A stored nominal program,
+Both cases must use the same RA composition entrypoint, catalog contract,
+prompt policy, context-request protocol, candidate schema, validator sequence,
+revision loop, and execution boundary. The catalog symbols and cardinality may
+vary by selected RA and version, but each attempt pins the complete exact
+snapshot and fingerprint. A stored nominal program,
 product-specific macro, `robot_task_program`, capability decomposition, or
 preauthored recovery primitive sequence is a modeled baseline and cannot count
 as dynamic primitive composition.
@@ -152,7 +171,8 @@ The immutable TBox defines generic PPR meaning. PA fills only the
 interaction-specific product, feature, requested-process, and outcome ABox from
 approved evidence. The selected RA supplies a separate resource-catalog ABox
 snapshot in which its resource individual is linked through `capableOf` to the
-exact eight primitive-process interface individuals. Their executable contract
+complete set of primitive-process interface individuals in the pinned catalog.
+Their executable contract
 details and numeric runtime values remain in typed context records.
 
 A Spec2Primitives-owned read-only projection adapter dynamically joins the
@@ -178,123 +198,90 @@ contributions.
 
 ## Shared PA and RA dynamic context-retrieval pattern
 
-PA and RA use the same bounded control pattern but operate over different
-authorities and context:
+The stable mechanism is consumer-driven rather than modality-driven:
 
 ```text
-current objective + currently owned context
+required consumer inputs
+        - valid current authority-owned context
+        = ContextNeeds
         ↓
-identify one concrete missing input
+select one authorized GroundingProducerDescriptor per resolvable output
         ↓
-select one authorized producer and context source
+retrieve or compute auditable evidence through the owning authority
         ↓
-retrieve or compute one auditable result
-        ↓
-validate, persist, and merge only supported information
-        ↓
-reassess the objective
-        ↓
-retrieve again, hand off, return missing_context, or stop fail-closed
+validate, fingerprint, persist, and reassess
 ```
 
-Both loops must preserve the exact request, routed producer, returned refs,
-provenance, failures, freshness, and reassessment result. Neither loop retrieves
-every available source by default, repeats a failed request without new
-justification, treats turn-limit exhaustion as completion, or asks the LLM to
-self-certify sufficiency.
+The TBox defines legal PPR meaning but cannot decide operational completeness or
+which sensor, document, CAD, or calibration source to use. The planned
+`ProductContextView` combines the current PA ABox with validated
+`TypedContextBinding` summaries, uncertainty, unresolved needs, attempted
+evidence, status, frames, freshness, hashes, and provenance. A
+`GroundingProducerDescriptor` advertises which semantic or typed outputs one
+controlled producer can establish and which authorized evidence dependencies it
+uses. This registry is application configuration, not an ontology predicate,
+task recipe, or model-authored route.
 
 PA owns product-intent and scene grounding:
 
-- PA starts from the exact requirement, current interaction ABox, typed product
-  context, unresolved claims, and approved evidence types.
-- PA may request one approved document or CAD ref, or one fresh permitted RGB-D
-  observation, then invoke only the matching controlled interpretation or
-  grounding tool.
+- Before allocation, PA evolves a `TaskTransitionDraft`. It dynamically selects
+  only the approved evidence needed to resolve currently blocking product,
+  process, feature, outcome, constraint, or task-binding needs.
+- Existing Phase 3.2 document, CAD, and observation retrieval remains exactly
+  one source per operation. This is an internal audit boundary, not a required
+  modality order or cross-agent message limit.
 - PA merges only evidence-backed product facts and retains numeric poses,
-  calibration, tolerances, and observations in typed context records.
-- PA hands off when no currently identified product-level ambiguity blocks a
-  robot-independent task-transition contract. This does not imply that RA has
-  enough resource context or that a primitive program is feasible.
+  calibration, tolerances, and observations in typed records.
+- `context understanding complete` means every currently blocking PA-owned need
+  referenced by the draft is satisfied for Phase 5. It does not mean every
+  later primitive input exists.
 - PA never retrieves the primitive catalog, robot state, IK, collision,
   trajectory, or execution evidence and never authors `primitive_steps`.
 
 RA owns embodiment grounding and composition readiness:
 
-- RA begins by retrieving a read-only task-relevant ontology projection, one
-  fresh selected-resource snapshot, and the complete catalog snapshot for the
-  exact eight semantic primitive interfaces. The projection includes the
-  current requested process and grounded outcome, relevant product and feature
-  assertions, the selected resource, and all eight `capableOf` primitive-process
-  offerings. It contains no task-to-primitive mapping or expected order.
-- The complete catalog is the allowed synthesis surface, so all eight offerings
-  are retrieved rather than selecting only primitives that would reveal an
-  expected solution. Their semantic interface cards accompany the ontology
-  projection because a primitive name or class assertion alone is not enough
-  for reliable composition.
-- RA then derives further needs from unbound candidate parameters, stale state,
-  primitive-interface requirements, or validator findings. It may retrieve or
-  compute only resource-owned state, target-generation, IK, collision, grasp,
-  release, trajectory, operational, and execution context.
-- A product or scene binding gap is returned to PA as structured
-  `missing_context`; RA does not reinterpret raw documents, CAD, RGB, or depth.
-  PA returns a versioned grounded update, after which RA refreshes affected
-  resource context and authors a new complete candidate.
+- RA retrieves a read-only task/resource projection, a fresh selected-resource
+  snapshot, and the complete current selected-RA-authoritative primitive-only
+  catalog. Every offering in the pinned snapshot and its exact symbol is
+  included, regardless of runtime cardinality; no task-filtered subset reveals
+  an expected solution.
+- RA LLM authors a structural `PrimitiveProgramDraft`. A deterministic binding
+  preflight inspects that draft and the primitive-interface contracts to gather
+  every currently unbound input without selecting, inserting, reordering,
+  parameterizing, or repairing a step.
+- Robot state, resource limits, IK, collision, grasp, release, trajectory,
+  operational, and execution gaps remain RA-owned. Product or scene gaps are
+  deduplicated by semantic need plus frame and freshness into one
+  `MissingContextBatch` for that round.
+- PA may resolve one batch through several internal single-source operations,
+  then returns one new versioned `CompositionContextBundle`. RA refreshes
+  affected local context and alone authors the next structural draft or fully
+  bound candidate.
 - RA is composition-ready only when every parameter is bound to an authorized
   value or context ref and one unchanged candidate passes every applicable
-  local-contract, physical, and projected-outcome validator. Execution outcome
-  still requires post-action observation.
-- RA never mutates the ABox, asks the user directly, invents a pose or state, or
-  treats its own final-state statement as evidence.
+  local-contract, physical, and projected-outcome validator.
 
-The commonality is therefore the retrieve → validate → persist → reassess loop,
-not shared data access. PA determines whether the product task is grounded; RA
-determines whether a candidate program is bound and executable under fresh
-resource conditions.
+There is no fixed semantic PA/RA batch-round count. Another round is permitted
+only when the prior round adds accepted context, reclassifies or resolves a
+need, or leads RA to author a structurally different draft. An identical request
+against unchanged inputs, an unsupported need, ambiguous or unavailable
+evidence, a repeated failed route, or no new accepted binding is `no_progress`
+and stops fail-closed. Operational cancellation, deadlines, and tool budgets
+remain valid failure boundaries; their exhaustion never implies readiness.
 
-### Semantic-need to evidence-source resolution
+Primitive interfaces and task drafts request grounded outputs such as an
+authorized product binding, pose-record ref, target ref, or constraint record;
+they never request raw PDF, STL, RGB, depth, or calibration payloads from RA.
+The controlled PA producer may use those permitted sources. The exact CAD is
+caller- or corpus-authorized rather than inventory-searched, and calibration is
+injected by an approved environmental authority and matched by frame and time.
+If no authorized producer advertises a missing output, the system stops instead
+of asking the ontology or LLM to invent a source.
 
-Primitive interfaces must require grounded semantic inputs, not raw evidence
-modalities. For example, an interface may need an authorized product binding,
-pose-record ref, target ref, or constraint record; it must not directly require
-"a PDF," "an STL," or "RGB-D." The controlled PA tools consume those raw
-sources to produce the grounded inputs.
-
-Resolve context dynamically with this dependency chain:
-
-```text
-task or candidate exposes one missing typed input
-        ↓
-check whether the current ABox or typed context already supports it
-        ↓ missing
-select one approved evidence type and its application-owned producer route
-        ↓
-resolve only the selected exact approved evidence ref
-        ↓
-retrieve the approved document or CAD, or capture fresh RGB-D and calibration
-        ↓
-run the producer, validate and persist its result, then reassess
-```
-
-The evidence-type-to-producer route is ordinary application configuration, not
-an ontology predicate or model output. PPR facts are matched through the
-ontology. Poses, calibration, CAD correspondence, and other geometry values may
-remain in typed context records when the loaded TBox does not provide
-vocabulary for them.
-
-This design never declares all document, STL, RGB, depth, and calibration inputs
-mandatory. Documentation is retrieved only when a missing process, product,
-feature, outcome, or constraint relation can be produced from it. CAD and fresh
-RGB-D are retrieved only when a missing observation, identity correspondence,
-pose, grasp, target, or related typed binding requires that grounding producer.
-If no authorized producer advertises the missing input, stop fail-closed rather
-than asking the ontology or LLM to invent a source.
-
-OWL inference supplies type and relation semantics but follows open-world
-semantics, so absence of a fact alone is not a completeness result. A small
-SHACL or equivalent boundary check may report a currently required grounded
-fact as missing only after that need is identified from the task or primitive
-interface. It must not be a static shape that hard-codes every modality or an
-expected primitive recipe. Adding pySHACL remains separately authorized.
+OWL inference remains open-world. A small SHACL or equivalent boundary check may
+flag an already identified required fact as missing, but it must not encode a
+static all-modality checklist or expected primitive sequence. Adding pySHACL
+remains separately authorized.
 
 ## Requirement-to-action workflow
 
@@ -306,29 +293,37 @@ exact product_requirement
         ↓
 Phase 4.0 loads the fixed TBox and initializes one interaction ABox
         ↓
-PA identifies one unresolved product or scene need
+PA evolves a TaskTransitionDraft over the current ProductContextView
         ↓
-PA retrieves one approved source and invokes its matching controlled tool
+PA resolves currently blocking ContextNeeds through output-capable producers
         ↓
 PA validates and persists evidence-backed facts, then reassesses
-        ↺ retrieve another relevant source only when the updated context requires it
+        ↺ each producer retrieval remains one auditable source operation
         ↓
-PA projects a versioned robot-independent task-transition contract
+PA projects a robot-independent TaskTransitionContract
         ↓
 inherited allocation supplies one selected resource_jid; PA unicasts the contract
         ↓
 selected RA retrieves a task-relevant ontology projection, fresh state,
-and the complete exact-eight interface catalog
+and the complete current primitive-only catalog snapshot
         ↓
-RA dynamically retrieves any additional selected-resource context it identifies
+RA LLM authors a structural PrimitiveProgramDraft
         ↓
-RA LLM authors one complete candidate primitive_steps program
+binding preflight gathers every currently unbound input
+        ├── RA-owned gaps resolve locally
+        └── product/scene gaps form one MissingContextBatch
+                                      ↓
+                         PA runs required controlled producers
+                                      ↓
+                         versioned CompositionContextBundle
+        ↓
+RA LLM authors a fully bound primitive_steps candidate
         ↓
 non-mutating declared-contract, resource, physical, and outcome checks
-   ↙ product/scene gap       ↓ robot-local finding         ↘ accepted unchanged
-PA grounds a versioned    RA retrieves/reasons and          fresh-state recheck
-task update; RA authors   authors a new candidate                    ↓
-a new candidate                     ↺                            RA execution
+   ↙ new product/scene gap   ↓ robot-local finding         ↘ accepted unchanged
+new batched PA round only  RA retrieves/reasons and          fresh-state recheck
+after measurable progress authors a new candidate                    ↓
+        └──────────────────────────↺                            RA execution
                                                                      ↓
                                               observation-backed realized outcome
 ```
@@ -344,10 +339,10 @@ recovery framework supplies a newly validated event.
 At no point does PA retrieve every modality by default or RA retrieve every
 resource record by default. PA chooses relevant product evidence from the
 evolving ABox. RA's bounded task-relevant ontology projection, fresh state, and
-complete exact-eight interface catalog are mandatory initial prerequisites;
-every later RA retrieval is selected from the current candidate need or
-validator finding. Validators and ontology reasoning never create a primitive
-step.
+complete current primitive-only catalog snapshot are mandatory initial
+prerequisites. Every later RA retrieval is selected from the current candidate
+need or validator finding. Validators and ontology reasoning never create a
+primitive step.
 
 ## Directory architecture
 
@@ -564,16 +559,17 @@ Phase 3.2, and the contract-first Phase 3.3 ontology integration are
 implemented. Real Phase 4 producers, Phase 3.4, and Phase 3.5 are not
 implemented.
 
-In the target runtime, Phase 3 retrieval and Phase 4 grounding form one loop.
-Phase 4.0 loads the fixed TBox and initializes the interaction ABox immediately
-after requirement intake. Phase 3.1 bootstraps the first source decision. For
-each later cycle, Phase 4.3 returns the next `needed_context` decision from the
-updated ABox; Phase 3.3 validates and routes it, Phase 3.2 serves that source,
-the matching controlled Phase 4 tool interprets it, and a validated
-evidence-backed triple delta updates the ABox. One source per operation is an
-audit boundary, not a one-source limit for the interaction; source count and
-order are determined at runtime, and PA does not retrieve every approved source
-blindly.
+In the target runtime, Phase 3 retrieval and Phase 4 grounding support PA while
+it evolves a `TaskTransitionDraft`. Phase 4.0 loads the fixed TBox and
+initializes the interaction ABox immediately after requirement intake. PA
+computes the currently blocking task-level `ContextNeed` values from the
+consumer inputs required by that draft minus valid current `ProductContextView`
+bindings. A `GroundingProducerDescriptor` maps each need to an authorized
+producer, which may select approved document, exact approved CAD, RGB-D,
+calibration, or an existing record. Phase 3.2 still serves only one source per
+producer operation so each result is auditable. That internal boundary is not a
+one-source or fixed-order limit for the interaction, and it is distinct from the
+later batched PA-to-RA exchange.
 
 PA asks for clarification only after relevant permitted evidence and matching
 controlled tools cannot resolve the remaining user-intent question. PA treats
@@ -852,9 +848,13 @@ accepted delta.
   `observed_feature_1`, an expected CAD match, a pose-record path, or a
   product-specific completion template. A failed or uncertain match produces no
   factual assertion and remains unresolved.
-- Keep one small application-owned map from `document`, `CAD`, and `observation`
-  to fixed producer identifiers. This map is runtime routing only; it is not
-  part of the TBox, the ABox, or the PA decision schema.
+- Preserve the implemented small application-owned map from `document`, `CAD`,
+  and `observation` to fixed producer identifiers as the current diagnostic
+  routing boundary. The planned production revision replaces this evidence-type
+  decision surface with `GroundingProducerDescriptor` records that advertise
+  the semantic or typed outputs each authorized producer can establish. Neither
+  representation is part of the TBox or ABox: the TBox defines valid meaning,
+  not which sensor, document, or producer PA must use.
 - Use the PPR `product`, `feature`, `process`, `resource`, and `capability` types
   as the common vocabulary for the future PA-to-RA handoff and typed primitive
   input bindings. The TBox constrains meaning and vocabulary; it does not
@@ -1031,9 +1031,52 @@ accepted delta.
   installed as a complete Phase 3 producer and cannot authorize context
   completion, assembly readiness, planning, or execution.
 
-#### Remaining Phase 4.2B2 and later grounding work - not implemented
+#### Simple generalized camera-frame pose estimation - implemented supporting infrastructure
 
-- Keep later rotation, complete pose estimation, and transforms under
+- `pose_estimation.py` consumes one intact `CADSizeCorrespondenceRecord` and
+  revalidates its complete CAD, segmentation, point-cloud, label-mask, and hash
+  chain before estimating anything.
+- Consider only size-plausible loose `source` candidates. Deterministically
+  sample the exact approved CAD, create 24 principal-axis orientation
+  hypotheses, and refine each with trimmed point-to-point ICP using the existing
+  NumPy and SciPy dependencies.
+- Rank registration fitness and inlier error. Accept a pose only when one
+  candidate and rotation is clear, retain materially different qualified
+  hypotheses as `ambiguous`, and reject weak or absent fits.
+- Persist one exclusive atomic `CADPoseEstimationRecord` containing complete
+  upstream provenance, fixed parameters, ranked and qualified hypotheses, and,
+  only for an accepted pose, translation, rotation matrix, quaternion, and the
+  camera-from-CAD transform.
+- Keep output in the selected camera optical frame. It is not a robot-frame
+  pose or pick point and does not establish `target_feature`, target pose,
+  insertion axis, tolerances, assembly readiness, or context completion.
+- The UI remains status-only. It can display only the compact pose state and
+  exposes no CAD selector, coordinates, rotation, score, threshold, mask, or
+  processing control.
+- This simple generalized pose estimator is supporting infrastructure, not the
+  research contribution. It never reads simulator identity, configured pose,
+  detector response, or evaluator data.
+
+#### Simple camera-to-robot frame conversion - implemented supporting infrastructure
+
+- `frame_conversion.py` records one caller-approved camera-to-robot rigid
+  transform with exact frames, validity window, source provenance, and a
+  deterministic payload hash. No transform value is derived from simulator
+  identity, world contents, or configured spawn pose.
+- Revalidate the complete camera-pose hash chain and use the originating
+  observation timestamp to check calibration validity. Require the calibration
+  source frame and exact caller-requested target frame to match.
+- Compose `robot_from_CAD = robot_from_camera × camera_from_CAD` and persist one
+  exclusive atomic `RobotFramePoseRecord` with translation, rotation matrix,
+  quaternion, transform, and complete input hashes only for an accepted pose.
+- Propagate `ambiguous` and `rejected` pose states without robot-frame
+  coordinates. The diagnostic and UI expose only compact conversion status.
+- This standard frame conversion is supporting infrastructure, not the research
+  contribution. It does not select a robot, contact RA, plan, or execute.
+
+#### Later Phase 4.2 grounding work - not implemented
+
+- Keep later cross-camera transforms under
   `tools/rgb_d_cad_grounding/`.
 - Register the tool under the application-owned `CAD` and `observation` producer
   routes. For the currently served approved evidence, dynamically detect zero or more
@@ -1063,20 +1106,24 @@ accepted delta.
 
 ### Phase 4.3: post-understanding decision
 
-- Assess the current interaction ABox, typed context records, unresolved
-  assertions, evidence status, and approved evidence-type routes
-  against the exact `product_requirement`. Phase 4.1 and Phase 4.2 may each run
-  zero or more times; neither modality is mandatory by itself.
-- Resolve a missing semantic fact or typed binding by selecting one relevant
-  approved source and dispatching its application-owned producer route. Do not
-  infer that the primitive itself consumes a PDF, STL, RGB, depth, or
-  calibration payload, and do not retrieve a modality merely because it is
-  available.
-- Derive the next unresolved semantic need from the current goal and ABox, then
-  select one relevant producer and permitted source. Process sources dynamically
-  until every retrieved source has been interpreted, every accepted delta has
-  been merged, and no relevant evidence request is outstanding. Do not require
-  corpus exhaustion.
+This production assessor and its `TaskTransitionDraft`/`ContextNeed` contract
+are planned and not implemented. The current production path still stops at
+`grounding_unavailable`.
+
+- Assess the evolving `TaskTransitionDraft`, current interaction ABox,
+  `ProductContextView`, unresolved assertions, evidence status, and authorized
+  `GroundingProducerDescriptor` records against the exact
+  `product_requirement`. Phase 4.1 and Phase 4.2 may each run zero or more
+  times; neither modality is mandatory by itself.
+- Compute task-level `ContextNeed` values as required draft-consumer inputs
+  minus valid current `TypedContextBinding` values. Resolve only the currently
+  blocking needs by selecting descriptors whose declared outputs and evidence
+  policy match. Do not retrieve a modality merely because it is available.
+- Run each selected producer as one internally auditable source operation,
+  validate and merge its result, update the `ProductContextView`, and reassess.
+  PA may dynamically select approved document, exact approved CAD, RGB-D,
+  calibration, or an existing record; it does not exhaust the corpus or follow
+  a hard-coded evidence sequence.
 - Assess PA handoff readiness only when no currently identified blocking
   product-level ambiguity remains. Enter clarification only when the remaining
   unresolved value is user intent; do not claim that PA handoff readiness proves
@@ -1105,7 +1152,10 @@ accepted delta.
 
 This phase requires a separate implementation request.
 
-- Have PA convert the grounded product requirement into an assembly plan.
+- Have PA evolve the grounded product requirement into a
+  `TaskTransitionDraft`, resolve only its currently blocking task-level
+  `ContextNeed` values, and accept it as a `TaskTransitionContract` for the
+  inherited allocator.
 - Show PA building the assembly plan from grounded evidence in the PA card and
   ordered interaction record.
 - Treat each nominal assembly-plan entry as a robot-independent task-transition
@@ -1126,15 +1176,20 @@ This phase requires a separate implementation request.
   add a relation from that high-level process to an expected primitive set.
 - Keep the assembly plan separate from robot-specific `primitive_steps`. Do not
   have PA author, prescribe, or complete `primitive_steps`.
+- Interpret `context understanding complete` narrowly: the currently blocking
+  task-level inputs required to produce the Phase 5 contract are valid. Later
+  primitive contracts may expose additional runtime inputs after allocation;
+  Phase 5 need not predict or eagerly retrieve them.
 - Do not express the plan as calls to the prior predefined composite functions
   `move_to_pick_location`, `pick_part`, `move_loaded_to_destination`, or
   `place_part`, or to an equivalent product-specific callable. PA specifies the
   required robot-independent transition; it does not select a function whose
   internal primitive program already solves that transition.
-- Version the grounded assembly contract and plan. When RA-triggered
-  `missing_context` adds product or scene knowledge, revalidate the plan before
-  the next RA update; revise it when the new fact changes product-level steps,
-  or explicitly preserve it when the update only supplies a missing binding.
+- Version the grounded assembly contract and plan. When an RA-triggered
+  `MissingContextBatch` adds product or scene knowledge, return a versioned
+  `CompositionContextBundle`, revalidate the plan before the next RA update,
+  revise it when a new fact changes product-level steps, or explicitly preserve
+  it when the update only supplies missing bindings.
 
 ## Phase 6: PA-to-RA communication
 
@@ -1167,9 +1222,10 @@ This phase requires a separate implementation request.
   `move_to_pick_location`, `pick_part`, `move_loaded_to_destination`, or
   `place_part` for the required transition. Those functions belong to the
   prior-work planning abstraction and are unavailable to the composer.
-- Make the exchange bidirectional. Let RA return a structured `missing_context`
-  result containing the unbound semantic input, owning authority, primitive or
-  validation reason, and supporting record refs.
+- Make the exchange bidirectional. Let RA return one deduplicated
+  `MissingContextBatch` containing all currently known unbound product or scene
+  inputs, their owning authority, primitive or validation reasons, consumer
+  contracts, and supporting record refs.
 - Route only product or scene knowledge gaps back to PA. For a nominal task, PA
   resumes the same interaction ABox and Phase 3.3/Phase 4 loop, then Phase 5
   revalidates or revises the task contract. For a recovery task, preserve a
@@ -1178,8 +1234,15 @@ This phase requires a separate implementation request.
   `resource_jid`, stop that transfer attempt fail-closed. The inherited framework
   may produce a newly validated event outside Spec2Primitives and import it as a
   new transfer input; the adapter never invokes the recovery selector.
-  Robot state, capability, primitive-catalog, IK, collision, and trajectory gaps
-  remain RA-owned.
+  PA resolves the batch through controlled producers and returns one versioned
+  `CompositionContextBundle` of `TypedContextBinding` values. Robot state,
+  capability, primitive-catalog, IK, collision, and trajectory gaps remain
+  RA-owned and are resolved locally without a PA round trip.
+- Permit another batched exchange only when binding or validation exposes new
+  needs and the prior round made measurable progress. There is no fixed semantic
+  round count. Reject replayed or repeated needs, stale versions, unavailable
+  producers, ambiguity, or a round that adds no valid binding, and terminate
+  fail-closed. Operational deadlines and cancellation remain allowed.
 - Keep upstream recovery-event feasibility records distinct from downstream
   primitive-program validation. Importing the selected recovery event does not
   make recovery event generation, selection, allocation, DES reasoning, or
@@ -1194,10 +1257,11 @@ This phase requires a separate implementation request.
 
 This phase requires a separate implementation request.
 
-- Retrieve fresh state from the selected RA and its resource-owned composition
-  catalog containing exactly the eight user-defined primitive symbols. Reject a
-  missing, extra, renamed, or substituted primitive instead of adapting the
-  catalog silently.
+- Retrieve fresh state from the selected RA and the complete
+  selected-RA-authoritative primitive-only catalog. Catalog cardinality is
+  runtime-determined. Preserve every exact symbol and pin the catalog version,
+  fingerprint, and reported cardinality for the composition attempt; never
+  normalize, rename, replace, or silently supplement an entry.
 - Require the composition catalog to be primitive-only. Reject a predefined
   composite function, product-specific macro, stored primitive program, or
   callable wrapper that already fixes primitive selection or order. In
@@ -1215,10 +1279,10 @@ This phase requires a separate implementation request.
   availability relation. PA must not author these assertions.
 - Use a Spec2Primitives-owned read-only projection adapter to retrieve the
   current task process and grounded outcome, relevant product and feature
-  individuals from the versioned PA ABox, the selected resource, and all eight
-  of its primitive-process interface individuals from the resource-catalog
-  ABox. Include authorized typed context refs and evidence provenance. Persist
-  the exact projection and both source fingerprints for every RA turn.
+  individuals from the versioned PA ABox, the selected resource, and every
+  primitive-process interface individual in the pinned resource-catalog ABox
+  snapshot. Include authorized typed context refs and evidence provenance.
+  Persist the exact projection and both source fingerprints for every RA turn.
 - Explicitly reject any projection containing a task-to-primitive `requires` or
   `precedes` recipe, an assertion that the selected resource is directly
   `capableOf` the requested high-level assembly process, or another relation
@@ -1231,58 +1295,62 @@ This phase requires a separate implementation request.
   evaluator endpoints, and only the resource-local state conditions or effects
   that are explicitly modeled. An omitted condition or effect is unmodeled; RA
   and the validators must not infer that it is satisfied.
-- Treat the fresh snapshot and complete exact-eight catalog as mandatory initial
-  RA context, not as a complete PDDL domain. Supply no task-specific domain or
+- Treat the fresh snapshot and complete current catalog as mandatory initial RA
+  context, not as a complete PDDL domain. Supply no task-specific domain or
   problem file, exhaustive action model, closed-world state, expected sequence,
   or mapping from the requested outcome to a primitive decomposition.
 - Show RA building context from the retrieved `context ref` in the RA card and
   ordered interaction record.
 - Give the selected RA LLM the versioned composition-task envelope, required
-  outcome, fresh initial state, exact eight semantic primitive interfaces and
-  partial local executable contracts, the read-only task-relevant ontology
+  outcome, fresh initial state, complete current semantic primitive interfaces
+  and partial local executable contracts, the read-only task-relevant ontology
   projection, relevant typed context refs, resource limits, and any findings
   from the previous candidate. Do not give it hidden expected answers or a
   completed decomposition. The ontology projection supplies shared meaning;
   the semantic interface cards supply callable behavior details that a process
   class or primitive name alone cannot provide.
-- After loading the three mandatory prerequisites, use the same demand-driven
-  control pattern as PA. Each RA turn either authors one complete candidate,
-  identifies one exact selected-resource `needed_context`, returns one
-  cross-authority `missing_context`, or returns bounded `cannot_compose`. Serve
-  and persist one requested result, then reassess before another request. Do not
-  preload all RA records or follow a fixed resource-context retrieval order.
+- After loading the mandatory prerequisites, have the selected RA author a
+  structural `PrimitiveProgramDraft` using only the pinned catalog. A binding
+  preflight compares the draft's declared consumer inputs with fresh valid
+  context, gathers all currently visible gaps, and partitions them by authority.
+  It may identify missing inputs, but it must not select, add, remove, reorder,
+  parameterize, or repair primitive steps.
 - Let an unbound input on a primitive interface or candidate identify the
   semantic need, not the evidence modality. For a product or scene input, RA
   returns that exact typed need to PA; PA selects the matching controlled
   producer and its approved evidence. RA must not request a raw PDF, STL, RGB,
   depth, or calibration payload directly.
-- Have the RA LLM author one complete candidate `primitive_steps` program by
-  selecting, ordering, parameterizing, and binding only those eight primitives.
-  This agentic step is the composer. No deterministic composer, backward or
-  forward search, validator, stored recipe, product-specific macro, or
-  capability decomposition may create or complete the candidate.
+- Have the RA LLM author the structural draft and later the fully bound
+  `primitive_steps` candidate by selecting, ordering, parameterizing, and
+  binding only symbols in the pinned catalog. This agentic step is the composer.
+  No binder, deterministic composer, backward or forward search, validator,
+  stored recipe, product-specific macro, or capability decomposition may create
+  or complete the candidate.
 - Use the dynamically retrieved PPR projection only as semantic and binding
   context, then use the primitive contracts plus typed context refs to bind
   runtime inputs. Treat any missing required binding as
   composition-not-ready context instead of inventing a value or claiming
   execution readiness. The RA LLM may reason over the projection, but neither
   OWL inference nor the projection adapter may author `primitive_steps`.
-- Have RA perform the binding. If a primitive contract exposes a missing
-  product or scene input, RA sends `missing_context` to PA; PA grounds additional
-  knowledge through controlled evidence tools. RA recomposes or retries binding
-  only after the task-origin-specific upstream authority returns the versioned
-  assertion, typed context refs, and task update. PA does not bind robot
-  primitive parameters.
-- If the missing input is RA-owned, retrieve or validate it inside the RA loop
-  without routing raw robot state through PA.
+- Have RA perform the binding. Resolve RA-owned inputs from fresh local state.
+  Collect all currently known product or scene gaps into one stable,
+  deduplicated `MissingContextBatch`; PA runs the required controlled producers
+  and returns a versioned, fingerprinted `CompositionContextBundle`. RA retries
+  binding only after validating the bundle, assertion versions, typed context
+  refs, and task update. PA does not bind robot primitive parameters.
+- Repeat the batched round only when a new need appears and the previous round
+  made progress. Stop fail-closed on ambiguity, repeated requests, replayed or
+  stale bundles, unavailable producers, a changed catalog fingerprint, or no
+  new valid binding. No fixed semantic round count is part of the contract.
 - Feed nominal and recovery envelopes through the exact same composition
   entrypoint and prompt policy. `task_origin` is audit and upstream-routing
   metadata; it must not select a recovery-specific composer or recipe.
 - Allow the RA to return a bounded, structured failure when it cannot produce a
   candidate. Agentic generation is not assumed to be correct or complete on the
   first attempt, and an unvalidated candidate must never proceed to execution.
-- Preserve every retrieved `context ref`, candidate `primitive_steps`, and
-  revision, every `missing_context` exchange, and every ABox update in the
+- Preserve every retrieved `context ref`, catalog snapshot,
+  `PrimitiveProgramDraft`, `MissingContextBatch`, `CompositionContextBundle`,
+  fully bound candidate, revision, progress decision, and ABox update in the
   active interaction under `contexts/`.
 
 ## Phase 8: RA validation and revision
@@ -1329,9 +1397,10 @@ Validate each candidate without mutating it through five stages:
   non-mutation is auditable. No validator may propose, add, remove, reorder,
   parameterize, or repair a primitive.
 - Return concrete categorized findings to RA when a candidate is rejected. A
-  newly exposed product or scene binding gap may use the Phase 6 RA-to-PA
-  `missing_context` path; other failures remain RA-local revision evidence. The
-  RA LLM, and only the RA LLM, authors the next complete candidate.
+  newly exposed product or scene binding gap joins a deduplicated Phase 6
+  `MissingContextBatch`; other failures remain RA-local revision evidence. A
+  binder or validator may report the gap but may never create or repair a step.
+  The RA LLM, and only the RA LLM, authors the next complete candidate.
 - Accept only the unchanged candidate that passes every applicable check. Stop
   fail-closed when the bounded revision budget is exhausted.
 - Show validation results and revisions in the RA card and ordered interaction
@@ -1341,8 +1410,10 @@ Validate each candidate without mutating it through five stages:
 
 ### Phase 7 and Phase 8 verification
 
-- Test that only the exact eight primitive symbols can appear and that no
-  template, decomposition, validator, or fallback code creates candidate steps.
+- Test complete selected-RA-authoritative primitive-only catalogs at multiple
+  cardinalities. Each candidate may use only exact symbols from its pinned
+  per-attempt catalog, and no template, binder, decomposition, validator, or
+  fallback code may create or repair candidate steps.
 - Test that the task envelope, composition prompt, resource-catalog snapshot,
   and execution dispatch contain none of `move_to_pick_location`, `pick_part`,
   `move_loaded_to_destination`, or `place_part`, and contain no equivalent
@@ -1350,25 +1421,28 @@ Validate each candidate without mutating it through five stages:
 - Test admission explicitly: a requirement with an available matching composite
   function is labeled prior-function reuse and is not counted as a
   Spec2Primitives composition; the nominal and recovery study inputs have no
-  such function and expose only the exact eight primitives.
+  such function and expose only their selected RA's complete primitive-only
+  catalog.
 - Test that each catalog item contains its semantic executable interface and
   truthful partial local contract while the combined input contains no PDDL
   domain/problem, exhaustive action model, expected sequence, or task-specific
   primitive decomposition.
 - Test the TBox/ABox split: generic PPR vocabulary remains in the TBox; PA
   evidence creates task/product/outcome individuals only in its interaction
-  ABox; selected-resource and exact-eight primitive offerings appear only in
+  ABox; selected-resource and current primitive offerings appear only in
   the versioned resource-catalog ABox; and RA receives a read-only projection
   without mutating either graph.
 - Verify that the projection includes the high-level requested process and
-  outcome plus all eight available primitive-process interfaces, but contains
+  outcome plus every available primitive-process interface in the pinned
+  snapshot, but contains
   no `requires`, `precedes`, direct high-level `capableOf`, expected sequence,
   or other task-to-primitive decomposition leak.
-- Test the same composition interface, prompt policy, eight-symbol catalog
-  interface, candidate schema, validators, and revision budget with nominal and
-  recovery-origin envelopes. Hold the exact eight primitive symbols and contract
-  schema fixed while preserving each selected RA's truthful resource-owned
-  parameter limits and evaluators.
+- Test the same composition contracts, prompt policy, candidate schema,
+  validators, and revision policy with nominal and recovery-origin envelopes.
+  For equal-input comparisons, pin the same per-case catalog snapshot,
+  fingerprint, cardinality, exact symbols, resource-owned limits, and evaluators.
+  Cross-resource experiments may vary catalog size and symbols and must report
+  those differences rather than treating cardinality as an admission condition.
 - Test rejection of a missing modeled intermediate primitive even when the RA
   output claims the requested final state. Test an equivalent accepted sequence
   whose intermediate preconditions are established in order.
@@ -1380,9 +1454,12 @@ Validate each candidate without mutating it through five stages:
   trajectory, and outcome rejection with categorized findings.
 - Test validator non-mutation with candidate fingerprints and prove that only a
   subsequent RA agentic turn can structurally revise the candidate.
-- Test `missing_context` ownership and task-origin-specific routing without
+- Test `MissingContextBatch` ownership and task-origin-specific routing without
   allowing PA to bind RA primitive parameters or the ontology to decide
   composition readiness.
+- Test stable batch deduplication, multiple productive context rounds, replay
+  rejection, stale bundle and catalog versions, unavailable producers,
+  authority routing, ambiguity, and deterministic no-progress termination.
 - Test the PA and RA retrieval loops with the same retrieve, validate, persist,
   and reassess invariant while enforcing their different authorities. Verify
   that neither follows a fixed all-source order and that exhaustion of a turn or
@@ -1420,10 +1497,13 @@ authorization.
   execution as distinct evidence.
 - Evaluate the primary nominal case from the raw requirement and the recovery
   transfer case from the imported selected recovery event with the same RA
-  composer, exact eight primitive symbols and contract schema, model and prompt
-  policy, validator stack, budgets, and execution boundary. Preserve each
-  selected RA's truthful contract values and evaluators. Recovery-specific
-  information may change the input contract but not the composition mechanism.
+  composer, contract schema, model and prompt policy, validator stack, budgets,
+  and execution boundary. Pin the same catalog snapshot and fingerprint within
+  each equal-input case, and report its exact symbols and cardinality. Catalog
+  size and symbols may vary across selected resources or cross-resource cases.
+  Preserve each selected RA's truthful contract values and evaluators.
+  Recovery-specific information may change the input contract but not the
+  composition mechanism.
 - For each reported composition case, audit and preserve the evidence that no
   matching predefined composite function was available to the selected RA.
   Treat a prior RCIM-style planner over predefined composite functions as a

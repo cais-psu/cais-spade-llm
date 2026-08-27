@@ -17,10 +17,13 @@ and a separate diagnostic ABox. Phase 4.2A adds assertion-free approved-CAD and
 four-camera RGB-D preprocessing. Phase 4.2B1 adds an automatic observation-only
 capture, preprocessing, and minimal segmentation path. Phase 4.2B2A adds strict
 size-only matching against one requested approved CAD and returns a unique
-candidate center in its camera optical frame. The UI remains status-only. Only
+candidate center in its camera optical frame. The remaining simple Phase 4.2B2
+pose increment adds deterministic generalized CAD registration for loose source
+candidates and returns an accepted, ambiguous, or rejected camera-frame pose.
+The UI remains status-only. Only
 persisted Phase 4.3-style assessments can clarify or complete. The main live
-loop fails closed until an authoritative TBox and complete correspondence,
-pose, and Phase 4.3 grounding runtime are configured.
+loop fails closed until an authoritative TBox, registered complete grounding
+producers, and Phase 4.3 grounding runtime are configured.
 
 ## MUST: Do not leak the answer
 
@@ -40,8 +43,10 @@ experiment that violates this boundary is invalid and must not be reported.
 ## Working boundary
 
 All new Spec2Primitives code belongs in this directory. ProductAgent and RobotAgent
-remain shared runtime authorities and will be reached through future adapters
-under `agents/pa/` and `agents/ra/`. They are not copied or modified. The dual
+remain shared runtime authorities and are reached only through package-owned
+adapters under `agents/pa/` and `agents/ra/`. The narrow PA context adapter is
+implemented; the RA adapter and workflow remain future work. Neither shared
+agent is copied or modified. The dual
 Gazebo UI uses a narrow adapter protocol; `SystemBridge` and
 `cais_spade_llm/ui/bridge.py` remain outside the Spec2Primitives package and are not
 modified. Unused shared-agent subsystems are outside the current
@@ -68,12 +73,32 @@ not authorize PA completion. RGB-D capture, preprocessing, and minimal
 segmentation run automatically only when the observation pipeline is invoked.
 The operator card is read-only and displays `idle`, `running`, `ready`, or
 `failed`, source and assembly candidate counts, CAD-correspondence and location
-states, and `pose: not_evaluated`. It has no CAD, coordinate, score, timeout,
-camera-role, threshold, mask, or artifact controls. The production card remains
+states, compact pose state, and robot-frame conversion state. It has no CAD,
+coordinate, score, timeout, camera-role, threshold, mask, or artifact controls.
+The production card remains
 `idle` until an authorized runtime caller invokes the supporting path. CAD
 preprocessing stays separate and size association processes only the exact CAD
-provided by its future caller. No rotation, complete pose, PA integration,
-planning, RA, or robot execution occurs.
+provided by its future caller. A controlled pose caller can update the same card
+with only the compact pose state; coordinates and rotations remain in the typed
+record. A separate controlled caller can inject one approved camera-to-robot
+calibration and persist a robot-frame transform while the card exposes only its
+status. No cross-camera transform, PA integration, planning, RA, or robot
+execution occurs.
+
+## Planned dynamic PA/RA workflow
+
+The target workflow is proposed architecture, not current runtime behavior. PA
+will dynamically ground only the minimum evidence-backed context needed for a
+robot-independent `TaskTransitionContract`. After inherited allocation, the
+selected RA will load its complete current primitive-only catalog, whose
+cardinality is determined at runtime, and author a structural
+`PrimitiveProgramDraft`. Missing robot-owned inputs remain local to RA; missing
+product or scene inputs return to PA in a deduplicated `MissingContextBatch`.
+PA may invoke several auditable single-source producers before returning a
+versioned `CompositionContextBundle`. Batched rounds have no fixed semantic
+count, but repeated, ambiguous, unsupported, or non-progressing requests stop
+fail-closed. Production Phase 4.3, Phase 5, the RA workflow, validation, and
+execution are not implemented.
 
 The dedicated scene uses the actual NIST plate, pin, gear fixture, shaft, and
 gear STL visuals. `Gear_Plate` and three `Gear_Shaft` instances are pre-installed
@@ -104,7 +129,8 @@ insertion-physics, or robot-execution claim.
   distinct here.
 - `evaluations/`: isolated post-prediction evaluation and ground truth.
 - `schemas/`: status and boundaries for current and future data contracts.
-- `tests/fixtures/`: future controlled, repeatable inputs.
+- `tests/fixtures/`: controlled, repeatable test-only inputs, beginning with
+  ontology fixtures.
 - `RESEARCH_POSITIONING.md`: terminology, Manual2Skill comparison, research
   gap, primitive definition, and claim boundaries for the paper.
 

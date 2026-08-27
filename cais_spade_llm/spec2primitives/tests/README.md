@@ -47,12 +47,29 @@ noise, duplicate-size ambiguity, no-match and zero-candidate rejection,
 image-boundary partial visibility, deterministic ranking, record hashes,
 tamper rejection, atomic cleanup, no-overwrite persistence, compact status, and
 the absence of coordinates or controls from the UI surface.
+The simple remaining Phase 4.2B2 pose tests cover known asymmetric camera-frame
+translations and rotations, same-size shape-fit resolution, candidate and
+rotation ambiguity, zero-candidate rejection, complete provenance, tamper
+rejection, deterministic atomic persistence, no-overwrite behavior, compact
+pose status, and the absence of coordinates or transforms from the UI surface.
+Camera-to-robot frame-conversion tests cover rotated-camera composition,
+changing camera-frame poses without code changes, calibration and frame
+validation, observation-time validity, payload and input-hash tampering,
+ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
+no-overwrite behavior, and status-only UI output.
 The PA UI tests cover the turn
 control, live turn counter, compact served-context summaries, full audit
 records, production `grounding_unavailable` state, and rejection of an unbacked
 completion turn.
 
 Later phases will add focused tests for user clarification replies, formal
-handoff, rotation and complete pose estimation, Phase 4.3
-assessment, schemas, later agent adapters, validation feedback, revision
-behavior, and accepted candidate handoff.
+handoff, cross-camera transformation, the production Phase 4.3 assessment and
+producer-descriptor registry, aggregated typed-context bindings, schemas, later
+agent adapters, validation feedback, revision behavior, and accepted candidate
+handoff. Composition coverage will exercise multiple catalog cardinalities
+without an eight-entry invariant, exact symbol membership, pinned catalog and
+bundle fingerprints, ownership routing, draft-derived batch aggregation and
+stable deduplication, replay rejection, stale versions, catalog changes,
+ambiguity, multiple productive PA/RA batch rounds, and fail-closed repeated or
+non-progressing requests. Until those phases are implemented, no test fixture
+or controlled double establishes a production RA composition path.

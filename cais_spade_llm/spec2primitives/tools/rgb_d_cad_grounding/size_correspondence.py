@@ -128,6 +128,7 @@ class _CADInput:
     source_sha256: str
     mesh_ref: str
     mesh_sha256: str
+    triangles_m: np.ndarray
 
 
 def associate_segmented_candidate_by_size(
@@ -288,6 +289,7 @@ def _load_cad_input(interaction_root: Path, record_path: Path) -> _CADInput:
         source_sha256=source_sha256,
         mesh_ref=mesh_ref,
         mesh_sha256=mesh_sha256,
+        triangles_m=triangles_m,
     )
 
 

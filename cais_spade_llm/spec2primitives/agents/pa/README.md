@@ -20,78 +20,79 @@ one evidence-type-routed producer, validate and merge its generic triple delta,
 then persist one Phase 4.3-style assessment over the updated ABox. Raw served
 summaries cannot directly authorize clarification or completion.
 
-## How PA determines needed information
+## Planned production behavior: how PA determines needed information
 
-PA determines a context need by comparing the information required by the next
-consumer with the validated runtime context already accumulated for the exact
-requirement:
+PA does not infer a universal input checklist from the TBox. The TBox defines
+legal meaning, not which document, sensor, CAD, or calibration operation is
+needed. The next consumer declares semantic or typed inputs, and the runtime
+compares them with the validated product context:
 
 ```text
-required information for the current handoff
-    - validated accumulated runtime context
-    = one unresolved information need
+required consumer inputs
+    - valid current ProductContextView
+    = ContextNeeds
 ```
 
-PA cannot determine sufficiency from the requirement alone. Its decision uses:
+Before allocation, the consumer is an evolving `TaskTransitionDraft`. It
+identifies the currently blocking product, process, `target_feature`, outcome,
+constraint, or task binding needed for a robot-independent
+`TaskTransitionContract`. After allocation, the consumer is the selected RA's
+`PrimitiveProgramDraft` and primitive-interface contracts. RA deduplicates the
+product or scene inputs they expose into a `MissingContextBatch`; robot-owned
+state, limits, IK, collision, and trajectory inputs remain local to RA.
 
-- the exact `product_requirement`;
-- the current validated product context and typed context-record refs;
-- the information required by the current handoff, initially the future
-  robot-independent assembly-planning input;
-- attempted evidence, unresolved results, contradictions, and freshness;
-- the currently available approved evidence and controlled tool descriptions;
-- a later downstream `missing_context` response when a consumer exposes a
-  product or scene input that was not previously needed.
+`ProductContextView` will combine the compact ABox with validated
+`TypedContextBinding` entries. Each binding records its subject or task role,
+record type, ref, hash, status, frame, time or validity, producer, and
+provenance. An ambiguous, rejected, stale, wrong-frame, missing, or tampered
+record does not satisfy a `ContextNeed`. Numeric poses, transforms,
+observations, and tolerances remain in typed records rather than being forced
+into the ABox.
 
-PA identifies the missing information before it selects an evidence source. A
-missing meaning, relationship, typed context record, or user intention is
-persisted as one `unresolved_semantic_need` with `kind`, `symbol`, and
-`description`. The source is then selected because it can address that need,
-not because the workflow follows a fixed modality order.
+The application-owned `GroundingProducerDescriptor` registry maps a missing
+semantic or typed output to an authorized controlled producer and its evidence
+dependencies. PDF, CAD, RGB-D, and calibration are producer inputs, not the
+needs exchanged between PA and RA. The exact CAD remains caller- or
+corpus-authorized, and calibration remains injected by an approved
+environmental authority; PA never searches an unrestricted inventory or
+guesses either value.
 
-| Unresolved information | Possible evidence or authority |
+| Stable mechanism | Dynamic interaction values |
 |---|---|
-| Meaning of the requested assembly | Approved document interpretation |
-| Intended receiving feature | Approved document interpretation |
-| Expected component dimensions | Exact approved CAD selected for that component |
-| Current loose-component location | Fresh RGB-D observation |
-| Which observed candidate matches the requested component | Segmented RGB-D candidates plus the exact selected CAD |
-| Robot-frame pick coordinate | Future frame transformation and fresh resource context |
-| Ambiguous user intention | Focused user clarification after permitted evidence is exhausted |
+| Official TBox and exact symbols | Requirement and runtime ABox individuals |
+| `ContextNeed` and `TypedContextBinding` schemas | Currently blocking semantic or typed inputs |
+| Producer capability descriptors and validators | Selected approved evidence and produced refs |
+| Progress and authority rules | Selected RA, frame, catalog, and `primitive_steps` |
 
-This table describes possible resolution paths, not mandatory fields or a
-required retrieval sequence. An interaction may use none, one, or several of
-these paths. PA requests only one source, validates and persists its interpreted
-result, and reassesses before requesting another.
+For `assemble Medium Gear`, PA may first ground the requested process, product,
+and `target_feature` when the evolving task draft identifies those gaps. If the
+task draft requires a current loose-part pose, a typed pose need routes to the
+approved CAD/RGB-D producer using the exact authorized CAD. If no geometry is
+needed for the task-level handoff, PA invokes no geometry producer. After a
+robot frame is selected, RA may expose source pose, target pose, insertion axis,
+or tolerance inputs in one batch. A robot-frame-pose need can then use an
+accepted camera-frame pose plus a valid frame- and time-matched calibration.
+Another task can expose a different set and order without changing orchestration
+code.
 
-For `assemble Medium Gear`, a valid dynamic sequence could be:
+One source per existing Phase 3.2 operation remains an internal audit boundary.
+A single `MissingContextBatch` may therefore cause PA to run several numbered,
+single-source operations before it returns one new versioned
+`CompositionContextBundle`. There is no fixed semantic batch-round count.
+Another round is permitted only after new accepted context, a reclassified
+need, or a structurally different RA draft demonstrates progress. An identical
+request against unchanged context, ambiguity, unsupported output, unavailable
+producer, or no new accepted binding stops fail-closed.
 
-1. Record that the receiving feature or requested assembly meaning is
-   unresolved and request the approved document.
-2. Reassess the updated product context. If the current component location is
-   required for the current handoff, record `current_part_location` as the next
-   unresolved information need and request fresh RGB-D.
-3. If the observation contains several unresolved candidates, request
-   `Gear_Medium.STL` because its geometry can support candidate association.
-4. Persist the accepted, ambiguous, or rejected size-association result and
-   reassess again.
-5. Keep robot-frame location or complete pose unresolved when only a
-   camera-frame center exists. Do not claim completion from that partial result.
+`context understanding complete` means only that every currently blocking
+PA-owned need referenced by the `TaskTransitionDraft` is satisfied for Phase 5.
+It does not mean that every later primitive input is already available.
 
-Another requirement may produce a different order or require neither CAD nor
-RGB-D. PA does not retrieve a source merely because it is available.
-
-PA proposes the unresolved information need and evidence request; the
-controlled Phase 4.3 boundary validates the request, rejects unsupported or
-unjustified duplicate retrieval, and permits clarification or completion only
-from persisted assessment over the updated context. Future consumers may return
-a new `missing_context` need, so a previously sufficient planning handoff does
-not imply that every later primitive input is already available.
-
-The production Phase 4.3 assessor and the Phase 4.2B2A association connection
-are not configured yet. Current controlled tests inject assessment and
-grounding doubles; the live UI therefore remains fail-closed instead of making
-these decisions from raw retrieved summaries.
+This production mechanism is not implemented. The current Phase 4.3 assessor,
+typed-context index, producer-descriptor registry, complete document/scene/pose/
+frame producer chain, Phase 5 handoff, and downstream batch-resumption path are
+absent. Controlled tests inject assessment and grounding doubles, so the live UI
+remains fail-closed rather than making these decisions from raw summaries.
 
 `product_agent_runtime.py` composes one shared ProductAgent behind the narrow
 `ProductAgentContextRuntime` interface used by the Phase 2.1 UI connection. It

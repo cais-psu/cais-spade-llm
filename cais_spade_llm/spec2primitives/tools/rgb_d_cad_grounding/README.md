@@ -1,4 +1,4 @@
-# Phase 4.2A preprocessing through Phase 4.2B2A size association
+# Phase 4.2 preprocessing through simple camera-to-robot frame conversion
 
 `gazebo_observation_provider.py` implements the Phase 1.2 demand-driven live
 capture boundary. `capture_gazebo_observation(...)` creates request-owned ROS2
@@ -47,6 +47,37 @@ Rotation, complete pose, cross-camera fusion, and robot-frame conversion remain
 `not_evaluated`. The tool never searches the CAD inventory or loads more than
 the exact CAD record supplied by its caller.
 
+`pose_estimation.py` consumes one intact `CADSizeCorrespondenceRecord`,
+revalidates its complete CAD, segmentation, point-cloud, mask, and hash chain,
+and considers only size-plausible loose `source` candidates. It deterministically
+samples the CAD surface, creates 24 principal-axis orientation hypotheses, and
+refines each with trimmed point-to-point ICP using NumPy and SciPy. A clear fit
+persists translation, rotation matrix, quaternion, and the complete
+camera-from-CAD transform; competing candidates or rotations remain
+`ambiguous`, and weak fits are `rejected`.
+
+Each successful call atomically persists one `CADPoseEstimationRecord` with the
+exact source-correspondence hash, complete upstream provenance, fixed
+parameters, all ranked and qualified hypotheses, and any selected camera
+optical frame. The result is not a robot-frame pose or pick point. It does not
+search the CAD inventory, use a learned detector, or read simulator identity,
+configured pose, detector response, or evaluator data.
+
+`frame_conversion.py` atomically records one injected
+`CameraToRobotCalibrationRecord` with exact source and target frames, validity,
+approved-source provenance, derived rotation representations, and a
+deterministic payload hash. It then revalidates the camera-pose provenance,
+checks the calibration at the originating observation timestamp, requires an
+exact caller-requested target frame, and composes
+`robot_from_CAD = robot_from_camera × camera_from_CAD`.
+
+An accepted composition atomically persists one `RobotFramePoseRecord` with
+translation, rotation matrix, quaternion, complete transform, and both input
+hashes. An ambiguous or rejected camera pose preserves that state without any
+robot-frame coordinates. This path performs no robot selection, RA call,
+planning, or execution and reads no world, spawn, entity-state, detector, or
+evaluator input.
+
 `diagnostic.py` exposes the injected `ObservationCaptureRuntime`, retains the
 controlled Phase 4.2A preprocessing diagnostic, and adds
 `run_automatic_rgbd_segmentation_pipeline(...)`. The automatic entrypoint has no
@@ -57,14 +88,20 @@ path. The production capture adapter delegates only to
 atomic under `products/grounding/rgb_d_cad_grounding/`; Phase 4.2A generic
 deltas contain no RDF assertions. `run_cad_size_association_pipeline(...)`
 updates only the compact read-only status after a controlled caller supplies
-the required records.
+the required records. `run_cad_pose_estimation_pipeline(...)` similarly exposes
+only `CAD_correspondence`, `location`, and `pose` states.
+`run_robot_frame_pose_conversion_pipeline(...)` adds only the compact
+`robot_frame_conversion` state and never returns coordinates through the UI
+status boundary.
 
 The tools have no background stream, general identity recognition,
-cross-camera fusion, rotation or complete pose estimation, PA-loop connection,
-planning, or robot execution. The UI reads only the compact automatic status
+cross-camera fusion, PA-loop connection, planning, or
+robot execution. The UI reads only the compact automatic status
 (`idle`, `running`, `ready`, or `failed`), candidate counts, CAD-correspondence
-state, location state, and `pose: not_evaluated`; it exposes no CAD, coordinate,
+state, location state, pose state, and robot-frame conversion state; it exposes
+no CAD, coordinate,
 score, timeout, camera-role, threshold, mask, or artifact controls. Capture,
-preprocessing, segmentation, and size association are supporting
-infrastructure, not the research contribution, and cannot authorize context
-completion.
+preprocessing, segmentation, size association, pose estimation, and frame
+conversion are
+supporting infrastructure, not the research contribution, and cannot authorize
+context completion.

@@ -48,12 +48,45 @@ without exposing coordinates, scores, masks, or thresholds. The record is not
 an ontology assertion, complete pose, context-completion assessment, or
 assembly-readiness claim.
 
+The simple remaining Phase 4.2B2 pose increment adds
+`CADPoseEstimationRecord`, owned by
+`tools/rgb_d_cad_grounding/pose_estimation.py`. It binds one validated size
+correspondence to ranked camera-frame registration hypotheses and stores a
+translation, rotation matrix, quaternion, and camera-from-CAD transform only
+for a clear fit. `pose` is `accepted`, `ambiguous`, or `rejected`; qualified
+competing rotations remain in the typed record. The compact status may display
+the pose state but never exposes coordinates or transforms.
+
+The simple frame-conversion increment adds `CameraToRobotCalibrationRecord` and
+`RobotFramePoseRecord`, owned by
+`tools/rgb_d_cad_grounding/frame_conversion.py`. The calibration record binds
+one caller-approved rigid transform to exact source and target frames, a
+validity window, provenance, and a deterministic payload hash. The robot-frame
+record hashes both inputs and stores the composed translation, rotation matrix,
+quaternion, and transform only when the camera pose is accepted. Its
+`robot_frame_conversion` state is `accepted`, `ambiguous`, or `rejected`; the
+compact status exposes only that state.
+
 Planned contracts cover:
 
-- `target_feature`, complete target pose, insertion axis, and tolerances
-- fresh resource state and resource-owned primitive catalog
-- `primitive_steps`
-- state checks and IK/collision/trajectory validation feedback
-- rejected candidate revision and accepted candidate handoff
+- `ContextNeed`, containing one consumer-required semantic or typed input,
+  subject or task role, authority, frame or freshness constraints, and reason
+- `GroundingProducerDescriptor`, mapping supported outputs to an authorized
+  controlled producer and its evidence dependencies
+- `TypedContextBinding` and `ProductContextView`, joining compact ABox meaning
+  with validated record refs, hashes, status, frames, validity, and provenance
+- `TaskTransitionDraft` and robot-independent `TaskTransitionContract`
+- versioned `CompositionContextBundle` records with task, ABox, binding,
+  selected-resource, and catalog fingerprints
+- a complete selected-RA-authoritative primitive-only catalog snapshot with
+  runtime-determined cardinality and exact symbols
+- RA-authored `PrimitiveProgramDraft`, deduplicated `MissingContextBatch`, PA
+  batch response, and progress or no-progress decision records
+- fully bound `primitive_steps`, state checks, IK/collision/trajectory feedback,
+  rejected candidate revision, and accepted candidate handoff
+
+These are planned names and boundaries, not current schema implementations. No
+RA resource ABox, composition bundle, missing-context batch, or primitive
+candidate is produced by the current runtime.
 
 Phase 0 intentionally defines no JSON, YAML, or Python schema.
