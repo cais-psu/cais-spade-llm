@@ -14,22 +14,32 @@ rejections, atomic storage, ROS cleanup, and the absence of agent, UI, detector,
 Gazebo-state, and ground-truth dependencies. The scene suite also checks the
 current directory boundaries. Phase 2 UI tests cover the PA-only workspace,
 Phase 2.1 connection, and preserved dual-Gazebo controls. Phase 3.1 tests cover
-exact product-requirement preservation, TBox/ABox initialization before PA,
-document or live-observation first requests, first-turn clarification rejection,
-structured failure recording, and exclusive interaction records. Phase 3.2 tests
+exact product-requirement preservation, ABox initialization, authorized
+inference-free previews, terminal first-turn states, structured failure
+recording, and exclusive interaction records. Phase 3.2 tests
 cover exact document, CAD, and controlled live observation serving, preserved
 `provenance` and retrieval failures, exclusive
 records, no fallback evidence, and the absence of PA turns, VLM, UI, grounding,
 planning, RA, forbidden Gazebo-state inputs, or execution. Phase 3.3 tests
-inject only the schema-only fixture and controlled producer doubles; they cover
-configurable limits, output-capable producer-descriptor routing, numbered source serving,
-cumulative atomic ABox deltas, aligned interpretation and decision records,
-alternative source order, duplicate prevention, limits, clarification, and
-completion only from persisted assessment, without concrete Phase 4 producer,
-planning, primitive-catalog, RA, evaluator, or execution dependencies. Phase
-4.1 tests cover strict model configuration, a six-page non-stored OpenAI request,
-offline vision doubles, page-level provenance, compiled deltas, atomic ABox
-acceptance and rejection, and the separate fail-closed diagnostic. Phase 4.2A
+inject only the schema-only fixture and controlled provider doubles; they cover
+configurable limits, capability-based action discovery, numbered source
+serving, cumulative atomic ABox deltas, aligned interpretation and decision
+records, alternative source order, duplicate prevention, clarification, and
+terminal incomplete states without planning, primitive-catalog, RA, evaluator,
+or execution dependencies. Phase
+4.1 tests cover ontology-neutral non-stored overview requests, cache hits,
+document/model/schema invalidation, atomic persistence, a second registered PDF,
+the `--all`/`--context-ref` preparation command, page-level provenance,
+assertion-free document deltas, and the separate stage-oriented diagnostic.
+Production grounding tests reproduce the original `specification` entity-key
+output and prove it cannot mutate the ABox. They also check one schema for
+`assemble medium gear`, drilling, welding, and inspection; answer-leak prompt
+boundaries; cached first-call previews; deferred targeted VLM inspection;
+dynamic selection independent of registration order; synthetic providers;
+source-revision replay protection; new-evidence requirements; incomplete
+exhaustion and emergency ceilings; directly-supported-only late mapping;
+wrong-domain/range rejection; completion-v2 hashes; F5 zero-inference startup;
+and zero document-VLM calls on CAD/RGB-D paths. Phase 4.2A
 tests cover exact approved CAD paths and hashes, complete binary STL loading,
 millimetre-to-metre conversion, analytic four-camera deprojection, RGB/pixel
 association, invalid-depth removal, calibration rejection, atomic typed records,
@@ -57,22 +67,24 @@ changing camera-frame poses without code changes, calibration and frame
 validation, observation-time validity, payload and input-hash tampering,
 ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
 no-overwrite behavior, and status-only UI output.
-Phase 4.3 contract tests cover deterministic need computation, exact fixed
-symbols, authorized descriptor selection, PA-only authority, typed-binding
-status/frame/freshness validation, and artifact tamper rejection. Production
-grounding tests cover document-only completion; dynamically ordered CAD,
-observation, segmentation, size-correspondence, and camera-frame-pose paths;
-unused-modality exclusion; and ambiguous pose failure without user
-clarification. The PA UI tests cover the turn control, live turn counter,
+Phase 4.3 contract tests cover strict `GroundingSession`, statement,
+information-need, action-attempt, decision, provider-capability, typed-contract,
+and completion-v2 validation. They also cover exact fixed symbols, PA-only
+authority, typed-binding status/frame/freshness validation, rejection of
+removed completion formats, and artifact tamper rejection. Production grounding tests
+cover document-only completion; dynamically discovered CAD, observation,
+segmentation, size-correspondence, and camera-frame-pose paths;
+unused-modality exclusion; and incomplete persistence without turning a system
+evidence gap into user clarification. The PA UI tests cover the turn control, live turn counter,
 compact served-context summaries, full audit records, configured production
 grounding, fail-closed unconfigured state, read-only ontology assertions,
-provenance, typed bindings, unresolved needs, producer decisions, and rejection
-of an unbacked completion turn.
+source records, typed bindings, session decisions, complete/waiting/incomplete
+states, and rejection of an unbacked completion turn.
 Phase 3.4 tests cover same-interaction answers, repeated questions, new evidence
 after a reply, exact history, cancellation, interruption recovery, and rejection
-of system-evidence clarification. Phase 3.5 tests cover referenced completion,
-empty current draft needs, document and typed-geometry paths, UI readiness, and
-completion, draft, clarification, and typed-record tampering.
+of system-evidence clarification. Phase 3.5 tests cover referenced completion
+version 2, document and typed-geometry paths, UI readiness, and session,
+ontology, contract, clarification, source, and typed-record tampering.
 
 Later phases will add focused tests for the Phase 5 task handoff,
 cross-camera transformation, robot-frame grounding after resource

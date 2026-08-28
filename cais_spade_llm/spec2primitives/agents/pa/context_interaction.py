@@ -16,10 +16,12 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
+    persist_pa_context_grounding_completion_v2,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
+    load_interaction_abox,
 )
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     approved_context_ref_evidence_types,
@@ -157,13 +159,28 @@ async def start_pa_context_interaction(
                 product_context=product_context.to_record(),
                 max_pa_turns=12,
             )
-            if not isinstance(assessment, dict) or not isinstance(
-                assessment.get("needed_context"), dict
-            ):
-                raise RuntimeError(
-                    "Production Phase 4.3 returned no initial needed_context."
+            if not isinstance(assessment, dict):
+                raise RuntimeError("Production Phase 4.3 returned an invalid result.")
+            if isinstance(assessment.get("needed_context"), dict):
+                pa_output = {"needed_context": assessment["needed_context"]}
+            elif (
+                assessment.get("needed_context") is None
+                and assessment.get("unresolved_semantic_need") is None
+                and isinstance(
+                    assessment.get("context understanding complete"), bool
                 )
-            pa_output = {"needed_context": assessment["needed_context"]}
+                and assessment.get("grounding_status")
+                in {"complete", "incomplete", "ontology_gap"}
+            ):
+                pa_output = {
+                    "needed_context": None,
+                    "context understanding complete": assessment[
+                        "context understanding complete"
+                    ],
+                    "grounding_status": assessment["grounding_status"],
+                }
+            else:
+                raise RuntimeError("Production Phase 4.3 returned no valid decision.")
         else:
             response_format = _needed_context_response_format(context_refs)
             prompt = _needed_context_prompt(
@@ -190,7 +207,16 @@ async def start_pa_context_interaction(
         _write_first_turn(turn_path, product_requirement, pa_input, None, failure)
         return failure
 
-    validation_error = _needed_context_validation_error(pa_output, context_refs)
+    terminal_status = (
+        pa_output.get("grounding_status")
+        if isinstance(pa_output, dict)
+        else None
+    )
+    validation_error = (
+        None
+        if terminal_status in {"complete", "incomplete", "ontology_gap"}
+        else _needed_context_validation_error(pa_output, context_refs)
+    )
     if validation_error is not None:
         failure = _failure("invalid_pa_response", validation_error)
         _write_first_turn(
@@ -209,6 +235,30 @@ async def start_pa_context_interaction(
         pa_output,
         None,
     )
+    if terminal_status == "complete":
+        try:
+            fresh_abox = load_interaction_abox(interaction_root, tbox)
+            fresh_view = build_product_context_view(
+                interaction_root,
+                fresh_abox,
+                attempted_evidence=(),
+                assessed_at_ns=time.time_ns(),
+            )
+            persist_product_context_view(interaction_root, fresh_view)
+            persist_pa_context_grounding_completion_v2(
+                interaction_root,
+                product_requirement=product_requirement,
+                completion_turn=1,
+                decision_ref=str(turn_path.relative_to(interaction_root)),
+                product_context=fresh_view,
+                clarification_refs=(),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.exception("Phase 3.1 grounding completion failed.")
+            return _failure(
+                "context_completion_failed",
+                f"PA grounding completion failed: {type(exc).__name__}: {exc}",
+            )
     return pa_output
 
 

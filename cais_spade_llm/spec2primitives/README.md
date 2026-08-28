@@ -7,25 +7,29 @@ Spec2Primitives is the isolated workspace for
 The current implementation contains the project skeleton, research scope,
 implementation plan, approved source references, demand-driven RGB-D context
 tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
-interaction UI connected through Phase 3.5, the Phase 3.1 product-requirement
-intake boundary, Phase 3.2 requested-context serving, and contract-first Phase
-3.3 ontology orchestration, Phase 3.4 clarification resumption, and the
-tamper-checked Phase 3.5 PA grounding-completion boundary. The Phase 4.0 RDFLib foundation separates shared
-immutable TBox semantics from PA-owned product context, initializes independent
-interaction ABoxes before PA's first request, and validates evidence-backed fact
-deltas inside the loop. Phase 4.1 adds an injected OpenAI document interpreter
-and a separate diagnostic ABox. Phase 4.2A adds assertion-free approved-CAD and
+interaction UI connected through Phase 3.5, exact product-requirement intake,
+requested-context serving, resumable clarification, and a tamper-checked PA
+grounding-completion boundary. Production grounding starts from the exact
+requirement and authorized zero-cost provider previews. A generalized
+`GroundingSession` records cited statements, missing information, attempted
+actions, and one next decision without receiving the TBox or ABox. Only after
+the needed understanding is sufficient does PA make a separate late
+`OntologyGroundingProposal`; the deterministic validator remains the only ABox
+commit authority. Phase 4.1 supplies cached ontology-neutral
+`DocumentOverviewRecord` previews and a selective targeted
+`DocumentEvidenceRecord` fallback. Phase 4.2A adds assertion-free approved-CAD and
 four-camera RGB-D preprocessing. Phase 4.2B1 adds an automatic observation-only
 capture, preprocessing, and minimal segmentation path. Phase 4.2B2A adds strict
 size-only matching against one requested approved CAD and returns a unique
 candidate center in its camera optical frame. The remaining simple Phase 4.2B2
 pose increment adds deterministic generalized CAD registration for loose source
 candidates and returns an accepted, ambiguous, or rejected camera-frame pose.
-Phase 4.3 adds a production pre-RA grounding runtime with persisted
-`TaskTransitionDraft`, `ContextNeed`, `TypedContextBinding`,
-`ProductContextView`, and output-capable producer descriptors. The UI exposes
-the resulting assertions, provenance, bindings, needs, producer choices, and
-timeline read-only. The live loop remains fail-closed unless an authoritative
+Phase 4.3 adds the production pre-RA `GroundingSession`, provider capability
+descriptors, `TypedContextBinding`, `ProductContextView`, and
+`PAContextGroundingCompletion` version 2 contracts. The UI exposes complete,
+waiting, incomplete, and ontology-gap states plus the accepted assertions,
+typed records, actions, and timeline read-only. The live loop remains
+fail-closed unless an authoritative
 TBox and `OPENAI_API_KEY` configure that runtime. The project-authoritative
 schema-only TBox is `ontology/spec2primitives_ppr_tbox.owl`; paired
 `SPEC2PRIMITIVES_PPR_TBOX_PATH` and `SPEC2PRIMITIVES_PPR_NAMESPACE` values may
@@ -67,6 +71,27 @@ poetry run python -m cais_spade_llm.ui_main
 The starting page is available at `/spec2primitives` through the `Spec2Primitives`
 navigation item.
 
+### Approved manual lifecycle
+
+1. Register the PDF explicitly in
+   `references/products/approved_sources.json`.
+2. Prepare its ontology-neutral overview cache with either
+   `poetry run python -m cais_spade_llm.spec2primitives.tools.document_evidence.prepare --context-ref <exact-ref>`
+   or `--all`.
+3. Start the system. F5 validates sources and reports cache state but performs
+   no ProductAgent, LLM, or VLM inference request.
+4. Run generalized PA grounding. Cached observations appear as inference-free
+   previews; PA may select one exact eligible provider action for an open
+   `InformationNeed`. A prepared overview requires zero document-VLM calls.
+5. After all required information is resolved, create and validate the late
+   semantic projection. Future RA receives the validated ontology projection,
+   typed grounding contract, and hash-pinned typed evidence records.
+
+Overview caches are generated under `contexts/source_cache/`, keyed by PDF
+SHA-256, document-model settings, and overview-schema version, and are not
+committed. A new or changed manual needs no document-purpose prompt or
+product-specific code.
+
 The page can start and stop the no-hardware `gazebo_dual_spec2primitives` simulation,
 which launches `table_spec2primitives.world` with Gazebo, MoveIt, and RViz while
 forcing `run_perception:=false`. Its Phase 2 PA interaction workspace exposes
@@ -76,11 +101,14 @@ uses the production grounding runtime when model configuration and
 `OPENAI_API_KEY` are present. Invalid or partial TBox overrides and missing
 model authority display `grounding_unavailable`. Pending user-intent questions can be answered
 or cancelled in the same interaction; completion is shown only from a verified
-`PAContextGroundingCompletion`. Controlled tests use a schema-only fixture,
+`PAContextGroundingCompletion` version 2. Earlier completion formats are not
+loaded or migrated. Controlled tests use a schema-only fixture,
 deterministic model responses, and producer inputs to exercise the complete
-orchestration record. A separate Phase 4.1 diagnostic can interpret the approved
-NIST PDF when the project TBox and `OPENAI_API_KEY` are available. It does
-not authorize PA completion. RGB-D capture, preprocessing, and minimal
+orchestration record. A separate Phase 4.1 diagnostic can select any PDF
+registered in `references/products/approved_sources.json` and displays the
+overview, PA statements, provider actions, targeted evidence, untrusted
+ontology proposal, and accepted assertions as separate stages. It does not
+authorize PA completion. RGB-D capture, preprocessing, and minimal
 segmentation run automatically only when the observation pipeline is invoked.
 The operator card is read-only and displays `idle`, `running`, `ready`, or
 `failed`, source and assembly candidate counts, CAD-correspondence and location
@@ -99,8 +127,8 @@ RA communication, or robot execution occurs.
 
 ## Planned dynamic PA/RA workflow
 
-The target workflow is proposed architecture, not current runtime behavior. PA
-will dynamically ground only the minimum evidence-backed context needed for a
+The downstream RA workflow is proposed architecture, not current runtime
+behavior. PA now dynamically grounds only the evidence-backed context needed for a
 robot-independent `TaskTransitionContract`. After inherited allocation, the
 selected RA will load its complete current primitive-only catalog, whose
 cardinality is determined at runtime, and author a structural
@@ -121,16 +149,18 @@ insertion-physics, or robot-execution claim.
 
 ## Folder guide
 
-- `agents/pa/`: the Phase 3.1 ProductAgent boundary, Phase 3.2 exact context
-  serving, Phase 3.3--3.5 orchestration and completion, PA-owned Phase 4.0 product context, and the
-  production pre-RA Phase 4.3 grounding contracts and runtime.
+- `agents/pa/`: the ProductAgent boundary, exact context serving, generalized
+  grounding sessions, late ontology mapping, completion v2, PA-owned product
+  context, and the production pre-RA runtime.
 - `agents/ra/`: future Spec2Primitives RobotAgent adapter and RA workflow code.
 - `adapters/`: narrow runtime connections, beginning with
   `gazebo_dual_spec2primitives`.
 - `cases/`: case-study inputs, beginning with
   `product requirement: assemble Medium Gear`.
-- `ontology/`: shared immutable PPR TBox loading, profile validation,
-  fingerprinting, and class-hierarchy queries. It owns no writable ABox.
+- `ontology/`: supporting infrastructure for semantic interoperability:
+  immutable PPR TBox loading, profile validation, fingerprinting, and
+  class-hierarchy queries. It does not route evidence, understand tasks,
+  compose primitives, or understand documents, and it owns no writable ABox.
 - `tools/`: controlled retrieval, observation, OpenAI document interpretation,
   Phase 4.2A CAD/RGB-D preprocessing, and Phase 4.2B1 minimal camera-local
   segmentation plus Phase 4.2B2A size-only candidate association tools.

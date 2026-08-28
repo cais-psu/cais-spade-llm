@@ -497,13 +497,17 @@ recovery-planning contribution.
 The proposed cross-authority workflow is:
 
 ```text
-Exact requirement + official TBox + current validated context
+Exact requirement + authorized zero-cost previews + provider capabilities
         ↓
-PA evolves a TaskTransitionDraft
+PA creates or updates a source-cited GroundingSession
         ↓
-PA dynamically resolves currently blocking ContextNeeds
+PA selects eligible evidence actions for open InformationNeeds
         ↓
-robot-independent TaskTransitionContract
+directly supported statements enter late ontology mapping and validation
+        ↓
+validated ontology projection + typed grounding contract
+        ↓
+future robot-independent TaskTransitionContract
         ↓
 inherited allocator selects resource_jid
         ↓
@@ -527,10 +531,10 @@ non-mutating validation and RA revision
 accepted candidate or fail-closed result
 ```
 
-- PA computes currently blocking needs using the canonical rule
-  `required consumer inputs - valid current context = ContextNeeds` while it
-  evolves a `TaskTransitionDraft`. Its current product-owned state is exposed as
-  a `ProductContextView` of versioned `TypedContextBinding` records.
+- PA records source-cited statements, open `InformationNeed` records, attempted
+  provider/source revisions, and one next decision in a `GroundingSession`.
+  `ProductContextView` exposes only the final validated ABox and versioned
+  `TypedContextBinding` records; it is not PA's reasoning state.
 - The official TBox defines valid meaning and types; it does not choose a
   document, sensor, CAD, or tool. `GroundingProducerDescriptor` records map a
   missing semantic or typed output to an authorized producer and evidence
@@ -565,13 +569,15 @@ accepted candidate or fail-closed result
 Internal PA retrieval remains deliberately semantic and auditable:
 
 ```text
-ContextNeed identifies one grounded semantic or typed output
+InformationNeed identifies one unanswered question and accepted record types
         ↓
-GroundingProducerDescriptor selects an authorized producer
+controller derives eligible actions from provider capability descriptors
+        ↓
+PA selects one exact eligible provider and source revision
         ↓
 one approved source is retrieved and processed for that producer operation
         ↓
-validate, fingerprint, persist, and update ProductContextView
+validate, fingerprint, persist, and update GroundingSession
 ```
 
 One-source-at-a-time is an internal producer audit boundary, not the PA-to-RA
@@ -602,17 +608,21 @@ persist exact product_requirement
         ↓
 load fixed TBox and initialize the interaction ABox
         ↓
-evolve TaskTransitionDraft and derive blocking ContextNeeds
+collect inference-free previews and create a source-cited GroundingSession
         ↓
-select GroundingProducerDescriptor for one need
+derive eligible actions for one open InformationNeed
         ↓
 serve one relevant approved source and run the controlled producer
         ↓
-validate and merge its evidence-backed result and TypedContextBinding
+validate and persist its typed evidence record
         ↓
-refresh ProductContextView and reassess dynamically
+update GroundingSession only when accepted evidence changes its fingerprint
         ↓
-accept robot-independent TaskTransitionContract
+map directly supported statements through the deterministic ontology validator
+        ↓
+persist validated ontology projection + typed grounding contract
+        ↓
+future robot-independent TaskTransitionContract
         ↓
 handoff to inherited allocation
 ```
@@ -637,9 +647,9 @@ For ICRA:
   separate, versioned
   resource-catalog ABox snapshot supplied by that RA. The resource links to
   those offerings through `capableOf`; PA does not author resource facts.
-- Document and scene tools are controlled, side-effect-free producers. Both
-  return one generic subject-predicate-object triple-delta contract; the
-  orchestrator validates and merges accepted assertions.
+- Document and scene tools are controlled evidence producers. They return
+  typed evidence records; only the late ontology mapper may propose assertions,
+  and the orchestrator validates every proposed ABox change.
 - `GroundingProducerDescriptor` records map a missing semantic or typed output
   to an authorized producer and evidence policy. Neither the TBox nor PA uses a
   product-specific slot template, fixed source count, fixed modality set, or

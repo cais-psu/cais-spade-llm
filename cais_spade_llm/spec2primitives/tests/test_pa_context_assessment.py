@@ -629,6 +629,7 @@ def _terminal_complete() -> dict[str, object]:
     return {
         "needed_context": None,
         "context understanding complete": True,
+        "grounding_status": "complete",
     }
 
 

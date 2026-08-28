@@ -17,12 +17,16 @@ from cais_spade_llm.spec2primitives.agents.pa.context_serving import (
     serve_pa_requested_context,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    ContextNeed,
+    GroundingActionAttempt,
+    GroundingDecision,
     GroundingProducerDescriptor,
-    PAContextGroundingCompletion,
+    GroundingSession,
+    GroundingStatement,
+    InformationNeed,
+    PAContextGroundingCompletionV2,
     ProductContextView,
-    TaskTransitionDraft,
     TypedContextBinding,
+    TypedGroundingContract,
     load_pa_context_grounding_completion,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
@@ -31,15 +35,19 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
 
 __all__ = [
     "ProductAgentContextRuntime",
-    "ContextNeed",
+    "GroundingActionAttempt",
+    "GroundingDecision",
     "GroundingProducerDescriptor",
+    "GroundingSession",
+    "GroundingStatement",
+    "InformationNeed",
     "PAOntologyConfig",
-    "PAContextGroundingCompletion",
+    "PAContextGroundingCompletionV2",
     "ProductContextView",
     "ProductContextGroundingRuntime",
     "ProductionProductContextGroundingRuntime",
-    "TaskTransitionDraft",
     "TypedContextBinding",
+    "TypedGroundingContract",
     "cancel_pa_context_interaction",
     "continue_pa_context_interaction",
     "load_pa_context_grounding_completion",

@@ -22,6 +22,12 @@ from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
 from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
 )
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingDecision,
+    GroundingSession,
+    InformationNeed,
+    persist_grounding_session,
+)
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     ProductionProductContextGroundingRuntime,
 )
@@ -213,6 +219,66 @@ def test_connected_ui_stops_for_clarification_without_user_reply(
     assert clarification_question in view["messages"]
     assert "Not available until Phase 3.4 is implemented." not in view["messages"]
     assert view["pending_clarification_turn"] == "2"
+
+
+def test_ui_displays_persisted_incomplete_grounding_session(
+    tmp_path: Path,
+) -> None:
+    interaction_root = tmp_path / "interaction_incomplete"
+    need = InformationNeed.from_mapping(
+        {
+            "need_id": "need_0001",
+            "question": "Which receiving location is intended?",
+            "required": True,
+            "sources": ["requirement_0001"],
+            "accepted_record_types": ["DocumentEvidenceRecord"],
+            "status": "exhausted",
+            "answer_statement_ids": [],
+        }
+    )
+    decision = GroundingDecision.from_mapping(
+        {
+            "decision_type": "incomplete",
+            "need_id": None,
+            "provider_id": None,
+            "source_ref": None,
+            "source_revision": None,
+            "query": None,
+            "reason": "No eligible untried evidence action remains.",
+        }
+    )
+    session = GroundingSession.create(
+        revision=1,
+        requirement_text="assemble medium gear",
+        statements=[],
+        information_needs=[need],
+        attempted_actions=[],
+        evidence_refs=["requirement_0001"],
+        decision=decision,
+        status="incomplete",
+        information_status="not_enough",
+    )
+    persist_grounding_session(interaction_root, session)
+    interaction = {
+        "interaction_identifier": "interaction_incomplete",
+        "interaction_root": interaction_root,
+        "product_requirement": "assemble medium gear",
+        "phase_3_1": {
+            "needed_context": None,
+            "context understanding complete": False,
+            "grounding_status": "incomplete",
+        },
+        "phase_3_2": None,
+        "phase_3_3": None,
+        "max_pa_turns": 12,
+    }
+
+    view = spec2primitives_ui._pa_ui_view(interaction)
+
+    assert view["activity_state"] == "grounding incomplete"
+    assert "Which receiving location is intended?" in view["activity_message"]
+    assert "Grounding is incomplete" in view["needed_context"]
+    assert '"status": "incomplete"' in view["Grounding Decisions"]
 
 
 def test_connected_ui_submits_reply_in_same_interaction(tmp_path: Path) -> None:
@@ -605,9 +671,23 @@ def test_shared_structured_call_reports_bad_request_without_retry(
 def test_ui_runtime_factory_uses_project_tbox_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class StartupVisionRuntime:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            self.requests: list[object] = []
+
+        async def interpret_document(self, request: object) -> object:
+            self.requests.append(request)
+            raise AssertionError("F5 startup must not request a document overview.")
+
+        async def inspect_document_pages(self, request: object) -> object:
+            self.requests.append(request)
+            raise AssertionError("F5 startup must not request targeted document evidence.")
+
     dual_gazebo = object()
     product_agent = FakeProductAgent()
     selected_models: list[str] = []
+    vision_runtimes: list[StartupVisionRuntime] = []
     monkeypatch.delenv("SPEC2PRIMITIVES_PPR_TBOX_PATH", raising=False)
     monkeypatch.delenv("SPEC2PRIMITIVES_PPR_NAMESPACE", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "controlled-test-key")
@@ -615,6 +695,12 @@ def test_ui_runtime_factory_uses_project_tbox_by_default(
         product_agent_runtime,
         "create_product_agent_context_runtime",
         lambda *, model: selected_models.append(model) or product_agent,
+    )
+    monkeypatch.setattr(
+        ui_runtime,
+        "OpenAIDocumentVisionRuntime",
+        lambda config: vision_runtimes.append(StartupVisionRuntime(config))
+        or vision_runtimes[-1],
     )
 
     runtime = ui_runtime.create_spec2primitives_ui_runtime(dual_gazebo)
@@ -637,6 +723,15 @@ def test_ui_runtime_factory_uses_project_tbox_by_default(
         ui_runtime.DEFAULT_SPEC2PRIMITIVES_PPR_TBOX_PATH.resolve()
     )
     assert runtime.document_vision_runtime is not None
+    assert product_agent.calls == []
+    assert product_agent.setup_calls == 0
+    assert len(vision_runtimes) == 1
+    assert vision_runtimes[0].requests == []
+    assert runtime.document_source_status
+    assert all(
+        item["source_status"] == "valid"
+        for item in runtime.document_source_status
+    )
     assert runtime.observation_capture_runtime is not None
     assert runtime.document_diagnostic_unavailable_reason is None
 
@@ -815,6 +910,7 @@ def _completion_response() -> dict[str, Any]:
     return {
         "needed_context": None,
         "context understanding complete": True,
+        "grounding_status": "complete",
     }
 
 

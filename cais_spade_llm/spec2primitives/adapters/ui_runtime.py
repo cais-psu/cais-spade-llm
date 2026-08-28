@@ -29,6 +29,11 @@ from cais_spade_llm.spec2primitives.ontology import (
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
     DocumentVisionRuntime,
     OpenAIDocumentVisionRuntime,
+    document_overview_cache_status,
+)
+from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    approved_document_metadata,
+    approved_document_refs,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     LiveGazeboObservationCaptureRuntime,
@@ -55,6 +60,7 @@ class Spec2PrimitivesUIRuntime:
     model_config: ModelRuntimeConfig | None = None
     document_vision_runtime: DocumentVisionRuntime | None = None
     document_diagnostic_unavailable_reason: str | None = None
+    document_source_status: tuple[dict[str, object], ...] = ()
     observation_capture_runtime: ObservationCaptureRuntime | None = None
 
 
@@ -95,6 +101,7 @@ def create_spec2primitives_ui_runtime(
         product_agent = create_product_agent_context_runtime(
             model=model_config.product_agent_llm.model
         )
+    document_source_status = _document_startup_status(model_config)
 
     tbox_path_override = os.environ.get("SPEC2PRIMITIVES_PPR_TBOX_PATH")
     ppr_namespace_override = os.environ.get("SPEC2PRIMITIVES_PPR_NAMESPACE")
@@ -144,5 +151,53 @@ def create_spec2primitives_ui_runtime(
         model_config=model_config,
         document_vision_runtime=vision_runtime,
         document_diagnostic_unavailable_reason=unavailable_reason,
+        document_source_status=document_source_status,
         observation_capture_runtime=LiveGazeboObservationCaptureRuntime(),
     )
+
+
+def _document_startup_status(
+    model_config: ModelRuntimeConfig | None,
+) -> tuple[dict[str, object], ...]:
+    """Validate registered PDFs and inspect caches without model requests."""
+    try:
+        context_refs = approved_document_refs()
+    except (OSError, ValueError) as exc:
+        return (
+            {
+                "context_ref": None,
+                "source_status": "invalid",
+                "overview_status": "unavailable",
+                "record_path": None,
+                "rejection": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    statuses: list[dict[str, object]] = []
+    for context_ref in context_refs:
+        if model_config is not None:
+            statuses.append(
+                document_overview_cache_status(
+                    context_ref,
+                    cache_root=SPEC2PRIMITIVES_CONTEXTS_ROOT / "source_cache",
+                    config=model_config.document_vlm,
+                )
+            )
+            continue
+        try:
+            approved_document_metadata(context_ref)
+        except (OSError, ValueError) as exc:
+            rejection: object = f"{type(exc).__name__}: {exc}"
+            source_status = "invalid"
+        else:
+            rejection = None
+            source_status = "valid"
+        statuses.append(
+            {
+                "context_ref": context_ref,
+                "source_status": source_status,
+                "overview_status": "unavailable",
+                "record_path": None,
+                "rejection": rejection,
+            }
+        )
+    return tuple(statuses)

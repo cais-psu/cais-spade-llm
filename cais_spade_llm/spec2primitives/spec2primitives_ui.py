@@ -34,23 +34,26 @@ from cais_spade_llm.spec2primitives.agents.pa import (
     submit_pa_clarification_reply,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
-    DOCUMENT_CONTEXT_REF,
     run_document_interpretation_diagnostic,
+)
+from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    approved_document_refs,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     read_rgbd_segmentation_status,
 )
 
 _FLOW_STEPS = (
-    "product requirement: assemble Medium Gear",
-    "PA retrieves manual/specification/CAD",
-    "PA grounds target_feature, target pose, insertion axis, tolerances",
+    "exact product requirement",
+    "PA reads cached previews and selects evidence when needed",
+    "PA records cited statements and missing information",
+    "PA creates a late validated ontology projection and typed contract",
     "RA retrieves fresh resource state and resource-owned primitive catalog",
     "RA authors primitive_steps",
     "state checks + IK/collision/trajectory validation",
 )
 _PHASE_2_CONNECTED_MESSAGE = (
-    "Connected through Phase 3.5 and the pre-RA Phase 4.3 grounding boundary. "
+    "Connected through the evidence-first PA grounding and completion-v2 boundary. "
     "The production runtime is available only with an authoritative TBox and "
     "controlled Phase 4 producers; Phase 5 planning, RA, primitive composition, "
     "and robot action remain unavailable. Phase 3.4 clarification replies and "
@@ -67,7 +70,7 @@ _PHASE_2_RESULT_AREAS = (
     ("clarification", "No clarification_question is available."),
     ("Ontology Grounding", "No validated ProductContextView is available."),
     ("Typed Runtime Context", "No typed runtime context is available."),
-    ("Grounding Decisions", "No task draft or producer selection is available."),
+    ("Grounding Decisions", "No grounding session is available."),
     ("PA Grounding Completion", "No Phase 3.5 completion record is available."),
 )
 _ASSEMBLY_PLAN_COLUMNS = (
@@ -293,7 +296,7 @@ async def _run_pa_ui_interaction(
     )
     phase_3_2 = None
     phase_3_3 = None
-    if "needed_context" in phase_3_1:
+    if isinstance(phase_3_1.get("needed_context"), dict):
         phase_3_2 = serve_pa_requested_context(interaction_root)
     if isinstance(phase_3_2, dict) and "served_context" in phase_3_2:
         phase_3_3 = await continue_pa_context_interaction(
@@ -372,12 +375,15 @@ def _latest_turn_number(interaction_root: Path) -> int:
 async def _run_document_diagnostic_ui(
     runtime: Spec2PrimitivesUIRuntime,
     product_requirement: str,
+    *,
+    context_ref: str,
 ) -> dict[str, object]:
-    """Run Phase 4.1 in a fresh ABox that is separate from the PA loop."""
+    """Run evidence-first document stages in a separate diagnostic ABox."""
     if (
         runtime.ontology_config is None
         or runtime.model_config is None
         or runtime.document_vision_runtime is None
+        or runtime.tbox is None
     ):
         return {
             "status": "unavailable",
@@ -391,6 +397,8 @@ async def _run_document_diagnostic_ui(
     return await run_document_interpretation_diagnostic(
         interaction_root=interaction_root,
         product_requirement=product_requirement,
+        context_ref=context_ref,
+        product_agent=runtime.product_agent,
         ontology_config=runtime.ontology_config,
         config=runtime.model_config.document_vlm,
         vision_runtime=runtime.document_vision_runtime,
@@ -500,6 +508,16 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     )
     completion_record = _validated_persisted_completion(records, interaction_root)
     completed = completion_record is not None
+    session_records = [
+        record
+        for name, record in records.items()
+        if name.startswith("grounding_session_revision_")
+        and isinstance(record, dict)
+    ]
+    latest_session = session_records[-1] if session_records else None
+    grounding_status = (
+        latest_session.get("status") if isinstance(latest_session, dict) else None
+    )
     completed_turns = {
         decision.get("turn")
         for decision in decisions
@@ -571,6 +589,18 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
             f"{turn_status} The validated Phase 3.5 record reports complete "
             "product context. Ready for Phase 5; Phase 5 remains unavailable."
         )
+    elif grounding_status in {"incomplete", "ontology_gap"}:
+        activity_state, activity_color = "grounding incomplete", "amber"
+        missing = latest_session.get("missing_information", [])
+        activity_message = (
+            f"{turn_status} PA grounding stopped as {grounding_status}. "
+            f"Missing information: {_json_text(missing)}"
+        )
+    elif grounding_status in {"waiting_for_evidence", "waiting_for_user"}:
+        activity_state, activity_color = "grounding waiting", "amber"
+        activity_message = (
+            f"{turn_status} PA grounding is {str(grounding_status).replace('_', ' ')}."
+        )
     elif served_contexts:
         activity_state, activity_color = "context served", "green"
         activity_message = f"{turn_status} The requested context was served."
@@ -592,7 +622,11 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
             else (
                 "No further needed_context. context understanding complete."
                 if completed
-                else "No needed_context decision is available."
+                else (
+                    "No further needed_context. Grounding is incomplete."
+                    if grounding_status in {"incomplete", "ontology_gap"}
+                    else "No needed_context decision is available."
+                )
             )
         ),
         "served context": (
@@ -640,7 +674,11 @@ def _validated_persisted_assessment(
         "needed_context",
         "context understanding complete",
     }
-    if not isinstance(assessment, dict) or set(assessment) != expected_keys:
+    session_keys = expected_keys | {"grounding_status"}
+    if not isinstance(assessment, dict) or frozenset(assessment) not in {
+        frozenset(expected_keys),
+        frozenset(session_keys),
+    }:
         return None
     complete = assessment["context understanding complete"]
     needed_context = assessment["needed_context"]
@@ -652,6 +690,13 @@ def _validated_persisted_assessment(
             assessment["unresolved_semantic_need"],
         )
         return assessment if all(value is None for value in terminal_values) else None
+    if assessment.get("grounding_status") in {"incomplete", "ontology_gap"}:
+        return (
+            assessment
+            if needed_context is None
+            and assessment["unresolved_semantic_need"] is None
+            else None
+        )
     if not isinstance(needed_context, dict):
         return None
     semantic_need = assessment["unresolved_semantic_need"]
@@ -731,11 +776,25 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
         )
     )
     grounding_paths.extend(
-        (f"task_transition_{path.stem}", path)
+        (f"grounding_session_{path.stem}", path)
         for path in sorted(
-            (interaction_root / "products/grounding/task_transition").glob(
-                "draft_*.json"
+            (interaction_root / "products/grounding/session").glob(
+                "revision_*.json"
             )
+        )
+    )
+    grounding_paths.extend(
+        (f"ontology_grounding_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/ontology_grounding").glob(
+                "proposal_*.json"
+            )
+        )
+    )
+    grounding_paths.extend(
+        (f"grounding_completion_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/completion").glob("*.json")
         )
     )
     for record_name, record_path in grounding_paths:
@@ -785,25 +844,29 @@ def _grounding_result_values(
             records.get("ontology_assertion_provenance"),
         )
         typed_text = _json_text(latest_view.get("typed_bindings", []))
-    drafts = [
+    sessions = [
         value
         for name, value in records.items()
-        if name.startswith("task_transition_draft_") and isinstance(value, dict)
+        if name.startswith("grounding_session_revision_")
+        and isinstance(value, dict)
     ]
-    selections = [
+    proposals = [
         value
         for name, value in records.items()
-        if name.startswith("producer_selection_") and isinstance(value, dict)
+        if name.startswith("ontology_grounding_proposal_")
+        and isinstance(value, dict)
     ]
     decisions_text = (
         _json_text(
             {
-                "latest_TaskTransitionDraft": drafts[-1] if drafts else None,
-                "GroundingProducerSelections": selections,
+                "latest_GroundingSession": sessions[-1] if sessions else None,
+                "latest_OntologyGroundingProposal": (
+                    proposals[-1] if proposals else None
+                ),
             }
         )
-        if drafts or selections
-        else "No task draft or producer selection is available."
+        if sessions or proposals
+        else "No grounding session is available."
     )
     return {
         "Ontology Grounding": ontology_text,
@@ -1451,7 +1514,13 @@ def _render_document_interpretation_diagnostic(
         runtime.ontology_config is not None
         and runtime.model_config is not None
         and runtime.document_vision_runtime is not None
+        and runtime.tbox is not None
     )
+    try:
+        document_refs = list(approved_document_refs())
+    except (OSError, ValueError):
+        document_refs = []
+    ready = ready and bool(document_refs)
     model = (
         runtime.model_config.document_vlm.model
         if runtime.model_config is not None
@@ -1464,14 +1533,20 @@ def _render_document_interpretation_diagnostic(
                     "text-lg font-semibold text-slate-900"
                 )
                 ui.label(
-                    "OpenAI VLM · separate diagnostic ABox · no PA completion decision"
+                    "Overview → PA statements → provider action → late mapping → validator"
                 ).classes("text-xs text-slate-500")
             readiness_badge = ui.badge("ready" if ready else "unavailable").props(
                 f"color={'green' if ready else 'amber'} outline"
             )
 
-        ui.label(f"Approved source: {DOCUMENT_CONTEXT_REF}").classes("text-sm text-slate-700")
         ui.label(f"Configured VLM: {model}").classes("text-sm text-slate-700")
+        for source_status in runtime.document_source_status:
+            ui.label(
+                "Document cache: "
+                f"{source_status.get('context_ref')} · "
+                f"source={source_status.get('source_status')} · "
+                f"overview={source_status.get('overview_status')}"
+            ).classes("text-xs text-slate-600")
         if not ready:
             ui.label(
                 runtime.document_diagnostic_unavailable_reason
@@ -1482,6 +1557,15 @@ def _render_document_interpretation_diagnostic(
             ui.input(
                 label="diagnostic product_requirement",
                 placeholder="assemble Medium Gear",
+            )
+            .props("outlined")
+            .classes("w-full")
+        )
+        document_input = (
+            ui.select(
+                document_refs,
+                value=document_refs[0] if document_refs else None,
+                label="approved document context_ref",
             )
             .props("outlined")
             .classes("w-full")
@@ -1497,26 +1581,39 @@ def _render_document_interpretation_diagnostic(
 
         def _update_enabled() -> None:
             value = requirement_input.value
+            context_ref = document_input.value
             _set_enabled(
                 run_button,
                 ready
                 and not action_state["busy"]
                 and isinstance(value, str)
-                and bool(value.strip()),
+                and bool(value.strip())
+                and isinstance(context_ref, str),
             )
 
         async def _run() -> None:
             value = requirement_input.value
-            if not ready or action_state["busy"] or not isinstance(value, str) or not value.strip():
+            context_ref = document_input.value
+            if (
+                not ready
+                or action_state["busy"]
+                or not isinstance(value, str)
+                or not value.strip()
+                or not isinstance(context_ref, str)
+            ):
                 return
             action_state["busy"] = True
             _set_enabled(run_button, False)
             requirement_input.props("disable")
             readiness_badge.set_text("running")
             readiness_badge.props("color=indigo")
-            result_value.set_text("Rendering and interpreting all approved PDF pages...")
+            result_value.set_text("Preparing and interpreting the approved document...")
             try:
-                result = await _run_document_diagnostic_ui(runtime, value)
+                result = await _run_document_diagnostic_ui(
+                    runtime,
+                    value,
+                    context_ref=context_ref,
+                )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 readiness_badge.set_text("rejected")
                 readiness_badge.props("color=red")
@@ -1537,6 +1634,7 @@ def _render_document_interpretation_diagnostic(
                 _update_enabled()
 
         requirement_input.on_value_change(lambda _: _update_enabled())
+        document_input.on_value_change(lambda _: _update_enabled())
         run_button.on_click(_run)
 
 

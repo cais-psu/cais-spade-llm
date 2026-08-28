@@ -11,12 +11,17 @@ from typing import Any
 import pytest
 
 from cais_spade_llm.spec2primitives.agents.pa import (
-    PAContextGroundingCompletion,
+    PAContextGroundingCompletionV2,
     load_pa_context_grounding_completion,
     submit_pa_clarification_reply,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingDecision,
     GroundingContractError,
+    GroundingSession,
+    InformationNeed,
+    load_latest_grounding_session,
+    persist_grounding_session,
 )
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
     ControlledGroundingRuntime,
@@ -31,7 +36,7 @@ from cais_spade_llm.spec2primitives.tests.test_pa_clarification import (
 )
 
 
-def test_completion_record_proves_only_current_draft_is_ready(
+def test_completion_record_pins_generalized_grounding_bundle(
     tmp_path: Path,
 ) -> None:
     grounding = ControlledGroundingRuntime(assessments=[complete_context()])
@@ -45,15 +50,19 @@ def test_completion_record_proves_only_current_draft_is_ready(
 
     assert result["context understanding complete"] is True
     completion = load_pa_context_grounding_completion(tmp_path)
-    assert isinstance(completion, PAContextGroundingCompletion)
+    assert isinstance(completion, PAContextGroundingCompletionV2)
     assert completion.product_requirement == "assemble Medium Gear"
     assert completion.completion_turn == 2
-    assert completion.attempted_evidence == ("NIST_assembly_instructions.pdf",)
+    assert completion.source_refs[0]["ref"] == "NIST_assembly_instructions.pdf"
     assert completion.typed_context_refs == ()
     assert completion.clarification_refs == ()
     record = completion.to_record()
     assert record["status"] == "context understanding complete"
-    assert record["unresolved_context_needs"] == []
+    assert record["schema_version"] == 2
+    assert record["grounding_session_ref"].endswith("revision_0002.json")
+    assert record["typed_grounding_contract_ref"].endswith(
+        "typed_grounding_contract_0001.json"
+    )
     serialized = json.dumps(record)
     for forbidden in (
         "TaskTransitionContract",
@@ -62,6 +71,20 @@ def test_completion_record_proves_only_current_draft_is_ready(
         "robot_frame",
     ):
         assert forbidden not in serialized
+
+
+def test_completion_loader_rejects_removed_version_1_artifact(
+    tmp_path: Path,
+) -> None:
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_path.parent.mkdir(parents=True)
+    _write_json(completion_path, {"schema_version": 1})
+
+    with pytest.raises(
+        GroundingContractError,
+        match="schema version 2 is supported",
+    ):
+        load_pa_context_grounding_completion(tmp_path)
 
 
 def test_completion_preserves_answered_clarification_ref(tmp_path: Path) -> None:
@@ -87,12 +110,12 @@ def test_completion_preserves_answered_clarification_ref(tmp_path: Path) -> None
 
     assert result["context understanding complete"] is True
     completion = load_pa_context_grounding_completion(tmp_path)
-    assert completion.clarification_refs == (
-        "interaction_record/clarification_0002.json",
+    assert completion.clarification_refs[0]["ref"] == (
+        "interaction_record/clarification_0002.json"
     )
 
 
-@pytest.mark.parametrize("tamper_target", ["completion", "draft", "clarification"])
+@pytest.mark.parametrize("tamper_target", ["completion", "session", "clarification"])
 def test_completion_loader_rejects_tampered_records(
     tmp_path: Path,
     tamper_target: str,
@@ -120,13 +143,15 @@ def test_completion_loader_rejects_tampered_records(
     if tamper_target == "completion":
         completion["completion_turn"] = 99
         _write_json(completion_path, completion)
-    elif tamper_target == "draft":
-        draft_path = tmp_path / str(completion["task_transition_draft_ref"])
-        draft = _read_json(draft_path)
-        draft["required_outcome"] = "tampered"
-        _write_json(draft_path, draft)
+    elif tamper_target == "session":
+        session_path = tmp_path / str(completion["grounding_session_ref"])
+        session = _read_json(session_path)
+        session["information_status"] = "not_enough"
+        _write_json(session_path, session)
     else:
-        clarification_path = tmp_path / str(completion["clarification_refs"][0])
+        clarification_path = tmp_path / str(
+            completion["clarification_refs"][0]["ref"]
+        )
         clarification = _read_json(clarification_path)
         clarification["reply"] = "Small Gear"
         _write_json(clarification_path, clarification)
@@ -135,7 +160,7 @@ def test_completion_loader_rejects_tampered_records(
         load_pa_context_grounding_completion(tmp_path)
 
 
-def test_completion_is_rejected_when_latest_draft_still_has_a_need(
+def test_completion_is_rejected_when_latest_session_is_incomplete(
     tmp_path: Path,
 ) -> None:
     grounding = _UnresolvedCompletionRuntime(assessments=[complete_context()])
@@ -152,7 +177,7 @@ def test_completion_is_rejected_when_latest_draft_still_has_a_need(
 
 
 class _UnresolvedCompletionRuntime(ControlledGroundingRuntime):
-    """Tamper its controlled draft before the Phase 3.5 validator runs."""
+    """Append an incomplete session before the Phase 3.5 validator runs."""
 
     async def assess_product_context(  # noqa: PLR0913
         self,
@@ -178,25 +203,44 @@ class _UnresolvedCompletionRuntime(ControlledGroundingRuntime):
             turn_number=turn_number,
             max_pa_turns=max_pa_turns,
         )
-        draft_path = sorted(
-            (interaction_root / "products/grounding/task_transition").glob(
-                "draft_*.json"
-            )
-        )[-1]
-        draft = _read_json(draft_path)
-        draft["required_inputs"] = [
+        previous = load_latest_grounding_session(interaction_root)
+        assert previous is not None
+        need = InformationNeed.from_mapping(
             {
-                "kind": "user_intent",
-                "symbol": "product_requirement",
-                "subject_role": "product_context",
-                "authority": "PA",
-                "frame": None,
-                "maximum_age_ns": None,
-                "reason": "user intent remains unresolved",
+                "need_id": "controlled_need_0001",
+                "question": "Which user intent remains unresolved?",
+                "required": True,
+                "sources": ["requirement_0001"],
+                "accepted_record_types": ["PAClarification"],
+                "status": "exhausted",
+                "answer_statement_ids": [],
             }
-        ]
-        draft["unresolved_user_intent"] = "user intent remains unresolved"
-        _write_json(draft_path, draft)
+        )
+        decision = GroundingDecision.from_mapping(
+            {
+                "decision_type": "incomplete",
+                "need_id": None,
+                "provider_id": None,
+                "source_ref": None,
+                "source_revision": None,
+                "query": None,
+                "reason": "The controlled interaction remains incomplete.",
+            }
+        )
+        persist_grounding_session(
+            interaction_root,
+            GroundingSession.create(
+                revision=previous.revision + 1,
+                requirement_text=previous.requirement_text,
+                statements=previous.statements,
+                information_needs=[need],
+                attempted_actions=previous.attempted_actions,
+                evidence_refs=previous.evidence_refs,
+                decision=decision,
+                status="incomplete",
+                information_status="partial",
+            ),
+        )
         return result
 
 

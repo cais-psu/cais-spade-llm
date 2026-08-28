@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     )
 
 _EVIDENCE_TYPES = frozenset({"document", "CAD", "observation"})
+_PROVIDER_INPUT_TYPES = _EVIDENCE_TYPES | {"existing_record", "user"}
 _PRODUCER_SYMBOL = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]*$")
 
 
@@ -57,7 +58,7 @@ class ProductContextGroundingRuntime(Protocol):
     def grounding_producer_descriptors(
         self,
     ) -> Sequence[GroundingProducerDescriptor | Mapping[str, object]]:
-        """Return the application-owned output-capable producer registry."""
+        """Return provider-owned capability descriptions."""
         ...
 
     async def initial_product_context_decision(
@@ -70,7 +71,7 @@ class ProductContextGroundingRuntime(Protocol):
         product_context: Mapping[str, object],
         max_pa_turns: int,
     ) -> Mapping[str, object]:
-        """Optionally make the first request from a TaskTransitionDraft."""
+        """Create the first generalized grounding-session decision."""
         ...
 
     async def interpret_served_context(
@@ -99,7 +100,7 @@ class ProductContextGroundingRuntime(Protocol):
         turn_number: int,
         max_pa_turns: int,
     ) -> Mapping[str, object]:
-        """Return one Phase 4.3-style decision over the updated ABox."""
+        """Return one session update after newly accepted evidence."""
         ...
 
 
@@ -164,7 +165,9 @@ def validated_grounding_producer_descriptors(
             raise OntologyContextError(
                 "Grounding producer must be a fixed non-path identifier."
             )
-        if not set(descriptor.evidence_types).issubset(_EVIDENCE_TYPES | {"existing_record"}):
+        if not set(descriptor.accepted_evidence_types).issubset(
+            _PROVIDER_INPUT_TYPES
+        ):
             raise OntologyContextError(
                 f"{descriptor.producer} advertises an invalid evidence type."
             )
@@ -172,8 +175,8 @@ def validated_grounding_producer_descriptors(
     covered_evidence = {
         evidence_type
         for descriptor in validated
-        for evidence_type in descriptor.evidence_types
-        if evidence_type != "existing_record"
+        for evidence_type in descriptor.accepted_evidence_types
+        if evidence_type in _EVIDENCE_TYPES
     }
     if covered_evidence != _EVIDENCE_TYPES:
         raise OntologyContextError(
@@ -190,7 +193,7 @@ def producer_for_evidence_type(
     producers = {
         descriptor.producer
         for descriptor in descriptors
-        if evidence_type in descriptor.evidence_types
+        if evidence_type in descriptor.accepted_evidence_types
     }
     if len(producers) != 1:
         raise OntologyContextError(

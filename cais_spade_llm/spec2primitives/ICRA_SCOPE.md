@@ -12,8 +12,9 @@ resumable user-intent clarification and a tamper-checked grounding-completion
 record, together with the pre-RA Phase 4.3 grounding runtime, the Phase 4.0 ontology foundation, demand-driven document
 and geometry producers, generalized camera-frame pose estimation, and separate
 camera-to-robot frame-conversion infrastructure. The configured production path
-stops when the `TaskTransitionDraft` inputs are grounded and records readiness
-for Phase 5. No Phase 5 task
+uses a generalized, cited `GroundingSession`, performs a separate late ontology
+projection, and writes `PAContextGroundingCompletion` version 2 before recording
+readiness for Phase 5. No Phase 5 task
 contract, RA adapter, resource-catalog ABox, primitive composer, validator
 stack, or execution path is connected.
 
@@ -58,7 +59,7 @@ The research contribution is not that PA and RA exchange messages. It is the
 combination of:
 
 1. PA dynamically grounding an incomplete product requirement from only the
-   relevant approved document, CAD, and RGB-D evidence into a provenance-backed,
+   relevant approved document, CAD, and RGB-D evidence into a source-cited,
    robot-independent task-transition contract.
 2. RA, where RA means RobotAgent, interpreting that required transition against
    fresh selected-resource state and the complete current semantic primitive
@@ -72,6 +73,15 @@ combination of:
 Exact-ref retrieval, PA and RA live cards, ordered interaction records, and
 simulation are supporting infrastructure and evaluation evidence. They are not
 the fundamental contribution by themselves.
+
+The evidence-first manual pipeline is also supporting infrastructure for the
+composition paper, not a general document-understanding contribution. A
+generic cached overview is separated from generalized PA understanding and a
+late statement-cited ontology proposal; the shared validator alone accepts
+assertions. Targeted page vision is deferred until PA selects that provider for
+an unresolved information need. This supports newly
+registered specifications and manuals without product-purpose prompts or a
+hard-coded question such as where a particular gear is located.
 
 Automatic RGB-D capture, deprojection, support-plane segmentation, exact-CAD
 size comparison, and camera-frame candidate-center measurement are also
@@ -96,8 +106,8 @@ contract fields.
 The ontology split is:
 
 - The immutable TBox contains generic PPR classes, properties, and restrictions.
-- PA fills a per-interaction ABox with evidence-backed requested-process,
-  product, feature, and grounded-outcome individuals.
+- PA fills a per-interaction ABox only with directly supported individuals and
+  relations that the current TBox can represent.
 - The selected RA supplies a separate versioned resource-catalog ABox snapshot
   containing its resource individual, every primitive-process interface
   individual in that snapshot, and `resource capableOf primitive` assertions.
@@ -109,9 +119,12 @@ restrictions are not runtime context. The project-authoritative production TBox
 is `ontology/spec2primitives_ppr_tbox.owl`; it contains only the approved
 schema-only PPR view.
 
-The requested assembly process may be linked through `realizes` to its grounded
-outcome. It must not be linked to primitive offerings through `requires`,
-`precedes`, direct high-level `capableOf`, or another expected set or order. A
+Any proposed `realizes` assertion is accepted only when cited evidence supports
+a correctly typed process and feature and the property signature passes
+validation. No relation is required merely because the requirement names a
+process. A high-level process must not be linked to primitive offerings through
+`requires`, `precedes`, direct high-level `capableOf`, or another expected set
+or order. A
 read-only runtime projection joins the relevant task ABox and resource-catalog
 ABox assertions for the RA LLM. The RA-authored `primitive_steps` candidate,
 not an ontology entailment, creates the task-to-primitive connection
@@ -127,29 +140,38 @@ an LLM is universally necessary.
 
 ## Dynamic context-retrieval boundary
 
-The next consumer, not the TBox, exposes required context. The TBox defines
-legal meaning; it does not prescribe a document, CAD, observation, calibration,
-or primitive recipe. Before allocation, PA evolves a `TaskTransitionDraft` and
-compares its blocking inputs with a validated `ProductContextView`. After
-allocation, the selected RA's `PrimitiveProgramDraft` and primitive interfaces
-expose further runtime inputs.
+The active information need, not the TBox, drives evidence retrieval. The TBox
+defines legal shared meaning; it does not prescribe a document, CAD,
+observation, calibration, or primitive recipe. Before allocation, PA evolves a
+`GroundingSession` from the exact requirement and authorized zero-cost
+previews. After allocation, the selected RA's future `PrimitiveProgramDraft`
+and primitive interfaces expose further runtime inputs.
 
 ```text
-required consumer inputs - valid current context = ContextNeeds
+required record type + satisfied prerequisites + authorized source
+- attempted provider/source revisions = eligible actions
         ↓
-GroundingProducerDescriptor selects an authorized output-capable producer
+PA selects one exact provider action
         ↓
-producer retrieves permitted evidence and returns supported facts or records
+provider retrieves permitted evidence and returns a typed record
         ↓
-validate, fingerprint, persist, and reassess
+validate, hash, persist, and update GroundingSession
 ```
 
-PA may dynamically choose approved document, exact caller- or corpus-authorized
-CAD, fresh RGB-D, matching injected calibration, or an existing accepted record.
-Those modalities are producer inputs, not the semantic needs exchanged by PA
-and RA. Numeric values remain in `TypedContextBinding` records associated with
-the ABox context. OWL open-world absence is never treated as completeness, and
-no static all-modality checklist or expected primitive sequence is encoded.
+Provider-owned `GroundingProducerDescriptor` values declare exact IDs,
+descriptions, accepted evidence types, produced record types, prerequisites,
+availability, and estimated cost. Registration order is not a priority. PA may
+dynamically choose an approved document, exact caller- or corpus-authorized
+CAD, fresh RGB-D, matching injected calibration, or an existing accepted
+record. Numeric values remain in typed records. OWL open-world absence is never
+treated as completeness, and no static all-modality checklist or expected
+primitive sequence is encoded.
+
+Only directly supported session statements may enter the separate late
+ontology call. Inferred statements may guide evidence selection but cannot
+mutate the ABox. If no eligible untried action remains, the session becomes
+`incomplete`; a mapping failure becomes `ontology_gap`. Neither state causes an
+unchanged evidence retry or a manufactured assertion.
 
 The PA handoff requires only the minimum evidence-backed task identity, outcome,
 and bindings needed for a robot-independent `TaskTransitionContract`. The
@@ -178,8 +200,11 @@ Spec2Primitives does not broadcast or reallocate.
 ```text
 PA
 ├── document evidence tool
-│   ├── PDF text extraction
-│   └── VLM diagram interpretation
+│   ├── registered PDF validation and content-addressed overview cache
+│   ├── generic ontology-neutral overview
+│   ├── generalized session statements and provider actions
+│   ├── late statement-cited ontology proposal plus deterministic validation
+│   └── selective targeted-page VLM evidence
 │
 └── RGB-D/CAD grounding tool
     ├── RGB-D capture and preprocessing
@@ -204,10 +229,11 @@ rejected records but do not establish general identity recognition, a pick
 point, complete scene grounding, context assessment, primitive composition,
 planning, or execution. They are not connected to the production PA/RA path.
 
-Intermediate mask, depth, CAD-fit, uncertainty, and provenance evidence remains
+Intermediate mask, depth, CAD-fit, uncertainty, and source evidence remains
 separately auditable even though the algorithms are grouped behind the two tool
-boundaries. RA does not receive raw document or camera data. PA sends RA only
-the grounded assembly task and its provenance-backed requirements.
+boundaries. RA does not receive raw document or camera data. The official
+future PA→RA input is the validated ontology projection, typed grounding
+contract, and hash-pinned typed evidence records.
 
 ## Research thesis and evaluation requirement
 
@@ -278,14 +304,19 @@ exact product_requirement: assemble Medium Gear
         ↓
 PA loads the fixed TBox and initializes one interaction ABox
         ↓
-PA evolves a TaskTransitionDraft over its ProductContextView
+PA receives the exact requirement and authorized zero-cost previews
         ↓
-PA resolves currently blocking ContextNeeds through authorized producers
+PA evolves cited GroundingSession statements and InformationNeeds
         ↓
-PA validates and persists evidence-backed facts, then reassesses
-        ↺ each producer retrieval remains one auditable source operation
+PA selects only eligible, untried provider/source revisions
+        ↺ each provider action remains one auditable source operation
         ↓
-PA projects a robot-independent TaskTransitionContract
+directly supported statements enter one late ontology proposal
+        ↓
+deterministic validation commits the ABox and completion v2 pins the
+ontology projection + typed contract + typed evidence records
+        ↓
+future Phase 5 projects a robot-independent TaskTransitionContract
         ↓
 inherited allocation supplies one selected resource_jid; PA unicasts
         ↓

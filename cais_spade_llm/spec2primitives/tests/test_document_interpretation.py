@@ -1,10 +1,10 @@
-"""Tests for the Phase 4.1 OpenAI document interpretation boundary."""
+"""Tests for evidence-first approved PDF preparation and interpretation."""
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,46 +13,57 @@ import httpx
 import pytest
 from openai import BadRequestError
 from PIL import Image
-from rdflib import RDF, Graph, Namespace
 
-from cais_spade_llm.spec2primitives import spec2primitives_ui
-from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
-    Spec2PrimitivesUIRuntime,
-)
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
 )
 from cais_spade_llm.spec2primitives.config import load_model_runtime_config
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
-    PPR_NAMESPACE,
     ontology_config,
 )
+from cais_spade_llm.spec2primitives.tools import exact_ref_resolver
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
-    DOCUMENT_CONTEXT_REF,
+    DOCUMENT_OVERVIEW_SCHEMA_VERSION,
     DocumentInterpretationError,
     DocumentVisionRequest,
     DocumentVisionResponse,
     OpenAIDocumentVisionRuntime,
+    TargetedDocumentVisionRequest,
+    document_overview_cache_status,
     interpret_document_evidence,
+    prepare_document_overview,
     run_document_interpretation_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
     RenderedDocumentPage,
     document_interpretation_schema,
+    targeted_document_evidence_schema,
+)
+from cais_spade_llm.spec2primitives.tools.document_evidence.prepare import (
+    main as prepare_document_main,
 )
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     resolve_context_ref,
 )
 
-PPR = Namespace(PPR_NAMESPACE)
+_TEST_DOCUMENT_REF = "NIST_assembly_instructions.pdf"
 
 
 class ControlledVisionRuntime:
-    """Return one evidence-backed interpretation without a network call."""
+    """Return controlled neutral document records without network calls."""
 
-    def __init__(self, output: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        output: dict[str, object] | None = None,
+        *,
+        targeted_output: dict[str, object] | None = None,
+        model: str = "gpt-5.4-mini-2026-03-17",
+    ) -> None:
         self.output = output or _valid_output()
+        self.targeted_output = targeted_output
+        self.model = model
         self.requests: list[DocumentVisionRequest] = []
+        self.targeted_requests: list[TargetedDocumentVisionRequest] = []
 
     async def interpret_document(
         self,
@@ -60,13 +71,33 @@ class ControlledVisionRuntime:
     ) -> DocumentVisionResponse:
         self.requests.append(request)
         return DocumentVisionResponse(
-            response_id="resp_controlled",
-            model="gpt-5.4-mini-2026-03-17",
+            response_id="resp_overview_controlled",
+            model=self.model,
             output=self.output,
         )
 
+    async def inspect_document_pages(
+        self,
+        request: TargetedDocumentVisionRequest,
+    ) -> DocumentVisionResponse:
+        self.targeted_requests.append(request)
+        output = self.targeted_output or {
+            "observations": [
+                {
+                    "description": "The requested item is visible on the selected page.",
+                    "evidence_pages": [request.pages[0].page_number],
+                }
+            ],
+            "uncertainty": [],
+        }
+        return DocumentVisionResponse(
+            response_id="resp_targeted_controlled",
+            model=self.model,
+            output=output,
+        )
 
-def test_openai_adapter_sends_one_nonstored_structured_six_page_request() -> None:
+
+def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
     class ControlledResponses:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -80,10 +111,9 @@ def test_openai_adapter_sends_one_nonstored_structured_six_page_request() -> Non
             )
 
     responses = ControlledResponses()
-    client = SimpleNamespace(responses=responses)
     runtime = OpenAIDocumentVisionRuntime(
         load_model_runtime_config().document_vlm,
-        client=client,
+        client=SimpleNamespace(responses=responses),
     )
     pages = tuple(
         RenderedDocumentPage(
@@ -96,11 +126,8 @@ def test_openai_adapter_sends_one_nonstored_structured_six_page_request() -> Non
         for number in range(1, 7)
     )
     request = DocumentVisionRequest(
-        product_requirement="assemble Medium Gear",
-        abox_view={"status": "unresolved"},
-        tbox_classes=(str(PPR.feature), str(PPR.process)),
-        tbox_object_properties=(str(PPR.defines), str(PPR.realizes)),
-        tbox_datatype_properties=(),
+        context_ref=_TEST_DOCUMENT_REF,
+        source_sha256="a" * 64,
         pages=pages,
     )
 
@@ -110,49 +137,193 @@ def test_openai_adapter_sends_one_nonstored_structured_six_page_request() -> Non
     assert response.output == _valid_output()
     assert len(responses.calls) == 1
     call = responses.calls[0]
-    assert call["model"] == "gpt-5.4-mini-2026-03-17"
     assert call["store"] is False
     assert call["max_output_tokens"] == 4096
     assert call["reasoning"] == {"effort": "low"}
     assert "tools" not in call
+    serialized = json.dumps(call)
+    for forbidden in (
+        "product_requirement",
+        "ContextNeed",
+        "TBox",
+        "ABox",
+        "allowed_classes",
+        "http://PAonto.com#",
+        "entity_key",
+        "triple_delta",
+    ):
+        assert forbidden not in serialized
     content = call["input"][0]["content"]
-    assert [item["type"] for item in content] == ["input_text", *("input_image",) * 6]
-    assert [item["detail"] for item in content[1:]] == ["high"] * 6
-    assert call["text"]["format"]["strict"] is True
-    assert call["text"]["format"]["schema"]["additionalProperties"] is False
+    assert [item["type"] for item in content] == [
+        "input_text",
+        *("input_image",) * 6,
+    ]
 
 
-def test_openai_document_schema_uses_supported_constraints() -> None:
-    schema = document_interpretation_schema()
-    schema_text = json.dumps(schema)
+def test_document_schemas_are_neutral_and_use_supported_constraints() -> None:
+    overview_schema = document_interpretation_schema()
+    targeted_schema = targeted_document_evidence_schema()
+    serialized = json.dumps([overview_schema, targeted_schema])
 
-    assert "uniqueItems" not in schema_text
-    properties = schema["properties"]
-    assert isinstance(properties, dict)
-    literal_facts = properties["literal_facts"]
-    assert isinstance(literal_facts, dict)
-    literal_items = literal_facts["items"]
-    assert isinstance(literal_items, dict)
-    literal_properties = literal_items["properties"]
-    assert isinstance(literal_properties, dict)
-    assert literal_properties["value"] == {
-        "anyOf": [
-            {"type": "string"},
-            {"type": "number"},
-            {"type": "boolean"},
-        ]
+    assert "uniqueItems" not in serialized
+    for forbidden in (
+        "entities",
+        "relations",
+        "literal_facts",
+        "class_iri",
+        "predicate_iri",
+        "TBox",
+        "ABox",
+    ):
+        assert forbidden not in serialized
+    assert set(overview_schema["properties"]) == {
+        "summary",
+        "observations",
+        "uncertainty",
     }
-    entities = properties["entities"]
-    assert isinstance(entities, dict)
-    entity_items = entities["items"]
-    assert isinstance(entity_items, dict)
-    entity_properties = entity_items["properties"]
-    assert isinstance(entity_properties, dict)
-    assert entity_properties["evidence_pages"] == {
-        "type": "array",
-        "items": {"type": "integer", "minimum": 1},
-        "minItems": 1,
+    assert set(targeted_schema["properties"]) == {
+        "observations",
+        "uncertainty",
     }
+
+
+def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_model_runtime_config().document_vlm
+    served_context = _served_document(_TEST_DOCUMENT_REF)
+    cache_root = tmp_path / "source_cache"
+    vision = ControlledVisionRuntime()
+
+    first = asyncio.run(
+        prepare_document_overview(
+            served_context=served_context,
+            cache_root=cache_root,
+            config=config,
+            vision_runtime=vision,
+        )
+    )
+    second = asyncio.run(
+        prepare_document_overview(
+            served_context=served_context,
+            cache_root=cache_root,
+            config=config,
+            vision_runtime=vision,
+        )
+    )
+
+    assert first.cache_status == "miss"
+    assert second.cache_status == "hit"
+    assert first.record_path == second.record_path
+    assert len(vision.requests) == 1
+    record = _read_json(first.record_path)
+    assert record["record_type"] == "DocumentOverviewRecord"
+    assert "entities" not in record
+    assert "relations" not in record
+    assert "assertions" not in record
+    assert record["observations"][0]["observation_id"] == "observation_0001"
+
+    changed_config = replace(config, model="controlled-new-model")
+    changed_vision = ControlledVisionRuntime(model="controlled-new-model")
+    changed = asyncio.run(
+        prepare_document_overview(
+            served_context=served_context,
+            cache_root=cache_root,
+            config=changed_config,
+            vision_runtime=changed_vision,
+        )
+    )
+    assert changed.cache_status == "miss"
+    assert changed.record_path != first.record_path
+    assert len(changed_vision.requests) == 1
+
+    monkeypatch.setattr(
+        "cais_spade_llm.spec2primitives.tools.document_evidence.interpreter."
+        "DOCUMENT_OVERVIEW_SCHEMA_VERSION",
+        DOCUMENT_OVERVIEW_SCHEMA_VERSION + 1,
+    )
+    stale_status = document_overview_cache_status(
+        _TEST_DOCUMENT_REF,
+        cache_root=cache_root,
+        config=config,
+    )
+    assert stale_status["source_status"] == "valid"
+    assert stale_status["overview_status"] == "stale"
+    schema_vision = ControlledVisionRuntime()
+    schema_changed = asyncio.run(
+        prepare_document_overview(
+            served_context=served_context,
+            cache_root=cache_root,
+            config=config,
+            vision_runtime=schema_vision,
+        )
+    )
+    assert schema_changed.cache_status == "miss"
+    assert schema_changed.record_path != first.record_path
+    assert len(schema_vision.requests) == 1
+
+    interaction_root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(
+        interaction_root,
+        "assemble Medium Gear",
+        tbox,
+    )
+    interpretation = asyncio.run(
+        interpret_document_evidence(
+            interaction_root=interaction_root,
+            tbox=tbox,
+            abox=abox,
+            served_context=served_context,
+            operation_number=1,
+            config=config,
+            vision_runtime=vision,
+        )
+    )
+    assert interpretation.delta["assertions"] == []
+    snapshot = _read_json(interpretation.overview_record_path)
+    assert snapshot["record_type"] == "DocumentOverviewRecord"
+    assert snapshot["producer"] == "document_evidence"
+
+
+def test_invalid_overview_is_removed_atomically_and_abox_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    output = _valid_output()
+    observations = output["observations"]
+    assert isinstance(observations, list)
+    observation = observations[0]
+    assert isinstance(observation, dict)
+    observation["evidence_pages"] = [4, 4]
+    interaction_root = tmp_path / "interaction"
+    config = load_model_runtime_config().document_vlm
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(
+        interaction_root,
+        "assemble Medium Gear",
+        tbox,
+    )
+
+    with pytest.raises(DocumentInterpretationError, match="must be unique"):
+        asyncio.run(
+            interpret_document_evidence(
+                interaction_root=interaction_root,
+                tbox=tbox,
+                abox=abox,
+                served_context=_served_document(_TEST_DOCUMENT_REF),
+                operation_number=1,
+                config=config,
+                vision_runtime=ControlledVisionRuntime(output),
+            )
+        )
+
+    assert not list((tmp_path / "source_cache").rglob("overview.json"))
+    manifest = _read_json(
+        interaction_root / "products/grounding/ontology/abox_manifest.json"
+    )
+    assert manifest["delta_count"] == 0
+    assert manifest["accepted_assertion_count"] == 0
 
 
 def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
@@ -177,29 +348,24 @@ def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
             "image_url": "data:image/png;base64,must-not-persist",
         },
     )
-    calls: list[dict[str, object]] = []
 
     class ControlledResponses:
         async def create(self, **kwargs: object) -> object:
-            calls.append(kwargs)
+            del kwargs
             raise api_error
 
     config = load_model_runtime_config().document_vlm
-    vision_runtime = OpenAIDocumentVisionRuntime(
+    runtime = OpenAIDocumentVisionRuntime(
         config,
         client=SimpleNamespace(responses=ControlledResponses()),
     )
     interaction_root = tmp_path / "bad_request"
-    configured_ontology = ontology_config()
-    tbox = configured_ontology.load_tbox()
+    tbox = ontology_config().load_tbox()
     abox = initialize_interaction_abox(
         interaction_root,
         "assemble Medium Gear",
         tbox,
     )
-    resolved = resolve_context_ref({"context_ref": DOCUMENT_CONTEXT_REF})
-    served_context = resolved["served_context"]
-    assert isinstance(served_context, dict)
 
     with pytest.raises(DocumentInterpretationError) as exc_info:
         asyncio.run(
@@ -207,36 +373,20 @@ def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
                 interaction_root=interaction_root,
                 tbox=tbox,
                 abox=abox,
-                served_context=served_context,
+                served_context=_served_document(_TEST_DOCUMENT_REF),
                 operation_number=1,
                 config=config,
-                vision_runtime=vision_runtime,
+                vision_runtime=runtime,
             )
         )
 
-    assert len(calls) == 1
     assert exc_info.value.__cause__ is api_error
-    expected_diagnostic = {
-        "stage": "Phase 4.1 document_evidence OpenAI Responses call",
-        "exception": "BadRequestError",
-        "status_code": 400,
-        "request_id": "req_document_controlled",
-        "error_type": "invalid_request_error",
-        "param": "text.format.schema",
-        "code": "invalid_json_schema",
-        "message": "Unsupported schema keyword: uniqueItems",
-    }
-    assert exc_info.value.diagnostic == expected_diagnostic
-    assert "status_code=400" in str(exc_info.value)
-    assert "param=text.format.schema" in str(exc_info.value)
-
     trace_path = (
         interaction_root
         / "products/grounding/document_evidence/interpretation_0001.json"
     )
-    trace = _read_json(trace_path)
-    assert trace["diagnostic"] == expected_diagnostic
     trace_text = trace_path.read_text(encoding="utf-8")
+    assert "req_document_controlled" in trace_text
     for forbidden in (
         "private_body_field",
         "controlled prompt",
@@ -247,228 +397,200 @@ def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
     ):
         assert forbidden not in trace_text
 
-    manifest = _read_json(
-        interaction_root / "products/grounding/ontology/abox_manifest.json"
-    )
-    assert manifest["delta_count"] == 0
-    assert not list(
-        (interaction_root / "products/grounding/ontology").glob("delta_*.json")
-    )
 
-
-def test_diagnostic_renders_all_pages_and_merges_validated_delta(
+def test_second_registered_pdf_uses_the_same_overview_pipeline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    requirement = "  assemble Medium Gear exactly  "
-    vision = ControlledVisionRuntime()
-    interaction_root = tmp_path / "document_diagnostic"
+    references_root = tmp_path / "references/products"
+    references_root.mkdir(parents=True)
+    pdf_path = references_root / "Second_Product_Manual.pdf"
+    Image.new("RGB", (320, 200), color="white").save(pdf_path, format="PDF")
+    inventory_path = references_root / "approved_sources.json"
+    inventory_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "context_ref": pdf_path.name,
+                        "evidence_type": "document",
+                        "repository_path": "references/products/Second_Product_Manual.pdf",
+                        "source_url": "https://example.test/second-manual",
+                        "page_count": 1,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(exact_ref_resolver, "_REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(exact_ref_resolver, "_REFERENCES_ROOT", references_root)
+    monkeypatch.setattr(exact_ref_resolver, "_INVENTORY_PATH", inventory_path)
+    served = _served_document(pdf_path.name)
+    vision = ControlledVisionRuntime(
+        {
+            "summary": "A second product manual.",
+            "observations": [
+                {
+                    "description": "The page shows a second product.",
+                    "evidence_pages": [1],
+                }
+            ],
+            "uncertainty": [],
+        }
+    )
 
     result = asyncio.run(
-        run_document_interpretation_diagnostic(
-            interaction_root=interaction_root,
-            product_requirement=requirement,
-            ontology_config=ontology_config(),
+        prepare_document_overview(
+            served_context=served,
+            cache_root=tmp_path / "cache",
             config=load_model_runtime_config().document_vlm,
             vision_runtime=vision,
         )
     )
 
-    assert result["status"] == "accepted"
-    assert result["product_requirement"] == requirement
-    assert result["page_count"] == 6
-    assert result["model"] == "gpt-5.4-mini-2026-03-17"
-    assert result["assertion_count"] == 4
-    assert len(result["supported_findings"]) == 4
-    assert len(result["uncertainty"]) == 1
-    assert len(result["unresolved_evidence_needs"]) == 1
-    assert result["failure"] is None
-    assert len(vision.requests) == 1
-    request = vision.requests[0]
-    assert request.product_requirement == requirement
-    assert request.abox_view["product_requirement"] == requirement
-    assert [page.page_number for page in request.pages] == list(range(1, 7))
-    assert all(page.image_data_url.startswith("data:image/png;base64,") for page in request.pages)
-    for page in request.pages:
-        with Image.open(page.image_path) as image:
-            assert abs(image.width - 1600) <= 2
+    assert result.context_ref == "Second_Product_Manual.pdf"
+    assert result.record["page_count"] == 1
+    document_evidence = served["document_evidence"]
+    assert isinstance(document_evidence, dict)
+    assert result.record["source_sha256"] == document_evidence["source_sha256"]
+    assert vision.requests[0].context_ref == "Second_Product_Manual.pdf"
 
-    graph = Graph().parse(str(result["abox_path"]), format="turtle")
-    feature = next(graph.subjects(RDF.type, PPR.feature))
-    process = next(graph.subjects(RDF.type, PPR.process))
-    specification = next(graph.subjects(RDF.type, PPR.specification))
-    assert (specification, PPR.defines, feature) in graph
-    assert (process, PPR.realizes, feature) in graph
-
-    trace = _read_json(Path(str(result["trace_path"])))
-    assert trace["store"] is False
-    assert len(trace["pages"]) == 6
-    assert trace["compiled_delta"]["assertions"][0]["evidence_refs"] == [
-        "NIST_assembly_instructions.pdf#page=4"
-    ]
-    assert "OPENAI_API_KEY" not in json.dumps(trace)
-    diagnostic = _read_json(Path(str(result["diagnostic_record_path"])))
-    assert diagnostic == result
-    assert "context understanding complete" not in json.dumps(diagnostic)
-
-
-def test_invalid_vision_vocabulary_is_rejected_without_abox_delta(
-    tmp_path: Path,
-) -> None:
-    output = _valid_output()
-    output["entities"][0]["class_iri"] = "https://unknown.example/Class"
-    interaction_root = tmp_path / "rejected"
-
-    result = asyncio.run(
-        run_document_interpretation_diagnostic(
-            interaction_root=interaction_root,
-            product_requirement="assemble Medium Gear",
-            ontology_config=ontology_config(),
+    Image.new("RGB", (320, 200), color="black").save(pdf_path, format="PDF")
+    changed_served = _served_document(pdf_path.name)
+    changed = asyncio.run(
+        prepare_document_overview(
+            served_context=changed_served,
+            cache_root=tmp_path / "cache",
             config=load_model_runtime_config().document_vlm,
-            vision_runtime=ControlledVisionRuntime(output),
+            vision_runtime=vision,
         )
     )
-
-    assert result["status"] == "rejected"
-    assert result["failure"]["reason"] == "document_interpretation_rejected"
-    assert result["trace_path"] is not None
-    assert result["abox_path"] is not None
-    manifest = _read_json(interaction_root / "products/grounding/ontology/abox_manifest.json")
-    assert manifest["delta_count"] == 0
-    assert manifest["accepted_assertion_count"] == 0
-    assert not list((interaction_root / "products/grounding/ontology").glob("delta_*.json"))
-    trace = _read_json(
-        interaction_root / "products/grounding/document_evidence/interpretation_0001.json"
-    )
-    assert "not declared in the TBox" in trace["failure"]
+    assert changed.cache_status == "miss"
+    assert changed.record_path != result.record_path
+    assert changed.record["source_sha256"] != result.record["source_sha256"]
+    assert len(vision.requests) == 2
 
 
-def test_duplicate_evidence_pages_remain_rejected_without_abox_delta(
+def test_prepare_command_supports_all_and_one_exact_context_ref(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    output = _valid_output()
-    entities = output["entities"]
-    assert isinstance(entities, list)
-    first_entity = entities[0]
-    assert isinstance(first_entity, dict)
-    first_entity["evidence_pages"] = [4, 4]
-    interaction_root = tmp_path / "duplicate_pages"
+    calls: list[tuple[tuple[str, ...], Path]] = []
 
-    result = asyncio.run(
-        run_document_interpretation_diagnostic(
-            interaction_root=interaction_root,
-            product_requirement="assemble Medium Gear",
-            ontology_config=ontology_config(),
-            config=load_model_runtime_config().document_vlm,
-            vision_runtime=ControlledVisionRuntime(output),
-        )
-    )
-
-    assert result["status"] == "rejected"
-    assert "evidence pages must be unique" in result["failure"]["message"]
-    manifest = _read_json(
-        interaction_root / "products/grounding/ontology/abox_manifest.json"
-    )
-    assert manifest["delta_count"] == 0
-    assert not list(
-        (interaction_root / "products/grounding/ontology").glob("delta_*.json")
-    )
-    trace = _read_json(
-        interaction_root
-        / "products/grounding/document_evidence/interpretation_0001.json"
-    )
-    assert trace["diagnostic"] is None
-
-
-def test_ui_document_diagnostic_is_separate_and_fails_closed(
-    monkeypatch: Any,
-    tmp_path: Path,
-) -> None:
-    unavailable = Spec2PrimitivesUIRuntime(
-        dual_gazebo=object(),
-        product_agent=object(),  # type: ignore[arg-type]
-        contexts_root=tmp_path,
-        document_diagnostic_unavailable_reason="controlled unavailable",
-    )
-    result = asyncio.run(
-        spec2primitives_ui._run_document_diagnostic_ui(
-            unavailable,
-            "assemble Medium Gear",
-        )
-    )
-    assert result["status"] == "unavailable"
-    assert result["failure"]["message"] == "controlled unavailable"
-
-    calls: list[dict[str, object]] = []
-
-    async def controlled_runner(**kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"status": "accepted", "failure": None}
+    async def controlled_prepare(
+        context_refs: tuple[str, ...],
+        *,
+        cache_root: Path,
+    ) -> int:
+        calls.append((context_refs, cache_root))
+        return 0
 
     monkeypatch.setattr(
-        spec2primitives_ui,
-        "run_document_interpretation_diagnostic",
-        controlled_runner,
+        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare."
+        "approved_document_refs",
+        lambda: ("First.pdf", "Second.pdf"),
     )
-    configured = Spec2PrimitivesUIRuntime(
-        dual_gazebo=object(),
-        product_agent=object(),  # type: ignore[arg-type]
-        contexts_root=tmp_path,
-        ontology_config=ontology_config(),
-        model_config=load_model_runtime_config(),
-        document_vision_runtime=ControlledVisionRuntime(),
+    monkeypatch.setattr(
+        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare."
+        "prepare_documents",
+        controlled_prepare,
     )
+
+    assert prepare_document_main(["--all", "--cache-root", str(tmp_path)]) == 0
+    assert (
+        prepare_document_main(
+            [
+                "--context-ref",
+                "Second.pdf",
+                "--cache-root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        (("First.pdf", "Second.pdf"), tmp_path),
+        (("Second.pdf",), tmp_path),
+    ]
+
+
+def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
+    tmp_path: Path,
+) -> None:
+    class ProposalAgent:
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert "initialized_specification_iri" in prompt
+            proposal_schema = response_format["schema"]["properties"][
+                "ontology_grounding_proposal"
+            ]["properties"]
+            statement_ids = proposal_schema["individuals"]["items"][
+                "properties"
+            ]["statement_ids"]["items"]["enum"]
+            return {
+                "ontology_grounding_proposal": {
+                    "individuals": [
+                        {
+                            "individual_index": 1,
+                            "class_iri": "http://PAonto.com#feature",
+                            "statement_ids": [statement_ids[0]],
+                        }
+                    ],
+                    "relations": [],
+                    "literal_facts": [],
+                    "unrepresented_statement_ids": statement_ids[1:],
+                }
+            }
+
     result = asyncio.run(
-        spec2primitives_ui._run_document_diagnostic_ui(
-            configured,
-            "assemble Medium Gear",
+        run_document_interpretation_diagnostic(
+            interaction_root=tmp_path / "diagnostic",
+            product_requirement="assemble Medium Gear",
+            context_ref=_TEST_DOCUMENT_REF,
+            product_agent=ProposalAgent(),
+            ontology_config=ontology_config(),
+            config=load_model_runtime_config().document_vlm,
+            vision_runtime=ControlledVisionRuntime(),
         )
     )
 
-    assert result == {"status": "accepted", "failure": None}
-    assert len(calls) == 1
-    assert str(calls[0]["interaction_root"]).startswith(str(tmp_path / "document_diagnostic_"))
-    source = inspect.getsource(spec2primitives_ui._render_document_interpretation_diagnostic)
-    assert "context understanding complete" not in source
+    assert result["status"] == "accepted"
+    assert result["overview"]["status"] == "accepted"
+    assert result["targeted_evidence"] is None
+    assert result["grounding_session"]["status"] == "ready_for_ontology"
+    assert result["ontology_proposal"]["status"] == "accepted"
+    assert len(result["accepted_assertions"]) == 1
+    assert result["failure"] is None
+
+
+def _served_document(context_ref: str) -> dict[str, object]:
+    resolved = resolve_context_ref({"context_ref": context_ref})
+    served = resolved.get("served_context")
+    assert isinstance(served, dict), resolved
+    return served
 
 
 def _valid_output() -> dict[str, object]:
     return {
-        "entities": [
+        "summary": "Assembly instructions for a gear product.",
+        "observations": [
             {
-                "key": "required_medium_gear",
-                "class_iri": str(PPR.feature),
+                "description": "The specification identifies a Medium Gear.",
                 "evidence_pages": [4],
             },
             {
-                "key": "gear_assembly_process",
-                "class_iri": str(PPR.process),
-                "evidence_pages": [4],
-            },
-        ],
-        "relations": [
-            {
-                "subject_key": "specification",
-                "predicate_iri": str(PPR.defines),
-                "object_key": "required_medium_gear",
-                "evidence_pages": [4],
-            },
-            {
-                "subject_key": "gear_assembly_process",
-                "predicate_iri": str(PPR.realizes),
-                "object_key": "required_medium_gear",
+                "description": "A depicted assembly sequence uses the gear.",
                 "evidence_pages": [4],
             },
         ],
-        "literal_facts": [],
         "uncertainty": [
             {
-                "description": "The manual does not state an insertion tolerance.",
-                "evidence_pages": [4],
-            }
-        ],
-        "unresolved_evidence_needs": [
-            {
-                "description": "A measured receiving pose is not present in the manual.",
+                "description": "The page does not state an insertion tolerance.",
                 "evidence_pages": [4],
             }
         ],

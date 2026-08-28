@@ -60,6 +60,7 @@ def test_exact_reply_resumes_same_interaction_and_rebuilds_view(
     assert result == {
         "needed_context": None,
         "context understanding complete": True,
+        "grounding_status": "complete",
     }
     record = _read_json(tmp_path / "interaction_record/clarification_0002.json")
     assert record["reply"] == "  Medium Gear  "

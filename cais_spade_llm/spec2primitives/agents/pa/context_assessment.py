@@ -8,7 +8,6 @@ import logging
 import math
 import time
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +22,12 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    ContextNeed,
     GroundingContractError,
     GroundingProducerDescriptor,
-    PAContextGroundingCompletion,
-    ProductContextView,
-    TaskTransitionDraft,
     build_product_context_view,
-    load_pa_context_grounding_completion,
+    load_latest_grounding_session,
+    persist_pa_context_grounding_completion_v2,
     persist_product_context_view,
-    unresolved_context_needs,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     ABoxSnapshot,
@@ -62,6 +57,7 @@ _ASSESSMENT_KEYS = {
     "needed_context",
     "context understanding complete",
 }
+_SESSION_ASSESSMENT_KEYS = _ASSESSMENT_KEYS | {"grounding_status"}
 _CLARIFICATION_KEYS = {
     "schema_version",
     "record_type",
@@ -393,7 +389,8 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             ):
                 raise AssertionError("Validated interpretation result is incomplete.")
             abox = updated_abox
-            attempted_evidence.append(evidence_identifier)
+            if evidence_identifier not in attempted_evidence:
+                attempted_evidence.append(evidence_identifier)
             served_context = None
 
         turn_number = operation_number + 1
@@ -538,10 +535,13 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             "needed_context": assessment_output["needed_context"],
             "context understanding complete": assessment_output["context understanding complete"],
         }
+        if "grounding_status" in assessment_output:
+            pa_output["grounding_status"] = assessment_output["grounding_status"]
         terminal = _is_terminal_assessment(assessment_output)
         limit_reached = (
             turn_number == max_pa_turns
             and assessment_output["context understanding complete"] is False
+            and not terminal
         )
         turn_failure_value = (
             _failure(
@@ -637,7 +637,10 @@ async def _interpret_and_merge(  # noqa: PLR0913
     evidence_identifier = _evidence_identifier(served_context)
     if evidence_identifier is None:
         return _failure("invalid_interaction", "served_context evidence ref is invalid.")
-    if evidence_identifier in attempted_evidence:
+    if (
+        evidence_identifier in attempted_evidence
+        and load_latest_grounding_session(interaction_root) is None
+    ):
         return _failure(
             "duplicate_evidence_request",
             f"Evidence was already interpreted: {evidence_identifier}.",
@@ -786,16 +789,34 @@ def _assessment_validation_error(  # noqa: C901
     served_static_refs: set[str],
     live_request_history: set[str],
 ) -> str | None:
-    if not isinstance(assessment, Mapping) or set(assessment) != _ASSESSMENT_KEYS:
+    if not isinstance(assessment, Mapping) or frozenset(assessment) not in {
+        frozenset(_ASSESSMENT_KEYS),
+        frozenset(_SESSION_ASSESSMENT_KEYS),
+    }:
         return "Phase 4.3 output fields are invalid."
     complete = assessment["context understanding complete"]
     needed_context = assessment["needed_context"]
     semantic_need = assessment["unresolved_semantic_need"]
+    grounding_status = assessment.get("grounding_status")
     if not isinstance(complete, bool):
         return "context understanding complete must be a boolean."
+    if grounding_status is not None and grounding_status not in {
+        "waiting_for_evidence",
+        "waiting_for_user",
+        "complete",
+        "incomplete",
+        "ontology_gap",
+    }:
+        return "grounding_status is invalid."
     if complete:
         if any(value is not None for value in (needed_context, semantic_need)):
             return "A completed assessment cannot retain a semantic need or request."
+        if grounding_status is not None and grounding_status != "complete":
+            return "A completed assessment requires grounding_status complete."
+        return None
+    if grounding_status in {"incomplete", "ontology_gap"}:
+        if needed_context is not None or semantic_need is not None:
+            return "A terminal grounding state cannot retain a request."
         return None
     semantic_need_error = _semantic_need_validation_error(semantic_need)
     if semantic_need_error is not None:
@@ -828,6 +849,8 @@ def _assessment_validation_error(  # noqa: C901
     )
     if descriptor_error is not None:
         return descriptor_error
+    if grounding_status is not None:
+        return None
     if isinstance(context_ref, str) and context_ref in served_static_refs:
         return f"Phase 4.3 context_ref was already served: {context_ref}."
     if context_ref is None and _semantic_need_key(semantic_need) in live_request_history:
@@ -843,24 +866,26 @@ def _descriptor_request_validation_error(
 ) -> str | None:
     if not isinstance(semantic_need, Mapping) or not isinstance(evidence_kind, str):
         return "A producer request requires one structured semantic need."
-    try:
-        need = ContextNeed.from_mapping(
-            {
-                "kind": semantic_need["kind"],
-                "symbol": semantic_need["symbol"],
-                "subject_role": "product_context",
-                "authority": "PA",
-                "frame": None,
-                "maximum_age_ns": None,
-                "reason": semantic_need["description"],
-            }
-        )
-    except (GroundingContractError, KeyError, TypeError) as exc:
-        return f"Phase 4.3 semantic need cannot be routed: {exc}"
+    if set(semantic_need) != {"kind", "symbol", "description"}:
+        return "Phase 4.3 semantic need fields are invalid."
+    kind = semantic_need.get("kind")
+    symbol = semantic_need.get("symbol")
+    description = semantic_need.get("description")
+    if kind not in {"class", "property", "individual", "typed_context_record"}:
+        return "Phase 4.3 semantic need kind cannot be routed."
+    if any(
+        not isinstance(item, str) or not item.strip()
+        for item in (symbol, description)
+    ):
+        return "Phase 4.3 semantic need values cannot be routed."
     matches = [
         descriptor
         for descriptor in producer_descriptors
-        if descriptor.supports(need) and evidence_kind in descriptor.evidence_types
+        if evidence_kind in descriptor.accepted_evidence_types
+        and (
+            kind != "typed_context_record"
+            or descriptor.supports_record_type(str(symbol))
+        )
     ]
     if not matches:
         return (
@@ -895,6 +920,8 @@ def _semantic_need_key(semantic_need: Mapping[str, object]) -> str:
 
 def _is_terminal_assessment(assessment: Mapping[str, object]) -> bool:
     if assessment["context understanding complete"] is True:
+        return True
+    if assessment.get("grounding_status") in {"incomplete", "ontology_gap"}:
         return True
     needed_context = assessment["needed_context"]
     return isinstance(needed_context, dict) and isinstance(
@@ -1050,117 +1077,47 @@ def _persist_pa_context_grounding_completion(  # noqa: PLR0913
     try:
         tbox.assert_unchanged()
         abox = load_interaction_abox(interaction_root, tbox)
-        draft_paths = sorted(
-            (
-                interaction_root / "products/grounding/task_transition"
-            ).glob("draft_*.json")
-        )
-        if not draft_paths:
-            return "No persisted TaskTransitionDraft is available for Phase 3.5."
-        draft_path = draft_paths[-1]
-        draft_source = draft_path.read_bytes()
-        draft_value = json.loads(draft_source.decode("utf-8"))
-        if not isinstance(draft_value, Mapping):
-            return "Persisted TaskTransitionDraft is not an object."
-        draft = TaskTransitionDraft.from_mapping(draft_value)
-        if draft.product_requirement != product_requirement:
-            return "TaskTransitionDraft product_requirement does not match Phase 3.5."
-
-        source_view_path: Path | None = None
-        source_view: ProductContextView | None = None
-        for path in sorted(
-            (interaction_root / "products/grounding/product_context").glob(
-                "view_*.json"
+        session = load_latest_grounding_session(interaction_root)
+        if session is not None:
+            if session.status != "complete":
+                return "GroundingSession is not complete for Phase 3.5."
+            fresh_view = build_product_context_view(
+                interaction_root,
+                abox,
+                attempted_evidence=attempted_evidence,
+                assessed_at_ns=time.time_ns(),
             )
-        ):
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, Mapping):
-                return "Persisted ProductContextView is not an object."
-            candidate = ProductContextView.from_mapping(value)
-            if candidate.fingerprint == draft.source_view_fingerprint:
-                source_view_path = path
-                source_view = candidate
-        if source_view_path is None or source_view is None:
-            return "TaskTransitionDraft source ProductContextView is unavailable."
-
-        fresh_view = build_product_context_view(
-            interaction_root,
-            abox,
-            attempted_evidence=attempted_evidence,
-            assessed_at_ns=time.time_ns(),
-        )
-        if (
-            source_view.tbox_fingerprint != fresh_view.tbox_fingerprint
-            or source_view.abox_fingerprint != fresh_view.abox_fingerprint
-            or source_view.delta_count != fresh_view.delta_count
-            or source_view.assertions != fresh_view.assertions
-        ):
-            return "TaskTransitionDraft source context is not the current PA context."
-        current_draft = replace(
-            draft,
-            source_view_fingerprint=fresh_view.fingerprint,
-        )
-        unresolved = unresolved_context_needs(current_draft, fresh_view)
-        if unresolved or draft.unresolved_user_intent is not None:
-            return "TaskTransitionDraft still has unresolved context needs."
-
-        fresh_view_path = persist_product_context_view(
-            interaction_root,
-            fresh_view,
-        )
-        clarification_refs: list[str] = []
-        for item in clarification_history:
-            question_turn = item.get("question_turn")
-            if not isinstance(question_turn, int) or isinstance(question_turn, bool):
-                return "Clarification history contains an invalid question turn."
-            path = (
-                interaction_root
-                / "interaction_record"
-                / f"clarification_{question_turn:04d}.json"
+            persist_product_context_view(interaction_root, fresh_view)
+            clarification_refs: list[str] = []
+            for item in clarification_history:
+                question_turn = item.get("question_turn")
+                if not isinstance(question_turn, int) or isinstance(
+                    question_turn, bool
+                ):
+                    return "Clarification history contains an invalid question turn."
+                path = (
+                    interaction_root
+                    / "interaction_record"
+                    / f"clarification_{question_turn:04d}.json"
+                )
+                persisted, error = _existing_clarification_record(path)
+                if error is not None or persisted != item:
+                    return error or (
+                        "Clarification history does not match its persisted record."
+                    )
+                if persisted.get("action") != "answered":
+                    return "Cancelled clarification cannot enter Phase 3.5."
+                clarification_refs.append(str(path.relative_to(interaction_root)))
+            persist_pa_context_grounding_completion_v2(
+                interaction_root,
+                product_requirement=product_requirement,
+                completion_turn=completion_turn,
+                decision_ref=str(decision_path.relative_to(interaction_root)),
+                product_context=fresh_view,
+                clarification_refs=clarification_refs,
             )
-            persisted, error = _existing_clarification_record(path)
-            if error is not None or persisted != item:
-                return error or "Clarification history does not match its persisted record."
-            if persisted.get("action") != "answered":
-                return "Cancelled clarification cannot enter Phase 3.5."
-            clarification_refs.append(str(path.relative_to(interaction_root)))
-
-        payload: dict[str, object] = {
-            "schema_version": 1,
-            "record_type": "PAContextGroundingCompletion",
-            "status": "context understanding complete",
-            "product_requirement": product_requirement,
-            "completion_turn": completion_turn,
-            "decision_ref": str(decision_path.relative_to(interaction_root)),
-            "task_transition_draft_ref": str(draft_path.relative_to(interaction_root)),
-            "task_transition_draft_sha256": hashlib.sha256(draft_source).hexdigest(),
-            "product_context_ref": str(
-                fresh_view_path.relative_to(interaction_root)
-            ),
-            "product_context_fingerprint": fresh_view.fingerprint,
-            "tbox_fingerprint": fresh_view.tbox_fingerprint,
-            "abox_fingerprint": fresh_view.abox_fingerprint,
-            "attempted_evidence": list(fresh_view.attempted_evidence),
-            "typed_context_refs": [
-                {
-                    "ref": binding.record_ref,
-                    "sha256": binding.record_sha256,
-                }
-                for binding in fresh_view.typed_bindings
-            ],
-            "clarification_refs": clarification_refs,
-            "unresolved_context_needs": [],
-            "completed_at_ns": time.time_ns(),
-        }
-        payload["fingerprint"] = _record_fingerprint(payload)
-        completion = PAContextGroundingCompletion.from_mapping(payload)
-        _write_json_exclusive(
-            interaction_root
-            / "interaction_record"
-            / "context_completion_0001.json",
-            completion.to_record(),
-        )
-        load_pa_context_grounding_completion(interaction_root)
+            return None
+        return "No complete GroundingSession is available for Phase 3.5."
     except (
         FileExistsError,
         GroundingContractError,

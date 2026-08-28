@@ -7,14 +7,14 @@ contract-first ontology integration, Phase 3.4, Phase 3.5, Phase 4.0, Phase
 preprocessing, Phase 4.2B1 minimal automatic RGB-D segmentation, and Phase
 4.2B2A CAD-size candidate association, the simple remaining Phase 4.2B2
 camera-frame pose increment, simple camera-to-robot frame conversion, and the
-pre-RA Phase 4.3 grounding runtime are implemented. Phase 3.1
-now initializes Phase 4.0 before PA selects its first source and rejects
-first-turn clarification. Phase 3.3 now orchestrates numbered retrieval,
-controlled interpretation, validated ABox deltas, and persisted Phase 4.3
-decisions without assessing raw evidence summaries. Phase 4.3 now evolves and
-persists a robot-independent `TaskTransitionDraft`, computes exact
-`ContextNeed` values from a validated `ProductContextView`, and selects only an
-authorized output-capable producer. The production runtime and its read-only
+pre-RA Phase 4.3 grounding runtime are implemented. Startup validates sources,
+loads cache indexes and provider capabilities, and validates the immutable TBox
+without making an LLM or VLM call. During an interaction, PA starts from the
+exact requirement and inference-free previews, then evolves a cited
+`GroundingSession`. The controller discovers eligible actions from provider
+capabilities and source revisions, not from a fixed modality order. Only after
+required information is resolved does a separate PA call map directly
+supported statement IDs into an untrusted ontology proposal. The production runtime and its read-only
 ontology-grounding UI use the project-authoritative
 `ontology/spec2primitives_ppr_tbox.owl` by default and are enabled only when it
 passes the schema-only profile and `OPENAI_API_KEY` is configured; otherwise the interaction fails closed. The
@@ -27,6 +27,33 @@ authorize an end-to-end implementation.
 `PA` refers to ProductAgent and `RA` refers to RobotAgent throughout this plan.
 Only PA and RA participate in the current Spec2Primitives roadmap.
 
+## Current authoritative PA grounding lifecycle
+
+```text
+register approved source
+→ prepare generic document cache when applicable
+→ start system with zero model calls
+→ exact requirement + authorized previews initialize GroundingSession
+→ PA records cited statements and InformationNeeds
+→ controller offers only eligible, untried provider/source revisions
+→ PA selects one action, waits for user intent, stops incomplete,
+  or becomes ready for ontology
+→ directly supported statements enter one late ontology proposal
+→ deterministic validation and atomic ABox commit
+→ ontology projection + typed grounding contract + hash-pinned records
+```
+
+This lifecycle is generalized across manufacturing processes. The initial
+schema contains no assembly-specific field, expected answer, ontology
+vocabulary, or fixed document → CAD → RGB-D sequence. `max_pa_turns` is only an
+emergency operational ceiling; exhaustion produces a persisted `incomplete`
+session rather than a semantic-loop exception.
+
+The ontology is supporting infrastructure for semantic interoperability. It is
+not the evidence router, task-understanding engine, document-understanding
+contribution, or primitive composer. Information the current TBox cannot
+express remains in the typed grounding contract.
+
 ## Proposed-versus-implemented status
 
 | Phase | Status | Current boundary |
@@ -34,19 +61,19 @@ Only PA and RA participate in the current Spec2Primitives roadmap.
 | Phase 0 and Phase 0.1 | implemented | Isolated package and no-hardware NIST operator scene. |
 | Phase 1, Phase 1.1, and Phase 1.2 | implemented | Approved exact-ref retrieval plus stored and request-scoped live RGB-D observations. |
 | Phase 2 and Phase 2.1 | implemented | PA UI, configurable turn limit, live PA turn counter, transcript, compact evidence summaries, and complete audit records. |
-| Phase 3.1 | implemented with project-authoritative TBox | Exact requirement intake loads `ontology/spec2primitives_ppr_tbox.owl` by default, initializes the ABox before PA's first request, exposes the unresolved view and approved evidence types, and rejects first-turn clarification. |
+| Phase 3.1 | generalized grounding implemented | Exact requirement intake initializes the ABox and `GroundingSession`, gathers authorized zero-cost previews, and permits request, waiting, incomplete, ontology-gap, or completion states. The first grounding prompt receives no TBox or ABox. |
 | Phase 3.2 | implemented | One persisted document, CAD, or live-observation request is served exactly and recorded without fallback evidence. |
-| Phase 3.3 | contract-first integration implemented | Each served result is routed through an authorized output-capable producer descriptor, its delta is validated and merged, and only a persisted Phase 4.3 decision can request more evidence, clarify, or complete. |
-| Phase 3.4 and Phase 3.5 | implemented | Exact user-intent replies and cancellation resume the same interaction; completion persists one fully referenced, tamper-checked `PAContextGroundingCompletion` that is ready only for Phase 5. |
-| Phase 4.0 | implemented and wired through injected contracts | Shared RDFLib TBox loading, independent PA ABoxes, safe reload, compact views, output-capable descriptor routing, and atomic evidence-backed delta validation are used by Phase 3. |
-| Phase 4.1 | implemented as a separate diagnostic | All six approved NIST PDF pages are rendered and sent through an injected OpenAI vision boundary in one structured request; its compiled delta is persisted and accepted only through the shared ABox validator. |
+| Phase 3.3 | generalized session integration implemented | Each accepted result updates a persisted `GroundingSession`; provider actions are discovered by capability and exact source revision, and unchanged actions cannot count as progress. |
+| Phase 3.4 and Phase 3.5 | implemented | Exact user-intent replies and cancellation resume the same interaction; production completion writes tamper-checked `PAContextGroundingCompletion` version 2. Earlier completion formats are not loaded or migrated. |
+| Phase 4.0 | implemented and wired through injected contracts | Shared RDFLib TBox loading, independent PA ABoxes, safe reload, compact views, late mapping, and atomic evidence-backed delta validation are used by Phase 3. |
+| Phase 4.1 | evidence-first document grounding implemented | Every registered approved PDF can be prepared into a content-addressed, ontology-neutral `DocumentOverviewRecord`. A targeted `DocumentEvidenceRecord` runs only after PA selects that provider action. Late mapping consumes directly supported session statement IDs. F5 performs no inference. |
 | Phase 4.2A | implemented as a separate diagnostic | Exact approved binary STL meshes and fresh validated four-camera RGB-D bundles become atomic typed geometry records and assertion-free deltas; correspondence and pose remain not evaluated. |
 | Phase 4.2B1 | implemented supporting infrastructure | An observation-only entrypoint automatically captures, validates, preprocesses, and minimally segments four camera-local RGB-D views with fixed internal parameters. The UI is status-only. |
 | Phase 4.2B2A | implemented supporting infrastructure | One exact preprocessed approved CAD record is compared with validated segmented candidates by its two largest principal dimensions. A unique size match yields only a candidate center in its camera optical frame. |
 | Simple remaining Phase 4.2B2 pose increment | implemented supporting infrastructure | One intact size correspondence is refined across loose source candidates with deterministic principal-axis multistart and trimmed ICP. It persists an accepted, ambiguous, or rejected camera-frame pose without claiming a robot pose or pick point. |
 | Simple camera-to-robot frame conversion | implemented supporting infrastructure | One accepted camera-from-CAD transform is composed with one injected, hash-validated camera-to-robot calibration for an exact caller-selected target frame. Ambiguous and rejected poses remain coordinate-free. |
 | Later Phase 4.2 grounding | partially implemented in the pre-RA producer chain | Approved CAD and fresh observations can be preprocessed on demand, then segmented, associated, and estimated in a camera frame only for a current need. No cross-camera transform or complete target grounding exists. |
-| Phase 4.3 production grounding | implemented pre-RA | `TaskTransitionDraft`, `ContextNeed`, `TypedContextBinding`, `ProductContextView`, and `GroundingProducerDescriptor` drive document and typed-geometry grounding, persistence, progress checks, and read-only UI inspection. |
+| Phase 4.3 production grounding | generalized evidence-first implementation complete | `GroundingSession`, `GroundingStatement`, `InformationNeed`, `GroundingActionAttempt`, `GroundingDecision`, provider capability descriptors, late ontology mapping, `TypedGroundingContract`, and completion v2 drive the pre-RA boundary. |
 | Phase 5 | not implemented | No `TaskTransitionContract` or assembly-plan handoff record exists. |
 | Phases 6--9 | not implemented | No RA adapter, resource-catalog ABox, `CompositionContextBundle`, `PrimitiveProgramDraft`, `MissingContextBatch`, primitive composer, validator stack, or execution path exists. |
 
@@ -64,9 +91,12 @@ Controlled tests of retrieval and observation capture do not constitute
 document-diagram understanding, metric grounding, Gazebo task execution, or
 physical execution.
 
-The runtime now implements `ContextNeed`, `GroundingProducerDescriptor`,
-`TypedContextBinding`, `ProductContextView`, `TaskTransitionDraft`, and
-`PAContextGroundingCompletion`. The
+The runtime now implements `GroundingSession`, `GroundingStatement`,
+`InformationNeed`, `GroundingActionAttempt`, `GroundingDecision`,
+`GroundingProducerDescriptor`, `TypedContextBinding`, `ProductContextView`,
+`TypedGroundingContract`, and `PAContextGroundingCompletion` version 2. Earlier
+draft, need, and completion formats are no longer runtime contracts and are not
+loaded or migrated. The
 planned contracts `TaskTransitionContract`, `CompositionContextBundle`,
 `PrimitiveProgramDraft`, and `MissingContextBatch` remain future boundaries.
 
@@ -87,7 +117,7 @@ predefined composite function, or selected recovery event with the same gap
 RA LLM authors a structural PrimitiveProgramDraft
         ↓
 binding preflight resolves RA-owned inputs locally
-        + batches product/scene ContextNeeds to PA when required
+        + batches product/scene information needs to PA when required
         ↓
 PA returns a versioned CompositionContextBundle
         ↓
@@ -203,42 +233,43 @@ contributions.
 
 ## Shared PA and RA dynamic context-retrieval pattern
 
-The stable mechanism is consumer-driven rather than modality-driven:
+The stable mechanism is need-driven rather than modality-driven:
 
 ```text
-required consumer inputs
-        - valid current authority-owned context
-        = ContextNeeds
+open InformationNeed + required record type
+        + satisfied prerequisites
+        + authorized source revision
+        - attempted provider/source revisions
+        = eligible actions
         ↓
-select one authorized GroundingProducerDescriptor per resolvable output
+PA selects one exact action
         ↓
-retrieve or compute auditable evidence through the owning authority
-        ↓
-validate, fingerprint, persist, and reassess
+validate, hash, persist, and update GroundingSession
 ```
 
 The TBox defines legal PPR meaning but cannot decide operational completeness or
-which sensor, document, CAD, or calibration source to use. The planned
-`ProductContextView` combines the current PA ABox with validated
-`TypedContextBinding` summaries, uncertainty, unresolved needs, attempted
-evidence, status, frames, freshness, hashes, and provenance. A
-`GroundingProducerDescriptor` advertises which semantic or typed outputs one
-controlled producer can establish and which authorized evidence dependencies it
-uses. This registry is application configuration, not an ontology predicate,
-task recipe, or model-authored route.
+which sensor, document, CAD, or calibration source to use. `GroundingSession`
+holds PA's cited understanding and missing information.
+`ProductContextView` combines only the final validated PA ABox with validated
+`TypedContextBinding` summaries. A `GroundingProducerDescriptor` advertises
+accepted evidence types, produced record types, prerequisites, availability,
+and estimated cost. This registry is provider-owned application configuration,
+not an ontology predicate, task recipe, central priority, or model-authored
+route.
 
 PA owns product-intent and scene grounding:
 
-- Before allocation, PA evolves a `TaskTransitionDraft`. It dynamically selects
-  only the approved evidence needed to resolve currently blocking product,
-  process, feature, outcome, constraint, or task-binding needs.
+- Before allocation, PA evolves a `GroundingSession`. It dynamically selects
+  only the approved evidence needed to resolve its cited `InformationNeed`
+  values.
 - Existing Phase 3.2 document, CAD, and observation retrieval remains exactly
   one source per operation. This is an internal audit boundary, not a required
   modality order or cross-agent message limit.
-- PA merges only evidence-backed product facts and retains numeric poses,
-  calibration, tolerances, and observations in typed records.
-- `context understanding complete` means every currently blocking PA-owned need
-  referenced by the draft is satisfied for Phase 5. It does not mean every
+- PA projects only directly supported statements. Numeric poses, calibration,
+  tolerances, unsupported statements, and missing information remain in typed
+  records or the typed grounding contract.
+- `context understanding complete` means every required PA information need is
+  resolved and late semantic mapping passed validation. It does not mean every
   later primitive input exists.
 - PA never retrieves the primitive catalog, robot state, IK, collision,
   trajectory, or execution evidence and never authors `primitive_steps`.
@@ -280,8 +311,8 @@ they never request raw PDF, STL, RGB, depth, or calibration payloads from RA.
 The controlled PA producer may use those permitted sources. The exact CAD is
 caller- or corpus-authorized rather than inventory-searched, and calibration is
 injected by an approved environmental authority and matched by frame and time.
-If no authorized producer advertises a missing output, the system stops instead
-of asking the ontology or LLM to invent a source.
+If no authorized provider advertises a missing output, PA persists an
+`incomplete` session instead of asking the ontology or LLM to invent a source.
 
 OWL inference remains open-world. A small SHACL or equivalent boundary check may
 flag an already identified required fact as missing, but it must not encode a
@@ -296,16 +327,21 @@ composite function, stored nominal task program, or primitive recipe:
 ```text
 exact product_requirement
         ↓
-Phase 4.0 loads the fixed TBox and initializes one interaction ABox
+initialize GroundingSession and collect authorized zero-cost previews
         ↓
-PA evolves a TaskTransitionDraft over the current ProductContextView
+PA writes cited statements and InformationNeeds
         ↓
-PA resolves currently blocking ContextNeeds through output-capable producers
+controller discovers eligible provider/source revisions
         ↓
-PA validates and persists evidence-backed facts, then reassesses
-        ↺ each producer retrieval remains one auditable source operation
+PA selects one action; accepted changed evidence updates the session
+        ↺ each provider action remains one auditable source operation
         ↓
-PA projects a robot-independent TaskTransitionContract
+directly supported statements enter late ontology mapping
+        ↓
+validator commits the projection; completion v2 pins ontology,
+typed grounding contract, records, sources, and clarifications
+        ↓
+future Phase 5 projects a robot-independent TaskTransitionContract
         ↓
 inherited allocation supplies one selected resource_jid; PA unicasts the contract
         ↓
@@ -563,17 +599,17 @@ Phase 3.1, Phase 3.2, the contract-first Phase 3.3 ontology integration, Phase
 3.4 clarification resumption, and the Phase 3.5 completion boundary are
 implemented together with the production Phase 4 grounding producers.
 
-In the target runtime, Phase 3 retrieval and Phase 4 grounding support PA while
-it evolves a `TaskTransitionDraft`. Phase 4.0 loads the fixed TBox and
-initializes the interaction ABox immediately after requirement intake. PA
-computes the currently blocking task-level `ContextNeed` values from the
-consumer inputs required by that draft minus valid current `ProductContextView`
-bindings. A `GroundingProducerDescriptor` maps each need to an authorized
-producer, which may select approved document, exact approved CAD, RGB-D,
-calibration, or an existing record. Phase 3.2 still serves only one source per
-producer operation so each result is auditable. That internal boundary is not a
-one-source or fixed-order limit for the interaction, and it is distinct from the
-later batched PA-to-RA exchange.
+Phase 3 retrieval and Phase 4 grounding support PA while it evolves a
+`GroundingSession`. Phase 4.0 validates the fixed TBox and initializes the
+interaction ABox immediately after requirement intake, but the first PA
+grounding call does not receive either one. PA records its cited statements and
+`InformationNeed` values from the exact requirement and authorized previews. A
+`GroundingProducerDescriptor` contributes provider capability metadata; the
+controller discovers eligible document, exact approved CAD, RGB-D,
+clarification, or existing-record actions without a central modality order.
+Phase 3.2 still serves only one source per provider operation so each result is
+auditable. That internal boundary is not a one-source or fixed-order limit for
+the interaction, and it is distinct from the later batched PA-to-RA exchange.
 
 PA asks for clarification only after relevant permitted evidence and matching
 controlled tools cannot resolve the remaining user-intent question. PA treats
@@ -584,7 +620,7 @@ location, receiving feature, pose, diagram association, CAD association, or
 current arrangement is a system evidence problem, not a user clarification
 question.
 
-### Phase 3.1: product requirement intake and first `needed context` decision - implemented with contract-first ontology integration
+### Phase 3.1: exact requirement intake and first grounding-session decision - implemented
 
 - Add a Spec2Primitives-owned adapter under `agents/pa/` using composition with
   the shared ProductAgent. Do not subclass ProductAgent or LlmAgent.
@@ -616,37 +652,25 @@ question.
   to runtime status. Fail the interaction
   closed on TBox loading, profile validation, or ABox initialization errors,
   before PA can choose an evidence source.
-- Give PA the unchanged `product_requirement`, `approved_context_refs()`, the
-  compact unresolved product-context view, approved evidence types, permitted
-  request shapes, and the option to request one fresh
-  live RGB-D observation. Do not preload or interpret document, CAD, or
-  observation content in this bootstrap slice.
-- Run one structured PA turn with this response shape:
-
-  ```json
-  {
-    "needed_context": {
-      "context_ref": null,
-      "request_live_observation": false,
-      "clarification_question": null
-    }
-  }
-  ```
-
-- In the ontology-grounded target, require exactly one evidence request: an
-  approved `context_ref` or `request_live_observation: true`.
-  `clarification_question` must remain null on this first turn. Reject mixed,
-  malformed, unknown-ref, unsupported, or first-turn clarification decisions.
-- The implementation rejects first-turn `clarification_question` as a terminal
-  shortcut and requires a permitted evidence request before Phase 3.4 can ask
-  the user.
-- Do not allow the first PA turn to return `context understanding complete`
-  because no requested evidence has been served.
+- Give PA the unchanged `product_requirement`, authorized inference-free
+  provider previews, and the exact eligible-action list. The first prompt must
+  not contain the TBox, ABox, ontology vocabulary, process-specific fields,
+  expected answers, or hidden live detections.
+- Run one structured PA turn that authors the first `GroundingSession`. Validate
+  cited statements, information needs, prior-state preservation, and selection
+  of an exact eligible action before translating its decision to the existing
+  public `needed_context` shape.
+- The generalized session may request clarification on the first turn only when
+  the missing value is user intent. A system evidence gap must remain an
+  evidence need.
+- Allow the first PA turn to become ready for late ontology mapping when
+  authorized cached previews already support every required need.
 - Preserve the exact requirement, PA input, PA output or failure, and ordered
   interaction record under the caller-owned
   `contexts/<interaction_identifier>/` directory.
-- Do not resolve document or CAD evidence, capture live RGB-D, call a VLM,
-  perform grounding, modify the UI, build a plan, or execute robot behavior.
+- Do not prepare a stale document cache, capture live RGB-D, call a VLM, build a
+  plan, or execute robot behavior unless PA selects the corresponding eligible
+  action after this first session update.
 
 ### Phase 3.2: requested context serving - implemented
 
@@ -666,60 +690,41 @@ question.
 - Stop before the next PA turn. Do not call ProductAgent, an LLM, VLM, UI,
   grounding, planning, RA, or robot execution.
 
-### Phase 3.3: configurable ontology-backed context orchestration - contract-first integration implemented
+### Phase 3.3: generalized evidence-first context orchestration - implemented
 
 - Record `max_pa_turns` and `live_observation_timeout_sec` exclusively in
   `interaction_record/pa_context_settings.json`; count `turn_0001` in the limit.
-- Make Phase 3.3 the outer orchestration loop, not a second decision authority.
-  After the Phase 3.1 bootstrap request, it accepts only a persisted Phase 4.3
-  decision over the current ABox; it must not declare sufficiency or select a
-  different source from raw served summaries.
-- Validate the returned unresolved semantic need and selected exact approved
-  `context_ref` or fresh observation, then dispatch only the application-owned
-  producer route for that evidence type. Routing does not define hard-coded
-  assembly slots or expected answers.
-- For every valid request, call Phase 3.2 once, invoke only the matching Phase
-  4.1 or Phase 4.2 producer, validate and merge its generic triple delta, and
-  invoke Phase 4.3 before choosing the next source. Number PA, retrieval,
-  interpretation, delta, and decision records together and assign live captures
-  the next `observation_000N`.
-- Let PA dynamically retrieve several relevant sources when the evolving ABox
-  requires them. Do not hard-code a PDF → CAD → RGB-D order, stop after one
-  source by design, or retrieve the entire approved inventory by default.
-- Require sufficient product-level grounding for the exact requirement, with no
-  unresolved ambiguity, contradiction, outstanding evidence need, or failed
-  required retrieval. Do not encode a fixed checklist of receiving features,
-  observed components, CAD correspondence, or RGB-D fields in Phase 3.3.
-- Tell PA that Phase 4 owns grounding, Phase 5 owns robot-independent assembly
-  planning, Phase 6 introduces PA-to-RA communication, and Phase 7 lets RA
-  retrieve robot state and the resource-owned primitive catalog. Do not contact
-  RA or retrieve that catalog in Phase 3.
-- Preserve exact prompts, response formats, raw outputs, served results,
-  Evidence Sources through internal `provenance`, and failures. Do not preserve
-  hidden model reasoning or RGB/depth arrays in JSON.
-- Let `assemble Medium Gear` proceed directly to context retrieval. In the
-  controlled case, the approved document, candidate CAD refs, and live
-  observation are test evidence that PA may select when the evolving ABox and
-  tool descriptors justify them; they are not a production required-source list
-  or a hard-coded request order. PA must not ask the user to determine a
-  gear-shaft location while permitted system evidence can still address it.
-- Do not use a no-op transition from Phase 3 into a later one-way Phase 4 stage.
-  Phase 4.0 already exists and Phase 4 interpretation and assessment run inside
-  each retrieval cycle. Only a persisted Phase 4.3 result may request more
-  context, enter Phase 3.4, or declare `context understanding complete`.
-- When a user factual claim is unsupported or contradicts approved evidence,
-  preserve the exact claim and conflict. Do not use it as grounded evidence.
-- Track attempted sources, produced assertions, evidence gaps, failures, and
-  observation freshness so the loop does not repeat a request without new
-  justification.
-- Stop on a terminal Phase 4.3 decision, unrecoverable PA, retrieval, or
-  interpretation failure, invalid response, existing-record conflict, or
-  `pa_turn_limit_reached`. Limit exhaustion never implies completion.
-- The production UI loads the project-authoritative TBox by default and accepts
-  only a complete path-and-namespace override. It returns `grounding_unavailable`
-  before PA evidence selection when TBox validation or model authority is
-  unavailable. Controlled tests use schema-only fixtures and deterministic model
-  responses rather than claiming live perception or model validation.
+- Make Phase 3.3 the outer orchestration loop, not a second understanding or
+  mapping authority. It accepts only validated `GroundingSession` decisions.
+- Collect only authorized, inference-free previews before each PA call. Do not
+  expose hidden detections, simulator truth, evaluator labels, TBox, or ABox in
+  the first grounding prompt.
+- Discover eligible provider actions from required record type, satisfied
+  prerequisites, provider availability, authorized sources, and untried source
+  revisions. Do not encode an evidence priority or modality sequence.
+- Validate each PA update against prior session state. Prior statements and
+  needs cannot be silently removed or rewritten; a new required need after the
+  first call must cite newly accepted evidence.
+- Track each action by `need_id + provider_id + source_revision`. Serve and
+  interpret exactly the selected action, persist its typed record, then make one
+  PA session-update call.
+- Continue only when accepted evidence changes the session input fingerprint.
+  If no eligible untried action remains, persist `incomplete`; do not throw a
+  semantic-loop exception or invent a fact. Treat `max_pa_turns` only as an
+  emergency ceiling that also persists `incomplete`.
+- Enter clarification only for unresolved user intent. An unresolved component
+  location, pose, association, or other system-evidence question is not a user
+  clarification.
+- When all required needs are resolved, make one late ontology call using only
+  directly supported statement IDs. Validation failure becomes `ontology_gap`
+  and does not restart document retrieval.
+- Preserve exact prompts, response schemas, raw outputs, provider actions,
+  source refs, typed records, sessions, mapping proposals, accepted assertions,
+  and failures. Do not preserve hidden model reasoning or RGB/depth arrays in
+  JSON.
+- The production UI displays complete, waiting, incomplete, and ontology-gap
+  states. It returns `grounding_unavailable` before PA evidence selection when
+  TBox validation or model authority is unavailable.
 
 ### Phase 3.4: user clarification — implemented
 
@@ -738,34 +743,33 @@ question.
 - If the user insists on a factual claim contradicted by approved evidence, do
   not allow `context understanding complete`; let the user revise or cancel.
 
-### Phase 3.5: `context understanding complete` handoff — implemented
+### Phase 3.5: `context understanding complete` handoff — completion v2 implemented
 
-- Allow `context understanding complete` only after the Phase 4.0 PPR-aligned
-  representation and every Phase 4.1 document-diagram or Phase 4.2 CAD/RGB-D
-  producer invocation selected by the dynamic loop has completed, and Phase 4.3
-  finds no product-level ambiguity, contradiction, missing evidence, or failed
-  required retrieval.
+- Allow `context understanding complete` only after every required
+  `InformationNeed` is resolved, the late ontology proposal passes validation,
+  and any current-TBox gaps are retained in the typed grounding contract.
 - Preserve the original requirement, retrieved refs, observations,
   clarification history, retrieval errors, Phase 4 outputs, and supporting
   provenance for the Phase 5 handoff.
 - Treat `context understanding complete` as ready for Phase 5 PA assembly
   planning. It does not produce an assembly plan or `primitive_steps`, and it
   does not guarantee that RA can bind or execute every required primitive.
-- Persist one `PAContextGroundingCompletion` only after independently reloading
-  its decision, draft, source and current product-context views, typed-record
-  hashes, and answered clarification refs. The UI consumes that validated
-  record rather than treating a bare model decision as completion.
+- Persist one `PAContextGroundingCompletion` version 2 only after independently
+  reloading its session, late ontology proposal and projection, typed grounding
+  contract, source hashes, typed-record hashes, and answered clarification
+  refs. The UI consumes that validated record rather than treating a bare model
+  decision as completion.
 
 ### Phase 3.1 verification
 
-- Preserve the existing exact requirement, approved `context_ref`, and live
-  observation coverage. Revise first-turn clarification coverage so that it is
-  rejected instead of treated as a valid terminal decision.
-- Add integration coverage proving that Phase 4.0 initializes the TBox/ABox
-  before PA's first source decision and does not turn the requirement into
+- Preserve exact requirement, approved `context_ref`, clarification, and live
+  observation coverage through the generalized session decision.
+- Prove that Phase 4.0 initializes the TBox/ABox but the first PA grounding
+  prompt and schema contain neither one and do not turn the requirement into
   unsupported factual assertions.
-- Test rejection of clarification, malformed, mixed, unknown-ref, unsupported,
-  and premature completion responses.
+- Test malformed citations, unauthorized or repeated actions, unsupported
+  record types, invalid terminal states, and valid first-turn completion from
+  sufficient cached previews.
 - Test PA-call failure recording without claiming completion.
 - Verify that Phase 3.1 does not call `setup()`, planning, RA, the resolver,
   live capture, VLM, UI, or execution behavior and cannot access forbidden
@@ -787,38 +791,35 @@ question.
 
 ### Phase 3.3 verification
 
-- Test limits 2 and 12 plus the UI maximum 50, invalid values, exclusive settings,
-  cumulative ABox state, exact requirement preservation, numbered records, and
-  exactly one resolver or capture call per retrieval operation.
-- Test a Medium Gear interaction that dynamically selects and interprets
-  multiple relevant document, CAD, and observation sources before PA handoff.
+- Test limits 2 and 12 plus the UI maximum 50, invalid values, exclusive
+  settings, session state, exact requirement preservation, numbered records,
+  and exactly one resolver or capture call per selected action.
+- Test assembly, drilling, welding, and inspection with the identical schema.
   Preserve alternative PA-selected ordering and source counts, malformed or
   unjustified duplicate refs, PA and retrieval failure, record conflicts, and
-  `pa_turn_limit_reached` coverage.
+  emergency-ceiling `incomplete` coverage.
 - Prove that each served source is processed by its controlled tool and its
-  accepted triple delta is merged before another source is selected.
+  accepted typed record updates the session before another source is selected.
 - Verify every decision and compact served result appears in the PA UI while the
   expandable audit view preserves full records and internal `provenance`.
 - Verify Phase 3.3 invokes only the controlled Phase 4 producer selected by its
   capability descriptor and has no planning, primitive-catalog, RA,
   forbidden Gazebo-state, evaluator, or execution dependency.
-- Add revised tests proving that Phase 3.3 requests relevant remaining evidence
-  instead of asking which gear-shaft location receives the Medium Gear.
+- Test that system-evidence questions remain information needs and do not become
+  user clarification.
 - Test rejection of clarification or completion that is not backed by a
-  persisted Phase 4.3 decision over the updated ABox. Prove that one-source
+  persisted session and valid late mapping. Prove that one-source
   retrieval does not imply interaction completion and that irrelevant approved
   sources are not retrieved merely to exhaust the inventory.
 
 ## Phase 4: PA grounding
 
-This is the context-understanding stage and requires separate, bounded
-implementation requests. The Phase 4.0 foundation is invoked by Phase 3 through
-injected contracts. The target stage participates inside the Phase 3 retrieval
-loop; it does not wait for a batch of Phase 3 evidence and does not assume that
-retrieving a PDF or STL means its diagrams or geometry were understood. Phase
-4.0 runs before the first source decision, Phase 4.1 or Phase 4.2 runs after each
-relevant source is served, and Phase 4.3 reassesses the updated ABox after each
-accepted delta.
+This is the context-understanding stage. The Phase 4.0 foundation is invoked by
+Phase 3 through injected contracts. It does not assume that registering or
+retrieving a PDF or STL means its content or geometry was understood. Phase 4.0
+validates the TBox and initializes the ABox; the generalized session reasons
+over authorized previews and selected typed evidence records; the ABox changes
+only once PA is ready for late semantic mapping.
 
 ### Phase 4.0: PPR-aligned context representation - implemented and contract-first integrated with Phase 3
 
@@ -830,9 +831,9 @@ accepted delta.
   per interaction before PA's first source decision. Keep the fixed TBox
   immutable and seed the ABox from the exact `product_requirement` as an
   unresolved request, not as grounded scene or product facts.
-- Use the minimal semantic bridge `specification defines required feature` and
-  `requested process realizes the same feature`. These assertions express the
-  requested outcome, not proof that execution has achieved it.
+- Do not require a fixed semantic bridge. `defines` or `realizes` may be
+  proposed only when directly supported statements identify correctly typed
+  subjects and objects and the property signature passes validation.
 - Treat the pasted OWL as a parser and mixed-graph test sample, not the
   project-authoritative `ontology/spec2primitives_ppr_tbox.owl`. It combines classes and properties with named
   process, resource, feature, and performance individuals. Do not copy those
@@ -858,9 +859,10 @@ accepted delta.
   `observed_feature_1`, an expected CAD match, a pose-record path, or a
   product-specific completion template. A failed or uncertain match produces no
   factual assertion and remains unresolved.
-- Use the application-owned `GroundingProducerDescriptor` registry rather than
-  selecting a producer from evidence type alone. Each descriptor advertises the
-  exact semantic or typed outputs its authorized producer can establish. Neither
+- Use provider-owned `GroundingProducerDescriptor` capabilities rather than
+  selecting a producer from evidence type alone. Each descriptor advertises
+  accepted evidence, produced record types, prerequisites, availability, and
+  estimated cost. Neither
   representation is part of the TBox or ABox: the TBox defines valid meaning,
   not which sensor, document, or producer PA must use.
 - Use the PPR `product`, `feature`, `process`, `resource`, and `capability` types
@@ -870,8 +872,8 @@ accepted delta.
   retrieval order, or prove operational sufficiency. Do not treat the ontology
   as a separate ICRA contribution.
 - Keep the ontology layers explicit. Generic classes, properties, domains,
-  ranges, and restrictions belong to the immutable TBox. PA-created requested
-  process, product, feature, and grounded-outcome individuals belong to the
+  ranges, and restrictions belong to the immutable TBox. Only directly
+  supported, representable individuals and relations belong to the
   per-interaction PA ABox. Exact resource and primitive-offering individuals and
   their `capableOf` assertions belong to a selected-RA resource-catalog ABox
   snapshot introduced in Phase 7, not to the TBox and not to PA's evidence
@@ -926,28 +928,41 @@ accepted delta.
 - Verify that the shared ontology package has no PA or RA dependency and that
   PA product-context code has no RA dependency.
 
-### Phase 4.1: OpenAI document interpretation - implemented diagnostic
+### Phase 4.1: fast evidence-first document grounding - implemented
 
-- Implement the VLM as a controlled tool under `tools/document_evidence/`, not
-  as another agent.
-- Accept one exact served NIST document, render all six pages at a bounded
-  resolution, and send the ordered text and page images through an injected
-  `DocumentVisionRuntime` in one structured request.
-- The production adapter uses the OpenAI Responses API with `store: false`, no
-  tools, a strict JSON schema, and the model settings in
-  `config/model_runtime.json`. Credentials remain environment-only.
-- Compile model entity keys into interaction-owned IRIs and return a generic
-  evidence-backed triple delta without mutating the ABox or declaring context
-  understanding complete.
-- Let the VLM interpret approved document diagrams only. Do not give it RGB-D
-  observations or use it to propose metric geometry.
-- Preserve the exact document `context ref`, page-level provenance, structured
-  VLM output, configured and returned model, response identifier, rendered-page
-  hashes, compiled delta, and uncertainty. Uncertain interpretations remain
-  unresolved and do not become factual assertions.
-- Expose a separate UI diagnostic that initializes and persists its own ABox.
-  Keep the main PA loop fail-closed until the remaining grounding and assessment
-  producers are implemented.
+- Keep the VLM as a controlled tool under `tools/document_evidence/`, not as
+  another agent. Accept every PDF explicitly registered in
+  `approved_sources.json`; production code does not depend on the NIST ref.
+- Prepare each document once into a generic overview using ordered extracted
+  text and bounded page images. The overview request contains no requirement,
+  TBox, ABox, ontology vocabulary, entity key, relation, or triple delta.
+- Use the OpenAI Responses API with `store: false`, no tools, a strict JSON
+  schema, and `config/model_runtime.json`. Credentials remain environment-only.
+- Cache `DocumentOverviewRecord` by source SHA-256, complete document-model
+  configuration, and overview-schema version. Persist atomically; changed
+  documents, models, or schemas select a new cache key.
+- Return an assertion-free document delta that references the validated
+  overview. PA consumes its observations as a preview or selected targeted
+  record. The late `OntologyGroundingProposal` cites directly supported
+  `GroundingStatement` IDs.
+- Supply the initialized specification IRI separately. PA cannot create a
+  `specification` entity key; the controller assigns all new individual IRIs.
+- Send the controller-compiled proposal through the existing TBox, evidence,
+  and ABox validator before any commit.
+- When overview evidence is insufficient and PA selects the exact provider
+  action, rank approved pages deterministically, make one targeted neutral VLM
+  request, persist a `DocumentEvidenceRecord`, and update the session.
+  Document-free, CAD, and RGB-D paths make no document-VLM request.
+- F5 startup validates registered sources and inspects cache state only. Missing
+  or stale overviews are reported without blocking the UI and without making an
+  LLM/VLM request.
+- The separate diagnostic selects any approved document and displays overview,
+  PA statements, provider actions, targeted evidence, ontology proposal, and
+  accepted assertions independently.
+
+Manual lifecycle: register PDF → prepare cache with
+`python -m cais_spade_llm.spec2primitives.tools.document_evidence.prepare --all`
+or `--context-ref` → start system → ground only current requirements.
 
 ### Phase 4.2: CAD and RGB-D grounding
 
@@ -1112,59 +1127,49 @@ accepted delta.
 - Keep recognition inputs within the approved document, candidate CAD, RGB,
   depth, and camera calibration boundary.
 
-### Phase 4.3: post-understanding decision — implemented pre-RA
+### Phase 4.3: generalized evidence-first PA grounding — implemented pre-RA
 
-The production assessor and its `TaskTransitionDraft`/`ContextNeed` contract
-are implemented. The configured production path persists each draft, context
-view, producer choice, evidence result, and reassessment; an unconfigured path
-still stops at `grounding_unavailable`.
+The production assessor persists a versioned `GroundingSession` rather than
+using the ABox as PA's reasoning state. Its schema is process-neutral and its
+provider selection is capability-driven.
 
-- Assess the evolving `TaskTransitionDraft`, current interaction ABox,
-  `ProductContextView`, unresolved assertions, evidence status, and authorized
-  `GroundingProducerDescriptor` records against the exact
-  `product_requirement`. Phase 4.1 and Phase 4.2 may each run zero or more
-  times; neither modality is mandatory by itself.
-- Compute task-level `ContextNeed` values as required draft-consumer inputs
-  minus valid current `TypedContextBinding` values. Resolve only the currently
-  blocking needs by selecting descriptors whose declared outputs and evidence
-  policy match. Do not retrieve a modality merely because it is available.
-- Run each selected producer as one internally auditable source operation,
-  validate and merge its result, update the `ProductContextView`, and reassess.
-  PA may dynamically select approved document, exact approved CAD, RGB-D,
-  calibration, or an existing record; it does not exhaust the corpus or follow
-  a hard-coded evidence sequence.
-- Assess PA handoff readiness only when no currently identified blocking
-  product-level ambiguity remains. Enter clarification only when the remaining
-  unresolved value is user intent; do not claim that PA handoff readiness proves
-  composition or execution readiness.
-- Use one existing structured decision:
-  - an active `needed_context` with `context understanding complete: false`
-    returns to Phase 3.2 for exactly that approved ref or fresh observation;
-  - an active `clarification_question` with
-    `context understanding complete: false` enters Phase 3.4 only when the
-    unresolved value is user intent that system evidence cannot determine;
-  - `needed_context: null` with `context understanding complete: true` enters
-    Phase 3.5;
-  - a VLM, retrieval, CAD, RGB-D, contradiction, or grounding failure is
-    recorded; an approved alternative may be selected only when its advertised
-    capability can resolve the same need, otherwise the interaction stops
-    fail-closed and must not be converted into a user clarification question.
-- Preserve the Phase 4 input, evidence refs, output, uncertainty, unresolved
-  values, and decision in the ordered interaction record without hidden model
-  reasoning.
-- Allow the runtime to loop Phase 4.3 → Phase 3.2 → Phase 4.1 or Phase 4.2 →
-  delta validation and merge → Phase 4.3 when more permitted evidence can
-  resolve the missing context. Phase numbering does not require a one-way
-  runtime sequence.
+- Start from the exact requirement and authorized zero-cost previews.
+- Require every directly stated or inferred `GroundingStatement` to cite an
+  authorized source. Inferred statements may guide retrieval but cannot resolve
+  a required `InformationNeed` or mutate the ABox.
+- Build exact actions dynamically from provider-owned capability descriptors.
+  PA may select document, exact approved CAD, RGB-D, clarification, or an
+  existing typed record only when it appears in the eligible-action set.
+- Persist every attempt using the need, provider, and source-revision key.
+  Unchanged actions are replay failures, not progress.
+- Preserve the existing public `needed_context` request shape. Internally add
+  terminal `incomplete` and `ontology_gap` states with no requested context.
+- Map only after every required information need is resolved. The late mapper
+  receives directly supported statement IDs, the fixed vocabulary, property
+  signatures, current individuals, and initialized specification IRI.
+- Let the mapper type controller-owned individuals, refer to validated existing
+  individuals, and report statement IDs the current TBox cannot represent. It
+  cannot create the specification, map inferred statements, add
+  primitive/resource/recipe facts, or violate property domain/range.
+- Keep the deterministic TBox/evidence/ABox validator as the only commit
+  authority. A rejected map becomes `ontology_gap` without another evidence
+  loop.
+- Complete with `PAContextGroundingCompletion` version 2, which pins the
+  session, ontology projection, typed grounding contract, typed evidence
+  records, sources, and clarifications by hash.
+
+Expected warm behavior is one PA grounding call plus one late ontology call
+when cached previews suffice, zero document-VLM calls on that path, and one
+targeted VLM plus one PA update when selected visual evidence is required. F5
+startup always performs zero model calls.
 
 ## Phase 5: PA assembly plan
 
 This phase requires a separate implementation request.
 
-- Have PA evolve the grounded product requirement into a
-  `TaskTransitionDraft`, resolve only its currently blocking task-level
-  `ContextNeed` values, and accept it as a `TaskTransitionContract` for the
-  inherited allocator.
+- Have PA consume the validated ontology projection, typed grounding contract,
+  and hash-pinned typed evidence records to produce a
+  `TaskTransitionContract` for the inherited allocator.
 - Show PA building the assembly plan from grounded evidence in the PA card and
   ordered interaction record.
 - Treat each nominal assembly-plan entry as a robot-independent task-transition

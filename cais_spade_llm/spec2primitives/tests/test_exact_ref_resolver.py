@@ -97,6 +97,28 @@ def test_complete_document_ref_returns_all_ordered_pages() -> None:
     }
 
 
+def test_document_metadata_validates_without_serving_page_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        exact_ref_resolver,
+        "_serve_document",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not serve text")),
+    )
+
+    metadata = exact_ref_resolver.approved_document_metadata(
+        "NIST_assembly_instructions.pdf"
+    )
+
+    assert metadata["context_ref"] == "NIST_assembly_instructions.pdf"
+    assert metadata["page_count"] == 6
+    assert isinstance(metadata["source_sha256"], str)
+    assert len(metadata["source_sha256"]) == 64
+    assert exact_ref_resolver.approved_document_refs() == (
+        "NIST_assembly_instructions.pdf",
+    )
+
+
 def test_all_approved_cad_refs_return_bounded_geometry() -> None:
     for context_ref in EXPECTED_CAD_REFS:
         result = exact_ref_resolver.resolve_context_ref(

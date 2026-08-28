@@ -9,14 +9,17 @@ import pytest
 from rdflib import RDF
 
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    ContextNeed,
+    GroundingActionAttempt,
     GroundingContractError,
+    GroundingDecision,
     GroundingProducerDescriptor,
-    TaskTransitionDraft,
+    GroundingSession,
+    GroundingStatement,
+    InformationNeed,
     build_product_context_view,
+    load_latest_grounding_session,
+    persist_grounding_session,
     persist_product_context_view,
-    select_grounding_producer,
-    unresolved_context_needs,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
@@ -28,56 +31,147 @@ from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
 )
 
 
-def _need(
-    kind: str,
-    symbol: str,
-    *,
-    frame: str | None = None,
-    maximum_age_ns: int | None = None,
-) -> ContextNeed:
-    return ContextNeed.from_mapping(
-        {
-            "kind": kind,
-            "symbol": symbol,
-            "subject_role": "requested_product",
-            "authority": "PA",
-            "frame": frame,
-            "maximum_age_ns": maximum_age_ns,
-            "reason": "required by the robot-independent task draft",
-        }
-    )
-
-
 def _descriptor(
-    producer: str,
-    kind: str,
-    symbol: str,
-    *,
-    priority: int,
+    provider_id: str,
+    record_type: str,
 ) -> GroundingProducerDescriptor:
     return GroundingProducerDescriptor.from_mapping(
         {
-            "producer": producer,
-            "supported_outputs": [{"kind": kind, "symbol": symbol}],
-            "evidence_types": ["document"],
-            "required_record_types": [],
-            "priority": priority,
+            "provider_id": provider_id,
+            "description": "Controlled provider capability.",
+            "accepted_evidence_types": ["document"],
+            "produced_record_types": [record_type],
+            "prerequisites": {record_type: []},
+            "availability": True,
+            "estimated_cost": 1,
         }
     )
 
-
-def _draft(view_fingerprint: str, needs: list[ContextNeed]) -> TaskTransitionDraft:
-    return TaskTransitionDraft.from_mapping(
+def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
+    tmp_path: Path,
+) -> None:
+    statement = GroundingStatement.from_mapping(
         {
-            "version": 1,
-            "product_requirement": "assemble Medium Gear",
-            "requested_process": f"{PPR_NAMESPACE}assembly",
-            "required_outcome": "Medium Gear assembled",
-            "required_inputs": [need.to_record() for need in needs],
-            "unresolved_user_intent": None,
-            "source_view_fingerprint": view_fingerprint,
+            "statement_id": "statement_0001",
+            "text": "The named item is Medium Gear.",
+            "status": "directly_stated",
+            "sources": ["requirement_0001"],
+            "reason": "The exact requirement names the item.",
         }
     )
+    need = InformationNeed.from_mapping(
+        {
+            "need_id": "need_0001",
+            "question": "What approved evidence describes the named item?",
+            "required": True,
+            "sources": ["requirement_0001"],
+            "accepted_record_types": ["DocumentOverviewRecord"],
+            "status": "open",
+            "answer_statement_ids": [],
+        }
+    )
+    attempt = GroundingActionAttempt.from_mapping(
+        {
+            "attempt_id": "attempt_0001",
+            "need_id": "need_0001",
+            "provider_id": "document_evidence",
+            "source_ref": "manual.pdf",
+            "source_revision": "a" * 64,
+            "status": "no_change",
+            "record_refs": [],
+        }
+    )
+    decision = GroundingDecision.from_mapping(
+        {
+            "decision_type": "request_evidence",
+            "need_id": "need_0001",
+            "provider_id": "document_evidence",
+            "source_ref": "manual.pdf",
+            "source_revision": "b" * 64,
+            "query": "Find information about the named item.",
+            "reason": "A changed approved source revision remains available.",
+        }
+    )
+    session = GroundingSession.create(
+        revision=2,
+        requirement_text="assemble medium gear",
+        statements=[statement],
+        information_needs=[need],
+        attempted_actions=[attempt],
+        evidence_refs=["requirement_0001"],
+        decision=decision,
+        status="waiting_for_evidence",
+        information_status="partial",
+    )
+
+    path = persist_grounding_session(tmp_path, session)
+
+    assert path.name == "revision_0002.json"
+    assert load_latest_grounding_session(tmp_path) == session
+    assert session.missing_information == (need.question,)
+    assert len(session.fingerprint) == 64
+
+
+def test_grounding_session_rejects_answer_shaped_fields_and_repeated_actions() -> None:
+    statement = GroundingStatement.from_mapping(
+        {
+            "statement_id": "statement_0001",
+            "text": "The named item is Medium Gear.",
+            "status": "directly_stated",
+            "sources": ["requirement_0001"],
+            "reason": "The exact requirement names the item.",
+        }
+    )
+    value = statement.to_record()
+    value["assembly_context"] = {"destination": "expected answer"}
+    with pytest.raises(GroundingContractError, match="fields are invalid"):
+        GroundingStatement.from_mapping(value)
+
+    need = InformationNeed.from_mapping(
+        {
+            "need_id": "need_0001",
+            "question": "What evidence describes the named item?",
+            "required": True,
+            "sources": ["requirement_0001"],
+            "accepted_record_types": ["DocumentOverviewRecord"],
+            "status": "open",
+            "answer_statement_ids": [],
+        }
+    )
+    attempt = GroundingActionAttempt.from_mapping(
+        {
+            "attempt_id": "attempt_0001",
+            "need_id": need.need_id,
+            "provider_id": "document_evidence",
+            "source_ref": "manual.pdf",
+            "source_revision": "a" * 64,
+            "status": "no_change",
+            "record_refs": [],
+        }
+    )
+    repeated = GroundingDecision.from_mapping(
+        {
+            "decision_type": "request_evidence",
+            "need_id": need.need_id,
+            "provider_id": attempt.provider_id,
+            "source_ref": attempt.source_ref,
+            "source_revision": attempt.source_revision,
+            "query": "Try the same source again.",
+            "reason": "This action must be rejected.",
+        }
+    )
+    with pytest.raises(GroundingContractError, match="repeats an attempted"):
+        GroundingSession.create(
+            revision=2,
+            requirement_text="assemble medium gear",
+            statements=[statement],
+            information_needs=[need],
+            attempted_actions=[attempt],
+            evidence_refs=["requirement_0001"],
+            decision=repeated,
+            status="waiting_for_evidence",
+            information_status="partial",
+        )
 
 
 def test_view_joins_semantic_assertions_and_validated_typed_records(
@@ -148,29 +242,6 @@ def test_view_joins_semantic_assertions_and_validated_typed_records(
     )
 
 
-def test_required_inputs_minus_valid_context_is_deterministic(tmp_path: Path) -> None:
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
-    product_need = _need("class", f"{PPR_NAMESPACE}product")
-    pose_need = _need(
-        "typed_context_record",
-        "CADPoseEstimationRecord",
-        frame="cam_mk4_2_optical_frame",
-        maximum_age_ns=100,
-    )
-    view = build_product_context_view(
-        tmp_path,
-        abox,
-        attempted_evidence=(),
-        assessed_at_ns=1_000,
-    )
-
-    assert unresolved_context_needs(_draft(view.fingerprint, [product_need, pose_need]), view) == (
-        product_need,
-        pose_need,
-    )
-
-
 def test_tampered_or_out_of_root_typed_context_is_rejected(tmp_path: Path) -> None:
     tbox = ontology_config().load_tbox()
     abox = initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
@@ -200,52 +271,63 @@ def test_tampered_or_out_of_root_typed_context_is_rejected(tmp_path: Path) -> No
         )
 
 
-def test_descriptor_selection_uses_exact_output_priority_and_attempt_history() -> None:
-    need = _need("class", f"{PPR_NAMESPACE}product")
-    primary = _descriptor(
+def test_document_typed_record_requires_explicit_record_type(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
+    record_path = (
+        tmp_path / "products/grounding/document_evidence/overview_0001.json"
+    )
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "producer": "document_evidence",
+                "evidence_refs": [],
+                "overview": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    merge = validate_and_merge_triple_delta(
+        tmp_path,
+        tbox,
         "document_evidence",
-        "class",
-        f"{PPR_NAMESPACE}product",
-        priority=0,
-    )
-    alternative = _descriptor(
-        "approved_product_record",
-        "class",
-        f"{PPR_NAMESPACE}product",
-        priority=1,
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [str(record_path.relative_to(tmp_path))],
+        },
+        authorized_evidence_refs=[],
     )
 
-    assert select_grounding_producer(need, [alternative, primary]) == primary
-    assert (
-        select_grounding_producer(
-            need,
-            [primary, alternative],
-            attempted_producers=["document_evidence"],
-        )
-        == alternative
-    )
-    with pytest.raises(GroundingContractError, match="No untried"):
-        select_grounding_producer(
-            need,
-            [primary, alternative],
-            attempted_producers=["document_evidence", "approved_product_record"],
+    with pytest.raises(
+        GroundingContractError,
+        match="typed record_type must be a non-empty string",
+    ):
+        build_product_context_view(
+            tmp_path,
+            merge.abox,
+            attempted_evidence=(),
+            assessed_at_ns=1,
         )
 
 
-def test_pre_ra_contract_rejects_ra_authority_and_fixed_symbol_changes() -> None:
-    value = _need("class", f"{PPR_NAMESPACE}product").to_record()
-    value["authority"] = "RA"
-    with pytest.raises(GroundingContractError, match="must be PA"):
-        ContextNeed.from_mapping(value)
+def test_descriptor_advertises_capability_without_controller_priority() -> None:
+    descriptor = _descriptor("document_evidence", "DocumentOverviewRecord")
 
+    assert descriptor.supports_record_type("DocumentOverviewRecord")
+    assert descriptor.prerequisites_for("DocumentOverviewRecord") == ()
+    assert "priority" not in descriptor.to_record()
+
+
+def test_provider_descriptor_preserves_exact_fixed_output_symbol() -> None:
     descriptor_value = _descriptor(
         "document_evidence",
-        "class",
-        f"{PPR_NAMESPACE}product",
-        priority=0,
+        "DocumentOverviewRecord",
     ).to_record()
-    descriptor_value["supported_outputs"] = [
-        {"kind": "class", "symbol": f"{PPR_NAMESPACE}Product"}
-    ]
+    descriptor_value["produced_record_types"] = ["documentoverviewrecord"]
+    descriptor_value["prerequisites"] = {"documentoverviewrecord": []}
     changed = GroundingProducerDescriptor.from_mapping(descriptor_value)
-    assert not changed.supports(_need("class", f"{PPR_NAMESPACE}product"))
+    assert not changed.supports_record_type("DocumentOverviewRecord")

@@ -15,15 +15,23 @@ copied.
 
 ## Phase 1 approved exact refs
 
-`approved_sources.json` is the complete Phase 1 retrieval allowlist. It records
-one `NIST_assembly_instructions.pdf` document ref and the exact filenames of all
-34 current STL files under `ros2/cais_lab_robotics/cad_models/`.
+`approved_sources.json` is the complete retrieval allowlist. It currently
+records `NIST_assembly_instructions.pdf` and the exact filenames of all 34 STL
+files under `ros2/cais_lab_robotics/cad_models/`, but the resolver and document
+pipeline accept every PDF registered with the same strict manifest contract.
 
-The local resolver serves the six document pages together or a bounded CAD
-geometry summary. It does not copy source files, return raw STL bytes, add a new
-STL automatically, store or verify SHA-256, or expose scene roles, configured
+The local resolver serves each registered document's ordered pages, extracted
+text, and source SHA-256, or a bounded CAD geometry summary. It does not copy
+source files, return raw STL bytes, add sources automatically, or expose scene roles, configured
 poses, Gazebo state, or evaluator information. Historical hashes in the scene
 provenance below are not part of the Phase 1 inventory or resolver contract.
+
+Manual lifecycle: place the PDF in this controlled directory, add its exact ref,
+repository path, source URL, and page count to `approved_sources.json`, prepare
+the generic cache, start the system, run generalized PA grounding, and create
+the late semantic projection only when PA understanding is sufficient. A
+changed PDF hash or changed model/schema configuration invalidates the prepared
+cache without a code change or document-purpose prompt.
 
 ## NIST instructions provenance
 

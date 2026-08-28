@@ -15,9 +15,11 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingDecision,
     GroundingProducerDescriptor,
-    ProductContextView,
-    TaskTransitionDraft,
+    GroundingSession,
+    GroundingStatement,
+    persist_grounding_session,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import ABoxSnapshot
 from cais_spade_llm.spec2primitives.ontology import TBoxSnapshot
@@ -145,40 +147,114 @@ class ControlledGroundingRuntime:
                 prompt,
                 response_format={"name": "controlled_phase_4_3_test"},
             )
-        if result.get("context understanding complete") is True:
-            _persist_controlled_completion_draft(interaction_root, abox_view)
+        if (
+            set(result)
+            == {
+                "unresolved_semantic_need",
+                "needed_context",
+                "context understanding complete",
+                "grounding_status",
+            }
+            and result.get("unresolved_semantic_need") is None
+            and result.get("needed_context") is None
+            and result.get("context understanding complete") is True
+            and result.get("grounding_status") == "complete"
+        ):
+            _persist_controlled_completion_session(
+                interaction_root,
+                abox=abox,
+                product_requirement=str(abox_view["product_requirement"]),
+                attempted_evidence=attempted_evidence,
+            )
         return result
 
 
-def _persist_controlled_completion_draft(
+def _persist_controlled_completion_session(
     interaction_root: Path,
-    abox_view: Mapping[str, object],
+    *,
+    abox: ABoxSnapshot,
+    product_requirement: str,
+    attempted_evidence: tuple[str, ...],
 ) -> None:
-    """Persist the empty-needs draft required by the Phase 3.5 contract."""
-    view = ProductContextView.from_mapping(abox_view)
-    draft_root = Path(interaction_root) / "products/grounding/task_transition"
-    numbers = [
-        int(path.stem.removeprefix("draft_"))
-        for path in draft_root.glob("draft_*.json")
-        if path.stem.removeprefix("draft_").isdigit()
-    ]
-    version = max(numbers, default=0) + 1
-    draft = TaskTransitionDraft.from_mapping(
+    """Persist minimal generalized completion inputs for controlled tests."""
+    source_ref = attempted_evidence[-1] if attempted_evidence else "requirement_0001"
+    statement = GroundingStatement.from_mapping(
         {
-            "version": version,
-            "product_requirement": view.product_requirement,
-            "requested_process": None,
-            "required_outcome": "controlled grounded outcome",
-            "required_inputs": [],
-            "unresolved_user_intent": None,
-            "source_view_fingerprint": view.fingerprint,
+            "statement_id": "controlled_statement_0001",
+            "text": "The controlled interaction has enough directly stated context.",
+            "status": "directly_stated",
+            "sources": [source_ref],
+            "reason": "The controlled runtime supplies this test-only statement.",
         }
     )
-    path = draft_root / f"draft_{version:04d}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as stream:
-        json.dump(draft.to_record(), stream, indent=2, ensure_ascii=False)
+    decision = GroundingDecision.from_mapping(
+        {
+            "decision_type": "ready_for_ontology",
+            "need_id": None,
+            "provider_id": None,
+            "source_ref": None,
+            "source_revision": None,
+            "query": None,
+            "reason": "The controlled test session is ready for late mapping.",
+        }
+    )
+    ready = GroundingSession.create(
+        revision=1,
+        requirement_text=product_requirement,
+        statements=[statement],
+        information_needs=[],
+        attempted_actions=[],
+        evidence_refs=[source_ref],
+        decision=decision,
+        status="ready_for_ontology",
+        information_status="enough",
+    )
+    persist_grounding_session(interaction_root, ready)
+    proposal_path = (
+        Path(interaction_root)
+        / "products/grounding/ontology_grounding/proposal_0001.json"
+    )
+    proposal_path.parent.mkdir(parents=True, exist_ok=True)
+    proposal = {
+        "schema_version": 2,
+        "record_type": "OntologyGroundingProposal",
+        "proposal_number": 1,
+        "session_revision": ready.revision,
+        "session_fingerprint": ready.fingerprint,
+        "initialized_specification_iri": abox.specification_iri,
+        "direct_statement_ids": [statement.statement_id],
+        "output": {
+            "ontology_grounding_proposal": {
+                "individuals": [],
+                "relations": [],
+                "literal_facts": [],
+                "unrepresented_statement_ids": [statement.statement_id],
+            }
+        },
+        "compiled_delta": {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [],
+        },
+        "status": "accepted",
+        "failure": None,
+    }
+    with proposal_path.open("x", encoding="utf-8") as stream:
+        json.dump(proposal, stream, indent=2, ensure_ascii=False)
         stream.write("\n")
+    complete = GroundingSession.create(
+        revision=2,
+        requirement_text=product_requirement,
+        statements=[statement],
+        information_needs=[],
+        attempted_actions=[],
+        evidence_refs=[source_ref],
+        decision=decision,
+        status="complete",
+        information_status="enough",
+    )
+    persist_grounding_session(interaction_root, complete)
 
 
 def request_context(
@@ -250,6 +326,7 @@ def complete_context() -> dict[str, object]:
         "unresolved_semantic_need": None,
         "needed_context": None,
         "context understanding complete": True,
+        "grounding_status": "complete",
     }
 
 
@@ -257,24 +334,30 @@ def _default_descriptors() -> list[GroundingProducerDescriptor]:
     return [
         GroundingProducerDescriptor.from_mapping(
             {
-                "producer": "document_evidence",
-                "supported_outputs": [
-                    {"kind": "class", "symbol": f"{PPR_NAMESPACE}feature"}
-                ],
-                "evidence_types": ["document"],
-                "required_record_types": [],
-                "priority": 0,
+                "provider_id": "document_evidence",
+                "description": "Read controlled document evidence.",
+                "accepted_evidence_types": ["document"],
+                "produced_record_types": ["DocumentOverviewRecord"],
+                "prerequisites": {"DocumentOverviewRecord": []},
+                "availability": True,
+                "estimated_cost": 1,
             }
         ),
         GroundingProducerDescriptor.from_mapping(
             {
-                "producer": "rgb_d_cad_grounding",
-                "supported_outputs": [
-                    {"kind": "class", "symbol": f"{PPR_NAMESPACE}product"}
+                "provider_id": "rgb_d_cad_grounding",
+                "description": "Read controlled CAD or observation evidence.",
+                "accepted_evidence_types": ["CAD", "observation"],
+                "produced_record_types": [
+                    "CADMeshRecord",
+                    "RGBDSegmentationRecord",
                 ],
-                "evidence_types": ["CAD", "observation"],
-                "required_record_types": [],
-                "priority": 0,
+                "prerequisites": {
+                    "CADMeshRecord": [],
+                    "RGBDSegmentationRecord": [],
+                },
+                "availability": True,
+                "estimated_cost": 1,
             }
         ),
     ]

@@ -1,4 +1,4 @@
-"""Interpret approved PDF evidence through an injected vision boundary."""
+"""Interpret approved PDF evidence into ontology-neutral overview records."""
 
 from __future__ import annotations
 
@@ -16,40 +16,40 @@ from typing import Any, Protocol
 import pdfplumber
 from openai import AsyncOpenAI, OpenAIError
 from pdfminer.pdfparser import PDFSyntaxError
-from rdflib import RDF
 
-from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
-    compact_abox_view,
-)
 from cais_spade_llm.spec2primitives.agents.pa.product_context import ABoxSnapshot
 from cais_spade_llm.spec2primitives.config import DocumentVLMConfig
 from cais_spade_llm.spec2primitives.ontology import TBoxSnapshot
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    approved_document_metadata,
     approved_document_path,
+    resolve_context_ref,
 )
 
-DOCUMENT_CONTEXT_REF = "NIST_assembly_instructions.pdf"
+DOCUMENT_OVERVIEW_SCHEMA_VERSION = 1
 _PRODUCER = "document_evidence"
-_OUTPUT_NAME = "spec2primitives_document_interpretation"
-_ENTITY_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_OUTPUT_KEYS = {
-    "entities",
-    "relations",
-    "literal_facts",
+_OUTPUT_NAME = "spec2primitives_document_overview"
+_TARGETED_OUTPUT_NAME = "spec2primitives_document_evidence"
+_OUTPUT_KEYS = {"summary", "observations", "uncertainty"}
+_OBSERVATION_KEYS = {"description", "evidence_pages"}
+_CACHE_RECORD_KEYS = {
+    "schema_version",
+    "record_type",
+    "overview_schema_version",
+    "context_ref",
+    "source_sha256",
+    "cache_fingerprint",
+    "provider",
+    "configured_model",
+    "response_model",
+    "response_id",
+    "store",
+    "page_count",
+    "pages",
+    "summary",
+    "observations",
     "uncertainty",
-    "unresolved_evidence_needs",
 }
-_ENTITY_KEYS = {"key", "class_iri", "evidence_pages"}
-_RELATION_KEYS = {"subject_key", "predicate_iri", "object_key", "evidence_pages"}
-_LITERAL_KEYS = {
-    "subject_key",
-    "predicate_iri",
-    "value",
-    "datatype_iri",
-    "language",
-    "evidence_pages",
-}
-_NOTE_KEYS = {"description", "evidence_pages"}
 
 
 class DocumentInterpretationError(ValueError):
@@ -79,19 +79,26 @@ class RenderedDocumentPage:
 
 @dataclass(frozen=True)
 class DocumentVisionRequest:
-    """Contain the bounded inputs visible to a document vision runtime."""
+    """Contain only source evidence visible to the overview VLM."""
 
-    product_requirement: str
-    abox_view: Mapping[str, object]
-    tbox_classes: tuple[str, ...]
-    tbox_object_properties: tuple[str, ...]
-    tbox_datatype_properties: tuple[str, ...]
+    context_ref: str
+    source_sha256: str
+    pages: tuple[RenderedDocumentPage, ...]
+
+
+@dataclass(frozen=True)
+class TargetedDocumentVisionRequest:
+    """Contain a neutral evidence question and deterministic page selection."""
+
+    context_ref: str
+    source_sha256: str
+    evidence_question: str
     pages: tuple[RenderedDocumentPage, ...]
 
 
 @dataclass(frozen=True)
 class DocumentVisionResponse:
-    """Return one structured interpretation and provider audit fields."""
+    """Return one structured overview and provider audit fields."""
 
     response_id: str
     model: str
@@ -99,29 +106,53 @@ class DocumentVisionResponse:
 
 
 class DocumentVisionRuntime(Protocol):
-    """Narrow injected boundary for one document vision request."""
+    """Narrow injected boundary for one ontology-neutral document request."""
 
     async def interpret_document(
         self,
         request: DocumentVisionRequest,
     ) -> DocumentVisionResponse:
-        """Interpret all ordered pages in one structured call."""
+        """Interpret the ordered pages without product or ontology context."""
+        ...
+
+    async def inspect_document_pages(
+        self,
+        request: TargetedDocumentVisionRequest,
+    ) -> DocumentVisionResponse:
+        """Inspect only selected pages for one neutral evidence question."""
         ...
 
 
 @dataclass(frozen=True)
+class DocumentOverviewRecord:
+    """Reference one validated content-addressed document overview."""
+
+    context_ref: str
+    source_sha256: str
+    cache_fingerprint: str
+    cache_status: str
+    record_path: Path
+    record: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class DocumentEvidenceRecord:
+    """Reference one targeted, ontology-neutral runtime evidence record."""
+
+    context_ref: str
+    evidence_question: str
+    record_path: Path
+    record: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class DocumentInterpretationResult:
-    """Return a generic delta plus the persisted Phase 4.1 audit record."""
+    """Return the assertion-free delta and overview metadata used by callers."""
 
     delta: Mapping[str, object]
-    trace_path: Path
+    overview_record_path: Path
+    cache_status: str
     page_count: int
-    assertion_count: int
-    uncertainty_count: int
-    unresolved_evidence_need_count: int
-    provider: str
-    model: str
-    response_id: str
 
 
 class OpenAIDocumentVisionRuntime:
@@ -144,12 +175,9 @@ class OpenAIDocumentVisionRuntime:
         self,
         request: DocumentVisionRequest,
     ) -> DocumentVisionResponse:
-        """Submit one ordered multimodal request with strict JSON output."""
+        """Submit one ordered multimodal overview request with strict JSON."""
         content: list[dict[str, object]] = [
-            {
-                "type": "input_text",
-                "text": _request_text(request),
-            }
+            {"type": "input_text", "text": _request_text(request)}
         ]
         content.extend(
             {
@@ -179,33 +207,329 @@ class OpenAIDocumentVisionRuntime:
         except OpenAIError as exc:
             diagnostic = _openai_error_diagnostic(exc)
             raise DocumentInterpretationError(
-                "OpenAI document interpretation failed: "
+                "OpenAI document overview failed: "
                 f"{_diagnostic_summary(diagnostic)}",
                 diagnostic=diagnostic,
             ) from exc
 
-        output_text = getattr(response, "output_text", None)
-        response_id = getattr(response, "id", None)
-        model = getattr(response, "model", None)
-        if not all(isinstance(value, str) and value for value in (output_text, response_id, model)):
-            raise DocumentInterpretationError(
-                "OpenAI returned an incomplete document interpretation response."
-            )
+        return _document_vision_response(response, "document overview")
+
+    async def inspect_document_pages(
+        self,
+        request: TargetedDocumentVisionRequest,
+    ) -> DocumentVisionResponse:
+        """Submit one targeted request over deterministic approved pages."""
+        content: list[dict[str, object]] = [
+            {"type": "input_text", "text": _targeted_request_text(request)}
+        ]
+        content.extend(
+            {
+                "type": "input_image",
+                "image_url": page.image_data_url,
+                "detail": self._config.image_detail,
+            }
+            for page in request.pages
+        )
         try:
-            output = json.loads(output_text)
-        except json.JSONDecodeError as exc:
-            raise DocumentInterpretationError(
-                "OpenAI document interpretation output was not JSON."
-            ) from exc
-        if not isinstance(output, Mapping):
-            raise DocumentInterpretationError(
-                "OpenAI document interpretation output was not an object."
+            response = await self._client.responses.create(
+                model=self._config.model,
+                instructions=_TARGETED_OPENAI_INSTRUCTIONS,
+                input=[{"role": "user", "content": content}],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": _TARGETED_OUTPUT_NAME,
+                        "strict": True,
+                        "schema": targeted_document_evidence_schema(),
+                    }
+                },
+                reasoning={"effort": self._config.reasoning_effort},
+                max_output_tokens=self._config.max_output_tokens,
+                store=False,
             )
-        return DocumentVisionResponse(
-            response_id=response_id,
-            model=model,
+        except OpenAIError as exc:
+            diagnostic = _openai_error_diagnostic(exc)
+            raise DocumentInterpretationError(
+                "OpenAI targeted document evidence failed: "
+                f"{_diagnostic_summary(diagnostic)}",
+                diagnostic=diagnostic,
+            ) from exc
+        return _document_vision_response(response, "targeted document evidence")
+
+
+async def prepare_document_overview(
+    *,
+    served_context: Mapping[str, object],
+    cache_root: Path,
+    config: DocumentVLMConfig,
+    vision_runtime: DocumentVisionRuntime,
+) -> DocumentOverviewRecord:
+    """Load or create one content-addressed ontology-neutral overview.
+
+    The cache key includes the source bytes and interpretation contract. A
+    valid cache hit performs no model call.
+    """
+    context_ref, source_sha256, document_pages = _validated_served_document(
+        served_context
+    )
+    cache_fingerprint = _cache_fingerprint(source_sha256, config)
+    source_root = Path(cache_root).resolve() / "document" / source_sha256
+    record_root = source_root / cache_fingerprint
+    record_path = record_root / "overview.json"
+    if record_path.is_file():
+        record = _load_cache_record(
+            record_path,
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            cache_fingerprint=cache_fingerprint,
+        )
+        return DocumentOverviewRecord(
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            cache_fingerprint=cache_fingerprint,
+            cache_status="hit",
+            record_path=record_path,
+            record=record,
+        )
+
+    source_root.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(tempfile.mkdtemp(prefix=".overview-", dir=source_root))
+    try:
+        rendered_pages = _render_pages(
+            context_ref,
+            document_pages,
+            temporary_root / "rendered",
+        )
+        request = DocumentVisionRequest(
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            pages=rendered_pages,
+        )
+        response = await vision_runtime.interpret_document(request)
+        if response.model != config.model:
+            raise DocumentInterpretationError(
+                "Document vision response model does not match configured model."
+            )
+        output = _validated_overview_output(
+            response.output,
+            page_count=len(rendered_pages),
+        )
+        record = _overview_cache_record(
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            cache_fingerprint=cache_fingerprint,
+            config=config,
+            response=response,
+            rendered_pages=rendered_pages,
             output=output,
         )
+        _write_json_exclusive(temporary_root / "overview.json", record)
+        try:
+            temporary_root.rename(record_root)
+        except FileExistsError:
+            shutil.rmtree(temporary_root, ignore_errors=True)
+            record = _load_cache_record(
+                record_path,
+                context_ref=context_ref,
+                source_sha256=source_sha256,
+                cache_fingerprint=cache_fingerprint,
+            )
+            return DocumentOverviewRecord(
+                context_ref=context_ref,
+                source_sha256=source_sha256,
+                cache_fingerprint=cache_fingerprint,
+                cache_status="hit",
+                record_path=record_path,
+                record=record,
+            )
+    except (DocumentInterpretationError, OSError, RuntimeError, TypeError, ValueError):
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise
+
+    return DocumentOverviewRecord(
+        context_ref=context_ref,
+        source_sha256=source_sha256,
+        cache_fingerprint=cache_fingerprint,
+        cache_status="miss",
+        record_path=record_path,
+        record=record,
+    )
+
+
+def document_overview_cache_status(
+    context_ref: str,
+    *,
+    cache_root: Path,
+    config: DocumentVLMConfig,
+) -> dict[str, object]:
+    """Inspect one approved document and overview cache without inference."""
+    try:
+        metadata = approved_document_metadata(context_ref)
+        validated_ref = str(metadata["context_ref"])
+        source_sha256 = str(metadata["source_sha256"])
+        fingerprint = _cache_fingerprint(source_sha256, config)
+        record_path = (
+            Path(cache_root).resolve()
+            / "document"
+            / source_sha256
+            / fingerprint
+            / "overview.json"
+        )
+        if record_path.is_file():
+            _load_cache_record(
+                record_path,
+                context_ref=validated_ref,
+                source_sha256=source_sha256,
+                cache_fingerprint=fingerprint,
+            )
+            overview_status = "prepared"
+        else:
+            overview_status = (
+                "stale"
+                if _has_other_overview_record(
+                    Path(cache_root).resolve(),
+                    context_ref=validated_ref,
+                )
+                else "missing"
+            )
+    except (DocumentInterpretationError, OSError, TypeError, ValueError) as exc:
+        return {
+            "context_ref": context_ref,
+            "source_status": "invalid",
+            "overview_status": "unavailable",
+            "record_path": None,
+            "rejection": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "context_ref": validated_ref,
+        "source_status": "valid",
+        "source_sha256": source_sha256,
+        "overview_status": overview_status,
+        "record_path": str(record_path) if record_path.is_file() else None,
+        "rejection": None,
+    }
+
+
+async def inspect_document_evidence(
+    *,
+    interaction_root: Path,
+    overview_snapshot: Mapping[str, object],
+    evidence_question: str,
+    config: DocumentVLMConfig,
+    vision_runtime: DocumentVisionRuntime,
+    maximum_pages: int = 3,
+) -> DocumentEvidenceRecord:
+    """Inspect deterministically selected cached pages for one evidence gap."""
+    if not isinstance(evidence_question, str) or not evidence_question.strip():
+        raise DocumentInterpretationError("Targeted evidence question is invalid.")
+    if (
+        isinstance(maximum_pages, bool)
+        or not isinstance(maximum_pages, int)
+        or maximum_pages <= 0
+    ):
+        raise DocumentInterpretationError("maximum_pages must be a positive integer.")
+    root = Path(interaction_root).resolve()
+    overview, cache_record_path = _validated_overview_snapshot(
+        root,
+        overview_snapshot,
+    )
+    context_ref = str(overview["context_ref"])
+    resolved = resolve_context_ref({"context_ref": context_ref})
+    served = resolved.get("served_context")
+    if not isinstance(served, Mapping):
+        raise DocumentInterpretationError(
+            "Approved document could not be served for targeted inspection."
+        )
+    document_evidence = served.get("document_evidence")
+    pages = (
+        document_evidence.get("pages")
+        if isinstance(document_evidence, Mapping)
+        else None
+    )
+    if not isinstance(pages, list):
+        raise DocumentInterpretationError("Targeted document pages are invalid.")
+    selected_numbers = _select_targeted_pages(
+        evidence_question,
+        overview,
+        pages,
+        maximum_pages=maximum_pages,
+    )
+    rendered_pages = _load_cached_rendered_pages(
+        overview,
+        cache_record_path.parent,
+        pages,
+        selected_numbers,
+    )
+    request = TargetedDocumentVisionRequest(
+        context_ref=context_ref,
+        source_sha256=str(overview["source_sha256"]),
+        evidence_question=evidence_question,
+        pages=rendered_pages,
+    )
+    response = await vision_runtime.inspect_document_pages(request)
+    if response.model != config.model:
+        raise DocumentInterpretationError(
+            "Targeted document response model does not match configured model."
+        )
+    output = _validated_targeted_output(
+        response.output,
+        selected_pages=frozenset(selected_numbers),
+    )
+    evidence_number = len(
+        tuple(
+            (root / "products/grounding/document_evidence").glob(
+                "evidence_*.json"
+            )
+        )
+    ) + 1
+    record_path = (
+        root
+        / "products/grounding/document_evidence"
+        / f"evidence_{evidence_number:04d}.json"
+    )
+
+    def _items(field: str, prefix: str) -> list[dict[str, object]]:
+        items = output[field]
+        if not isinstance(items, list):
+            raise DocumentInterpretationError(
+                f"Targeted document {field} is invalid."
+            )
+        return [
+            {
+                f"{prefix}_id": f"targeted_{prefix}_{index:04d}",
+                "description": item["description"],
+                "evidence_refs": [
+                    f"{context_ref}#page={page}"
+                    for page in item["evidence_pages"]
+                ],
+            }
+            for index, item in enumerate(items, start=1)
+        ]
+
+    record = {
+        "schema_version": 1,
+        "record_type": "DocumentEvidenceRecord",
+        "producer": _PRODUCER,
+        "context_ref": context_ref,
+        "source_sha256": overview["source_sha256"],
+        "source_overview_ref": str(cache_record_path),
+        "evidence_question": evidence_question,
+        "selected_pages": list(selected_numbers),
+        "provider": config.provider,
+        "configured_model": config.model,
+        "response_model": response.model,
+        "response_id": response.response_id,
+        "store": False,
+        "observations": _items("observations", "observation"),
+        "uncertainty": _items("uncertainty", "uncertainty"),
+    }
+    _write_json_exclusive(record_path, record)
+    return DocumentEvidenceRecord(
+        context_ref=context_ref,
+        evidence_question=evidence_question,
+        record_path=record_path,
+        record=record,
+    )
 
 
 async def interpret_document_evidence(
@@ -218,56 +542,59 @@ async def interpret_document_evidence(
     config: DocumentVLMConfig,
     vision_runtime: DocumentVisionRuntime,
 ) -> DocumentInterpretationResult:
-    """Render, interpret, compile, and persist one approved PDF result.
-
-    The returned delta remains untrusted until the caller passes it through the
-    shared ABox validator. This function does not decide context completeness.
-    """
+    """Snapshot a neutral overview and return an assertion-free delta."""
     _validate_operation_number(operation_number)
-    document_pages = _validated_served_document(served_context)
     root = Path(interaction_root).resolve()
     if abox.interaction_root != root or abox.tbox_fingerprint != tbox.fingerprint:
         raise DocumentInterpretationError(
             "Document interpretation ABox does not match its interaction and TBox."
         )
-    if abox.product_requirement != compact_abox_view(abox)["product_requirement"]:
-        raise DocumentInterpretationError("ABox requirement view is inconsistent.")
     tbox.assert_unchanged()
     interpretation_root = root / "products/grounding/document_evidence"
     trace_path = interpretation_root / f"interpretation_{operation_number:04d}.json"
-    operation_root = interpretation_root / f"operation_{operation_number:04d}"
-    if trace_path.exists() or operation_root.exists():
+    overview_path = interpretation_root / f"overview_{operation_number:04d}.json"
+    if trace_path.exists() or overview_path.exists():
         raise DocumentInterpretationError(
             f"Document interpretation {operation_number:04d} already exists."
         )
 
-    rendered_pages: tuple[RenderedDocumentPage, ...] = ()
-    response: DocumentVisionResponse | None = None
+    overview: DocumentOverviewRecord | None = None
     try:
-        rendered_pages = _render_pages(
-            DOCUMENT_CONTEXT_REF,
-            document_pages,
-            operation_root,
+        overview = await prepare_document_overview(
+            served_context=served_context,
+            cache_root=root.parent / "source_cache",
+            config=config,
+            vision_runtime=vision_runtime,
         )
-        request = DocumentVisionRequest(
-            product_requirement=abox.product_requirement,
-            abox_view=compact_abox_view(abox),
-            tbox_classes=tuple(sorted(tbox.classes)),
-            tbox_object_properties=tuple(sorted(tbox.object_properties)),
-            tbox_datatype_properties=tuple(sorted(tbox.datatype_properties)),
-            pages=rendered_pages,
+        evidence_refs = [overview.context_ref]
+        evidence_refs.extend(
+            f"{overview.context_ref}#page={page_number}"
+            for page_number in range(1, int(overview.record["page_count"]) + 1)
         )
-        response = await vision_runtime.interpret_document(request)
-        if response.model != config.model:
-            raise DocumentInterpretationError(
-                "Document vision response model does not match configured model."
-            )
-        output = _validated_output(response.output, tbox, len(rendered_pages))
-        delta = _compile_delta(
-            output,
-            abox=abox,
-            operation_number=operation_number,
-        )
+        snapshot = {
+            "schema_version": 1,
+            "record_type": "DocumentOverviewRecord",
+            "producer": _PRODUCER,
+            "operation_number": operation_number,
+            "cache_status": overview.cache_status,
+            "cache_record_ref": str(overview.record_path),
+            "evidence_refs": evidence_refs,
+            "overview": dict(overview.record),
+        }
+        _write_json_exclusive(overview_path, snapshot)
+        uncertainty = [
+            {
+                "description": str(item["description"]),
+                "evidence_refs": list(item["evidence_refs"]),
+            }
+            for item in _record_items(overview.record, "uncertainty")
+        ]
+        delta: dict[str, object] = {
+            "assertions": [],
+            "uncertainty": uncertainty,
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [str(overview_path.relative_to(root))],
+        }
     except (DocumentInterpretationError, OSError, RuntimeError, TypeError, ValueError) as exc:
         diagnostic = (
             exc.diagnostic if isinstance(exc, DocumentInterpretationError) else None
@@ -276,9 +603,7 @@ async def interpret_document_evidence(
             trace_path,
             _trace_record(
                 config=config,
-                rendered_pages=rendered_pages,
-                response=response,
-                output=None if response is None else response.output,
+                overview=overview,
                 delta=None,
                 failure=f"{type(exc).__name__}: {exc}",
                 diagnostic=diagnostic,
@@ -294,145 +619,168 @@ async def interpret_document_evidence(
         trace_path,
         _trace_record(
             config=config,
-            rendered_pages=rendered_pages,
-            response=response,
-            output=output,
+            overview=overview,
             delta=delta,
             failure=None,
             diagnostic=None,
         ),
     )
+    page_count = int(overview.record["page_count"])
     return DocumentInterpretationResult(
         delta=delta,
-        trace_path=trace_path,
-        page_count=len(rendered_pages),
-        assertion_count=len(delta["assertions"]),  # type: ignore[arg-type]
-        uncertainty_count=len(delta["uncertainty"]),  # type: ignore[arg-type]
-        unresolved_evidence_need_count=len(  # type: ignore[arg-type]
-            delta["unresolved_evidence_needs"]
-        ),
-        provider=config.provider,
-        model=response.model,
-        response_id=response.response_id,
+        overview_record_path=overview_path,
+        cache_status=overview.cache_status,
+        page_count=page_count,
     )
 
 
 def document_interpretation_schema() -> dict[str, object]:
-    """Return the strict structured-output schema sent to OpenAI."""
+    """Return the strict ontology-neutral overview schema sent to OpenAI."""
     page_numbers = {
         "type": "array",
         "items": {"type": "integer", "minimum": 1},
         "minItems": 1,
+    }
+    observation = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(_OBSERVATION_KEYS),
+        "properties": {
+            "description": {"type": "string"},
+            "evidence_pages": page_numbers,
+        },
     }
     return {
         "type": "object",
         "additionalProperties": False,
         "required": sorted(_OUTPUT_KEYS),
         "properties": {
-            "entities": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": sorted(_ENTITY_KEYS),
-                    "properties": {
-                        "key": {"type": "string"},
-                        "class_iri": {"type": "string"},
-                        "evidence_pages": page_numbers,
-                    },
-                },
-            },
-            "relations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": sorted(_RELATION_KEYS),
-                    "properties": {
-                        "subject_key": {"type": "string"},
-                        "predicate_iri": {"type": "string"},
-                        "object_key": {"type": "string"},
-                        "evidence_pages": page_numbers,
-                    },
-                },
-            },
-            "literal_facts": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": sorted(_LITERAL_KEYS),
-                    "properties": {
-                        "subject_key": {"type": "string"},
-                        "predicate_iri": {"type": "string"},
-                        "value": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "number"},
-                                {"type": "boolean"},
-                            ]
-                        },
-                        "datatype_iri": {"type": ["string", "null"]},
-                        "language": {"type": ["string", "null"]},
-                        "evidence_pages": page_numbers,
-                    },
-                },
-            },
-            "uncertainty": {
-                "type": "array",
-                "items": _note_schema(page_numbers),
-            },
-            "unresolved_evidence_needs": {
-                "type": "array",
-                "items": _note_schema(page_numbers),
-            },
+            "summary": {"type": "string"},
+            "observations": {"type": "array", "items": observation},
+            "uncertainty": {"type": "array", "items": observation},
         },
     }
 
 
-def _note_schema(page_numbers: dict[str, object]) -> dict[str, object]:
-    return {
+def targeted_document_evidence_schema() -> dict[str, object]:
+    """Return the strict ontology-neutral targeted evidence schema."""
+    page_numbers = {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 1},
+        "minItems": 1,
+    }
+    observation = {
         "type": "object",
         "additionalProperties": False,
-        "required": sorted(_NOTE_KEYS),
+        "required": sorted(_OBSERVATION_KEYS),
         "properties": {
             "description": {"type": "string"},
             "evidence_pages": page_numbers,
         },
     }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["observations", "uncertainty"],
+        "properties": {
+            "observations": {"type": "array", "items": observation},
+            "uncertainty": {"type": "array", "items": observation},
+        },
+    }
 
 
 def _request_text(request: DocumentVisionRequest) -> str:
-    record = {
-        "product_requirement": request.product_requirement,
-        "current_abox": request.abox_view,
-        "allowed_tbox_classes": list(request.tbox_classes),
-        "allowed_tbox_object_properties": list(request.tbox_object_properties),
-        "allowed_tbox_datatype_properties": list(request.tbox_datatype_properties),
-        "document_pages": [
-            {"page": page.page_number, "extracted_text": page.text} for page in request.pages
-        ],
-    }
-    return json.dumps(record, ensure_ascii=False, allow_nan=False)
+    return json.dumps(
+        {
+            "document_context_ref": request.context_ref,
+            "source_sha256": request.source_sha256,
+            "document_pages": [
+                {"page": page.page_number, "extracted_text": page.text}
+                for page in request.pages
+            ],
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
-_OPENAI_INSTRUCTIONS = """You are a bounded document interpretation tool. Interpret only the supplied ordered PDF page images and extracted text for the exact product requirement. Use only the supplied TBox class and property IRIs. Use the reserved subject key `specification` only for the initialized requirement. Create short unique entity keys; do not create IRIs. Every output item must cite the visible page numbers supporting it. Put uncertain claims in uncertainty and missing evidence in unresolved_evidence_needs. Never infer robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
+def _targeted_request_text(request: TargetedDocumentVisionRequest) -> str:
+    return json.dumps(
+        {
+            "document_context_ref": request.context_ref,
+            "source_sha256": request.source_sha256,
+            "evidence_question": request.evidence_question,
+            "selected_document_pages": [
+                {"page": page.page_number, "extracted_text": page.text}
+                for page in request.pages
+            ],
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+_OPENAI_INSTRUCTIONS = """You are a bounded document overview tool. Describe only the supplied ordered PDF page images and extracted text. Produce a generic source overview independent of any user requirement or ontology. Record short surface-form observations with the visible page numbers that support them. Put ambiguous or unclear content in uncertainty. Do not create entity keys, IRIs, ontology classes, ontology properties, RDF assertions, robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
+
+_TARGETED_OPENAI_INSTRUCTIONS = """You are a bounded document evidence tool. Inspect only the supplied selected PDF pages for the supplied evidence question. Report short surface-form observations and uncertainty with exact visible page numbers. Do not translate observations into an ontology, create entity keys or IRIs, emit RDF assertions, infer robot resources or capabilities, compose primitive steps, or use simulator or execution state. It is valid to return no observations when the selected pages do not answer the question. Return only the requested structured object."""
+
+
+def _document_vision_response(response: object, label: str) -> DocumentVisionResponse:
+    output_text = getattr(response, "output_text", None)
+    response_id = getattr(response, "id", None)
+    model = getattr(response, "model", None)
+    if not all(
+        isinstance(value, str) and value
+        for value in (output_text, response_id, model)
+    ):
+        raise DocumentInterpretationError(
+            f"OpenAI returned an incomplete {label} response."
+        )
+    try:
+        output = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise DocumentInterpretationError(
+            f"OpenAI {label} output was not JSON."
+        ) from exc
+    if not isinstance(output, Mapping):
+        raise DocumentInterpretationError(
+            f"OpenAI {label} output was not an object."
+        )
+    return DocumentVisionResponse(
+        response_id=response_id,
+        model=model,
+        output=output,
+    )
 
 
 def _validated_served_document(
     served_context: Mapping[str, object],
-) -> tuple[Mapping[str, object], ...]:
+) -> tuple[str, str, tuple[Mapping[str, object], ...]]:
     if (
         not isinstance(served_context, Mapping)
-        or served_context.get("context_ref") != DOCUMENT_CONTEXT_REF
         or served_context.get("evidence_type") != "document"
     ):
         raise DocumentInterpretationError(
-            "Phase 4.1 accepts only the exact approved NIST document context."
+            "Phase 4.1 accepts only one approved document context."
         )
+    context_ref = served_context.get("context_ref")
+    if not isinstance(context_ref, str) or not context_ref:
+        raise DocumentInterpretationError("served document context_ref is invalid.")
+    try:
+        source_path = approved_document_path(context_ref)
+    except (OSError, ValueError) as exc:
+        raise DocumentInterpretationError(
+            "served document context_ref is not approved."
+        ) from exc
     document_evidence = served_context.get("document_evidence")
     if not isinstance(document_evidence, Mapping):
         raise DocumentInterpretationError("served_context has no document_evidence.")
+    if set(document_evidence) != {"source_sha256", "page_count", "pages"}:
+        raise DocumentInterpretationError("served document evidence fields are invalid.")
+    source_sha256 = document_evidence.get("source_sha256")
+    actual_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    if source_sha256 != actual_sha256:
+        raise DocumentInterpretationError("served document source hash is invalid.")
     pages = document_evidence.get("pages")
     page_count = document_evidence.get("page_count")
     if (
@@ -451,9 +799,209 @@ def _validated_served_document(
             or page.get("page") != page_number
             or not isinstance(page.get("text"), str)
         ):
-            raise DocumentInterpretationError("served document pages are not ordered exactly.")
+            raise DocumentInterpretationError(
+                "served document pages are not ordered exactly."
+            )
         validated.append(page)
-    return tuple(validated)
+    return context_ref, actual_sha256, tuple(validated)
+
+
+def _validated_overview_snapshot(
+    interaction_root: Path,
+    value: Mapping[str, object],
+) -> tuple[Mapping[str, object], Path]:
+    overview = value.get("overview")
+    cache_record_ref = value.get("cache_record_ref")
+    if (
+        value.get("schema_version") != 1
+        or value.get("record_type") != "DocumentOverviewRecord"
+        or value.get("producer") != _PRODUCER
+        or not isinstance(overview, Mapping)
+        or not isinstance(cache_record_ref, str)
+    ):
+        raise DocumentInterpretationError(
+            "Targeted inspection requires a valid DocumentOverviewRecord."
+        )
+    cache_root = (interaction_root.parent / "source_cache").resolve()
+    cache_record_path = Path(cache_record_ref).resolve()
+    try:
+        cache_record_path.relative_to(cache_root)
+    except ValueError as exc:
+        raise DocumentInterpretationError(
+            "Document overview cache ref leaves its generated cache root."
+        ) from exc
+    if cache_record_path.name != "overview.json":
+        raise DocumentInterpretationError("Document overview cache ref is invalid.")
+    try:
+        cached = json.loads(cache_record_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DocumentInterpretationError(
+            "Document overview cache could not be revalidated."
+        ) from exc
+    if not isinstance(cached, Mapping) or dict(cached) != dict(overview):
+        raise DocumentInterpretationError(
+            "Document overview snapshot does not match its cache record."
+        )
+    return overview, cache_record_path
+
+
+def _select_targeted_pages(
+    evidence_question: str,
+    overview: Mapping[str, object],
+    page_records: Sequence[Mapping[str, object]],
+    *,
+    maximum_pages: int,
+) -> tuple[int, ...]:
+    question_tokens = _search_tokens(evidence_question)
+    observation_scores: dict[int, int] = {}
+    observations = overview.get("observations")
+    if isinstance(observations, list):
+        for observation in observations:
+            if not isinstance(observation, Mapping):
+                continue
+            description = observation.get("description")
+            refs = observation.get("evidence_refs")
+            if not isinstance(description, str) or not isinstance(refs, list):
+                continue
+            overlap = len(question_tokens & _search_tokens(description))
+            for ref in refs:
+                page_number = _page_number_from_ref(ref)
+                if page_number is not None:
+                    observation_scores[page_number] = max(
+                        observation_scores.get(page_number, 0),
+                        overlap,
+                    )
+    ranked: list[tuple[int, int]] = []
+    for expected_page, page in enumerate(page_records, start=1):
+        if not isinstance(page, Mapping) or page.get("page") != expected_page:
+            raise DocumentInterpretationError(
+                "Targeted document pages are not ordered exactly."
+            )
+        text = page.get("text")
+        if not isinstance(text, str):
+            raise DocumentInterpretationError("Targeted page text is invalid.")
+        lexical_score = len(question_tokens & _search_tokens(text))
+        overview_score = observation_scores.get(expected_page, 0)
+        ranked.append((-(lexical_score * 10 + overview_score), expected_page))
+    ranked.sort()
+    return tuple(sorted(page for _score, page in ranked[:maximum_pages]))
+
+
+def _load_cached_rendered_pages(
+    overview: Mapping[str, object],
+    cache_record_root: Path,
+    page_records: Sequence[Mapping[str, object]],
+    selected_pages: Sequence[int],
+) -> tuple[RenderedDocumentPage, ...]:
+    rendered_records = overview.get("pages")
+    if not isinstance(rendered_records, list) or len(rendered_records) != len(
+        page_records
+    ):
+        raise DocumentInterpretationError("Cached rendered page records are invalid.")
+    selected = set(selected_pages)
+    result: list[RenderedDocumentPage] = []
+    for page_number in selected_pages:
+        rendered = rendered_records[page_number - 1]
+        page = page_records[page_number - 1]
+        if (
+            not isinstance(rendered, Mapping)
+            or rendered.get("page") != page_number
+            or not isinstance(rendered.get("image_ref"), str)
+            or not isinstance(rendered.get("image_sha256"), str)
+            or page.get("page") != page_number
+            or not isinstance(page.get("text"), str)
+        ):
+            raise DocumentInterpretationError("Cached rendered page is invalid.")
+        image_path = (cache_record_root / str(rendered["image_ref"])).resolve()
+        try:
+            image_path.relative_to(cache_record_root.resolve())
+            image_bytes = image_path.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise DocumentInterpretationError(
+                "Cached rendered page artifact is unavailable."
+            ) from exc
+        image_sha256 = hashlib.sha256(image_bytes).hexdigest()
+        if image_sha256 != rendered["image_sha256"]:
+            raise DocumentInterpretationError(
+                "Cached rendered page artifact hash is invalid."
+            )
+        result.append(
+            RenderedDocumentPage(
+                page_number=page_number,
+                image_path=image_path,
+                image_sha256=image_sha256,
+                image_data_url=(
+                    "data:image/png;base64,"
+                    + base64.b64encode(image_bytes).decode("ascii")
+                ),
+                text=str(page["text"]),
+            )
+        )
+    if set(page.page_number for page in result) != selected:
+        raise DocumentInterpretationError("Targeted rendered page selection is invalid.")
+    return tuple(result)
+
+
+def _validated_targeted_output(
+    value: Mapping[str, object],
+    *,
+    selected_pages: frozenset[int],
+) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "observations",
+        "uncertainty",
+    }:
+        raise DocumentInterpretationError(
+            "Targeted document output fields are invalid."
+        )
+    validated: dict[str, object] = {"observations": [], "uncertainty": []}
+    maximum_page = max(selected_pages)
+    for field in validated:
+        items = value[field]
+        if not isinstance(items, list):
+            raise DocumentInterpretationError(
+                f"Targeted document {field} must be a list."
+            )
+        output_items: list[dict[str, object]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping) or set(item) != _OBSERVATION_KEYS:
+                raise DocumentInterpretationError(
+                    f"Targeted {field}[{index}] fields are invalid."
+                )
+            description = item["description"]
+            if not isinstance(description, str) or not description.strip():
+                raise DocumentInterpretationError(
+                    f"Targeted {field}[{index}] description is invalid."
+                )
+            pages = _evidence_pages(
+                item["evidence_pages"],
+                maximum_page,
+                f"targeted {field}[{index}]",
+            )
+            if not set(pages).issubset(selected_pages):
+                raise DocumentInterpretationError(
+                    f"Targeted {field}[{index}] cites an unselected page."
+                )
+            output_items.append(
+                {"description": description, "evidence_pages": list(pages)}
+            )
+        validated[field] = output_items
+    return validated
+
+
+def _search_tokens(value: str) -> frozenset[str]:
+    return frozenset(
+        token
+        for token in re.findall(r"[A-Za-z0-9]+", value.casefold())
+        if len(token) > 2
+    )
+
+
+def _page_number_from_ref(value: object) -> int | None:
+    if not isinstance(value, str) or "#page=" not in value:
+        return None
+    page = value.rsplit("#page=", 1)[-1]
+    return int(page) if page.isdigit() and int(page) > 0 else None
 
 
 def _render_pages(
@@ -491,7 +1039,8 @@ def _render_pages(
                         image_path=operation_root / "pages" / image_path.name,
                         image_sha256=hashlib.sha256(image_bytes).hexdigest(),
                         image_data_url=(
-                            "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+                            "data:image/png;base64,"
+                            + base64.b64encode(image_bytes).decode("ascii")
                         ),
                         text=str(page_record["text"]),
                     )
@@ -503,215 +1052,219 @@ def _render_pages(
         raise
 
 
-def _validated_output(
+def _validated_overview_output(
     value: Mapping[str, object],
-    tbox: TBoxSnapshot,
+    *,
     page_count: int,
-) -> dict[str, list[dict[str, object]]]:
+) -> dict[str, object]:
     if not isinstance(value, Mapping) or set(value) != _OUTPUT_KEYS:
-        raise DocumentInterpretationError("Document output fields are invalid.")
-    output: dict[str, list[dict[str, object]]] = {}
-    for field in _OUTPUT_KEYS:
+        raise DocumentInterpretationError("Document overview output fields are invalid.")
+    summary = value["summary"]
+    if not isinstance(summary, str) or not summary.strip():
+        raise DocumentInterpretationError("Document overview summary is invalid.")
+    output: dict[str, object] = {
+        "summary": summary,
+        "observations": [],
+        "uncertainty": [],
+    }
+    for field in ("observations", "uncertainty"):
         items = value[field]
         if not isinstance(items, list):
-            raise DocumentInterpretationError(f"Document output {field} must be a list.")
-        output[field] = []
+            raise DocumentInterpretationError(f"Document overview {field} must be a list.")
+        validated_items: list[dict[str, object]] = []
         for index, item in enumerate(items):
-            if not isinstance(item, Mapping):
-                raise DocumentInterpretationError(f"{field}[{index}] must be an object.")
-            output[field].append(dict(item))
-
-    entity_keys = _validated_entities(output["entities"], tbox, page_count)
-    subject_keys = {"specification", *entity_keys}
-    _validate_relations(output["relations"], tbox, page_count, entity_keys)
-    _validate_literal_facts(output["literal_facts"], tbox, page_count, subject_keys)
-    _validate_notes(output["uncertainty"], "uncertainty", page_count)
-    _validate_notes(
-        output["unresolved_evidence_needs"],
-        "unresolved_evidence_needs",
-        page_count,
-    )
+            if not isinstance(item, Mapping) or set(item) != _OBSERVATION_KEYS:
+                raise DocumentInterpretationError(f"{field}[{index}] fields are invalid.")
+            description = item["description"]
+            if not isinstance(description, str) or not description.strip():
+                raise DocumentInterpretationError(
+                    f"{field}[{index}] description is invalid."
+                )
+            pages = _evidence_pages(
+                item["evidence_pages"],
+                page_count,
+                f"{field}[{index}]",
+            )
+            validated_items.append(
+                {"description": description, "evidence_pages": list(pages)}
+            )
+        output[field] = validated_items
+    if not output["observations"]:
+        raise DocumentInterpretationError(
+            "Document overview requires at least one cited observation."
+        )
     return output
 
 
-def _validated_entities(
-    entities: Sequence[Mapping[str, object]],
-    tbox: TBoxSnapshot,
-    page_count: int,
-) -> set[str]:
-    entity_keys: set[str] = set()
-    for index, entity in enumerate(entities):
-        _require_exact_keys(entity, _ENTITY_KEYS, f"entities[{index}]")
-        key = _entity_key(entity["key"], f"entities[{index}].key")
-        if key == "specification" or key in entity_keys:
-            raise DocumentInterpretationError("Entity keys must be unique and non-reserved.")
-        entity_keys.add(key)
-        if entity["class_iri"] not in tbox.classes:
-            raise DocumentInterpretationError("Entity class_iri is not declared in the TBox.")
-        _evidence_pages(entity["evidence_pages"], page_count, f"entities[{index}]")
-    return entity_keys
-
-
-def _validate_relations(
-    relations: Sequence[Mapping[str, object]],
-    tbox: TBoxSnapshot,
-    page_count: int,
-    entity_keys: set[str],
-) -> None:
-    subject_keys = {"specification", *entity_keys}
-    for index, relation in enumerate(relations):
-        _require_exact_keys(relation, _RELATION_KEYS, f"relations[{index}]")
-        if relation["subject_key"] not in subject_keys or relation["object_key"] not in entity_keys:
-            raise DocumentInterpretationError("Relation entity keys are not declared.")
-        if relation["predicate_iri"] not in tbox.object_properties:
-            raise DocumentInterpretationError("Relation predicate_iri is not declared in the TBox.")
-        _evidence_pages(relation["evidence_pages"], page_count, f"relations[{index}]")
-
-
-def _validate_literal_facts(
-    literal_facts: Sequence[Mapping[str, object]],
-    tbox: TBoxSnapshot,
-    page_count: int,
-    subject_keys: set[str],
-) -> None:
-    for index, literal in enumerate(literal_facts):
-        _require_exact_keys(literal, _LITERAL_KEYS, f"literal_facts[{index}]")
-        if literal["subject_key"] not in subject_keys:
-            raise DocumentInterpretationError("Literal fact subject key is not declared.")
-        if literal["predicate_iri"] not in tbox.datatype_properties:
-            raise DocumentInterpretationError("Literal predicate_iri is not declared in the TBox.")
-        scalar = literal["value"]
-        if isinstance(scalar, (dict, list)) or scalar is None:
-            raise DocumentInterpretationError("Literal fact value must be a JSON scalar.")
-        datatype = literal["datatype_iri"]
-        language = literal["language"]
-        if datatype is not None and (not isinstance(datatype, str) or not datatype):
-            raise DocumentInterpretationError("Literal datatype_iri is invalid.")
-        if language is not None and (not isinstance(language, str) or not language):
-            raise DocumentInterpretationError("Literal language is invalid.")
-        if datatype is not None and language is not None:
-            raise DocumentInterpretationError("Literal cannot have datatype and language together.")
-        _evidence_pages(literal["evidence_pages"], page_count, f"literal_facts[{index}]")
-
-
-def _validate_notes(
-    notes: Sequence[Mapping[str, object]],
-    field: str,
-    page_count: int,
-) -> None:
-    for index, note in enumerate(notes):
-        _require_exact_keys(note, _NOTE_KEYS, f"{field}[{index}]")
-        if not isinstance(note["description"], str) or not note["description"].strip():
-            raise DocumentInterpretationError(f"{field}[{index}] description is invalid.")
-        _evidence_pages(note["evidence_pages"], page_count, f"{field}[{index}]")
-
-
-def _compile_delta(
-    output: Mapping[str, list[dict[str, object]]],
+def _overview_cache_record(
     *,
-    abox: ABoxSnapshot,
-    operation_number: int,
+    context_ref: str,
+    source_sha256: str,
+    cache_fingerprint: str,
+    config: DocumentVLMConfig,
+    response: DocumentVisionResponse,
+    rendered_pages: Sequence[RenderedDocumentPage],
+    output: Mapping[str, object],
 ) -> dict[str, object]:
-    entity_iris = {
-        str(entity["key"]): f"{abox.namespace}document_{operation_number:04d}_{entity['key']}"
-        for entity in output["entities"]
-    }
-    subject_iris = {"specification": abox.specification_iri, **entity_iris}
-    assertions: list[dict[str, object]] = []
-    for entity in output["entities"]:
-        assertions.append(
-            _assertion(
-                entity_iris[str(entity["key"])],
-                str(RDF.type),
-                {"kind": "iri", "value": entity["class_iri"]},
-                entity["evidence_pages"],
-            )
-        )
-    for relation in output["relations"]:
-        assertions.append(
-            _assertion(
-                subject_iris[str(relation["subject_key"])],
-                str(relation["predicate_iri"]),
-                {
-                    "kind": "iri",
-                    "value": entity_iris[str(relation["object_key"])],
-                },
-                relation["evidence_pages"],
-            )
-        )
-    for literal in output["literal_facts"]:
-        object_record = {
-            "kind": "literal",
-            "value": literal["value"],
-        }
-        if literal["datatype_iri"] is not None:
-            object_record["datatype"] = literal["datatype_iri"]
-        if literal["language"] is not None:
-            object_record["language"] = literal["language"]
-        assertions.append(
-            _assertion(
-                subject_iris[str(literal["subject_key"])],
-                str(literal["predicate_iri"]),
-                object_record,
-                literal["evidence_pages"],
-            )
-        )
+    def _items(field: str, prefix: str) -> list[dict[str, object]]:
+        values = output[field]
+        if not isinstance(values, list):
+            raise DocumentInterpretationError(f"Document overview {field} is invalid.")
+        return [
+            {
+                f"{prefix}_id": f"{prefix}_{index:04d}",
+                "description": str(item["description"]),
+                "evidence_refs": [
+                    f"{context_ref}#page={page}" for page in item["evidence_pages"]
+                ],
+            }
+            for index, item in enumerate(values, start=1)
+        ]
+
     return {
-        "assertions": assertions,
-        "uncertainty": output["uncertainty"],
-        "unresolved_evidence_needs": output["unresolved_evidence_needs"],
-        "typed_context_refs": [
-            f"products/grounding/document_evidence/interpretation_{operation_number:04d}.json"
+        "schema_version": 1,
+        "record_type": "DocumentOverviewRecord",
+        "overview_schema_version": DOCUMENT_OVERVIEW_SCHEMA_VERSION,
+        "context_ref": context_ref,
+        "source_sha256": source_sha256,
+        "cache_fingerprint": cache_fingerprint,
+        "provider": config.provider,
+        "configured_model": config.model,
+        "response_model": response.model,
+        "response_id": response.response_id,
+        "store": False,
+        "page_count": len(rendered_pages),
+        "pages": [
+            {
+                "page": page.page_number,
+                "image_ref": f"rendered/pages/page_{page.page_number:04d}.png",
+                "image_sha256": page.image_sha256,
+            }
+            for page in rendered_pages
         ],
+        "summary": output["summary"],
+        "observations": _items("observations", "observation"),
+        "uncertainty": _items("uncertainty", "uncertainty"),
     }
 
 
-def _assertion(
-    subject: str,
-    predicate: str,
-    object_record: Mapping[str, object],
-    pages: object,
-) -> dict[str, object]:
-    return {
-        "subject": subject,
-        "predicate": predicate,
-        "object": dict(object_record),
-        "evidence_refs": [
-            f"{DOCUMENT_CONTEXT_REF}#page={page}"
-            for page in pages  # type: ignore[union-attr]
-        ],
+def _cache_fingerprint(source_sha256: str, config: DocumentVLMConfig) -> str:
+    value = {
+        "source_sha256": source_sha256,
+        "overview_schema_version": DOCUMENT_OVERVIEW_SCHEMA_VERSION,
+        "provider": config.provider,
+        "model": config.model,
+        "reasoning_effort": config.reasoning_effort,
+        "image_detail": config.image_detail,
+        "max_output_tokens": config.max_output_tokens,
     }
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_cache_record(
+    path: Path,
+    *,
+    context_ref: str,
+    source_sha256: str,
+    cache_fingerprint: str,
+) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DocumentInterpretationError("Document overview cache is unreadable.") from exc
+    if not isinstance(value, dict) or set(value) != _CACHE_RECORD_KEYS:
+        raise DocumentInterpretationError("Document overview cache fields are invalid.")
+    if (
+        value["schema_version"] != 1
+        or value["record_type"] != "DocumentOverviewRecord"
+        or value["overview_schema_version"] != DOCUMENT_OVERVIEW_SCHEMA_VERSION
+        or value["context_ref"] != context_ref
+        or value["source_sha256"] != source_sha256
+        or value["cache_fingerprint"] != cache_fingerprint
+        or value["store"] is not False
+    ):
+        raise DocumentInterpretationError("Document overview cache identity is invalid.")
+    page_count = value["page_count"]
+    pages = value["pages"]
+    if (
+        isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count <= 0
+        or not isinstance(pages, list)
+        or len(pages) != page_count
+    ):
+        raise DocumentInterpretationError("Document overview cached pages are invalid.")
+    for field in (
+        "summary",
+        "provider",
+        "configured_model",
+        "response_model",
+        "response_id",
+    ):
+        if not isinstance(value[field], str) or not value[field]:
+            raise DocumentInterpretationError(
+                f"Document overview cache {field} is invalid."
+            )
+    for field in ("observations", "uncertainty"):
+        if not isinstance(value[field], list):
+            raise DocumentInterpretationError(
+                f"Document overview cache {field} is invalid."
+            )
+    return value
+
+
+def _has_other_overview_record(cache_root: Path, *, context_ref: str) -> bool:
+    for path in (cache_root / "document").glob("*/*/overview.json"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, Mapping) and value.get("context_ref") == context_ref:
+            return True
+    return False
+
+
+def _record_items(
+    record: Mapping[str, object],
+    field: str,
+) -> tuple[Mapping[str, object], ...]:
+    items = record.get(field)
+    if not isinstance(items, list) or not all(isinstance(item, Mapping) for item in items):
+        raise DocumentInterpretationError(f"Document overview {field} is invalid.")
+    return tuple(items)  # type: ignore[arg-type]
 
 
 def _trace_record(
     *,
     config: DocumentVLMConfig,
-    rendered_pages: Sequence[RenderedDocumentPage],
-    response: DocumentVisionResponse | None,
-    output: Mapping[str, object] | None,
+    overview: DocumentOverviewRecord | None,
     delta: Mapping[str, object] | None,
     failure: str | None,
     diagnostic: Mapping[str, object] | None,
 ) -> dict[str, object]:
+    record = None if overview is None else overview.record
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "producer": _PRODUCER,
         "provider": config.provider,
         "configured_model": config.model,
-        "response_id": None if response is None else response.response_id,
-        "response_model": None if response is None else response.model,
+        "response_id": None if record is None else record["response_id"],
+        "response_model": None if record is None else record["response_model"],
         "store": False,
-        "document_context_ref": DOCUMENT_CONTEXT_REF,
-        "pages": [
-            {
-                "page": page.page_number,
-                "image_ref": str(page.image_path),
-                "image_sha256": page.image_sha256,
-            }
-            for page in rendered_pages
-        ],
-        "structured_output": output,
-        "compiled_delta": delta,
+        "document_context_ref": None if record is None else record["context_ref"],
+        "source_sha256": None if record is None else record["source_sha256"],
+        "cache_status": None if overview is None else overview.cache_status,
+        "cache_record_ref": None if overview is None else str(overview.record_path),
+        "pages": [] if record is None else record["pages"],
+        "structured_output": None
+        if record is None
+        else {
+            "summary": record["summary"],
+            "observations": record["observations"],
+            "uncertainty": record["uncertainty"],
+        },
+        "compiled_delta": None if delta is None else dict(delta),
         "failure": failure,
         "diagnostic": None if diagnostic is None else dict(diagnostic),
     }
@@ -736,7 +1289,6 @@ def _openai_error_diagnostic(error: OpenAIError) -> dict[str, object]:
     message = body_message if isinstance(body_message, str) else error_message
     if not isinstance(message, str) or not message:
         message = "OpenAI request failed without a message."
-
     return {
         "stage": "Phase 4.1 document_evidence OpenAI Responses call",
         "exception": type(error).__name__,
@@ -767,12 +1319,16 @@ def _diagnostic_summary(diagnostic: Mapping[str, object]) -> str:
     )
 
 
-def _write_trace_exclusive(path: Path, record: Mapping[str, object]) -> None:
+def _write_json_exclusive(path: Path, record: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(record, stream, indent=2, ensure_ascii=False, allow_nan=False)
+        stream.write("\n")
+
+
+def _write_trace_exclusive(path: Path, record: Mapping[str, object]) -> None:
     try:
-        with path.open("x", encoding="utf-8") as stream:
-            json.dump(record, stream, indent=2, ensure_ascii=False, allow_nan=False)
-            stream.write("\n")
+        _write_json_exclusive(path, record)
     except FileExistsError as exc:
         raise DocumentInterpretationError(
             f"Document interpretation trace already exists: {path.name}"
@@ -784,29 +1340,23 @@ def _validate_operation_number(value: object) -> None:
         raise DocumentInterpretationError("operation_number must be a positive integer.")
 
 
-def _require_exact_keys(
-    value: Mapping[str, object],
-    expected: set[str],
-    field_name: str,
-) -> None:
-    if set(value) != expected:
-        raise DocumentInterpretationError(f"{field_name} fields are invalid.")
-
-
-def _entity_key(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or not _ENTITY_KEY.fullmatch(value):
-        raise DocumentInterpretationError(f"{field_name} is invalid.")
-    return value
-
-
 def _evidence_pages(value: object, page_count: int, field_name: str) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
         raise DocumentInterpretationError(f"{field_name} requires evidence_pages.")
     pages: list[int] = []
     for page in value:
-        if isinstance(page, bool) or not isinstance(page, int) or page < 1 or page > page_count:
-            raise DocumentInterpretationError(f"{field_name} evidence page is invalid.")
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or page > page_count
+        ):
+            raise DocumentInterpretationError(
+                f"{field_name} evidence page is invalid."
+            )
         pages.append(page)
     if len(pages) != len(set(pages)):
-        raise DocumentInterpretationError(f"{field_name} evidence pages must be unique.")
+        raise DocumentInterpretationError(
+            f"{field_name} evidence pages must be unique."
+        )
     return tuple(pages)

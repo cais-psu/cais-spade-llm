@@ -55,6 +55,15 @@ def approved_cad_refs() -> tuple[str, ...]:
     )
 
 
+def approved_document_refs() -> tuple[str, ...]:
+    """Return every exact approved document ref in inventory order."""
+    return tuple(
+        context_ref
+        for context_ref, source in _load_sources().items()
+        if source["evidence_type"] == "document"
+    )
+
+
 def approved_document_path(context_ref: str) -> Path:
     """Return the local path for one exact approved document ref.
 
@@ -81,6 +90,27 @@ def approved_document_path(context_ref: str) -> Path:
     if not source_path.is_file():
         raise OSError("Approved document source is missing.")
     return source_path
+
+
+def approved_document_metadata(context_ref: str) -> dict[str, object]:
+    """Validate one approved PDF without extracting its page text."""
+    source_path = approved_document_path(context_ref)
+    source = _load_sources()[context_ref]
+    try:
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        with pdfplumber.open(source_path) as document:
+            page_count = len(document.pages)
+    except (OSError, PDFSyntaxError, TypeError, ValueError) as exc:
+        raise OSError("Approved document source could not be validated.") from exc
+    if page_count != source["page_count"]:
+        raise ValueError(
+            "Approved document page count does not match its inventory."
+        )
+    return {
+        "context_ref": context_ref,
+        "source_sha256": source_sha256,
+        "page_count": page_count,
+    }
 
 
 def approved_cad_path(context_ref: str) -> Path:
@@ -265,6 +295,7 @@ def _serve_document(
     source_path: Path,
 ) -> dict[str, object]:
     try:
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
         with pdfplumber.open(source_path) as document:
             if len(document.pages) != source["page_count"]:
                 return _rejection(
@@ -289,6 +320,7 @@ def _serve_document(
             "evidence_type": "document",
             "provenance": _provenance(source),
             "document_evidence": {
+                "source_sha256": source_sha256,
                 "page_count": len(pages),
                 "pages": pages,
             },

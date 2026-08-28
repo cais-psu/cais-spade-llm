@@ -7,9 +7,11 @@ here. They are tools used by the Spec2Primitives workflow, not agents.
   approved CAD summaries include a source hash for later integrity checks.
 - `observation_context.py` validates and stores fixture, replay, and live RGB-D
   bundles.
-- `document_evidence/` renders approved PDF pages, invokes an injected OpenAI
-  vision boundary, compiles a generic evidence-backed delta, and runs a separate
-  diagnostic ABox.
+- `document_evidence/` validates any registered approved PDF, prepares a
+  content-addressed ontology-neutral overview cache, returns assertion-free
+  overview refs, and invokes targeted page vision only for an explicit evidence
+  gap. Its diagnostic keeps overview, targeted evidence, PA proposal, and
+  accepted assertions separate.
 - `rgb_d_cad_grounding/` captures one fresh live Gazebo RGB-D bundle only when
   invoked, implements Phase 4.2A preprocessing, and implements Phase 4.2B1
   minimal camera-local segmentation, Phase 4.2B2A size-only association, and
@@ -24,10 +26,11 @@ here. They are tools used by the Spec2Primitives workflow, not agents.
   candidate or rotation ambiguity. Frame conversion consumes only a separate
   caller-approved calibration record.
 
-The live observation provider creates no background subscription and supplies
-no observation to PA or RA. The automatic observation entrypoint performs
+The live observation provider creates no background subscription. Its preview
+reports availability only; it supplies an observation to PA only after PA
+selects an eligible action. The automatic observation entrypoint performs
 capture → validation → preprocessing → segmentation only when called. The UI
 polls compact status and exposes no processing controls. CAD preprocessing stays
-separate; the association entrypoint is invoked only by a future caller that
-already selected one CAD record. Cross-camera transformation, PA integration,
-and assessment still require later separately authorized work.
+separate; association is invoked only after one exact approved CAD record and
+the required typed records exist. Cross-camera transformation and RA-owned
+assessment still require later separately authorized work.
