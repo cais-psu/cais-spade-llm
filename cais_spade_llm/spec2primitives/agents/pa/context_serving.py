@@ -404,12 +404,18 @@ def _read_recorded_pa_request(
     expected_output_keys = (
         {"needed_context"}
         if turn_number == 1
-        else {"needed_context", "context understanding complete"}
+        else {
+            "needed_context",
+            "context understanding complete",
+            "grounding_status",
+        }
     )
     if not isinstance(pa_output, dict) or set(pa_output) != expected_output_keys:
         return None, None, f"turn_{turn_number:04d} PA_output is invalid."
     if turn_number > 1 and pa_output["context understanding complete"] is not False:
         return None, None, f"turn_{turn_number:04d} does not contain a context request."
+    if turn_number > 1 and pa_output["grounding_status"] != "waiting_for_evidence":
+        return None, None, f"turn_{turn_number:04d} grounding_status is invalid."
     needed_context = pa_output["needed_context"]
     if not isinstance(needed_context, dict):
         return None, None, f"turn_{turn_number:04d} needed_context is invalid."

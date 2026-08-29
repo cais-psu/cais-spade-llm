@@ -735,7 +735,12 @@ def _validate_candidate_summary(
     if (
         not np.allclose(minimum, points_m.min(axis=0), rtol=0.0, atol=1e-6)
         or not np.allclose(maximum, points_m.max(axis=0), rtol=0.0, atol=1e-6)
-        or not np.allclose(centroid, points_m.mean(axis=0), rtol=0.0, atol=1e-6)
+        or not np.allclose(
+            centroid,
+            points_m.mean(axis=0, dtype=np.float64),
+            rtol=0.0,
+            atol=1e-6,
+        )
         or not np.array_equal(pixel_minimum, expected_pixel_minimum)
         or not np.array_equal(pixel_maximum, expected_pixel_maximum)
         or not math.isclose(depth_minimum, float(points_m[:, 2].min()), abs_tol=1e-6)

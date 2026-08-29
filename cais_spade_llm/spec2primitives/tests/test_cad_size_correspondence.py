@@ -95,6 +95,56 @@ def test_measurement_noise_within_fifteen_percent_is_accepted(tmp_path: Path) ->
     assert max(result.selected_candidate["dimension_errors"]) <= 0.15
 
 
+def test_large_assembly_candidate_summary_is_order_stable(tmp_path: Path) -> None:
+    segmentation_path, cad_path = _prepare_inputs(
+        tmp_path,
+        _size_bundle((0.042,), large_assembly_candidate=True),
+    )
+    segmentation_record = _read_json(segmentation_path)
+    assembly_camera = next(
+        camera for camera in segmentation_record["cameras"] if camera["camera_id"] == "cam_assembly"
+    )
+
+    result = associate_segmented_candidate_by_size(
+        interaction_root=tmp_path,
+        segmentation_record_path=segmentation_path,
+        cad_record_path=cad_path,
+    )
+
+    assert assembly_camera["candidates"][0]["point_count"] > 200_000
+    assert result.CAD_correspondence == "accepted"
+
+
+def test_tampered_candidate_centroid_rejects_without_partial_output(
+    tmp_path: Path,
+) -> None:
+    segmentation_path, cad_path = _prepare_inputs(
+        tmp_path,
+        _size_bundle((0.042,)),
+    )
+    segmentation_record = _read_json(segmentation_path)
+    centroid = segmentation_record["cameras"][0]["candidates"][0]["centroid_m"]
+    centroid[0] += 0.001
+    segmentation_path.write_text(
+        json.dumps(segmentation_record, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CADSizeAssociationError,
+        match="candidate summary is inconsistent",
+    ):
+        associate_segmented_candidate_by_size(
+            interaction_root=tmp_path,
+            segmentation_record_path=segmentation_path,
+            cad_record_path=cad_path,
+        )
+
+    grounding_root = tmp_path / "products/grounding/rgb_d_cad_grounding"
+    assert not (grounding_root / "correspondence_0001").exists()
+    assert list(grounding_root.glob(".correspondence-*")) == []
+
+
 def test_duplicate_size_candidates_are_ambiguous(tmp_path: Path) -> None:
     segmentation_path, cad_path = _prepare_inputs(
         tmp_path,
@@ -294,6 +344,7 @@ def _size_bundle(
     *,
     clipped_candidate: bool = False,
     zero_candidates: bool = False,
+    large_assembly_candidate: bool = False,
 ) -> ObservationBundle:
     observations = []
     for camera_index, camera_id in enumerate(CAMERA_IDS):
@@ -302,8 +353,17 @@ def _size_bundle(
         if zero_candidates:
             depth_m[100:105, 100:105] = np.float32(1.0)
         elif camera_id == "cam_assembly":
-            depth_m[100:300, 200:440] = np.float32(0.9)
-            rgb[100:300, 200:440] = np.asarray([80, 90, 100], dtype=np.uint8)
+            if large_assembly_candidate:
+                assembly_rows = slice(20, 460)
+                assembly_columns = slice(40, 600)
+            else:
+                assembly_rows = slice(100, 300)
+                assembly_columns = slice(200, 440)
+            depth_m[assembly_rows, assembly_columns] = np.float32(0.9)
+            rgb[assembly_rows, assembly_columns] = np.asarray(
+                [80, 90, 100],
+                dtype=np.uint8,
+            )
         else:
             depth_m[80:320, 20:600] = np.float32(1.0)
             rgb[80:320, 20:600] = np.asarray([20, 30, 40], dtype=np.uint8)

@@ -310,10 +310,14 @@ async def continue_pa_context_interaction(  # noqa: C901, PLR0912, PLR0915
             "ontology_context_invalid",
             "The interaction ABox product_requirement does not match Phase 3.1.",
         )
-    if not resuming_clarification and abox.delta_count != 0:
+    if (
+        not resuming_clarification
+        and abox.delta_count != 0
+        and not _is_initial_provisional_grounding(interaction_root, abox)
+    ):
         return _failure(
             "invalid_interaction",
-            "Phase 3.3 must start before any interaction delta exists.",
+            "Phase 3.3 may start only from the initialized or exact provisional ABox.",
         )
 
     settings = {
@@ -849,12 +853,12 @@ def _assessment_validation_error(  # noqa: C901
     )
     if descriptor_error is not None:
         return descriptor_error
+    if context_ref is None and _semantic_need_key(semantic_need) in live_request_history:
+        return "A repeated live observation requires a new semantic need."
     if grounding_status is not None:
         return None
     if isinstance(context_ref, str) and context_ref in served_static_refs:
         return f"Phase 4.3 context_ref was already served: {context_ref}."
-    if context_ref is None and _semantic_need_key(semantic_need) in live_request_history:
-        return "A repeated live observation requires a new semantic need."
     return None
 
 
@@ -1159,12 +1163,14 @@ def _pending_clarification(
     output = decision["Phase_4_3_output"]
     if not isinstance(turn, int) or isinstance(turn, bool):
         return None, "The latest clarification turn is invalid."
-    if not isinstance(output, dict) or set(output) != _ASSESSMENT_KEYS:
+    if not isinstance(output, dict) or set(output) != _SESSION_ASSESSMENT_KEYS:
         return None, "The latest Phase 4.3 output is invalid."
     semantic_need = output["unresolved_semantic_need"]
     needed_context = output["needed_context"]
     if output["context understanding complete"] is not False:
         return None, "A completed interaction cannot enter Phase 3.4."
+    if output["grounding_status"] != "waiting_for_user":
+        return None, "The latest decision is not waiting for user clarification."
     if (
         not isinstance(semantic_need, dict)
         or semantic_need.get("kind") != "user_intent"
@@ -1195,6 +1201,7 @@ def _pending_clarification(
         != {
             "needed_context": needed_context,
             "context understanding complete": False,
+            "grounding_status": "waiting_for_user",
         }
     ):
         return None, "The clarification ProductAgent turn is invalid."
@@ -1426,6 +1433,70 @@ def _existing_phase_3_3_record(interaction_root: Path) -> str | None:
             if path.name not in {"turn_0001.json", "retrieval_0001.json"}:
                 return str(path.relative_to(interaction_root))
     return None
+
+
+def _is_initial_provisional_grounding(
+    interaction_root: Path,
+    abox: ABoxSnapshot,
+) -> bool:
+    """Accept only the exact Phase 4.4 semantic delta before first retrieval."""
+    if abox.delta_count != 1:
+        return False
+    session = load_latest_grounding_session(interaction_root)
+    if (
+        session is None
+        or session.status != "waiting_for_evidence"
+        or session.next_action.action not in {"retrieve", "inspect"}
+    ):
+        return False
+    proposals = sorted(
+        (
+            Path(interaction_root)
+            / "products/grounding/ontology_grounding"
+        ).glob("proposal_*.json")
+    )
+    if len(proposals) != 1:
+        return False
+    proposal = _read_json(proposals[0])
+    if not isinstance(proposal, Mapping) or proposal.get("status") != "accepted":
+        return False
+    delta = _read_json(
+        Path(interaction_root) / "products/grounding/ontology/delta_0001.json"
+    )
+    if (
+        not isinstance(delta, Mapping)
+        or delta.get("producer") != "ontology_grounding"
+        or delta.get("typed_context_refs") != []
+        or delta.get("unresolved_evidence_needs") != []
+    ):
+        return False
+    assertions = delta.get("assertions")
+    if not isinstance(assertions, list) or len(assertions) != 3:
+        return False
+    feature_iri = f"{abox.namespace}medium_gear_feature"
+    specification_iri = abox.specification_iri
+    normalized = {
+        (
+            item.get("subject"),
+            str(item.get("predicate", "")).rsplit("#", 1)[-1],
+            (
+                item.get("object", {}).get("value")
+                if isinstance(item.get("object"), Mapping)
+                else None
+            ),
+        )
+        for item in assertions
+        if isinstance(item, Mapping)
+    }
+    return normalized == {
+        (feature_iri, "type", "http://PAonto.com#feature"),
+        (specification_iri, "defines", feature_iri),
+        (
+            "https://cais-spade-llm.local/process/assembly",
+            "realizes",
+            feature_iri,
+        ),
+    }
 
 
 def _write_interpretation_record(  # noqa: PLR0913

@@ -23,9 +23,8 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingDecision,
+    GroundingNextAction,
     GroundingSession,
-    InformationNeed,
     persist_grounding_session,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
@@ -131,12 +130,12 @@ def test_connected_ui_runs_through_phase_3_3_completion(
     assert f"product_requirement: {json.dumps(product_requirement)}" in view[
         "Ontology Grounding"
     ]
-    assert "delta_count: 1" in view["Ontology Grounding"]
+    assert "delta_count: 4" in view["Ontology Grounding"]
     assert str(PAOntologyConfig) not in view["Ontology Grounding"]
     assert "http://PAonto.com#specification" in view["Ontology Grounding"]
     assert "assertion_provenance" in view["Ontology Grounding"]
     assert "producer: \"interaction_initializer\"" in view["Ontology Grounding"]
-    assert view["Typed Runtime Context"] == "[]"
+    assert "RobotFramePoseRecord" in view["Typed Runtime Context"]
     assert view["ProductAgent Request Failure"] == ""
     assert "Ready for Phase 5" in view["PA Grounding Completion"]
     assert '"max_pa_turns": 12' in view["interaction_record"]
@@ -212,6 +211,7 @@ def test_connected_ui_stops_for_clarification_without_user_reply(
     assert interaction["phase_3_3"] == {
         "needed_context": request_clarification(clarification_question)["needed_context"],
         "context understanding complete": False,
+        "grounding_status": "waiting_for_user",
     }
     view = spec2primitives_ui._pa_ui_view(interaction)
     assert view["activity_state"] == "clarification needed"
@@ -225,38 +225,17 @@ def test_ui_displays_persisted_incomplete_grounding_session(
     tmp_path: Path,
 ) -> None:
     interaction_root = tmp_path / "interaction_incomplete"
-    need = InformationNeed.from_mapping(
-        {
-            "need_id": "need_0001",
-            "question": "Which receiving location is intended?",
-            "required": True,
-            "sources": ["requirement_0001"],
-            "accepted_record_types": ["DocumentEvidenceRecord"],
-            "status": "exhausted",
-            "answer_statement_ids": [],
-        }
-    )
-    decision = GroundingDecision.from_mapping(
-        {
-            "decision_type": "incomplete",
-            "need_id": None,
-            "provider_id": None,
-            "source_ref": None,
-            "source_revision": None,
-            "query": None,
-            "reason": "No eligible untried evidence action remains.",
-        }
-    )
     session = GroundingSession.create(
         revision=1,
         requirement_text="assemble medium gear",
-        statements=[],
-        information_needs=[need],
         attempted_actions=[],
-        evidence_refs=["requirement_0001"],
-        decision=decision,
+        next_action=GroundingNextAction.from_mapping(
+            {
+                "action": "incomplete",
+                "reason": "No eligible untried evidence action remains.",
+            }
+        ),
         status="incomplete",
-        information_status="not_enough",
     )
     persist_grounding_session(interaction_root, session)
     interaction = {
@@ -276,7 +255,7 @@ def test_ui_displays_persisted_incomplete_grounding_session(
     view = spec2primitives_ui._pa_ui_view(interaction)
 
     assert view["activity_state"] == "grounding incomplete"
-    assert "Which receiving location is intended?" in view["activity_message"]
+    assert "No eligible untried evidence action remains." in view["activity_message"]
     assert "Grounding is incomplete" in view["needed_context"]
     assert '"status": "incomplete"' in view["Grounding Decisions"]
 

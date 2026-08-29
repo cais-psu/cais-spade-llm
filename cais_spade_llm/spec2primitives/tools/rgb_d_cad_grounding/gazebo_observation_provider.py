@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
+import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import Callable
@@ -22,11 +27,19 @@ from cais_spade_llm.spec2primitives.tools.observation_context import (
     CameraCalibration,
     CameraObservation,
     ObservationBundle,
+    ObservationContextError,
     write_observation_bundle,
 )
 
 _BUFFER_SIZE = 10
 _SPIN_INTERVAL_SEC = 0.05
+_ROS_SETUP_PATH = Path("/opt/ros/humble/setup.bash")
+_ROS_WORKSPACE_SETUP_PATH = Path.home() / "ros2_ws/install/setup.bash"
+_ROS_WORKER_ACTIVE_ENV = "CAIS_SPEC2PRIMITIVES_ROS_CAPTURE_WORKER"
+_ROS_WORKER_GRACE_SEC = 30.0
+_ROS_WORKER_MODULE = (
+    "cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation_worker"
+)
 
 
 class GazeboObservationProviderError(RuntimeError):
@@ -74,12 +87,8 @@ class _ImagePair:
 
 @dataclass
 class _CameraSamples:
-    rgb: deque[_ImageSample] = field(
-        default_factory=lambda: deque(maxlen=_BUFFER_SIZE)
-    )
-    depth: deque[_ImageSample] = field(
-        default_factory=lambda: deque(maxlen=_BUFFER_SIZE)
-    )
+    rgb: deque[_ImageSample] = field(default_factory=lambda: deque(maxlen=_BUFFER_SIZE))
+    depth: deque[_ImageSample] = field(default_factory=lambda: deque(maxlen=_BUFFER_SIZE))
     calibration: CameraCalibration | None = None
 
 
@@ -134,10 +143,7 @@ class _ObservationCollector:
 
     def build_bundle(self, observation_ref: str) -> ObservationBundle | None:
         """Return the newest complete synchronized bundle, when available."""
-        candidates = {
-            camera_id: self._image_pairs(camera_id)
-            for camera_id in CAMERA_IDS
-        }
+        candidates = {camera_id: self._image_pairs(camera_id) for camera_id in CAMERA_IDS}
         if any(not candidates[camera_id] for camera_id in CAMERA_IDS):
             return None
 
@@ -175,9 +181,7 @@ class _ObservationCollector:
             calibration = samples.calibration
             if calibration is None:
                 return True
-            if samples.rgb and not any(
-                sample.frame == calibration.frame for sample in samples.rgb
-            ):
+            if samples.rgb and not any(sample.frame == calibration.frame for sample in samples.rgb):
                 return True
         return False
 
@@ -197,9 +201,7 @@ class _ObservationCollector:
             raise _invalid_message("Image message fields are incomplete.") from exc
 
         if encoding != expected_encoding:
-            raise _invalid_message(
-                f"Image encoding must be {expected_encoding}."
-            )
+            raise _invalid_message(f"Image encoding must be {expected_encoding}.")
         if width != IMAGE_WIDTH or height != IMAGE_HEIGHT:
             raise _invalid_message("Image dimensions must be 640 x 480.")
         if not isinstance(frame, str) or not frame:
@@ -217,11 +219,7 @@ class _ObservationCollector:
             raise _invalid_message("Image payload could not be decoded.") from exc
 
         array = np.asarray(converted)
-        expected_shape = (
-            (IMAGE_HEIGHT, IMAGE_WIDTH)
-            if is_depth
-            else (IMAGE_HEIGHT, IMAGE_WIDTH, 3)
-        )
+        expected_shape = (IMAGE_HEIGHT, IMAGE_WIDTH) if is_depth else (IMAGE_HEIGHT, IMAGE_WIDTH, 3)
         expected_dtype = np.float32 if is_depth else np.uint8
         if array.shape != expected_shape or array.dtype != expected_dtype:
             raise _invalid_message("Image payload shape or dtype is invalid.")
@@ -249,9 +247,7 @@ class _ObservationCollector:
                 pairs[(rgb.timestamp_ns, depth.timestamp_ns)] = _ImagePair(rgb, depth)
 
         for depth in samples.depth:
-            matching_rgb = [
-                rgb for rgb in samples.rgb if rgb.frame == calibration.frame
-            ]
+            matching_rgb = [rgb for rgb in samples.rgb if rgb.frame == calibration.frame]
             if not matching_rgb:
                 continue
             rgb = min(
@@ -336,7 +332,32 @@ def capture_gazebo_observation(
     ):
         raise ValueError("timeout_sec must be a finite positive number.")
 
-    dependencies = _load_ros_dependencies()
+    try:
+        dependencies = _load_ros_dependencies()
+    except GazeboObservationProviderError as exc:
+        if exc.reason != "ros_unavailable" or os.environ.get(_ROS_WORKER_ACTIVE_ENV) == "1":
+            raise
+        return _capture_gazebo_observation_in_ros_worker(
+            observations_root,
+            observation_ref,
+            timeout_sec=float(timeout_sec),
+        )
+
+    return _capture_gazebo_observation_with_dependencies(
+        observations_root,
+        observation_ref,
+        timeout_sec=float(timeout_sec),
+        dependencies=dependencies,
+    )
+
+
+def _capture_gazebo_observation_with_dependencies(
+    observations_root: Path,
+    observation_ref: str,
+    *,
+    timeout_sec: float,
+    dependencies: _RosDependencies,
+) -> Path:
     context = dependencies.context_type()
     node = None
     executor = None
@@ -365,9 +386,7 @@ def capture_gazebo_observation(
             remaining_sec = deadline - time.monotonic()
             if remaining_sec <= 0:
                 break
-            executor.spin_once(
-                timeout_sec=min(_SPIN_INTERVAL_SEC, remaining_sec)
-            )
+            executor.spin_once(timeout_sec=min(_SPIN_INTERVAL_SEC, remaining_sec))
             if collector.error is not None:
                 raise collector.error
             bundle = collector.build_bundle(observation_ref)
@@ -403,6 +422,114 @@ def capture_gazebo_observation(
         if initialized:
             with suppress(RuntimeError):
                 context.try_shutdown()
+
+
+def _capture_gazebo_observation_in_ros_worker(
+    observations_root: Path,
+    observation_ref: str,
+    *,
+    timeout_sec: float,
+) -> Path:
+    if not _ROS_SETUP_PATH.is_file():
+        raise GazeboObservationProviderError(
+            "ros_unavailable",
+            "The ROS2 Humble environment setup is unavailable.",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="spec2primitives_ros_capture_") as result_root_text:
+        result_root = Path(result_root_text)
+        result_path = result_root / "result.json"
+        ros_log_path = result_root / "ros_logs"
+        ros_log_path.mkdir()
+        command = _ros_worker_command(
+            observations_root,
+            observation_ref,
+            timeout_sec=timeout_sec,
+            result_path=result_path,
+        )
+        worker_environment = os.environ.copy()
+        worker_environment[_ROS_WORKER_ACTIVE_ENV] = "1"
+        worker_environment["ROS_LOG_DIR"] = str(ros_log_path)
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec + _ROS_WORKER_GRACE_SEC,
+                env=worker_environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GazeboObservationProviderError(
+                "ros_unavailable",
+                "The ROS2 image capture worker could not complete.",
+            ) from exc
+
+        if completed.returncode != 0:
+            raise GazeboObservationProviderError(
+                "ros_unavailable",
+                "The ROS2 image capture worker failed to start.",
+            )
+        result = _read_ros_worker_result(result_path)
+
+    if result.get("status") == "captured":
+        captured_path = result.get("captured_path")
+        if isinstance(captured_path, str) and captured_path:
+            return Path(captured_path)
+    elif result.get("status") == "failed":
+        message = result.get("message")
+        if result.get("error_type") == "provider":
+            reason = result.get("reason")
+            if isinstance(reason, str) and isinstance(message, str):
+                raise GazeboObservationProviderError(reason, message)
+        elif result.get("error_type") == "observation_context" and isinstance(message, str):
+            raise ObservationContextError(message)
+
+    raise GazeboObservationProviderError(
+        "ros_unavailable",
+        "The ROS2 image capture worker returned an invalid result.",
+    )
+
+
+def _ros_worker_command(
+    observations_root: Path,
+    observation_ref: str,
+    *,
+    timeout_sec: float,
+    result_path: Path,
+) -> list[str]:
+    source_and_run = 'set -e; source "$1"; if [ -f "$2" ]; then source "$2"; fi; exec "${@:3}"'
+    return [
+        "/bin/bash",
+        "-c",
+        source_and_run,
+        "spec2primitives_ros_capture",
+        str(_ROS_SETUP_PATH),
+        str(_ROS_WORKSPACE_SETUP_PATH),
+        sys.executable,
+        "-m",
+        _ROS_WORKER_MODULE,
+        str(observations_root),
+        observation_ref,
+        str(timeout_sec),
+        str(result_path),
+    ]
+
+
+def _read_ros_worker_result(result_path: Path) -> dict[str, object]:
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise GazeboObservationProviderError(
+            "ros_unavailable",
+            "The ROS2 image capture worker did not return a result.",
+        ) from exc
+    if not isinstance(result, dict):
+        raise GazeboObservationProviderError(
+            "ros_unavailable",
+            "The ROS2 image capture worker returned an invalid result.",
+        )
+    return result
 
 
 def _load_ros_dependencies() -> _RosDependencies:

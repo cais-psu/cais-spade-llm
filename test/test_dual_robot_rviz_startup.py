@@ -5,6 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 from cais_spade_llm.ui.bridge import SystemBridge
+from cais_spade_llm.ui.ros2_processes import ROS2_ENV
+
+
+def test_ros2_environment_removes_opencv_qt_paths_and_preserves_wsl_display() -> None:
+    unset_command = ROS2_ENV.split(";", maxsplit=1)[0]
+
+    assert "QT_QPA_PLATFORM_PLUGIN_PATH" in unset_command
+    assert "QT_QPA_FONTDIR" in unset_command
+    assert "DISPLAY" not in unset_command.split()
+    assert "WAYLAND_DISPLAY" not in unset_command.split()
 
 
 class _LaunchRecorder:

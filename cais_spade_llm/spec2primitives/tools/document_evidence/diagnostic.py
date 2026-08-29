@@ -13,9 +13,8 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingDecision,
+    GroundingNextAction,
     GroundingSession,
-    GroundingStatement,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
@@ -26,7 +25,11 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.config import DocumentVLMConfig
-from cais_spade_llm.spec2primitives.ontology import OntologyContextError
+from cais_spade_llm.spec2primitives.ontology import (
+    OntologyContextError,
+    load_predefined_resource_registry,
+    load_predefined_workcell,
+)
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
     DocumentInterpretationError,
     DocumentVisionRuntime,
@@ -125,42 +128,23 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             "observations": overview["observations"],
             "uncertainty": overview["uncertainty"],
         }
-        statements = tuple(
-            GroundingStatement.from_mapping(
-                {
-                    "statement_id": f"diagnostic_statement_{index:04d}",
-                    "text": str(item["description"]),
-                    "status": "directly_stated",
-                    "sources": list(item["evidence_refs"]),
-                    "reason": "The generic document overview states this observation.",
-                }
-            )
-            for index, item in enumerate(overview["observations"], start=1)
-            if isinstance(item, Mapping)
-        )
-        decision = GroundingDecision.from_mapping(
+        evidence_refs = sorted(
             {
-                "decision_type": "ready_for_ontology",
-                "need_id": None,
-                "provider_id": None,
-                "source_ref": None,
-                "source_revision": None,
-                "query": None,
-                "reason": "The diagnostic maps the cited overview statements.",
+                ref
+                for item in overview["observations"]
+                if isinstance(item, Mapping)
+                for ref in item.get("evidence_refs", [])
+                if isinstance(ref, str)
             }
         )
         session = GroundingSession.create(
             revision=1,
             requirement_text=product_requirement,
-            statements=statements,
-            information_needs=(),
             attempted_actions=(),
-            evidence_refs=sorted(
-                {source for item in statements for source in item.sources}
+            next_action=GroundingNextAction.from_mapping(
+                {"action": "propose_grounding"}
             ),
-            decision=decision,
             status="ready_for_ontology",
-            information_status="enough",
         )
         session_stage = session.to_record()
         proposal = await propose_and_validate_ontology_grounding(
@@ -168,7 +152,19 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             interaction_root=root,
             tbox=tbox,
             abox=overview_merge.abox,
+            workcell=load_predefined_workcell(
+                tbox,
+                load_predefined_resource_registry(tbox),
+            ),
             session=session,
+            evidence_previews=[
+                {
+                    "evidence_type": "accepted_typed_record",
+                    "source_ref": overview_ref,
+                    "content": dict(overview),
+                }
+            ],
+            authorized_evidence_refs=set(evidence_refs),
         )
         proposal_record = _read_mapping(
             proposal.proposal_path,
@@ -177,7 +173,7 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
         proposal_stage = {
             "status": proposal_record["status"],
             "record_ref": str(proposal.proposal_path.relative_to(root)),
-            "source_statement_ids": [item.statement_id for item in statements],
+            "source_evidence_refs": evidence_refs,
             "PA_output": proposal_record["output"],
             "compiled_delta": proposal_record["compiled_delta"],
         }

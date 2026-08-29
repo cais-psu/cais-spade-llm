@@ -18,12 +18,14 @@ specification.
 ## Proposed-versus-implemented status
 
 The dynamic PA-to-RA composition workflow in this document is the proposed
-ICRA architecture. The PA context adapter through Phase 3.5, supporting
-perception records, resumable user-intent clarification, tamper-checked PA
-grounding completion, and production pre-RA Phase 4.3 grounding runtime exist. Phase 5
-planning, the RA adapter, resource-catalog loading, `PrimitiveProgramDraft`
-authoring, batched context exchange, validation, and execution are not
-implemented; no Phase 5--9 runtime behavior is claimed.
+ICRA architecture. The PA context adapter through Phase 3.5 and production
+pre-RA grounding through Phase 4.4 exist. Phase 4.4 adds provisional
+`propose_grounding`, a predefined Workcell with broad `capableOf assembly`
+assertions, ontology-derived world-pose retrieval, manifest-backed coarse reach,
+and a host-authored `processExecution` assignment. Phase 5 selected-RA handoff,
+typed primitive-catalog loading, `PrimitiveProgramDraft` authoring, batched
+context exchange, validation, and execution are not implemented; no
+Phase 5--9 runtime behavior is claimed.
 
 ## Abstraction level
 
@@ -34,7 +36,7 @@ product specification
         ↓
 grounded assembly requirements
         ↓
-ontology-backed robot-independent task transition
+ontology-backed robot-independent task and selected-resource assignment
         outside the executable coverage of the
         predefined composite-function library
         ↓
@@ -85,9 +87,12 @@ segmentation, compact mask records, strict one-CAD principal-size comparison,
 standalone generalized CAD-to-RGB-D pose estimation, standard camera-to-robot
 frame conversion, atomic records, and operator status reporting are necessary
 plumbing for later experiments, not the claimed research contribution. The pose
-and frame-conversion callables exist as standalone tools, but they are not
-connected to production PA/RA orchestration. A size-only correspondence still
-does not establish general identity, task completion, planning, or execution.
+and frame-conversion callables are connected to the production PA grounding
+orchestration through typed prerequisites and an injectable approved-calibration
+boundary; no default approved calibration is configured in the current UI
+composition. They are not connected to RA composition or execution. A size-only
+correspondence still does not establish general identity, task completion,
+planning, or execution.
 
 Spec2Primitives studies a composite-function coverage gap. It begins after an RA
 has been selected and no valid selection, ordering, and parameterization of its
@@ -112,6 +117,41 @@ novelty must be evaluated at the capability-to-executable-primitive-program
 boundary. Merely moving function selection from PA to RA, or renaming an
 existing function as a primitive, would not constitute the claimed advance.
 
+## Relationship to A Closed-Loop Multi-Agent Framework for Robust Multi-Robot Manipulation
+
+[A Closed-Loop Multi-Agent Framework for Robust Multi-Robot
+Manipulation](https://arxiv.org/html/2607.06990v1) is direct prior art for
+LLM/VLM-driven runtime composition from predefined action primitives. Its
+Planning Agent produces a dependency-aware task DAG, parallelism decisions, and
+robot allocation; it does not generate the low-level action sequence. Its
+Manipulation Agent decomposes each assigned subtask and generates executable
+Python calls by dynamically selecting, ordering, repeating, and parameterizing
+a fixed library of 11 primitives: `Grasp`, `Place`, `Lift Up`, `Put Down`,
+`Reset Home`, `Move XY`, `Move Pose`, `Rotate`, `Align`, `Open`, and `Close`.
+
+That framework grounds arguments through adaptive perception and manipulation
+tools, including object/part detection and segmentation, 3D keypoints,
+AnyGrasp-based grasp candidates with kinematic filtering, and rotation
+estimation. Short-term history helps avoid redundant operations, while an
+experience pool can reuse a successful primitive sequence for an exact repeated
+task signature. Post-operation visual verification triggers local corrective
+steps; workspace or object-availability failures return to the Planning Agent
+for global replanning or reallocation.
+
+Therefore, neither runtime selection from a fixed primitive library nor an
+LLM-generated action sequence is by itself a Spec2Primitives novelty claim. The
+narrower proposed distinction must be evaluated as a combination of
+ontology-driven product-to-resource grounding, explicit resource authority, a
+complete selected-RA-owned and hash-pinned typed catalog, structured
+`primitive_steps` with provenance, and deterministic non-synthesizing validation
+that returns findings to the RA author. Both systems rely on predefined
+primitive implementations; Spec2Primitives must demonstrate the claimed
+contract, authority, provenance, and validation differences empirically rather
+than treating different primitive names or granularity as novelty. The cited
+paper also identifies its fixed primitive library as a limitation, so
+Spec2Primitives must not claim primitive discovery unless such a mechanism is
+separately implemented and evaluated.
+
 ## Neuro-symbolic research position
 
 Spec2Primitives is explicitly a neuro-symbolic framework. The lightweight PPR
@@ -125,14 +165,16 @@ standalone ICRA contribution.
 The symbolic side consists of more than OWL alone:
 
 - the immutable TBox defines the shared `product`, `feature`, `process`,
-  `resource`, and `capability` vocabulary;
+  `resource`, `capability`, and `processExecution` vocabulary;
 - the evidence-backed interaction ABox records the grounded requested process,
   product facts, features, and required outcome for the current interaction;
+- the predefined Workcell ABox records `xarm6` and `ur5e` as broadly
+  `capableOf assembly`, while a host-authored execution individual records the
+  one resource selected using typed pose evidence and manifest reach;
 - the RA-authoritative, versioned primitive catalog snapshot enumerates the
-  complete callable composition surface for that resource and interaction, and
-  the selected-RA resource-catalog ABox mirrors every exact primitive-process
-  offering in that pinned snapshot without encoding a task-specific
-  decomposition;
+  complete callable composition surface for that resource and interaction in a
+  typed record without primitive-level `capableOf` assertions or a
+  task-specific decomposition;
 - typed context records retain poses, observations, calibration, tolerances,
   resource state, and other values when the loaded TBox has no predicate for
   them; and
@@ -141,23 +183,21 @@ The symbolic side consists of more than OWL alone:
   outcome surface.
 
 Within the proposed method, the ontology is the canonical semantic interface for
-entity identity, evidence links, PA–RA meaning, and primitive-input type and
-entity bindings. Typed context and status records represent unresolved needs,
-conflicts, numeric values, and freshness. `GroundingProducerDescriptor` records
-map an already identified semantic or typed output need to authorized tools
-without hard-coding a PDF, CAD, RGB-D, calibration, or existing-record sequence.
-The TBox defines valid meaning; it does not decide which producer or source to
-use.
+entity identity, the requested process, broad Workcell capabilities, and the
+selected process execution. Typed context and status records represent evidence
+links, primitive-input bindings, unresolved needs, conflicts, numeric values,
+and freshness. `GroundingProducerDescriptor` records map an already identified
+semantic or typed output need to authorized tools without hard-coding a PDF,
+CAD, RGB-D, calibration, or existing-record sequence. The TBox defines valid
+meaning; it does not decide which producer or source to use.
 
 The composite-function coverage gap and composition surface are established
-from complete RA-authoritative, versioned catalog snapshots whose cardinality
-is determined at runtime. Each attempt pins the snapshot fingerprint and exact
-symbols. Completeness is not inferred from the absence of `capableOf`
-assertions under OWL open-world semantics. The resource-catalog ABox mirrors the
-authoritative primitive snapshot for semantic projection; it does not itself
-prove catalog completeness. A bounded SHACL check may test only an explicitly
-declared shape or already identified required input at a local validation
-boundary. It does not establish global context completeness.
+from complete RA-authoritative, versioned typed catalog snapshots whose
+cardinality is determined at runtime. Each attempt pins the snapshot fingerprint
+and exact symbols. Completeness is not inferred from OWL open-world absence or
+from the broad `capableOf assembly` assertions. A bounded SHACL check may test
+only an explicitly declared shape or already identified required input at a
+local validation boundary. It does not establish global context completeness.
 
 The neural side makes the decisions that are intentionally absent from the
 formal model:
@@ -174,8 +214,8 @@ formal model:
 The resulting closed loop is:
 
 ```text
-TBox + interaction ABox + selected-RA resource-catalog ABox
-        + typed context refs + partial primitive contracts
+TBox + interaction ABox + predefined Workcell ABox + host assignment
+        + selected-RA typed catalog + typed context refs + partial contracts
         ↓ bounded grounded projection
         ├─ PA neural decision → controlled evidence producer
         │       → validated evidence delta → ABox/typed-context update → reassess
@@ -317,8 +357,9 @@ Primitives or trajectory-level motion primitives.
 
 > Dynamic primitive composition is the selected RA's runtime, agentic proposal
 > and revision of ordered, parameterized calls from its current resource-owned
-> primitive-only catalog, conditioned on a versioned task-transition contract
-> outside predefined composite-function coverage and fresh resource context. The
+> primitive-only catalog, conditioned on a versioned ontology-grounded task and
+> exact selected-resource assignment outside predefined composite-function
+> coverage, plus fresh resource context. The
 > resulting task-specific composite program did not exist as a callable function
 > before the interaction.
 
@@ -333,7 +374,7 @@ The word `dynamic` requires more than replacing parameters in a fixed template.
 The evaluation must demonstrate that:
 
 1. No valid selection, ordering, and parameterization of the available
-   predefined composite functions satisfies the task-transition contract, and
+   predefined composite functions satisfies the ontology-grounded task, and
    no product-specific assembly program or completed `primitive_steps` is
    available or supplied.
 2. RA receives the assigned nominal task or selected recovery event, its
@@ -374,8 +415,8 @@ composite function is insufficient.
 Before an experiment, audit the selected RA's complete public callable interface
 and establish that no valid selection, ordering, or parameterization of its
 available predefined composite functions can satisfy the grounded
-task-transition contract, while the necessary primitive interfaces remain
-available. Perform this coverage audit from the task contract and public
+task and required outcome, while the necessary primitive interfaces remain
+available. Perform this coverage audit from the grounded task and public
 function semantics without reading an expected primitive program. Merely hiding
 an applicable composite function from the prompt is not an admissible case.
 
@@ -392,7 +433,7 @@ appear identical.
 The operational method is:
 
 ```text
-versioned task-transition contract + task/resource ontology projection
+versioned post-assignment task/resource ontology projection
         + fresh selected-RA state
         + complete pinned semantic primitive interfaces and partial contracts
         + grounded context refs
@@ -446,42 +487,80 @@ coverage. If an intermediate requirement appears in no contract, invariant,
 primitive evaluator, physical check, or outcome check, the system cannot claim
 to have detected or validated its omission.
 
-The paper therefore does not claim that LLMs are universally necessary for
-primitive composition or that classical planning cannot solve these tasks. In
-the evaluated partial-model setting, no complete product-specific executable
-program or complete finite symbolic search domain is supplied, so the RA LLM is
-the framework's agentic candidate generator and validators cannot replace it as
-the composer. A sufficiently complete symbolic domain could use another search
-or planning method. The empirical claim must come from equal-input comparisons:
-a symbolic composer limited to machine-readable fields on the same partial
-interfaces, bounded black-box sequence search with the same validator access
-and query budget, LLM-only generation, and the full agentic generation plus
-validation-revision method. Domain coverage, abstention, and applicability must
-be reported separately. A classical planner supplied with a separately
-engineered complete PDDL domain is an extra-information oracle rather than an
-equal-input baseline. Its success would measure the value and cost of additional
-modeling; symbolic failure outside represented coverage cannot support a
-universal LLM-necessity claim.
+## Why an RA LLM composer is justified relative to symbolic planning
+
+Spec2Primitives does not claim that LLMs are universally necessary for
+primitive composition or that classical planning cannot solve these tasks.
+When a complete symbolic domain captures the goal, initial state, primitive
+preconditions and effects, and relevant state transitions, a classical planner
+is the stronger default because it provides systematic search over that model.
+The RA LLM is justified at a different boundary: the selected resource exposes
+a complete current catalog of semantic executable interfaces with typed inputs,
+outputs, truthful limits, partial local conditions and effects, and evaluator
+endpoints, but it does not expose a complete causal action model connecting the
+new product outcome to every required intermediate state.
+
+Continuous feasibility alone is not this justification. IK, collision,
+visibility, motion, and other high-dimensional constraints can be integrated
+with symbolic task planning through black-box procedures, as demonstrated by
+[PDDLStream](https://arxiv.org/abs/1802.08705). The missing artifact studied
+here is the task-level causal decomposition itself. In the evaluated
+partial-model setting, no complete product-specific executable program or
+complete finite symbolic search domain is supplied. The RA LLM therefore acts
+as the agentic candidate composer over natural-language operation semantics and
+typed bindings, while deterministic symbolic and physical validators retain
+authority to reject the unchanged candidate. They do not become a hidden
+composer. This generator-verifier division is consistent with the broader
+[LLM-Modulo](https://arxiv.org/abs/2402.01817) position, while
+[PlanBench](https://arxiv.org/abs/2206.10498) provides further reason not to
+treat an unaided LLM as a sound replacement for model-based planning.
+
+The empirical comparison must distinguish equal-input methods from a
+separately engineered complete symbolic model:
+
+1. An interface-only symbolic composer uses only the machine-readable fields on
+   the same partial primitive interfaces and abstains outside represented
+   coverage.
+2. Bounded black-box sequence search receives the same validator access and
+   candidate-query budget as RA but no semantic LLM composer.
+3. LLM-only generation receives the same task, catalog, and state but no
+   validation-driven revision.
+4. The full RA method authors complete candidates and structurally revises them
+   from categorized, non-synthesizing validator findings.
+5. A classical planner receives a separately engineered complete PDDL domain as
+   an extra-information oracle rather than an equal-input baseline.
+
+The study must report domain coverage, abstention, validator-accepted and
+executed outcomes, and the engineering effort required to construct and
+maintain the complete symbolic model, including its predicates, action schemas,
+external procedures, and task-to-goal mappings. The oracle's success measures
+the value of that additional modeling, while its authoring and update effort
+measures the cost. Symbolic failure outside represented coverage cannot support
+a universal LLM-necessity claim. The defensible claim is conditional: RA-owned
+agentic composition can extend execution-program coverage when the runtime
+surface is semantically informative and deterministically checkable but
+causally incomplete.
 
 ## One composition core, two task origins
 
 ```text
-nominal: grounded PA task-transition contract ─┐
-                                                ├─→ same RA-owned agentic composition core
-recovery: validated resource-assigned event ───┘
+nominal: grounded PA task + resource assignment ─┐
+                                                  ├─→ same RA-owned agentic composition core
+recovery: validated resource-assigned event ─────┘
                                                            ↓
                                       candidate → validators → RA revision
 ```
 
 The nominal case is the primary end-to-end study: PA begins with a raw assembly
-requirement whose grounded transition is outside the selected RA's predefined
+requirement whose grounded task is outside the selected RA's predefined
 composite-function library coverage and has no stored nominal task program,
-grounds the requirement, and supplies the robot-independent task-transition
-contract. The recovery case is a transfer study: the existing recovery framework
+grounds the requirement, and supplies the robot-independent post-assignment
+ontology projection and evidence records. The recovery case is a transfer study:
+the existing recovery framework
 begins with the fault and runtime state and supplies an already selected,
 validated, and resource-assigned recovery event with the same
 composite-function coverage gap. A read-only adapter maps that event into the
-same composition contract without providing its primitive decomposition.
+same composition input without providing its primitive decomposition.
 
 After this boundary, each origin uses its exact selected RA through the same
 composer implementation, runtime-catalog interface, batched context-request
@@ -497,19 +576,23 @@ recovery-planning contribution.
 The proposed cross-authority workflow is:
 
 ```text
-Exact requirement + authorized zero-cost previews + provider capabilities
+Exact requirement + authoritative ontology + available sources
         ↓
-PA creates or updates a source-cited GroundingSession
+PA understands the requirement and ontology together
         ↓
-PA selects eligible evidence actions for open InformationNeeds
+PA retrieves only currently relevant approved evidence
         ↓
-directly supported statements enter late ontology mapping and validation
+PA proposes a provisional semantic ABox and cited context summary
         ↓
-validated ontology projection + typed grounding contract
+task/Workcell join identifies broad assembly candidates
         ↓
-future robot-independent TaskTransitionContract
+host derives ResourceAssignmentNeed(RobotFramePoseRecord, world)
         ↓
-inherited allocator selects resource_jid
+typed prerequisites dynamically obtain only missing evidence
+        ↓
+manifest-backed coarse reach selects one exact resource_jid
+        ↓
+host commits processExecution and the post-assignment projection
         ↓
 selected RA loads fresh state + complete current primitive catalog
         ↓
@@ -531,8 +614,9 @@ non-mutating validation and RA revision
 accepted candidate or fail-closed result
 ```
 
-- PA records source-cited statements, open `InformationNeed` records, attempted
-  provider/source revisions, and one next decision in a `GroundingSession`.
+- PA returns only one `retrieve`, `inspect`, `propose_grounding`, `ask_user`, or
+  `incomplete` action. The host records attempted provider/source revisions and
+  resolved metadata in `GroundingSession`.
   `ProductContextView` exposes only the final validated ABox and versioned
   `TypedContextBinding` records; it is not PA's reasoning state.
 - The official TBox defines valid meaning and types; it does not choose a
@@ -540,10 +624,15 @@ accepted candidate or fail-closed result
   missing semantic or typed output to an authorized producer and evidence
   policy. PA may dynamically select approved document, exact approved CAD,
   RGB-D, calibration, or an existing record.
-- PA resolves only currently blocking task-level needs before accepting a
-  `TaskTransitionContract`. Here, `context understanding complete` means only
-  that Phase 5's current robot-independent consumer inputs are satisfied. It is
-  not a claim that later primitive bindings or execution context are complete.
+- `propose_grounding` may commit the semantic task ABox without completing the
+  interaction. The host recomputes, but never persists, a
+  `ResourceAssignmentNeed` only when the semantic join has candidates and no
+  accepted same-interaction world-frame pose. A valid current pose prevents a
+  repeated observation; no candidates means no camera request.
+- PA resolves only currently blocking task-level and assignment evidence before
+  the host records `processExecution`. `context understanding complete` means
+  only that Phase 5's current post-assignment consumer inputs are satisfied. It
+  is not a claim that later primitive bindings or execution context are complete.
 - RA retrieves the complete selected-RA-authoritative primitive-only catalog
   and fresh local state after allocation. Catalog cardinality is runtime-
   determined; the attempt pins its version, fingerprint, and exact symbols.
@@ -561,23 +650,24 @@ accepted candidate or fail-closed result
 - Binders and validators may detect and categorize missing inputs, but may never
   create, reorder, bind, or repair primitive steps. Only RA authors structural
   drafts, fully bound candidates, and revisions.
-- PA readiness means that a robot-independent task contract is grounded. RA
+- PA readiness means that the grounded task, resource evidence, and host-authored
+  assignment are accepted. There is no separate task-transition contract. RA
   readiness means that one unchanged candidate is fully bound and accepted by
   every applicable declared-contract and resource-owned check. Neither agent
   certifies the next authority's work or the post-execution outcome.
 
-Internal PA retrieval remains deliberately semantic and auditable:
+Internal PA retrieval remains deliberately simple and auditable:
 
 ```text
-InformationNeed identifies one unanswered question and accepted record types
+PA sees requirement + ontology + available sources + retrieved records
         ↓
-controller derives eligible actions from provider capability descriptors
+PA returns one minimal semantic action
         ↓
-PA selects one exact eligible provider and source revision
+controller resolves the provider and exact source revision
         ↓
 one approved source is retrieved and processed for that producer operation
         ↓
-validate, fingerprint, persist, and update GroundingSession
+validate, fingerprint, persist the typed record, and re-evaluate
 ```
 
 One-source-at-a-time is an internal producer audit boundary, not the PA-to-RA
@@ -593,38 +683,47 @@ determines the primitive sequence.
 The ICRA paper uses a lightweight PPR ontology as the architecturally required
 formal backbone joining the product specification to primitive composition. It
 is the authoritative semantic interface through which PA and RA share grounded
-product facts, requested-process and outcome meaning, resource capability
-assertions, provenance, and primitive bindings. Removing it would change the
-proposed method rather than merely remove an optional implementation aid.
+product facts, requested-process meaning, broad Workcell capabilities, and the
+host-selected process execution. Hash-pinned typed records carry provenance,
+numeric state, detailed resource configuration, and primitive bindings that the
+loaded vocabulary does not express. Removing the ontology would change the
+proposed semantic join and assignment boundary rather than merely remove an
+optional implementation aid.
 Ontology schema design nevertheless remains outside the standalone ICRA novelty;
 the contribution is the integrated neuro-symbolic grounding,
 composition-validation, and revision structure.
 
-The planned PA-internal grounding detail, nested inside the canonical workflow
-above, is:
+The implemented Phase 4.4 PA-internal grounding detail, nested inside the
+canonical workflow above, is:
 
 ```text
 persist exact product_requirement
         ↓
 load fixed TBox and initialize the interaction ABox
         ↓
-collect inference-free previews and create a source-cited GroundingSession
+collect inference-free previews and create a host-owned GroundingSession
         ↓
-derive eligible actions for one open InformationNeed
+PA selects one minimal action from the current sources and records
         ↓
 serve one relevant approved source and run the controlled producer
         ↓
 validate and persist its typed evidence record
         ↓
-update GroundingSession only when accepted evidence changes its fingerprint
+append the host-owned action attempt to GroundingSession
         ↓
-map directly supported statements through the deterministic ontology validator
+create one evidence-cited provisional ontology/context proposal and validate it
         ↓
-persist validated ontology projection + typed grounding contract
+join accepted task facts to the predefined Workcell ABox
         ↓
-future robot-independent TaskTransitionContract
+derive missing RobotFramePoseRecord(world) from assignment requirements
         ↓
-handoff to inherited allocation
+resolve only the declared typed provider prerequisites
+        ↓
+evaluate manifest-backed coarse reach in fixed registry order
+        ↓
+host commits processExecution and the post-assignment completion
+        ↓
+future selected-RA handoff
 ```
 
 One source per cycle is an auditable retrieval operation, not a limit of one
@@ -636,17 +735,17 @@ approved corpus by default.
 For ICRA:
 
 - The immutable TBox supplies the exact `product`, `feature`, `process`,
-  `resource`, and `capability` types before the first PA source decision.
+  `resource`, `capability`, and `processExecution` vocabulary before the first
+  PA source decision.
 - One independent interaction ABox contains the exact requirement as an
   explicitly unresolved request. Apart from that request, it accumulates only
   evidence-backed factual assertions, each paired with persisted provenance.
 - The TBox contains generic classes, properties, and restrictions. PA-created
   requested-process, product, feature, and grounded-outcome individuals belong
-  to the interaction ABox. The selected resource and every concrete
-  primitive-process interface offering in its pinned catalog belong to a
-  separate, versioned
-  resource-catalog ABox snapshot supplied by that RA. The resource links to
-  those offerings through `capableOf`; PA does not author resource facts.
+  to the interaction ABox. The predefined Workcell ABox owns broad
+  `xarm6 capableOf assembly` and `ur5e capableOf assembly` facts. Only the host
+  may add the selected `processExecution`; PA does not author resource or
+  execution facts.
 - Document and scene tools are controlled evidence producers. They return
   typed evidence records; only the late ontology mapper may propose assertions,
   and the orchestrator validates every proposed ABox change.
@@ -654,53 +753,56 @@ For ICRA:
   to an authorized producer and evidence policy. Neither the TBox nor PA uses a
   product-specific slot template, fixed source count, fixed modality set, or
   fixed retrieval order.
-- PA-to-RA task records and resource-owned primitive contracts reference the
-  same ontology types for auditable primitive-input binding.
+- PA-to-RA task records and resource-owned primitive contracts reference stable
+  ontology identities for auditable primitive-input binding. The complete
+  primitive catalog remains a typed, versioned, selected-RA-owned record and no
+  primitive receives `ppr:capableOf`.
 - The requested assembly process may be linked through `realizes` to its
   grounded product outcome. It must not be linked to primitive offerings
-  through `requires`, `precedes`, direct high-level `capableOf`, or another
-  task-to-primitive mapping. The missing mapping is intentional: the RA LLM
+  through `requires`, `precedes`, `capableOf`, or another task-to-primitive
+  mapping. The missing mapping is intentional: the RA LLM
   reasons from the requested process and outcome to a candidate sequence over
   the available lower-level interfaces.
 - A Spec2Primitives-owned read-only projection adapter dynamically joins only
-  the relevant PA ABox assertions, every offering in the selected-resource
-  catalog snapshot,
-  authorized typed context refs, and their source fingerprints for the current
-  RA turn. The RA LLM consumes this bounded semantic projection plus the
-  executable interface cards and fresh state. The shared RobotAgent does not
-  depend on RDFLib, mutate either ABox, or receive an ontology-inferred
-  decomposition.
+  the relevant PA and Workcell ABox assertions, the host assignment, every
+  offering in the selected-resource typed catalog snapshot, authorized typed
+  context refs, and their source fingerprints for the current RA turn. The RA
+  LLM consumes this bounded projection plus the executable interface cards and
+  fresh state. The shared RobotAgent does not depend on RDFLib, mutate an ABox,
+  or receive an ontology-inferred decomposition.
 
-The minimal relationship is illustrated below using three example primitive
-symbols. A real runtime projection includes the complete selected-RA catalog,
-whatever its cardinality, and preserves every symbol exactly:
+The minimal Phase 4.4 relationship is illustrated below. It records broad
+Workcell eligibility and the evidence-backed selected execution, but contains
+no primitive offering or sequence. Phase 5 supplies the selected RA's complete
+typed catalog separately and preserves every symbol exactly:
 
 ```turtle
 # PA interaction ABox
-ctx:gear_assembly_1 a ppr:process ;
-    ppr:realizes ctx:medium_gear_installed .
+ctx:specification_1 ppr:defines ctx:medium_gear_feature .
+ctx:medium_gear_feature a ppr:feature .
+process:assembly ppr:realizes ctx:medium_gear_feature .
 
-ctx:medium_gear_1 a ppr:product .
-ctx:medium_gear_installed a ppr:feature .
+# Predefined Workcell ABox
+process:assembly a ppr:process .
+resource:xarm6 a ppr:resource ;
+    ppr:capableOf process:assembly .
+resource:ur5e a ppr:resource ;
+    ppr:capableOf process:assembly .
 
-# Selected-RA resource-catalog ABox
-ctx:ur5e a ppr:resource ;
-    ppr:capableOf ctx:primitive_move_arm_xyz,
-                  ctx:primitive_grasp_part,
-                  ctx:primitive_release_part .
-
-ctx:primitive_move_arm_xyz a ppr:process .
-ctx:primitive_grasp_part a ppr:process .
-ctx:primitive_release_part a ppr:process .
+# Host-authored selection after typed evidence and reach validation
+ctx:specification_1
+    ppr:hasProcessExecution ctx:process_execution_0001 .
+ctx:process_execution_0001 a ppr:processExecution ;
+    ppr:runsProcess process:assembly ;
+    ppr:runsOnResource resource:xarm6 .
 ```
 
-The graph intentionally contains no assertion such as
-`ctx:gear_assembly_1 ppr:requires ctx:primitive_grasp_part`, no primitive
-`ppr:precedes` relation, and no claim that a primitive by itself
-`ppr:realizes ctx:medium_gear_installed`. Consequently, TBox plus ABoxes do not
-entail a sequence. The RA LLM proposes the missing connection as a candidate
-runtime record, and deterministic validators return acceptance, rejection, or
-`unmodeled` without converting that hypothesis into evidence-backed PA facts.
+The graph intentionally contains no primitive `ppr:capableOf`, `ppr:requires`,
+or `ppr:precedes` assertion and no claim that a primitive by itself realizes the
+feature. Consequently, TBox plus ABoxes do not entail a sequence. The RA LLM
+proposes the missing connection as a candidate runtime record, and deterministic
+validators return acceptance, rejection, or `unmodeled` without converting that
+hypothesis into evidence-backed PA facts.
 
 The remaining ontology boundaries are:
 
@@ -723,10 +825,14 @@ The remaining ontology boundaries are:
   the represented contract surface. PA handoff readiness is therefore a
   product-level handoff decision, not a guarantee of composition or execution
   readiness.
-- The ontology does not discover, rank, or allocate resources. Nominal resource
-  assignment consumes the registered RA roster and exact `resource_jid` output
-  from the mechanism established in prior work; recovery input already carries
-  its assigned `resource_jid`. Both paths unicast to that RA.
+- The ontology join identifies only the predefined resources broadly capable of
+  `assembly`; it does not establish current reach. A deterministic host check
+  uses the accepted world-frame pose and pinned manifest limits, then selects
+  the first reachable candidate in registry order and records its exact
+  `resource_jid`. This is coarse supporting allocation, not an optimal allocator
+  or proof of IK, collision, grasp, or insertion feasibility. Recovery input
+  already carries its assigned `resource_jid`; both paths later unicast to the
+  selected RA.
 - In the recovery transfer case, grounded ontology identifiers may describe the
   desired product outcome, but the fault, custody, live resource state, selected
   recovery event, and feasibility records remain typed runtime context. The
@@ -739,7 +845,7 @@ validation-feedback revision loop. ICRA uses agent-requested,
 one-source-at-a-time exact-ref retrieval only inside auditable PA producer
 operations; cross-agent product/scene needs and PA responses are batched. RA
 additionally receives a bounded deterministic projection over the current task
-and selected-resource ABoxes. ICRA does not claim ontology design, SHACL
+and selected-resource assignment. ICRA does not claim ontology design, SHACL
 completeness, learned or graph-ranked retrieval, GraphRAG, ontology-based
 composition, or execution graph updates as contributions.
 
@@ -785,52 +891,51 @@ systems perform no composition. The narrower distinction is:
 
 ## Research gap
 
-The central gap is not manual-to-action generation. Manual2Skill already
-addresses that problem. The remaining gap is runtime construction and revision
-of the robot execution program under current embodiment and resource
-constraints.
+The central gap is not manual-to-action generation; Manual2Skill already
+addresses that problem. It is also not dynamic selection and ordering from a
+fixed primitive library or closed-loop correction; the cited multi-robot
+framework already generates Python primitive sequences and replans after visual
+verification. Spec2Primitives must not use either capability alone as its gap.
 
-It is also not the requirement-to-capability matching problem addressed in the
-prior RCIM work. That workflow can adaptively select and coordinate predefined
-composite functions, but it assumes that a suitable function implementation is
-already present in the resource capability library. The remaining problem is
-what the selected RA should do when no valid selection, ordering, and
-parameterization of that function library satisfies the grounded transition and
-only its execution primitives cover the required operations.
+The gap is also not the requirement-to-capability matching problem addressed in
+the prior RCIM work. That workflow can adaptively select and coordinate
+predefined composite functions. The narrower investigation begins when the
+product requirement and live evidence must be joined to a predefined Workcell,
+one resource must be selected without encoding the answer in the ontology, and
+the selected RA must compose outside its composite-function coverage from its
+own complete, pinned primitive interface catalog.
 
 A paper-ready gap statement is:
 
-> Manual2Skill and Manual2Skill++ demonstrate that instruction manuals and
-> known 3D part models can be transformed into assembly hierarchies, connection
-> constraints, and target poses. However, their execution stages rely on a fixed
-> motion-planning pipeline or predefined connector-specific strategies. They do
-> not investigate runtime synthesis of a robot-specific primitive program from
-> a resource-owned primitive catalog under fresh robot state and embodiment
-> constraints. They also do not evaluate a closed validation-revision loop in
-> which concrete state, IK, collision, and trajectory failures cause structural
-> changes to the generated `primitive_steps`. This leaves open how grounded
-> product intent and validated recovery transitions can be transformed by one
-> resource-owned composition mechanism into feasible and revisable primitive
-> programs under current embodiment constraints, without providing a
-> task-specific primitive recipe.
+> Prior work covers manual-derived assembly structure, target-pose generation,
+> predefined-function resource coordination, and VLM-generated action sequences
+> over a fixed primitive library with visual recovery. It does not establish the
+> specific end-to-end boundary studied here: evidence-backed ontology grounding
+> of an unforeseen product request, explicit broad-capability versus current-
+> reach resource assignment, a complete selected-resource-authoritative and
+> hash-pinned typed primitive catalog, and structured candidate revision driven
+> by deterministic validators that never synthesize repair steps. This leaves an
+> empirical question about whether that combined authority, provenance, and
+> validation boundary improves feasible robot-specific primitive programs over
+> equal-input alternatives without a task-specific primitive recipe.
 
 The corresponding research question is:
 
-> Given a grounded task transition, fresh selected-resource context, and the
+> Given an ontology-grounded task and selected-resource assignment, fresh
+> selected-resource context, and the
 > complete selected-RA-authoritative primitive-only catalog with partial local
 > executable contracts, where no valid selection, ordering, and
 > parameterization of the selected RA's predefined composite functions
-> satisfies that transition, can one RA-owned LLM composer author and revise
+> satisfies that task, can one RA-owned LLM composer author and revise
 > validator-accepted `primitive_steps` for nominal and recovery-origin tasks
 > without a task-specific recipe or complete PDDL domain/problem?
 
 The concise contribution statement is:
 
 > Spec2Primitives combines an architecturally required ontology-backed symbolic
-> context with RA-owned neural candidate synthesis and a non-synthesizing
-> symbolic and physical validation-feedback loop to produce a previously
-> unavailable task-specific composite program from resource-owned execution
-> primitives.
+> context and resource assignment with a selected-RA-authoritative, pinned
+> primitive catalog, RA-owned structured candidate synthesis, and a
+> non-synthesizing symbolic and physical validation-feedback loop.
 
 The architectural hypothesis is that the ontology-backed context provides the
 stable formal interface through which dynamically retrieved product knowledge,
@@ -841,15 +946,17 @@ validation-guided neural revision improves accepted and executed primitive
 programs over equal-input primitive composers. The recovery hypothesis is
 limited to transfer of the same composition mechanism.
 
-The ontology deliberately entails neither a one-to-one resource match for the
-grounded high-level process nor an ordered primitive realization. It supplies
-shared product, process, resource, outcome, and binding semantics; the semantic
-primitive interface cards supply callable behavior descriptions. The evaluated
-hypothesis is that the RA LLM can bridge this deliberately unmodeled
-task-to-primitive relation by proposing and revising candidates that the
-non-synthesizing validators can accept or reject. This motivates the agentic
-composer in the framework without claiming that no alternative composer could
-bridge the same relation.
+The predefined Workcell ABox deliberately provides only broad resource matches
+for the grounded high-level process. It does not entail which arm can reach the
+current product; Phase 4.4 makes that decision from typed pose evidence and
+pinned manifest limits, then the host records one selected execution. Neither
+the broad match nor the final assignment entails an ordered primitive
+realization. The semantic primitive interface cards supply callable behavior
+descriptions, and the evaluated hypothesis is that the RA LLM can bridge this
+deliberately unmodeled task-to-primitive relation by proposing and revising
+candidates that the non-synthesizing validators can accept or reject. This
+motivates the agentic composer without claiming that no alternative composer
+could bridge the same relation.
 
 The primary evidence comes from nominal end-to-end assembly without a
 predefined nominal program and outside the executable coverage of the predefined
@@ -899,32 +1006,32 @@ The paper must not claim that:
   RCIM work is a new contribution;
 - Spec2Primitives replaces or is universally better than the prior RCIM
   framework;
+- dynamic selection, ordering, and parameterization from a fixed action-
+  primitive library is unique to Spec2Primitives;
 - moving a predefined composite function's internal sequence into an LLM prompt
   constitutes dynamic primitive composition; or
 - the inherited recovery event-generation, selection, safety, or
   approval framework is an ICRA contribution.
 
-The task-transition contract is a grounded goal and binding record rather than
-a PDDL problem or primitive decomposition. Acceptance over the partial interface
-surface proves neither global symbolic plan soundness or completeness nor the
-realized assembly outcome. Required conditions outside all declared contracts,
-invariants, evaluator endpoints, and projected-outcome checks must be reported
-as `unmodeled` and fail closed.
+The post-assignment ontology projection and typed evidence provide a grounded
+goal and binding input rather than a PDDL problem or primitive decomposition;
+there is no separate task-transition contract. Acceptance over the partial
+interface surface proves neither global symbolic plan soundness or completeness
+nor the realized assembly outcome. Required conditions outside all declared
+contracts, invariants, evaluator endpoints, and projected-outcome checks must be
+reported as `unmodeled` and fail closed.
 
 PA and RA being separate agents is an architectural mechanism, not sufficient
-novelty by itself. The contribution depends on showing that the separation,
-provenance-backed task-transition contract, fresh resource grounding, RA-owned
-agentic candidate generation, and non-synthesizing validation-driven revision
-improve primitive-program feasibility. The equal-input comparison includes a
-symbolic composer over the represented interface fields, bounded black-box
-search with the same validator access and budget, LLM-only generation, and the
-full agentic generation plus validation-revision method under the same task
-contract, catalog, state, and execution boundary. Report domain coverage and
-abstention separately; treat a separately engineered complete PDDL domain as an
-extra-information oracle. Monolithic, no-retrieval, stale-context, and
-no-revision ablations may further isolate the nominal pipeline. Recovery results
-support composer transfer only and must not be used to re-claim the inherited
-recovery stack.
+novelty by itself. Dynamic action-primitive sequencing from a fixed library is
+also established prior art. The contribution depends on showing that the
+ontology-grounded and provenance-backed resource assignment, selected-RA catalog
+authority, RA-owned structured candidate generation, and non-synthesizing
+validation-driven revision improve primitive-program feasibility. The
+comparison and reporting requirements under `Why an RA LLM composer is
+justified relative to symbolic planning` define how that hypothesis is
+evaluated. Monolithic, no-retrieval, stale-context, and no-revision ablations may
+further isolate the nominal pipeline. Recovery results support composer transfer
+only and must not be used to re-claim the inherited recovery stack.
 
 A prior RCIM-style predefined-function planner should be reported separately as
 a boundary baseline. Its inability to match an admitted case explains why the

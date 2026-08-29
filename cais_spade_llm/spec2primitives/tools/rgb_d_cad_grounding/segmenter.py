@@ -476,7 +476,7 @@ def _segment_camera(
                     "minimum": _float_list(candidate_points.min(axis=0)),
                     "maximum": _float_list(candidate_points.max(axis=0)),
                 },
-                "centroid_m": _float_list(candidate_points.mean(axis=0)),
+                "centroid_m": _float_list(candidate_points.mean(axis=0, dtype=np.float64)),
                 "depth_range_m": {
                     "minimum": float(candidate_points[:, 2].min()),
                     "maximum": float(candidate_points[:, 2].max()),

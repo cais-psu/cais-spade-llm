@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -591,10 +591,15 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         )
     elif grounding_status in {"incomplete", "ontology_gap"}:
         activity_state, activity_color = "grounding incomplete", "amber"
-        missing = latest_session.get("missing_information", [])
+        next_action = latest_session.get("next_action")
+        reason = (
+            next_action.get("reason")
+            if isinstance(next_action, Mapping)
+            else None
+        )
         activity_message = (
             f"{turn_status} PA grounding stopped as {grounding_status}. "
-            f"Missing information: {_json_text(missing)}"
+            f"Reason: {reason or 'No safe grounding action remained.'}"
         )
     elif grounding_status in {"waiting_for_evidence", "waiting_for_user"}:
         activity_state, activity_color = "grounding waiting", "amber"

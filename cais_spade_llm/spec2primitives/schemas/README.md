@@ -22,10 +22,12 @@ Document handling uses separate strict contracts. `DocumentOverviewRecord`, owne
 `tools/document_evidence/interpreter.py`, contains only a summary,
 surface-form observations, uncertainty, and exact page refs.
 `DocumentEvidenceRecord` has the same ontology-neutral evidence shape for a
-deterministically selected targeted page subset. `OntologyGroundingProposal`,
-owned by `agents/pa/ontology_grounding.py`, is a late untrusted mapping from
-directly supported `GroundingStatement` IDs. It has numbered new individuals,
-not model-authored entity keys; `specification` is supplied separately and
+question-targeted inspection of every ordered page in the approved document.
+`OntologyGroundingProposal`,
+owned by `agents/pa/ontology_grounding.py`, is one late untrusted proposal built
+from the requirement, ontology, and retrieved typed records together. It has
+numbered new individuals, proposal-level evidence refs, one context summary,
+and missing information; `specification` is supplied separately and
 controller-owned. Only the existing triple-delta validator can accept compiled
 assertions.
 
@@ -79,23 +81,28 @@ compact status exposes only that state.
 Implemented pre-RA grounding contracts in
 `agents/pa/grounding_contracts.py` cover:
 
-- `GroundingStatement`, with plain text, `directly_stated` or `inferred`
-  status, source refs, and a reason;
-- `InformationNeed`, with a question, required flag, accepted record types,
-  source refs, state, and answer statement IDs;
-- `GroundingActionAttempt`, uniquely tracking
-  `need_id + provider_id + source_revision`;
-- `GroundingDecision` and versioned `GroundingSession` state;
+- `GroundingNextAction`, containing exactly one `retrieve`, `inspect`,
+  `propose_grounding`, `ask_user`, or `incomplete` action;
+- `GroundingActionAttempt`, host-owned and uniquely tracking the exact action,
+  provider, source, revision, question, result, and produced record refs;
+- `GroundingSession` schema version 2, containing only the requirement,
+  revision, prior attempts, resolved next-action metadata, status, and
+  fingerprint;
 - `GroundingProducerDescriptor`, describing one provider's accepted evidence,
   produced records, prerequisites, availability, and estimated cost;
 - `TypedContextBinding` and `ProductContextView`, joining compact ABox meaning
   with validated record refs, hashes, status, frames, validity, and source
   details;
-- `TypedGroundingContract`, preserving supported statements, missing
-  information, and current-TBox gaps; and
+- `TypedGroundingContract` schema version 2, preserving one final cited context
+  summary, missing information, ontology projection, and hash-pinned records;
 - append-only `PAClarification` records plus `PAContextGroundingCompletion`
   version 2, which pins the session, ontology, typed records, sources, and
   clarification hashes.
+
+The PA authoring response is only one minimal semantic action. The host derives
+provider metadata, revisions, attempt IDs, hashes, status, and persistence.
+Final semantic content is authored once with the ontology proposal rather than
+copied through intermediate reasoning records.
 
 Earlier PA draft, need, and completion formats are not loaded or migrated. New
 production interactions write only the generalized session and completion

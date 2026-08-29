@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,11 +12,9 @@ from rdflib import RDF
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingActionAttempt,
     GroundingContractError,
-    GroundingDecision,
+    GroundingNextAction,
     GroundingProducerDescriptor,
     GroundingSession,
-    GroundingStatement,
-    InformationNeed,
     build_product_context_view,
     load_latest_grounding_session,
     persist_grounding_session,
@@ -50,127 +49,85 @@ def _descriptor(
 def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
     tmp_path: Path,
 ) -> None:
-    statement = GroundingStatement.from_mapping(
-        {
-            "statement_id": "statement_0001",
-            "text": "The named item is Medium Gear.",
-            "status": "directly_stated",
-            "sources": ["requirement_0001"],
-            "reason": "The exact requirement names the item.",
-        }
-    )
-    need = InformationNeed.from_mapping(
-        {
-            "need_id": "need_0001",
-            "question": "What approved evidence describes the named item?",
-            "required": True,
-            "sources": ["requirement_0001"],
-            "accepted_record_types": ["DocumentOverviewRecord"],
-            "status": "open",
-            "answer_statement_ids": [],
-        }
-    )
     attempt = GroundingActionAttempt.from_mapping(
         {
             "attempt_id": "attempt_0001",
-            "need_id": "need_0001",
+            "action": "retrieve",
             "provider_id": "document_evidence",
             "source_ref": "manual.pdf",
             "source_revision": "a" * 64,
+            "question": None,
             "status": "no_change",
             "record_refs": [],
         }
     )
-    decision = GroundingDecision.from_mapping(
-        {
-            "decision_type": "request_evidence",
-            "need_id": "need_0001",
-            "provider_id": "document_evidence",
-            "source_ref": "manual.pdf",
-            "source_revision": "b" * 64,
-            "query": "Find information about the named item.",
-            "reason": "A changed approved source revision remains available.",
-        }
+    next_action = GroundingNextAction.from_mapping(
+        {"action": "inspect", "source_ref": "manual.pdf", "question": "How is it assembled?"}
     )
     session = GroundingSession.create(
         revision=2,
         requirement_text="assemble medium gear",
-        statements=[statement],
-        information_needs=[need],
         attempted_actions=[attempt],
-        evidence_refs=["requirement_0001"],
-        decision=decision,
+        next_action=next_action,
+        selected_provider_id="document_evidence",
+        selected_source_revision="b" * 64,
         status="waiting_for_evidence",
-        information_status="partial",
     )
 
     path = persist_grounding_session(tmp_path, session)
 
     assert path.name == "revision_0002.json"
     assert load_latest_grounding_session(tmp_path) == session
-    assert session.missing_information == (need.question,)
+    assert attempt.action_key == (
+        "retrieve",
+        "document_evidence",
+        "manual.pdf",
+        "a" * 64,
+        None,
+    )
+    assert session.next_action.question == "How is it assembled?"
+    assert not {
+        "statements",
+        "information_needs",
+        "information_need_transitions",
+        "answer_statement_ids",
+        "understanding",
+    }.intersection(session.to_record())
     assert len(session.fingerprint) == 64
 
 
 def test_grounding_session_rejects_answer_shaped_fields_and_repeated_actions() -> None:
-    statement = GroundingStatement.from_mapping(
-        {
-            "statement_id": "statement_0001",
-            "text": "The named item is Medium Gear.",
-            "status": "directly_stated",
-            "sources": ["requirement_0001"],
-            "reason": "The exact requirement names the item.",
-        }
-    )
-    value = statement.to_record()
-    value["assembly_context"] = {"destination": "expected answer"}
-    with pytest.raises(GroundingContractError, match="fields are invalid"):
-        GroundingStatement.from_mapping(value)
+    with pytest.raises(GroundingContractError, match="action is invalid"):
+        GroundingNextAction.from_mapping({"action": "fill_ontology"})
 
-    need = InformationNeed.from_mapping(
-        {
-            "need_id": "need_0001",
-            "question": "What evidence describes the named item?",
-            "required": True,
-            "sources": ["requirement_0001"],
-            "accepted_record_types": ["DocumentOverviewRecord"],
-            "status": "open",
-            "answer_statement_ids": [],
-        }
-    )
+    value = {"action": "propose_grounding", "understanding": "hidden state"}
+    with pytest.raises(GroundingContractError, match="fields are invalid"):
+        GroundingNextAction.from_mapping(value)
+
     attempt = GroundingActionAttempt.from_mapping(
         {
             "attempt_id": "attempt_0001",
-            "need_id": need.need_id,
+            "action": "retrieve",
             "provider_id": "document_evidence",
             "source_ref": "manual.pdf",
             "source_revision": "a" * 64,
+            "question": None,
             "status": "no_change",
             "record_refs": [],
         }
     )
-    repeated = GroundingDecision.from_mapping(
-        {
-            "decision_type": "request_evidence",
-            "need_id": need.need_id,
-            "provider_id": attempt.provider_id,
-            "source_ref": attempt.source_ref,
-            "source_revision": attempt.source_revision,
-            "query": "Try the same source again.",
-            "reason": "This action must be rejected.",
-        }
+    duplicate = GroundingActionAttempt.from_mapping(
+        {**attempt.to_record(), "attempt_id": "attempt_0002"}
     )
-    with pytest.raises(GroundingContractError, match="repeats an attempted"):
+    with pytest.raises(GroundingContractError, match="must not repeat an action"):
         GroundingSession.create(
             revision=2,
             requirement_text="assemble medium gear",
-            statements=[statement],
-            information_needs=[need],
-            attempted_actions=[attempt],
-            evidence_refs=["requirement_0001"],
-            decision=repeated,
+            attempted_actions=[attempt, duplicate],
+            next_action=GroundingNextAction.from_mapping(
+                {"action": "propose_grounding"}
+            ),
             status="waiting_for_evidence",
-            information_status="partial",
         )
 
 
@@ -269,6 +226,68 @@ def test_tampered_or_out_of_root_typed_context_is_rejected(tmp_path: Path) -> No
             attempted_evidence=(),
             assessed_at_ns=1,
         )
+
+
+def test_changed_embedded_source_reopens_world_pose_as_stale(
+    tmp_path: Path,
+) -> None:
+    tbox = ontology_config().load_tbox()
+    initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
+    record_root = tmp_path / "products/grounding/world_pose_provider"
+    record_root.mkdir(parents=True)
+    source_path = record_root / "source_0001.json"
+    source_path.write_text('{"capture":"accepted"}\n', encoding="utf-8")
+    source_ref = source_path.relative_to(tmp_path).as_posix()
+    pose_path = record_root / "world_pose_0001.json"
+    pose_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_type": "RobotFramePoseRecord",
+                "producer": "world_pose_provider",
+                "target_frame": "world",
+                "observation_timestamp_ns": 10,
+                "robot_frame_conversion": "accepted",
+                "source_evidence": {
+                    "ref": source_ref,
+                    "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                },
+                "robot_frame_pose": {
+                    "CAD_origin_translation_m": [0.0, -0.5, 1.1]
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    merge = validate_and_merge_triple_delta(
+        tmp_path,
+        tbox,
+        "world_pose_provider",
+        {
+            "assertions": [],
+            "typed_context_refs": [pose_path.relative_to(tmp_path).as_posix()],
+        },
+        authorized_evidence_refs=[],
+    )
+    accepted = build_product_context_view(
+        tmp_path,
+        merge.abox,
+        attempted_evidence=(),
+        assessed_at_ns=10,
+    )
+    assert accepted.typed_bindings[0].status == "accepted"
+
+    source_path.write_text('{"capture":"changed"}\n', encoding="utf-8")
+    reopened = build_product_context_view(
+        tmp_path,
+        merge.abox,
+        attempted_evidence=(),
+        assessed_at_ns=11,
+    )
+
+    assert reopened.typed_bindings[0].status == "stale"
+    assert reopened.typed_bindings[0].record_ref == accepted.typed_bindings[0].record_ref
 
 
 def test_document_typed_record_requires_explicit_record_type(tmp_path: Path) -> None:

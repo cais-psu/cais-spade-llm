@@ -99,7 +99,7 @@ def test_each_valid_first_decision_is_returned_and_recorded(
     assert context_ref_schema["enum"] == [None, *approved_context_refs()]
     assert response_format["schema"]["properties"]["needed_context"]["properties"][
         "clarification_question"
-    ] == {"type": "null"}
+    ] == {"type": ["string", "null"], "minLength": 1}
     assert "approved_context_ref_evidence_types" in call["prompt"]
     assert PPR_NAMESPACE in call["prompt"]
     assert 'status": "unresolved' in call["prompt"]
@@ -343,7 +343,7 @@ def test_pa_context_interaction_has_only_the_approved_dependencies() -> None:
     assert "primitive_steps" in source
 
 
-def test_first_turn_clarification_is_rejected_after_abox_initialization(
+def test_first_turn_clarification_is_allowed_after_abox_initialization(
     tmp_path: Path,
 ) -> None:
     product_agent = FakeProductAgent(
@@ -358,8 +358,13 @@ def test_first_turn_clarification_is_rejected_after_abox_initialization(
 
     result = _start(product_agent, tmp_path, "assemble Medium Gear")
 
-    assert result["failure"]["reason"] == "invalid_pa_response"
-    assert "must remain null" in result["failure"]["message"]
+    assert result == {
+        "needed_context": {
+            "context_ref": None,
+            "request_live_observation": False,
+            "clarification_question": "Which gear shaft?",
+        }
+    }
     assert (tmp_path / "products/grounding/ontology/interaction_abox.ttl").is_file()
 
 

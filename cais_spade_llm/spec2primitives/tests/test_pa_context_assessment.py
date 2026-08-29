@@ -166,10 +166,11 @@ def test_medium_gear_sequence_interprets_merges_and_completes(
     for number in range(1, 7):
         assert (tmp_path / f"interaction_record/interpretation_{number:04d}.json").is_file()
         assert (tmp_path / f"interaction_record/decision_{number:04d}.json").is_file()
+    for number in range(1, 10):
         assert (tmp_path / f"products/grounding/ontology/delta_{number:04d}.json").is_file()
     manifest = _read_json(tmp_path / "products/grounding/ontology/abox_manifest.json")
-    assert manifest["delta_count"] == 6
-    assert manifest["accepted_assertion_count"] == 6
+    assert manifest["delta_count"] == 9
+    assert manifest["accepted_assertion_count"] == 13
     final_decision = _read_json(tmp_path / "interaction_record/decision_0006.json")
     assert final_decision["Phase_4_3_output"] == complete_context()
     assert "served_context" not in json.dumps(final_decision["Phase_4_3_input"])
@@ -407,6 +408,7 @@ def test_clarification_requires_persisted_assessment(tmp_path: Path) -> None:
     assert result == {
         "needed_context": clarification["needed_context"],
         "context understanding complete": False,
+        "grounding_status": "waiting_for_user",
     }
     assert (
         _read_json(tmp_path / "interaction_record/decision_0001.json")["Phase_4_3_output"]

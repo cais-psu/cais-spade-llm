@@ -30,6 +30,7 @@ from cais_spade_llm.spec2primitives.tools.document_evidence import (
     OpenAIDocumentVisionRuntime,
     TargetedDocumentVisionRequest,
     document_overview_cache_status,
+    inspect_document_evidence,
     interpret_document_evidence,
     prepare_document_overview,
     run_document_interpretation_diagnostic,
@@ -84,7 +85,7 @@ class ControlledVisionRuntime:
         output = self.targeted_output or {
             "observations": [
                 {
-                    "description": "The requested item is visible on the selected page.",
+                    "description": "The requested item is visible in the document.",
                     "evidence_pages": [request.pages[0].page_number],
                 }
             ],
@@ -285,6 +286,73 @@ def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
     snapshot = _read_json(interpretation.overview_record_path)
     assert snapshot["record_type"] == "DocumentOverviewRecord"
     assert snapshot["producer"] == "document_evidence"
+
+
+def test_targeted_evidence_inspects_every_nist_page_in_order(
+    tmp_path: Path,
+) -> None:
+    config = load_model_runtime_config().document_vlm
+    served_context = _served_document(_TEST_DOCUMENT_REF)
+    vision = ControlledVisionRuntime()
+    overview = asyncio.run(
+        prepare_document_overview(
+            served_context=served_context,
+            cache_root=tmp_path / "source_cache",
+            config=config,
+            vision_runtime=vision,
+        )
+    )
+    snapshot = {
+        "schema_version": 1,
+        "record_type": "DocumentOverviewRecord",
+        "producer": "document_evidence",
+        "operation_number": 1,
+        "cache_status": overview.cache_status,
+        "cache_record_ref": str(overview.record_path),
+        "evidence_refs": [
+            _TEST_DOCUMENT_REF,
+            *(f"{_TEST_DOCUMENT_REF}#page={page}" for page in range(1, 7)),
+        ],
+        "overview": dict(overview.record),
+    }
+
+    evidence = asyncio.run(
+        inspect_document_evidence(
+            interaction_root=tmp_path / "interaction",
+            overview_snapshot=snapshot,
+            evidence_question="What does page 4 say about assembling Medium Gear?",
+            config=config,
+            vision_runtime=vision,
+        )
+    )
+
+    assert [page.page_number for page in vision.targeted_requests[0].pages] == list(
+        range(1, 7)
+    )
+    assert 4 in [page.page_number for page in vision.targeted_requests[0].pages]
+    assert evidence.record["selected_pages"] == list(range(1, 7))
+
+    invalid_vision = ControlledVisionRuntime(
+        targeted_output={
+            "observations": [
+                {
+                    "description": "This citation is outside the document.",
+                    "evidence_pages": [7],
+                }
+            ],
+            "uncertainty": [],
+        }
+    )
+    with pytest.raises(DocumentInterpretationError, match="evidence page is invalid"):
+        asyncio.run(
+            inspect_document_evidence(
+                interaction_root=tmp_path / "invalid_interaction",
+                overview_snapshot=snapshot,
+                evidence_question="What does the document say?",
+                config=config,
+                vision_runtime=invalid_vision,
+            )
+        )
 
 
 def test_invalid_overview_is_removed_atomically_and_abox_is_unchanged(
@@ -529,21 +597,43 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             proposal_schema = response_format["schema"]["properties"][
                 "ontology_grounding_proposal"
             ]["properties"]
-            statement_ids = proposal_schema["individuals"]["items"][
-                "properties"
-            ]["statement_ids"]["items"]["enum"]
+            evidence_refs = proposal_schema["evidence_refs"]["items"]["enum"]
             return {
                 "ontology_grounding_proposal": {
                     "individuals": [
                         {
                             "individual_index": 1,
                             "class_iri": "http://PAonto.com#feature",
-                            "statement_ids": [statement_ids[0]],
                         }
                     ],
-                    "relations": [],
+                    "relations": [
+                        {
+                            "subject_kind": "specification",
+                            "subject_individual_index": None,
+                            "subject_iri": None,
+                            "predicate_iri": "http://PAonto.com#defines",
+                            "object_kind": "new_individual",
+                            "object_individual_index": 1,
+                            "object_iri": None,
+                        },
+                        {
+                            "subject_kind": "existing_individual",
+                            "subject_individual_index": None,
+                            "subject_iri": (
+                                "https://cais-spade-llm.local/process/assembly"
+                            ),
+                            "predicate_iri": "http://PAonto.com#realizes",
+                            "object_kind": "new_individual",
+                            "object_individual_index": 1,
+                            "object_iri": None,
+                        },
+                    ],
                     "literal_facts": [],
-                    "unrepresented_statement_ids": statement_ids[1:],
+                    "context_summary": (
+                        "The document describes the requested assembly context."
+                    ),
+                    "evidence_refs": [evidence_refs[0]],
+                    "missing_information": [],
                 }
             }
 
@@ -564,7 +654,7 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
     assert result["targeted_evidence"] is None
     assert result["grounding_session"]["status"] == "ready_for_ontology"
     assert result["ontology_proposal"]["status"] == "accepted"
-    assert len(result["accepted_assertions"]) == 1
+    assert len(result["accepted_assertions"]) == 3
     assert result["failure"] is None
 
 

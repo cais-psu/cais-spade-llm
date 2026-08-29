@@ -16,10 +16,9 @@ from cais_spade_llm.spec2primitives.agents.pa import (
     submit_pa_clarification_reply,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingDecision,
     GroundingContractError,
+    GroundingNextAction,
     GroundingSession,
-    InformationNeed,
     load_latest_grounding_session,
     persist_grounding_session,
 )
@@ -54,7 +53,8 @@ def test_completion_record_pins_generalized_grounding_bundle(
     assert completion.product_requirement == "assemble Medium Gear"
     assert completion.completion_turn == 2
     assert completion.source_refs[0]["ref"] == "NIST_assembly_instructions.pdf"
-    assert completion.typed_context_refs == ()
+    assert len(completion.typed_context_refs) == 1
+    assert completion.typed_context_refs[0]["ref"].endswith("world_pose_0001.json")
     assert completion.clarification_refs == ()
     record = completion.to_record()
     assert record["status"] == "context understanding complete"
@@ -63,6 +63,19 @@ def test_completion_record_pins_generalized_grounding_bundle(
     assert record["typed_grounding_contract_ref"].endswith(
         "typed_grounding_contract_0001.json"
     )
+    assert record["resource_selection_ref"].endswith(
+        "selection_0001/resource_selection_record.json"
+    )
+    assert record["resource_assignment_delta_ref"].endswith("delta_0004.json")
+    contract = _read_json(tmp_path / str(record["typed_grounding_contract_ref"]))
+    assert contract["schema_version"] == 2
+    assert contract["context_summary"] == (
+        "The controlled interaction has enough cited product context."
+    )
+    assert contract["context_evidence_refs"] == [
+        "NIST_assembly_instructions.pdf"
+    ]
+    assert contract["missing_information"] == []
     serialized = json.dumps(record)
     for forbidden in (
         "TaskTransitionContract",
@@ -71,6 +84,44 @@ def test_completion_record_pins_generalized_grounding_bundle(
         "robot_frame",
     ):
         assert forbidden not in serialized
+
+
+def test_completion_loader_rejects_changed_resource_selection(tmp_path: Path) -> None:
+    grounding = ControlledGroundingRuntime(assessments=[complete_context()])
+    product_agent = _initialize(
+        tmp_path,
+        grounding,
+        product_requirement="assemble Medium Gear",
+    )
+    _continue(product_agent, tmp_path, grounding)
+    completion = load_pa_context_grounding_completion(tmp_path)
+    selection_path = tmp_path / completion.resource_selection_ref
+    selection = _read_json(selection_path)
+    selection["selected_resource_jid"] = "changed@localhost"
+    _write_json(selection_path, selection)
+
+    with pytest.raises(GroundingContractError, match="ResourceSelectionRecord hash"):
+        load_pa_context_grounding_completion(tmp_path)
+
+
+def test_completion_loader_rejects_changed_assignment_delta_authority(
+    tmp_path: Path,
+) -> None:
+    grounding = ControlledGroundingRuntime(assessments=[complete_context()])
+    product_agent = _initialize(
+        tmp_path,
+        grounding,
+        product_requirement="assemble Medium Gear",
+    )
+    _continue(product_agent, tmp_path, grounding)
+    completion = load_pa_context_grounding_completion(tmp_path)
+    delta_path = tmp_path / completion.resource_assignment_delta_ref
+    delta = _read_json(delta_path)
+    delta["producer"] = "ontology_grounding"
+    _write_json(delta_path, delta)
+
+    with pytest.raises(GroundingContractError, match="assignment delta hash"):
+        load_pa_context_grounding_completion(tmp_path)
 
 
 def test_completion_loader_rejects_removed_version_1_artifact(
@@ -146,7 +197,7 @@ def test_completion_loader_rejects_tampered_records(
     elif tamper_target == "session":
         session_path = tmp_path / str(completion["grounding_session_ref"])
         session = _read_json(session_path)
-        session["information_status"] = "not_enough"
+        session["status"] = "incomplete"
         _write_json(session_path, session)
     else:
         clarification_path = tmp_path / str(
@@ -205,40 +256,19 @@ class _UnresolvedCompletionRuntime(ControlledGroundingRuntime):
         )
         previous = load_latest_grounding_session(interaction_root)
         assert previous is not None
-        need = InformationNeed.from_mapping(
-            {
-                "need_id": "controlled_need_0001",
-                "question": "Which user intent remains unresolved?",
-                "required": True,
-                "sources": ["requirement_0001"],
-                "accepted_record_types": ["PAClarification"],
-                "status": "exhausted",
-                "answer_statement_ids": [],
-            }
-        )
-        decision = GroundingDecision.from_mapping(
-            {
-                "decision_type": "incomplete",
-                "need_id": None,
-                "provider_id": None,
-                "source_ref": None,
-                "source_revision": None,
-                "query": None,
-                "reason": "The controlled interaction remains incomplete.",
-            }
-        )
         persist_grounding_session(
             interaction_root,
             GroundingSession.create(
                 revision=previous.revision + 1,
                 requirement_text=previous.requirement_text,
-                statements=previous.statements,
-                information_needs=[need],
                 attempted_actions=previous.attempted_actions,
-                evidence_refs=previous.evidence_refs,
-                decision=decision,
+                next_action=GroundingNextAction.from_mapping(
+                    {
+                        "action": "incomplete",
+                        "reason": "The controlled interaction remains incomplete.",
+                    }
+                ),
                 status="incomplete",
-                information_status="partial",
             ),
         )
         return result

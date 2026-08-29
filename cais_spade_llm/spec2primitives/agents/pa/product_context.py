@@ -38,7 +38,27 @@ _PROVENANCE_NAME = "assertion_provenance.json"
 _REQUIREMENT_EVIDENCE_REF = "products/user_requirement/product_requirement.json"
 _SCHEMA_VERSION = 1
 
-_PROHIBITED_PA_PROPERTIES = frozenset({"capableOf", "provides", "requires", "precedes"})
+_PROHIBITED_PA_PROPERTIES = frozenset(
+    {
+        "capableOf",
+        "provides",
+        "requires",
+        "precedes",
+        "hasProcessExecution",
+        "runsProcess",
+        "runsOnResource",
+    }
+)
+_PROHIBITED_PA_CLASSES = frozenset({"processExecution"})
+_PROCESS_NAMESPACE = "https://cais-spade-llm.local/process/"
+_RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
+_ASSEMBLY_PROCESS_IRI = f"{_PROCESS_NAMESPACE}assembly"
+_PREDEFINED_RESOURCE_IRIS = frozenset(
+    {
+        f"{_RESOURCE_NAMESPACE}xarm6",
+        f"{_RESOURCE_NAMESPACE}ur5e",
+    }
+)
 _TYPED_CONTEXT_PREFIX = "products/grounding/"
 _DELTA_KEYS = frozenset(
     {
@@ -275,51 +295,137 @@ def validate_and_merge_triple_delta(
         normalized_assertions.append(normalized_record)
 
     _validate_pa_abox_graph(candidate, manifest, tbox)
-    next_delta_number = int(manifest["delta_count"]) + 1
-    delta_path = abox.ontology_root / f"delta_{next_delta_number:04d}.json"
-    if delta_path.exists():
-        raise OntologyPersistenceError(f"Delta record already exists: {delta_path.name}")
-
-    delta_record = {
-        "schema_version": _SCHEMA_VERSION,
-        "delta_number": next_delta_number,
-        "producer": validated_producer,
-        "assertions": normalized_assertions,
-        "uncertainty": list(normalized_delta.uncertainty),
-        "unresolved_evidence_needs": list(normalized_delta.unresolved_evidence_needs),
-        "typed_context_refs": list(normalized_delta.typed_context_refs),
-    }
-    updated_provenance = dict(provenance)
-    provenance_assertions = list(provenance["assertions"])
-    for assertion in normalized_assertions:
-        provenance_assertions.append(
-            {
-                **assertion,
-                "producer": validated_producer,
-                "delta_ref": delta_path.name,
-            }
-        )
-    updated_provenance["assertions"] = provenance_assertions
-    updated_manifest = dict(manifest)
-    updated_manifest["delta_count"] = next_delta_number
-    updated_manifest["accepted_assertion_count"] = int(manifest["accepted_assertion_count"]) + len(
-        normalized_assertions
-    )
-
-    _persist_merge(
+    return _persist_validated_delta(
         abox,
         candidate,
-        updated_manifest,
-        updated_provenance,
-        delta_path,
-        delta_record,
+        manifest=manifest,
+        provenance=provenance,
+        producer=validated_producer,
+        normalized_assertions=normalized_assertions,
+        uncertainty=normalized_delta.uncertainty,
+        unresolved_evidence_needs=normalized_delta.unresolved_evidence_needs,
+        typed_context_refs=normalized_delta.typed_context_refs,
     )
-    updated_abox = _snapshot_from_graph(root, candidate, updated_manifest)
-    return MergeResult(
-        accepted=True,
-        assertion_count=len(normalized_assertions),
-        delta_path=delta_path,
-        abox=updated_abox,
+
+
+def commit_host_resource_assignment(
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    *,
+    producer: str,
+    assertions: Sequence[Mapping[str, object]],
+    authorized_evidence_refs: Iterable[str],
+) -> MergeResult:
+    """Persist one exact controller-authored process-execution assignment.
+
+    This is deliberately separate from the untrusted generic delta boundary.
+    The caller cannot use it to add arbitrary RDF: the four required assertions,
+    stable process, predefined resource, and controller-derived execution IRI are
+    validated here before the ordinary atomic persistence path is reused.
+    """
+    _validate_tbox_snapshot(tbox)
+    validated_producer = _require_nonempty_string(
+        producer,
+        "producer",
+        TripleDeltaError,
+    )
+    if not _SAFE_IDENTIFIER.fullmatch(validated_producer):
+        raise TripleDeltaError("producer must be a fixed non-path identifier.")
+    authorized_refs = _validated_authorized_refs(authorized_evidence_refs)
+    if len(assertions) != 4:
+        raise TripleDeltaError(
+            "Host resource assignment requires exactly four assertions."
+        )
+
+    root = Path(interaction_root).resolve()
+    abox, manifest, provenance = _load_persisted_abox(root, tbox)
+    ppr = Namespace(tbox.ppr_namespace)
+    specification = URIRef(abox.specification_iri)
+    execution = URIRef(f"{abox.namespace}process_execution_0001")
+    if any(abox.graph.triples((None, ppr.hasProcessExecution, None))) or any(
+        abox.graph.triples((None, RDF.type, ppr.processExecution))
+    ):
+        raise TripleDeltaError("The interaction already has a process execution.")
+
+    coerced = tuple(
+        _coerce_assertion(assertion, index)
+        for index, assertion in enumerate(assertions)
+    )
+    triples: dict[tuple[URIRef, URIRef, URIRef], TripleAssertion] = {}
+    for assertion in coerced:
+        if not assertion.evidence_refs:
+            raise TripleDeltaError(
+                "Every host assignment assertion requires evidence_refs."
+            )
+        if any(ref not in authorized_refs for ref in assertion.evidence_refs):
+            raise TripleDeltaError(
+                "Host assignment assertion contains unauthorized evidence."
+            )
+        if assertion.object.kind != "iri" or not isinstance(
+            assertion.object.value, str
+        ):
+            raise TripleDeltaError("Host assignment objects must be IRIs.")
+        triple = (
+            URIRef(assertion.subject),
+            URIRef(assertion.predicate),
+            URIRef(assertion.object.value),
+        )
+        if triple in triples:
+            raise TripleDeltaError("Host assignment assertions must be unique.")
+        triples[triple] = assertion
+
+    resource_triples = [
+        triple
+        for triple in triples
+        if triple[0] == execution and triple[1] == ppr.runsOnResource
+    ]
+    if len(resource_triples) != 1 or str(resource_triples[0][2]) not in (
+        _PREDEFINED_RESOURCE_IRIS
+    ):
+        raise TripleDeltaError(
+            "Host assignment must select exactly one predefined resource."
+        )
+    expected = {
+        (specification, ppr.hasProcessExecution, execution),
+        (execution, RDF.type, ppr.processExecution),
+        (execution, ppr.runsProcess, URIRef(_ASSEMBLY_PROCESS_IRI)),
+        resource_triples[0],
+    }
+    if set(triples) != expected:
+        raise TripleDeltaError(
+            "Host resource assignment does not match the exact execution pattern."
+        )
+
+    candidate = Graph()
+    for prefix, namespace in abox.graph.namespaces():
+        candidate.bind(prefix, namespace)
+    candidate.bind("process", Namespace(_PROCESS_NAMESPACE))
+    candidate.bind("resource", Namespace(_RESOURCE_NAMESPACE))
+    for triple in abox.graph:
+        candidate.add(triple)
+    for triple in expected:
+        candidate.add(triple)
+    _validate_pa_abox_graph(candidate, manifest, tbox)
+
+    normalized_assertions = [
+        {
+            "subject": str(triple[0]),
+            "predicate": str(triple[1]),
+            "object": {"kind": "iri", "value": str(triple[2])},
+            "evidence_refs": list(triples[triple].evidence_refs),
+        }
+        for triple in sorted(expected, key=lambda item: tuple(map(str, item)))
+    ]
+    return _persist_validated_delta(
+        abox,
+        candidate,
+        manifest=manifest,
+        provenance=provenance,
+        producer=validated_producer,
+        normalized_assertions=normalized_assertions,
+        uncertainty=(),
+        unresolved_evidence_needs=(),
+        typed_context_refs=(),
     )
 
 
@@ -555,7 +661,12 @@ def _validated_assertion(
     _raise_if_prohibited_property(assertion.predicate, TripleDeltaError)
     _require_absolute_iri(assertion.subject, "assertion subject", TripleDeltaError)
     _require_absolute_iri(assertion.predicate, "assertion predicate", TripleDeltaError)
-    if not assertion.subject.startswith(abox.namespace):
+    ppr = Namespace(tbox.ppr_namespace)
+    authorized_external_process = (
+        assertion.subject == _ASSEMBLY_PROCESS_IRI
+        and assertion.predicate == str(ppr.realizes)
+    )
+    if not assertion.subject.startswith(abox.namespace) and not authorized_external_process:
         raise TripleDeltaError(
             "Assertion subject must belong to the current interaction namespace."
         )
@@ -610,6 +721,8 @@ def _validated_type_object(
         raise TripleDeltaError("PA ABox cannot contain resource or capability individuals.")
     if _class_is_primitive(tbox, class_ref):
         raise TripleDeltaError("PA ABox cannot contain primitive individuals.")
+    if _local_name(class_iri) in _PROHIBITED_PA_CLASSES:
+        raise TripleDeltaError("PA ABox cannot contain process-execution individuals.")
     return class_ref, {"kind": "iri", "value": class_iri}
 
 
@@ -684,7 +797,7 @@ def _validate_pa_abox_graph(
     _validate_semantic_bridge(graph, specification, tbox)
 
 
-def _validate_pa_abox_triple(
+def _validate_pa_abox_triple(  # noqa: C901, PLR0912
     triple: tuple[object, object, object],
     *,
     namespace: str,
@@ -694,11 +807,34 @@ def _validate_pa_abox_triple(
 ) -> None:
     subject, predicate, object_node = triple
     ppr = Namespace(tbox.ppr_namespace)
-    if not isinstance(subject, URIRef) or not str(subject).startswith(namespace):
+    if not isinstance(subject, URIRef):
+        raise TripleDeltaError("ABox subjects must be IRIs.")
+    if (
+        subject == URIRef(_ASSEMBLY_PROCESS_IRI)
+        and predicate == ppr.realizes
+        and isinstance(object_node, URIRef)
+        and str(object_node).startswith(namespace)
+    ):
+        return
+    if not str(subject).startswith(namespace):
         raise TripleDeltaError("ABox subjects must belong to the interaction namespace.")
     if not isinstance(predicate, URIRef):
         raise TripleDeltaError("ABox predicates must be IRIs.")
     _raise_if_primitive_symbol(str(subject), TripleDeltaError)
+
+    execution = URIRef(f"{namespace}process_execution_0001")
+    if predicate == ppr.hasProcessExecution:
+        if subject != specification or object_node != execution:
+            raise TripleDeltaError("ABox process execution link is invalid.")
+        return
+    if predicate == ppr.runsProcess:
+        if subject != execution or object_node != URIRef(_ASSEMBLY_PROCESS_IRI):
+            raise TripleDeltaError("ABox execution process is invalid.")
+        return
+    if predicate == ppr.runsOnResource:
+        if subject != execution or str(object_node) not in _PREDEFINED_RESOURCE_IRIS:
+            raise TripleDeltaError("ABox execution resource is invalid.")
+        return
     _raise_if_prohibited_property(str(predicate), TripleDeltaError)
 
     if predicate == RDF.type:
@@ -714,6 +850,8 @@ def _validate_pa_abox_triple(
             raise TripleDeltaError("PA ABox cannot contain resource or capability individuals.")
         if _class_is_primitive(tbox, object_node):
             raise TripleDeltaError("PA ABox cannot contain primitive individuals.")
+        if object_node == ppr.processExecution and subject != execution:
+            raise TripleDeltaError("ABox process-execution individual is invalid.")
         return
     if predicate == RDF.value:
         if subject != specification or object_node != Literal(requirement):
@@ -767,7 +905,12 @@ def _validate_semantic_bridge(
             )
         defined_features.add(defined_feature)
     for process, realized_feature in graph.subject_objects(ppr.realizes):
-        if not _instance_is_type(graph, process, ppr.process, tbox):
+        if process != URIRef(_ASSEMBLY_PROCESS_IRI) and not _instance_is_type(
+            graph,
+            process,
+            ppr.process,
+            tbox,
+        ):
             raise TripleDeltaError("realizes subject must be typed as process.")
         if not isinstance(realized_feature, URIRef) or not _instance_is_type(
             graph,
@@ -787,6 +930,53 @@ def _validate_semantic_bridge(
             and _instance_is_type(graph, subject, ppr.process, tbox)
         ):
             raise TripleDeltaError("PA ABox cannot encode process composition recipes.")
+
+    _validate_process_execution(graph, specification, defined_features, tbox)
+
+
+def _validate_process_execution(
+    graph: Graph,
+    specification: URIRef,
+    defined_features: set[URIRef],
+    tbox: TBoxSnapshot,
+) -> None:
+    """Validate the optional controller-authored current assignment."""
+    ppr = Namespace(tbox.ppr_namespace)
+    expected_execution = URIRef(
+        f"{str(specification).rsplit('/', 1)[0]}/process_execution_0001"
+    )
+    linked = list(graph.objects(specification, ppr.hasProcessExecution))
+    all_links = list(graph.subject_objects(ppr.hasProcessExecution))
+    typed = set(graph.subjects(RDF.type, ppr.processExecution))
+    runs_process = list(graph.subject_objects(ppr.runsProcess))
+    runs_resource = list(graph.subject_objects(ppr.runsOnResource))
+    if not linked:
+        if all_links or typed or runs_process or runs_resource:
+            raise TripleDeltaError("ABox contains an incomplete process execution.")
+        return
+    if linked != [expected_execution] or all_links != [
+        (specification, expected_execution)
+    ]:
+        raise TripleDeltaError("ABox must contain one current process execution.")
+    if typed != {expected_execution}:
+        raise TripleDeltaError("ABox process execution type is incomplete.")
+    if runs_process != [
+        (expected_execution, URIRef(_ASSEMBLY_PROCESS_IRI))
+    ]:
+        raise TripleDeltaError("ABox process execution must run assembly exactly once.")
+    if (
+        len(runs_resource) != 1
+        or runs_resource[0][0] != expected_execution
+        or str(runs_resource[0][1]) not in _PREDEFINED_RESOURCE_IRIS
+    ):
+        raise TripleDeltaError(
+            "ABox process execution must run on one predefined resource."
+        )
+    realized = set(graph.objects(URIRef(_ASSEMBLY_PROCESS_IRI), ppr.realizes))
+    if not realized or not realized.issubset(defined_features):
+        raise TripleDeltaError(
+            "ABox assigned assembly must realize a feature of this specification."
+        )
 
 
 def _load_persisted_abox(
@@ -862,6 +1052,65 @@ def _validate_manifest(
     actual_delta_names = {path.name for path in ontology_root.glob("delta_*.json")}
     if actual_delta_names != expected_delta_names:
         raise OntologyPersistenceError("Persisted delta sequence is invalid.")
+
+
+def _persist_validated_delta(  # noqa: PLR0913
+    abox: ABoxSnapshot,
+    graph: Graph,
+    *,
+    manifest: Mapping[str, object],
+    provenance: Mapping[str, object],
+    producer: str,
+    normalized_assertions: Sequence[Mapping[str, object]],
+    uncertainty: Sequence[object],
+    unresolved_evidence_needs: Sequence[object],
+    typed_context_refs: Sequence[str],
+) -> MergeResult:
+    """Atomically persist assertions that their authority boundary validated."""
+    next_delta_number = int(manifest["delta_count"]) + 1
+    delta_path = abox.ontology_root / f"delta_{next_delta_number:04d}.json"
+    if delta_path.exists():
+        raise OntologyPersistenceError(f"Delta record already exists: {delta_path.name}")
+    normalized = [dict(assertion) for assertion in normalized_assertions]
+    delta_record = {
+        "schema_version": _SCHEMA_VERSION,
+        "delta_number": next_delta_number,
+        "producer": producer,
+        "assertions": normalized,
+        "uncertainty": list(uncertainty),
+        "unresolved_evidence_needs": list(unresolved_evidence_needs),
+        "typed_context_refs": list(typed_context_refs),
+    }
+    updated_provenance = dict(provenance)
+    provenance_assertions = list(provenance["assertions"])
+    for assertion in normalized:
+        provenance_assertions.append(
+            {
+                **assertion,
+                "producer": producer,
+                "delta_ref": delta_path.name,
+            }
+        )
+    updated_provenance["assertions"] = provenance_assertions
+    updated_manifest = dict(manifest)
+    updated_manifest["delta_count"] = next_delta_number
+    updated_manifest["accepted_assertion_count"] = int(
+        manifest["accepted_assertion_count"]
+    ) + len(normalized)
+    _persist_merge(
+        abox,
+        graph,
+        updated_manifest,
+        updated_provenance,
+        delta_path,
+        delta_record,
+    )
+    return MergeResult(
+        accepted=True,
+        assertion_count=len(normalized),
+        delta_path=delta_path,
+        abox=_snapshot_from_graph(abox.interaction_root, graph, updated_manifest),
+    )
 
 
 def _persist_merge(

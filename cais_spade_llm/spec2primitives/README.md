@@ -10,13 +10,15 @@ tools, a dedicated no-hardware NIST Gazebo scene launcher, a Phase 2 PA
 interaction UI connected through Phase 3.5, exact product-requirement intake,
 requested-context serving, resumable clarification, and a tamper-checked PA
 grounding-completion boundary. Production grounding starts from the exact
-requirement and authorized zero-cost provider previews. A generalized
-`GroundingSession` records cited statements, missing information, attempted
-actions, and one next decision without receiving the TBox or ABox. Only after
-the needed understanding is sufficient does PA make a separate late
-`OntologyGroundingProposal`; the deterministic validator remains the only ABox
-commit authority. Phase 4.1 supplies cached ontology-neutral
-`DocumentOverviewRecord` previews and a selective targeted
+requirement, authoritative ontology, available sources, and retrieved typed
+records together. PA returns only one `retrieve`, `inspect`, `propose_grounding`,
+`ask_user`, or `incomplete` action. `GroundingSession` schema version 2 stores
+the host-owned action journal and resolved provider metadata; it contains no
+intermediate understanding, statements, information needs, or transitions.
+On `propose_grounding`, PA makes one late `OntologyGroundingProposal` containing
+TBox-level facts, one cited context summary, and missing information. The
+deterministic validator remains the only ABox commit authority. Phase 4.1 supplies cached ontology-neutral
+`DocumentOverviewRecord` previews and a question-targeted, full-document
 `DocumentEvidenceRecord` fallback. Phase 4.2A adds assertion-free approved-CAD and
 four-camera RGB-D preprocessing. Phase 4.2B1 adds an automatic observation-only
 capture, preprocessing, and minimal segmentation path. Phase 4.2B2A adds strict
@@ -34,6 +36,10 @@ TBox and `OPENAI_API_KEY` configure that runtime. The project-authoritative
 schema-only TBox is `ontology/spec2primitives_ppr_tbox.owl`; paired
 `SPEC2PRIMITIVES_PPR_TBOX_PATH` and `SPEC2PRIMITIVES_PPR_NAMESPACE` values may
 override it.
+
+The current approved document corpus is one six-page NIST PDF. Targeted
+inspection sends those six cached pages together in order; it does not use RAG,
+embeddings, or page ranking. Retrieval for larger documents remains future work.
 
 ## MUST: Do not leak the answer
 
@@ -80,12 +86,12 @@ navigation item.
    or `--all`.
 3. Start the system. F5 validates sources and reports cache state but performs
    no ProductAgent, LLM, or VLM inference request.
-4. Run generalized PA grounding. Cached observations appear as inference-free
-   previews; PA may select one exact eligible provider action for an open
-   `InformationNeed`. A prepared overview requires zero document-VLM calls.
-5. After all required information is resolved, create and validate the late
-   semantic projection. Future RA receives the validated ontology projection,
-   typed grounding contract, and hash-pinned typed evidence records.
+4. Run generalized PA grounding. PA receives the requirement, ontology,
+   available sources, and retrieved typed records together, then chooses only
+   `retrieve`, `inspect`, `propose_grounding`, `ask_user`, or `incomplete`.
+5. On `propose_grounding`, create and validate the ontology projection plus one
+   cited final context summary. Future RA receives that projection, the typed
+   grounding contract, and hash-pinned typed evidence records.
 
 Overview caches are generated under `contexts/source_cache/`, keyed by PDF
 SHA-256, document-model settings, and overview-schema version, and are not
@@ -106,7 +112,7 @@ loaded or migrated. Controlled tests use a schema-only fixture,
 deterministic model responses, and producer inputs to exercise the complete
 orchestration record. A separate Phase 4.1 diagnostic can select any PDF
 registered in `references/products/approved_sources.json` and displays the
-overview, PA statements, provider actions, targeted evidence, untrusted
+overview, PA action journal, targeted evidence, untrusted
 ontology proposal, and accepted assertions as separate stages. It does not
 authorize PA completion. RGB-D capture, preprocessing, and minimal
 segmentation run automatically only when the observation pipeline is invoked.

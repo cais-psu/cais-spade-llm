@@ -218,20 +218,13 @@ def test_import_has_no_ros_side_effects() -> None:
     source_path = Path(gazebo_observation_provider.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     top_level_imports = {
-        node.module
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom) and node.module
+        node.module for node in tree.body if isinstance(node, ast.ImportFrom) and node.module
     }
     top_level_imports.update(
-        alias.name
-        for node in tree.body
-        if isinstance(node, ast.Import)
-        for alias in node.names
+        alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names
     )
 
-    assert not top_level_imports.intersection(
-        {"rclpy", "sensor_msgs.msg", "cv_bridge"}
-    )
+    assert not top_level_imports.intersection({"rclpy", "sensor_msgs.msg", "cv_bridge"})
     error = GazeboObservationProviderError("capture_timeout", "controlled")
     assert error.reason == "capture_timeout"
 
@@ -412,12 +405,8 @@ def test_incomplete_camera_returns_capture_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    missing_depth_topic = (
-        f"/{CAMERA_IDS[-1]}/{CAMERA_IDS[-1]}/depth/image_raw"
-    )
-    events = [
-        event for event in _complete_events() if event[0] != missing_depth_topic
-    ]
+    missing_depth_topic = f"/{CAMERA_IDS[-1]}/{CAMERA_IDS[-1]}/depth/image_raw"
+    events = [event for event in _complete_events() if event[0] != missing_depth_topic]
     runtime = _install_runtime(monkeypatch, events)
 
     with pytest.raises(GazeboObservationProviderError) as exc_info:
@@ -490,9 +479,7 @@ def test_duplicate_ref_preserves_existing_bundle_and_cleans_second_request(
         capture_gazebo_observation(tmp_path, "observation_duplicate")
 
     assert (bundle_path / "manifest.json").read_bytes() == original_manifest
-    assert sorted(path.name for path in tmp_path.iterdir()) == [
-        "observation_duplicate"
-    ]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["observation_duplicate"]
     _assert_runtime_cleaned(first_runtime)
     _assert_runtime_cleaned(second_runtime)
 
@@ -562,6 +549,10 @@ def test_ros_dependency_failure_uses_ros_unavailable(
         "_load_ros_dependencies",
         load_dependencies,
     )
+    monkeypatch.setenv(
+        gazebo_observation_provider._ROS_WORKER_ACTIVE_ENV,
+        "1",
+    )
 
     with pytest.raises(GazeboObservationProviderError) as exc_info:
         capture_gazebo_observation(tmp_path, "observation_ros_unavailable")
@@ -569,14 +560,107 @@ def test_ros_dependency_failure_uses_ros_unavailable(
     assert exc_info.value.reason == "ros_unavailable"
 
 
+def test_missing_in_process_ros_dependencies_use_sourced_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_path = tmp_path / "observation_sourced_worker"
+    worker_calls: list[tuple[Path, str, float]] = []
+
+    def load_dependencies() -> Any:
+        raise GazeboObservationProviderError(
+            "ros_unavailable",
+            "controlled missing in-process ROS2",
+        )
+
+    def capture_in_worker(
+        observations_root: Path,
+        observation_ref: str,
+        *,
+        timeout_sec: float,
+    ) -> Path:
+        worker_calls.append((observations_root, observation_ref, timeout_sec))
+        return expected_path
+
+    monkeypatch.delenv(
+        gazebo_observation_provider._ROS_WORKER_ACTIVE_ENV,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gazebo_observation_provider,
+        "_load_ros_dependencies",
+        load_dependencies,
+    )
+    monkeypatch.setattr(
+        gazebo_observation_provider,
+        "_capture_gazebo_observation_in_ros_worker",
+        capture_in_worker,
+    )
+
+    captured_path = capture_gazebo_observation(
+        tmp_path,
+        "observation_sourced_worker",
+        timeout_sec=2.5,
+    )
+
+    assert captured_path == expected_path
+    assert worker_calls == [(tmp_path, "observation_sourced_worker", 2.5)]
+
+
+def test_sourced_worker_preserves_provider_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ros_setup_path = tmp_path / "opt_ros_humble_setup.bash"
+    ros_setup_path.write_text("# controlled setup\n", encoding="utf-8")
+
+    def run_worker(command: list[str], **kwargs: Any) -> Any:
+        assert command[0:2] == ["/bin/bash", "-c"]
+        assert str(ros_setup_path) in command
+        assert kwargs["env"][gazebo_observation_provider._ROS_WORKER_ACTIVE_ENV] == "1"
+        assert Path(kwargs["env"]["ROS_LOG_DIR"]).is_dir()
+        assert kwargs["timeout"] == 31.0
+        Path(command[-1]).write_text(
+            "{\n"
+            '  "status": "failed",\n'
+            '  "error_type": "provider",\n'
+            '  "reason": "capture_timeout",\n'
+            '  "message": "controlled worker timeout"\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(
+        gazebo_observation_provider,
+        "_ROS_SETUP_PATH",
+        ros_setup_path,
+    )
+    monkeypatch.setattr(
+        gazebo_observation_provider.subprocess,
+        "run",
+        run_worker,
+    )
+
+    with pytest.raises(
+        GazeboObservationProviderError,
+        match="controlled worker timeout",
+    ) as exc_info:
+        gazebo_observation_provider._capture_gazebo_observation_in_ros_worker(
+            tmp_path,
+            "observation_worker_timeout",
+            timeout_sec=1.0,
+        )
+
+    assert exc_info.value.reason == "capture_timeout"
+
+
 def test_provider_has_no_agent_ui_detector_state_or_ground_truth_dependency() -> None:
     source_path = Path(gazebo_observation_provider.__file__)
     source = source_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(source_path))
     imported_modules = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
     }
     imported_modules.update(
         alias.name
@@ -657,9 +741,7 @@ def _complete_events(
 
 
 def _camera_info(camera_id: str, timestamp_ns: int) -> FakeCameraInfo:
-    return FakeCameraInfo(
-        header=_header(f"{camera_id}_rgb_optical_frame", timestamp_ns)
-    )
+    return FakeCameraInfo(header=_header(f"{camera_id}_rgb_optical_frame", timestamp_ns))
 
 
 def _rgb_image(

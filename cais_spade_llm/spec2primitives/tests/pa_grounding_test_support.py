@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,14 +16,25 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingDecision,
+    GroundingNextAction,
     GroundingProducerDescriptor,
     GroundingSession,
-    GroundingStatement,
     persist_grounding_session,
 )
-from cais_spade_llm.spec2primitives.agents.pa.product_context import ABoxSnapshot
-from cais_spade_llm.spec2primitives.ontology import TBoxSnapshot
+from cais_spade_llm.spec2primitives.agents.pa.product_context import (
+    ABoxSnapshot,
+    validate_and_merge_triple_delta,
+)
+from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    commit_resource_assignment,
+    derive_resource_assignment_need,
+    select_predefined_resource,
+)
+from cais_spade_llm.spec2primitives.ontology import (
+    TBoxSnapshot,
+    load_predefined_resource_registry,
+    load_predefined_workcell,
+)
 
 PPR_NAMESPACE = "http://PAonto.com#"
 MINIMAL_TBOX_PATH = Path(__file__).parent / "fixtures/ontology/minimal_ppr_tbox.owl"
@@ -162,6 +174,7 @@ class ControlledGroundingRuntime:
         ):
             _persist_controlled_completion_session(
                 interaction_root,
+                tbox=tbox,
                 abox=abox,
                 product_requirement=str(abox_view["product_requirement"]),
                 attempted_evidence=attempted_evidence,
@@ -172,89 +185,202 @@ class ControlledGroundingRuntime:
 def _persist_controlled_completion_session(
     interaction_root: Path,
     *,
+    tbox: TBoxSnapshot,
     abox: ABoxSnapshot,
     product_requirement: str,
     attempted_evidence: tuple[str, ...],
 ) -> None:
     """Persist minimal generalized completion inputs for controlled tests."""
     source_ref = attempted_evidence[-1] if attempted_evidence else "requirement_0001"
-    statement = GroundingStatement.from_mapping(
-        {
-            "statement_id": "controlled_statement_0001",
-            "text": "The controlled interaction has enough directly stated context.",
-            "status": "directly_stated",
-            "sources": [source_ref],
-            "reason": "The controlled runtime supplies this test-only statement.",
-        }
-    )
-    decision = GroundingDecision.from_mapping(
-        {
-            "decision_type": "ready_for_ontology",
-            "need_id": None,
-            "provider_id": None,
-            "source_ref": None,
-            "source_revision": None,
-            "query": None,
-            "reason": "The controlled test session is ready for late mapping.",
-        }
+    next_action = GroundingNextAction.from_mapping(
+        {"action": "propose_grounding"}
     )
     ready = GroundingSession.create(
         revision=1,
         requirement_text=product_requirement,
-        statements=[statement],
-        information_needs=[],
         attempted_actions=[],
-        evidence_refs=[source_ref],
-        decision=decision,
+        next_action=next_action,
         status="ready_for_ontology",
-        information_status="enough",
     )
     persist_grounding_session(interaction_root, ready)
+    feature_iri = f"{abox.namespace}medium_gear_feature"
+    task_assertions = [
+        {
+            "subject": feature_iri,
+            "predicate": str(RDF.type),
+            "object": {"kind": "iri", "value": f"{PPR_NAMESPACE}feature"},
+            "evidence_refs": [source_ref],
+        },
+        {
+            "subject": abox.specification_iri,
+            "predicate": f"{PPR_NAMESPACE}defines",
+            "object": {"kind": "iri", "value": feature_iri},
+            "evidence_refs": [source_ref],
+        },
+        {
+            "subject": "https://cais-spade-llm.local/process/assembly",
+            "predicate": f"{PPR_NAMESPACE}realizes",
+            "object": {"kind": "iri", "value": feature_iri},
+            "evidence_refs": [source_ref],
+        },
+    ]
+    task_delta = {
+        "assertions": task_assertions,
+        "uncertainty": [],
+        "unresolved_evidence_needs": [],
+        "typed_context_refs": [],
+    }
+    validate_and_merge_triple_delta(
+        interaction_root,
+        tbox,
+        "ontology_grounding",
+        task_delta,
+        authorized_evidence_refs=[source_ref],
+    )
     proposal_path = (
         Path(interaction_root)
         / "products/grounding/ontology_grounding/proposal_0001.json"
     )
     proposal_path.parent.mkdir(parents=True, exist_ok=True)
     proposal = {
-        "schema_version": 2,
+        "schema_version": 3,
         "record_type": "OntologyGroundingProposal",
         "proposal_number": 1,
         "session_revision": ready.revision,
         "session_fingerprint": ready.fingerprint,
         "initialized_specification_iri": abox.specification_iri,
-        "direct_statement_ids": [statement.statement_id],
         "output": {
             "ontology_grounding_proposal": {
-                "individuals": [],
-                "relations": [],
+                "individuals": [
+                    {"individual_index": 1, "class_iri": f"{PPR_NAMESPACE}feature"}
+                ],
+                "relations": [
+                    {
+                        "subject_kind": "specification",
+                        "subject_individual_index": None,
+                        "subject_iri": None,
+                        "predicate_iri": f"{PPR_NAMESPACE}defines",
+                        "object_kind": "new_individual",
+                        "object_individual_index": 1,
+                        "object_iri": None,
+                    },
+                    {
+                        "subject_kind": "existing_individual",
+                        "subject_individual_index": None,
+                        "subject_iri": "https://cais-spade-llm.local/process/assembly",
+                        "predicate_iri": f"{PPR_NAMESPACE}realizes",
+                        "object_kind": "new_individual",
+                        "object_individual_index": 1,
+                        "object_iri": None,
+                    },
+                ],
                 "literal_facts": [],
-                "unrepresented_statement_ids": [statement.statement_id],
+                "context_summary": (
+                    "The controlled interaction has enough cited product context."
+                ),
+                "evidence_refs": [source_ref],
+                "missing_information": [],
             }
         },
-        "compiled_delta": {
-            "assertions": [],
-            "uncertainty": [],
-            "unresolved_evidence_needs": [],
-            "typed_context_refs": [],
-        },
+        "compiled_delta": task_delta,
         "status": "accepted",
         "failure": None,
     }
     with proposal_path.open("x", encoding="utf-8") as stream:
         json.dump(proposal, stream, indent=2, ensure_ascii=False)
         stream.write("\n")
+    pose_ref = _write_controlled_world_pose(interaction_root)
+    pose_merge = validate_and_merge_triple_delta(
+        interaction_root,
+        tbox,
+        "controlled_world_pose_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [pose_ref],
+        },
+        authorized_evidence_refs=[source_ref],
+    )
+    registry = load_predefined_resource_registry(tbox)
+    workcell = load_predefined_workcell(tbox, registry)
+    need = derive_resource_assignment_need(pose_merge.abox, workcell)
+    if need is None:
+        raise AssertionError("Controlled completion has no resource-assignment need.")
+    selection = select_predefined_resource(
+        interaction_root=interaction_root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        need=need,
+        robot_frame_pose_path=Path(interaction_root) / pose_ref,
+    )
+    commit_resource_assignment(
+        interaction_root=interaction_root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        need=need,
+        selection=selection,
+    )
     complete = GroundingSession.create(
         revision=2,
         requirement_text=product_requirement,
-        statements=[statement],
-        information_needs=[],
         attempted_actions=[],
-        evidence_refs=[source_ref],
-        decision=decision,
+        next_action=next_action,
         status="complete",
-        information_status="enough",
     )
     persist_grounding_session(interaction_root, complete)
+
+
+def _write_controlled_world_pose(interaction_root: Path) -> str:
+    """Persist a direct world-pose record with one hash-pinned source record."""
+    root = Path(interaction_root)
+    destination = root / "products/grounding/controlled_world_pose"
+    destination.mkdir(parents=True, exist_ok=True)
+    source_path = destination / "source_evidence_0001.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_type": "ControlledWorldPoseEvidence",
+                "producer": "controlled_world_pose_provider",
+                "status": "accepted",
+                "observation_timestamp_ns": 1,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    source_ref = source_path.relative_to(root).as_posix()
+    pose_path = destination / "world_pose_0001.json"
+    pose_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_type": "RobotFramePoseRecord",
+                "producer": "controlled_world_pose_provider",
+                "target_frame": "world",
+                "observation_timestamp_ns": 1,
+                "robot_frame_conversion": "accepted",
+                "CAD_correspondence": "accepted",
+                "location": "available",
+                "pose": "accepted",
+                "source_evidence": {
+                    "ref": source_ref,
+                    "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                },
+                "robot_frame_pose": {
+                    "CAD_origin_translation_m": [0.0, -0.5, 1.1]
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return pose_path.relative_to(root).as_posix()
 
 
 def request_context(
@@ -280,6 +406,7 @@ def request_context(
             "clarification_question": None,
         },
         "context understanding complete": False,
+        "grounding_status": "waiting_for_evidence",
     }
 
 
@@ -300,6 +427,7 @@ def request_live_observation(
             "clarification_question": None,
         },
         "context understanding complete": False,
+        "grounding_status": "waiting_for_evidence",
     }
 
 
@@ -317,6 +445,7 @@ def request_clarification(question: str) -> dict[str, object]:
             "clarification_question": question,
         },
         "context understanding complete": False,
+        "grounding_status": "waiting_for_user",
     }
 
 

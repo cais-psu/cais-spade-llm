@@ -9,9 +9,9 @@ here. They are tools used by the Spec2Primitives workflow, not agents.
   bundles.
 - `document_evidence/` validates any registered approved PDF, prepares a
   content-addressed ontology-neutral overview cache, returns assertion-free
-  overview refs, and invokes targeted page vision only for an explicit evidence
-  gap. Its diagnostic keeps overview, targeted evidence, PA proposal, and
-  accepted assertions separate.
+  overview refs, and invokes question-targeted full-document vision only for an
+  explicit evidence gap. Its diagnostic keeps overview, targeted evidence, PA
+  proposal, and accepted assertions separate.
 - `rgb_d_cad_grounding/` captures one fresh live Gazebo RGB-D bundle only when
   invoked, implements Phase 4.2A preprocessing, and implements Phase 4.2B1
   minimal camera-local segmentation, Phase 4.2B2A size-only association, and

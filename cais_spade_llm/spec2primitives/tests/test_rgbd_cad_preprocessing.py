@@ -152,6 +152,39 @@ def test_cad_preprocessing_preserves_full_mesh_units_hashes_and_delta(
     assert _read_json(result.record_path) == record
 
 
+def test_cad_preprocessing_accepts_served_gear_shaft_bounds(tmp_path: Path) -> None:
+    served_context = _served_cad("Gear_Shaft.STL")
+
+    result = preprocess_served_geometry(
+        interaction_root=tmp_path,
+        served_context=served_context,
+        operation_number=1,
+    )
+
+    assert result.evidence_ref == "Gear_Shaft.STL"
+    assert result.record["source"]["context_ref"] == "Gear_Shaft.STL"
+    assert result.record_path.is_file()
+    assert all(path.is_file() for path in result.artifact_paths)
+
+
+def test_cad_preprocessing_rejects_tampered_served_bounds(tmp_path: Path) -> None:
+    served_context = _served_cad("Gear_Shaft.STL")
+    served_context["CAD_evidence"]["bounds_mm"]["minimum"][0] += 0.001
+
+    with pytest.raises(GeometryPreprocessingError, match="bounds do not match"):
+        preprocess_served_geometry(
+            interaction_root=tmp_path,
+            served_context=served_context,
+            operation_number=1,
+        )
+
+    operation_root = (
+        tmp_path
+        / "products/grounding/rgb_d_cad_grounding/operation_0001"
+    )
+    assert not operation_root.exists()
+
+
 def test_cad_preprocessing_rejects_source_changed_after_serving(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

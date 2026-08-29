@@ -9,8 +9,10 @@ from typing import Any
 
 _CAIS_ROS_LOG_DIR = Path(__file__).resolve().parents[1] / "log" / "ros"
 
+# The non-headless OpenCV wheel points Qt at its bundled plugins when imported.
+# ROS GUI clients use the system Qt installation and abort if they inherit those paths.
 ROS2_ENV = (
-    "unset VIRTUAL_ENV PYTHONHOME; "
+    "unset VIRTUAL_ENV PYTHONHOME QT_QPA_PLATFORM_PLUGIN_PATH QT_QPA_FONTDIR; "
     "export PATH=/usr/bin:/usr/local/bin:$PATH; "
     f"mkdir -p {shlex.quote(str(_CAIS_ROS_LOG_DIR))}; "
     f"export ROS_LOG_DIR={shlex.quote(str(_CAIS_ROS_LOG_DIR))}; "

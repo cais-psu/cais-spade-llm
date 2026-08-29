@@ -20,10 +20,18 @@ _REQUIRED_CLASSES = (
     "product",
     "feature",
     "process",
+    "processExecution",
     "resource",
     "capability",
 )
-_REQUIRED_OBJECT_PROPERTIES = ("defines", "realizes", "capableOf")
+_REQUIRED_OBJECT_PROPERTIES = (
+    "defines",
+    "realizes",
+    "capableOf",
+    "hasProcessExecution",
+    "runsProcess",
+    "runsOnResource",
+)
 
 
 class OntologyContextError(ValueError):
@@ -118,6 +126,7 @@ def load_ppr_tbox(tbox_path: Path, *, ppr_namespace: str) -> TBoxSnapshot:
         classes=classes,
         object_properties=object_properties,
     )
+    _validate_process_execution_slice(graph, namespace)
     _validate_schema_only_profile(
         graph,
         namespace,
@@ -175,6 +184,42 @@ def _validate_required_symbols(
         if missing_properties:
             details.append(f"object_properties={missing_properties}")
         raise TBoxProfileError("TBox is missing required PPR symbols: " + ", ".join(details))
+
+
+def _validate_process_execution_slice(graph: Graph, namespace: str) -> None:
+    process_execution = URIRef(f"{namespace}processExecution")
+    expected_profiles = {
+        URIRef(f"{namespace}hasProcessExecution"): (
+            URIRef(f"{namespace}specification"),
+            process_execution,
+            False,
+        ),
+        URIRef(f"{namespace}runsProcess"): (
+            process_execution,
+            URIRef(f"{namespace}process"),
+            True,
+        ),
+        URIRef(f"{namespace}runsOnResource"): (
+            process_execution,
+            URIRef(f"{namespace}resource"),
+            True,
+        ),
+    }
+    for property_iri, profile in expected_profiles.items():
+        expected_domain, expected_range, expected_functional = profile
+        if set(graph.objects(property_iri, RDFS.domain)) != {expected_domain}:
+            raise TBoxProfileError(
+                f"TBox property has an invalid domain: {property_iri}"
+            )
+        if set(graph.objects(property_iri, RDFS.range)) != {expected_range}:
+            raise TBoxProfileError(
+                f"TBox property has an invalid range: {property_iri}"
+            )
+        is_functional = (property_iri, RDF.type, OWL.FunctionalProperty) in graph
+        if is_functional != expected_functional:
+            raise TBoxProfileError(
+                f"TBox property has an invalid functional profile: {property_iri}"
+            )
 
 
 def _validate_schema_only_profile(

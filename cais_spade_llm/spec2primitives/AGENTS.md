@@ -40,6 +40,37 @@
 - In the handoff, report feature or bug-fix changes separately from refactoring
   changes. If no refactoring was performed, say so explicitly.
 
+## Error-driven replacement and legacy removal
+
+- When an error requires changing an authorized plan or implementation, remove
+  the superseded code path that the replacement makes invalid or nonfunctional.
+- Remove the obsolete implementation together with its unused helpers,
+  fallback branches, deprecated aliases, compatibility wrappers, tests, and
+  documentation when they exist only to support the failed behavior.
+- Do not retain two active implementations of the same behavior unless the user
+  explicitly requires backward compatibility or a staged migration.
+- Before removing legacy code, confirm that the replacement covers the current
+  runtime call path and that no authorized persistence or public-interface
+  requirement still depends on it.
+- If complete removal would exceed the authorized scope, change a public
+  interface, or require a data migration, stop at that boundary, report the
+  remaining legacy dependency, and ask the user before expanding the change.
+
+## Simplicity and minimum contracts
+
+- Implement the user-approved plain-language process directly.
+- Do not add an intermediate field, state transition, duplicate representation,
+  or compatibility layer unless an active runtime consumer requires it.
+- The model returns only the next semantic action or the final ontology/context
+  proposal. The host derives IDs, provider metadata, revisions, hashes, and
+  persistence fields.
+- Reuse retrieved typed records as evidence state instead of copying them into
+  model-authored reasoning records.
+- Before adding a field, identify its runtime consumer and deterministic
+  validator. If neither exists, do not add the field.
+- When two designs provide the same behavior, choose fewer model-controlled
+  fields and fewer persisted objects.
+
 ## Before-edit code-reading preview
 
 Before every implementation change, provide a concise preview that:

@@ -286,14 +286,18 @@ def _needed_context_prompt(
                 "request_live_observation": True,
                 "clarification_question": None,
             },
+            "user clarification": {
+                "context_ref": None,
+                "request_live_observation": False,
+                "clarification_question": "<one concise question>",
+            },
         },
     }
     return (
         "Make only the first Spec2Primitives needed_context decision. "
-        "No document, CAD, or observation evidence has been served. Retrieve "
-        "one permitted evidence source before clarification can be considered. "
-        "Treat user expertise as unknown. Choose exactly one permitted evidence "
-        "request shape and leave clarification_question null. Do not return context "
+        "No document, CAD, or observation evidence has been served. Treat user "
+        "expertise as unknown. Choose exactly one permitted evidence or clarification "
+        "request shape. Do not return context "
         "understanding complete, grounding, an assembly plan, or primitive_steps.\n\n"
         "PA input:\n"
         f"{json.dumps(pa_context, indent=2, ensure_ascii=False)}"
@@ -326,7 +330,8 @@ def _needed_context_response_format(
                         },
                         "request_live_observation": {"type": "boolean"},
                         "clarification_question": {
-                            "type": "null",
+                            "type": ["string", "null"],
+                            "minLength": 1,
                         },
                     },
                 }
@@ -356,13 +361,17 @@ def _needed_context_validation_error(
         return "context_ref is not an approved exact ref."
     if not isinstance(request_live_observation, bool):
         return "request_live_observation must be a boolean."
-    if clarification_question is not None:
-        return "Phase 3.1 clarification_question must remain null."
+    if clarification_question is not None and (
+        not isinstance(clarification_question, str)
+        or not clarification_question.strip()
+    ):
+        return "clarification_question must be null or non-empty text."
 
     active_values = sum(
         (
             context_ref is not None,
             request_live_observation is True,
+            clarification_question is not None,
         )
     )
     if active_values != 1:

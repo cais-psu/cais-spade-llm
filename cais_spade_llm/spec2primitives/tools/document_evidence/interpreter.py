@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -119,7 +118,7 @@ class DocumentVisionRuntime(Protocol):
         self,
         request: TargetedDocumentVisionRequest,
     ) -> DocumentVisionResponse:
-        """Inspect only selected pages for one neutral evidence question."""
+        """Inspect all ordered document pages for one neutral evidence question."""
         ...
 
 
@@ -417,17 +416,10 @@ async def inspect_document_evidence(
     evidence_question: str,
     config: DocumentVLMConfig,
     vision_runtime: DocumentVisionRuntime,
-    maximum_pages: int = 3,
 ) -> DocumentEvidenceRecord:
-    """Inspect deterministically selected cached pages for one evidence gap."""
+    """Inspect every ordered cached page for one evidence gap."""
     if not isinstance(evidence_question, str) or not evidence_question.strip():
         raise DocumentInterpretationError("Targeted evidence question is invalid.")
-    if (
-        isinstance(maximum_pages, bool)
-        or not isinstance(maximum_pages, int)
-        or maximum_pages <= 0
-    ):
-        raise DocumentInterpretationError("maximum_pages must be a positive integer.")
     root = Path(interaction_root).resolve()
     overview, cache_record_path = _validated_overview_snapshot(
         root,
@@ -448,17 +440,12 @@ async def inspect_document_evidence(
     )
     if not isinstance(pages, list):
         raise DocumentInterpretationError("Targeted document pages are invalid.")
-    selected_numbers = _select_targeted_pages(
-        evidence_question,
-        overview,
-        pages,
-        maximum_pages=maximum_pages,
-    )
+    page_numbers = tuple(range(1, len(pages) + 1))
     rendered_pages = _load_cached_rendered_pages(
         overview,
         cache_record_path.parent,
         pages,
-        selected_numbers,
+        page_numbers,
     )
     request = TargetedDocumentVisionRequest(
         context_ref=context_ref,
@@ -473,7 +460,7 @@ async def inspect_document_evidence(
         )
     output = _validated_targeted_output(
         response.output,
-        selected_pages=frozenset(selected_numbers),
+        document_pages=frozenset(page_numbers),
     )
     evidence_number = len(
         tuple(
@@ -514,7 +501,7 @@ async def inspect_document_evidence(
         "source_sha256": overview["source_sha256"],
         "source_overview_ref": str(cache_record_path),
         "evidence_question": evidence_question,
-        "selected_pages": list(selected_numbers),
+        "selected_pages": list(page_numbers),
         "provider": config.provider,
         "configured_model": config.model,
         "response_model": response.model,
@@ -710,7 +697,7 @@ def _targeted_request_text(request: TargetedDocumentVisionRequest) -> str:
             "document_context_ref": request.context_ref,
             "source_sha256": request.source_sha256,
             "evidence_question": request.evidence_question,
-            "selected_document_pages": [
+            "document_pages": [
                 {"page": page.page_number, "extracted_text": page.text}
                 for page in request.pages
             ],
@@ -722,7 +709,7 @@ def _targeted_request_text(request: TargetedDocumentVisionRequest) -> str:
 
 _OPENAI_INSTRUCTIONS = """You are a bounded document overview tool. Describe only the supplied ordered PDF page images and extracted text. Produce a generic source overview independent of any user requirement or ontology. Record short surface-form observations with the visible page numbers that support them. Put ambiguous or unclear content in uncertainty. Do not create entity keys, IRIs, ontology classes, ontology properties, RDF assertions, robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
 
-_TARGETED_OPENAI_INSTRUCTIONS = """You are a bounded document evidence tool. Inspect only the supplied selected PDF pages for the supplied evidence question. Report short surface-form observations and uncertainty with exact visible page numbers. Do not translate observations into an ontology, create entity keys or IRIs, emit RDF assertions, infer robot resources or capabilities, compose primitive steps, or use simulator or execution state. It is valid to return no observations when the selected pages do not answer the question. Return only the requested structured object."""
+_TARGETED_OPENAI_INSTRUCTIONS = """You are a bounded document evidence tool. Inspect every supplied PDF page in order for the supplied evidence question. Report short surface-form observations and uncertainty with exact visible page numbers. Do not translate observations into an ontology, create entity keys or IRIs, emit RDF assertions, infer robot resources or capabilities, compose primitive steps, or use simulator or execution state. It is valid to return no observations when the document does not answer the question. Return only the requested structured object."""
 
 
 def _document_vision_response(response: object, label: str) -> DocumentVisionResponse:
@@ -845,62 +832,20 @@ def _validated_overview_snapshot(
     return overview, cache_record_path
 
 
-def _select_targeted_pages(
-    evidence_question: str,
-    overview: Mapping[str, object],
-    page_records: Sequence[Mapping[str, object]],
-    *,
-    maximum_pages: int,
-) -> tuple[int, ...]:
-    question_tokens = _search_tokens(evidence_question)
-    observation_scores: dict[int, int] = {}
-    observations = overview.get("observations")
-    if isinstance(observations, list):
-        for observation in observations:
-            if not isinstance(observation, Mapping):
-                continue
-            description = observation.get("description")
-            refs = observation.get("evidence_refs")
-            if not isinstance(description, str) or not isinstance(refs, list):
-                continue
-            overlap = len(question_tokens & _search_tokens(description))
-            for ref in refs:
-                page_number = _page_number_from_ref(ref)
-                if page_number is not None:
-                    observation_scores[page_number] = max(
-                        observation_scores.get(page_number, 0),
-                        overlap,
-                    )
-    ranked: list[tuple[int, int]] = []
-    for expected_page, page in enumerate(page_records, start=1):
-        if not isinstance(page, Mapping) or page.get("page") != expected_page:
-            raise DocumentInterpretationError(
-                "Targeted document pages are not ordered exactly."
-            )
-        text = page.get("text")
-        if not isinstance(text, str):
-            raise DocumentInterpretationError("Targeted page text is invalid.")
-        lexical_score = len(question_tokens & _search_tokens(text))
-        overview_score = observation_scores.get(expected_page, 0)
-        ranked.append((-(lexical_score * 10 + overview_score), expected_page))
-    ranked.sort()
-    return tuple(sorted(page for _score, page in ranked[:maximum_pages]))
-
-
 def _load_cached_rendered_pages(
     overview: Mapping[str, object],
     cache_record_root: Path,
     page_records: Sequence[Mapping[str, object]],
-    selected_pages: Sequence[int],
+    page_numbers: Sequence[int],
 ) -> tuple[RenderedDocumentPage, ...]:
     rendered_records = overview.get("pages")
     if not isinstance(rendered_records, list) or len(rendered_records) != len(
         page_records
     ):
         raise DocumentInterpretationError("Cached rendered page records are invalid.")
-    selected = set(selected_pages)
+    expected_pages = set(page_numbers)
     result: list[RenderedDocumentPage] = []
-    for page_number in selected_pages:
+    for page_number in page_numbers:
         rendered = rendered_records[page_number - 1]
         page = page_records[page_number - 1]
         if (
@@ -937,15 +882,15 @@ def _load_cached_rendered_pages(
                 text=str(page["text"]),
             )
         )
-    if set(page.page_number for page in result) != selected:
-        raise DocumentInterpretationError("Targeted rendered page selection is invalid.")
+    if set(page.page_number for page in result) != expected_pages:
+        raise DocumentInterpretationError("Targeted rendered document pages are invalid.")
     return tuple(result)
 
 
 def _validated_targeted_output(
     value: Mapping[str, object],
     *,
-    selected_pages: frozenset[int],
+    document_pages: frozenset[int],
 ) -> dict[str, object]:
     if not isinstance(value, Mapping) or set(value) != {
         "observations",
@@ -955,7 +900,7 @@ def _validated_targeted_output(
             "Targeted document output fields are invalid."
         )
     validated: dict[str, object] = {"observations": [], "uncertainty": []}
-    maximum_page = max(selected_pages)
+    maximum_page = max(document_pages)
     for field in validated:
         items = value[field]
         if not isinstance(items, list):
@@ -978,30 +923,15 @@ def _validated_targeted_output(
                 maximum_page,
                 f"targeted {field}[{index}]",
             )
-            if not set(pages).issubset(selected_pages):
+            if not set(pages).issubset(document_pages):
                 raise DocumentInterpretationError(
-                    f"Targeted {field}[{index}] cites an unselected page."
+                    f"Targeted {field}[{index}] cites a page outside the document."
                 )
             output_items.append(
                 {"description": description, "evidence_pages": list(pages)}
             )
         validated[field] = output_items
     return validated
-
-
-def _search_tokens(value: str) -> frozenset[str]:
-    return frozenset(
-        token
-        for token in re.findall(r"[A-Za-z0-9]+", value.casefold())
-        if len(token) > 2
-    )
-
-
-def _page_number_from_ref(value: object) -> int | None:
-    if not isinstance(value, str) or "#page=" not in value:
-        return None
-    page = value.rsplit("#page=", 1)[-1]
-    return int(page) if page.isdigit() and int(page) > 0 else None
 
 
 def _render_pages(

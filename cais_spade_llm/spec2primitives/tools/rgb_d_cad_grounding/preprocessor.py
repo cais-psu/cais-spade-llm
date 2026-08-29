@@ -31,6 +31,7 @@ _GROUNDING_ROOT = Path("products/grounding/rgb_d_cad_grounding")
 _OBSERVATIONS_ROOT = Path("products/observations")
 _PRODUCER = "rgb_d_cad_grounding"
 _SUPPORTED_DISTORTION_MODELS = {"plumb_bob", "rational_polynomial"}
+_SERVED_BOUNDS_ATOL_MM = 5e-7
 _CAD_CONTEXT_KEYS = {"context_ref", "evidence_type", "provenance", "CAD_evidence"}
 _OBSERVATION_CONTEXT_KEYS = {
     "context_ref",
@@ -198,15 +199,23 @@ def _preprocess_cad(
         raise GeometryPreprocessingError(
             "Approved CAD source changed after its exact ref was served."
         )
-    triangles_m, facet_normals, triangle_count = _load_binary_stl(source_bytes)
+    vertices_mm, facet_normals, triangle_count = _load_binary_stl(source_bytes)
     if evidence["triangle_count"] != triangle_count:
         raise GeometryPreprocessingError(
             "Served CAD triangle count does not match the approved mesh."
         )
+    bounds_minimum_mm = vertices_mm.min(axis=(0, 1))
+    bounds_maximum_mm = vertices_mm.max(axis=(0, 1))
+    _validate_served_bounds(
+        evidence["bounds_mm"],
+        bounds_minimum_mm,
+        bounds_maximum_mm,
+    )
+
+    triangles_m = np.asarray(vertices_mm * np.float32(0.001), dtype=np.float32)
     bounds_minimum = triangles_m.min(axis=(0, 1))
     bounds_maximum = triangles_m.max(axis=(0, 1))
     bounds_size = bounds_maximum - bounds_minimum
-    _validate_served_bounds(evidence["bounds_mm"], bounds_minimum, bounds_maximum)
 
     artifact_name = "cad_mesh.npz"
     artifact_path = temporary_root / artifact_name
@@ -388,8 +397,7 @@ def _load_binary_stl(source_bytes: bytes) -> tuple[np.ndarray, np.ndarray, int]:
     facet_normals = np.array(facets["normal"], dtype=np.float32, copy=True)
     if not np.isfinite(vertices_mm).all() or not np.isfinite(facet_normals).all():
         raise GeometryPreprocessingError("Binary STL contains non-finite geometry.")
-    triangles_m = np.asarray(vertices_mm * np.float32(0.001), dtype=np.float32)
-    return triangles_m, facet_normals, triangle_count
+    return vertices_mm, facet_normals, triangle_count
 
 
 def _deproject_camera(
@@ -568,8 +576,8 @@ def _validated_artifact_references(
 
 def _validate_served_bounds(
     value: object,
-    minimum_m: np.ndarray,
-    maximum_m: np.ndarray,
+    minimum_mm: np.ndarray,
+    maximum_mm: np.ndarray,
 ) -> None:
     if not isinstance(value, Mapping) or set(value) != {"minimum", "maximum", "size"}:
         raise GeometryPreprocessingError("Served CAD bounds are invalid.")
@@ -588,10 +596,31 @@ def _validate_served_bounds(
         )
     ):
         raise GeometryPreprocessingError("Served CAD bounds are invalid.")
+    approved_minimum = np.asarray(minimum_mm, dtype=np.float64)
+    approved_maximum = np.asarray(maximum_mm, dtype=np.float64)
+    approved_size = approved_maximum - approved_minimum
+    # The resolver serializes source-unit STL bounds to six decimal places.
+    # Validate before float32 metre conversion so its rounding cannot reject
+    # metadata that still matches the exact approved source mesh.
     if not (
-        np.allclose(served_minimum * 0.001, minimum_m, rtol=0.0, atol=1e-8)
-        and np.allclose(served_maximum * 0.001, maximum_m, rtol=0.0, atol=1e-8)
-        and np.allclose(served_size * 0.001, maximum_m - minimum_m, rtol=0.0, atol=1e-8)
+        np.allclose(
+            served_minimum,
+            approved_minimum,
+            rtol=0.0,
+            atol=_SERVED_BOUNDS_ATOL_MM,
+        )
+        and np.allclose(
+            served_maximum,
+            approved_maximum,
+            rtol=0.0,
+            atol=_SERVED_BOUNDS_ATOL_MM,
+        )
+        and np.allclose(
+            served_size,
+            approved_size,
+            rtol=0.0,
+            atol=_SERVED_BOUNDS_ATOL_MM,
+        )
     ):
         raise GeometryPreprocessingError("Served CAD bounds do not match the approved mesh.")
 

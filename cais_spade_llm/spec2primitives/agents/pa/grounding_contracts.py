@@ -22,17 +22,14 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import ABoxSnapsho
 _BINDING_STATUSES = frozenset(
     {"accepted", "ambiguous", "rejected", "stale", "unavailable"}
 )
-_GROUNDING_STATEMENT_STATUSES = frozenset({"directly_stated", "inferred"})
-_INFORMATION_NEED_STATUSES = frozenset({"open", "resolved", "exhausted"})
 _ACTION_ATTEMPT_STATUSES = frozenset(
     {"accepted", "no_change", "rejected", "unavailable"}
 )
-_GROUNDING_DECISION_TYPES = frozenset(
-    {"request_evidence", "ready_for_ontology", "incomplete"}
+_GROUNDING_ACTIONS = frozenset(
+    {"retrieve", "inspect", "propose_grounding", "ask_user", "incomplete"}
 )
 _GROUNDING_SESSION_STATUSES = frozenset(
     {
-        "grounding",
         "waiting_for_evidence",
         "waiting_for_user",
         "ready_for_ontology",
@@ -41,10 +38,59 @@ _GROUNDING_SESSION_STATUSES = frozenset(
         "ontology_gap",
     }
 )
-_INFORMATION_STATUSES = frozenset({"enough", "partial", "not_enough"})
 _SAFE_SYMBOL = re.compile(r"^[^\x00-\x1f\x7f]+$")
 _VIEW_ROOT = Path("products/grounding/product_context")
 _SESSION_ROOT = Path("products/grounding/session")
+_RESOURCE_SELECTION_PREFIX = (
+    "products",
+    "grounding",
+    "resource_selection",
+)
+_RESOURCE_SELECTION_RECORD_NAME = "resource_selection_record.json"
+_RESOURCE_SELECTION_POLICY = "first_reachable_in_predefined_registry_order"
+_ASSEMBLY_PROCESS_IRI = "https://cais-spade-llm.local/process/assembly"
+_PREDEFINED_RESOURCES = (
+    ("xarm6", "https://cais-spade-llm.local/resource/xarm6"),
+    ("ur5e", "https://cais-spade-llm.local/resource/ur5e"),
+)
+_RESOURCE_SELECTION_KEYS = frozenset(
+    {
+        "schema_version",
+        "record_type",
+        "selection_number",
+        "specification_iri",
+        "feature_iri",
+        "process_iri",
+        "candidate_resource_iris",
+        "required_record_type",
+        "target_frame",
+        "pose_record_ref",
+        "pose_record_sha256",
+        "observation_timestamp_ns",
+        "tbox_fingerprint",
+        "registry_fingerprint",
+        "workcell_fingerprint",
+        "selection_policy",
+        "candidate_reach_evidence",
+        "selected_resource_symbol",
+        "selected_resource_iri",
+        "selected_resource_jid",
+        "selected_execution_mode",
+        "fingerprint",
+    }
+)
+_CANDIDATE_REACH_KEYS = frozenset(
+    {
+        "resource_symbol",
+        "resource_iri",
+        "resource_jid",
+        "manifest_ref",
+        "manifest_sha256",
+        "execution_mode",
+        "reachable",
+        "verdicts",
+    }
+)
 _DELTA_KEYS = frozenset(
     {
         "schema_version",
@@ -62,146 +108,74 @@ class GroundingContractError(ValueError):
     """Raised when a Phase 4.3 grounding contract is invalid."""
 
 
-@dataclass(frozen=True)
-class GroundingStatement:
-    """Record one source-cited statement without ontology commitments."""
-
-    statement_id: str
-    text: str
-    status: str
-    sources: tuple[str, ...]
-    reason: str
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> GroundingStatement:
-        """Validate and construct one grounding statement."""
-        _require_exact_keys(
-            value,
-            {"statement_id", "text", "status", "sources", "reason"},
-            "GroundingStatement",
-        )
-        status = _required_string(value["status"], "GroundingStatement.status")
-        if status not in _GROUNDING_STATEMENT_STATUSES:
-            raise GroundingContractError("GroundingStatement.status is invalid.")
-        sources = _string_tuple(value["sources"], "GroundingStatement.sources")
-        if not sources:
-            raise GroundingContractError(
-                "GroundingStatement.sources must contain supporting sources."
-            )
-        return cls(
-            statement_id=_required_symbol(
-                value["statement_id"], "GroundingStatement.statement_id"
-            ),
-            text=_required_string(value["text"], "GroundingStatement.text"),
-            status=status,
-            sources=sources,
-            reason=_required_string(value["reason"], "GroundingStatement.reason"),
-        )
-
-    def to_record(self) -> dict[str, object]:
-        """Return the JSON-safe statement record."""
-        return {
-            "statement_id": self.statement_id,
-            "text": self.text,
-            "status": self.status,
-            "sources": list(self.sources),
-            "reason": self.reason,
-        }
+class _EmbeddedEvidenceStateError(GroundingContractError):
+    """Mark an unavailable or hash-changed embedded source as stale evidence."""
 
 
 @dataclass(frozen=True)
-class InformationNeed:
-    """Describe one unresolved question and the records that may answer it."""
+class GroundingNextAction:
+    """Hold the one semantic action selected by ProductAgent."""
 
-    need_id: str
-    question: str
-    required: bool
-    sources: tuple[str, ...]
-    accepted_record_types: tuple[str, ...]
-    status: str
-    answer_statement_ids: tuple[str, ...]
+    action: str
+    source_ref: str | None
+    question: str | None
+    reason: str | None
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> InformationNeed:
-        """Validate and construct one information need."""
-        _require_exact_keys(
-            value,
-            {
-                "need_id",
-                "question",
-                "required",
-                "sources",
-                "accepted_record_types",
-                "status",
-                "answer_statement_ids",
-            },
-            "InformationNeed",
-        )
-        required = value["required"]
-        if not isinstance(required, bool):
-            raise GroundingContractError("InformationNeed.required must be a boolean.")
-        sources = _string_tuple(value["sources"], "InformationNeed.sources")
-        if not sources:
-            raise GroundingContractError(
-                "InformationNeed.sources must identify why the question is open."
-            )
-        status = _required_string(value["status"], "InformationNeed.status")
-        if status not in _INFORMATION_NEED_STATUSES:
-            raise GroundingContractError("InformationNeed.status is invalid.")
-        accepted_record_types = _string_tuple(
-            value["accepted_record_types"],
-            "InformationNeed.accepted_record_types",
-        )
-        if status == "open" and not accepted_record_types:
-            raise GroundingContractError(
-                "An open InformationNeed requires accepted_record_types."
-            )
-        answer_statement_ids = _string_tuple(
-            value["answer_statement_ids"],
-            "InformationNeed.answer_statement_ids",
-        )
-        if status == "resolved" and not answer_statement_ids:
-            raise GroundingContractError(
-                "A resolved InformationNeed requires answer_statement_ids."
-            )
-        if status != "resolved" and answer_statement_ids:
-            raise GroundingContractError(
-                "Only a resolved InformationNeed may have answer_statement_ids."
-            )
+    def from_mapping(cls, value: Mapping[str, object]) -> GroundingNextAction:
+        """Validate one minimal action variant without controller metadata."""
+        action = _required_string(value.get("action"), "GroundingNextAction.action")
+        if action not in _GROUNDING_ACTIONS:
+            raise GroundingContractError("GroundingNextAction.action is invalid.")
+        expected = {
+            "retrieve": {"action", "source_ref"},
+            "inspect": {"action", "source_ref", "question"},
+            "propose_grounding": {"action"},
+            "ask_user": {"action", "question"},
+            "incomplete": {"action", "reason"},
+        }[action]
+        _require_exact_keys(value, expected, "GroundingNextAction")
         return cls(
-            need_id=_required_symbol(value["need_id"], "InformationNeed.need_id"),
-            question=_required_string(
-                value["question"], "InformationNeed.question"
+            action=action,
+            source_ref=(
+                _required_symbol(value["source_ref"], "GroundingNextAction.source_ref")
+                if "source_ref" in value
+                else None
             ),
-            required=required,
-            sources=sources,
-            accepted_record_types=accepted_record_types,
-            status=status,
-            answer_statement_ids=answer_statement_ids,
+            question=(
+                _required_string(value["question"], "GroundingNextAction.question")
+                if "question" in value
+                else None
+            ),
+            reason=(
+                _required_string(value["reason"], "GroundingNextAction.reason")
+                if "reason" in value
+                else None
+            ),
         )
 
     def to_record(self) -> dict[str, object]:
-        """Return the JSON-safe information-need record."""
-        return {
-            "need_id": self.need_id,
-            "question": self.question,
-            "required": self.required,
-            "sources": list(self.sources),
-            "accepted_record_types": list(self.accepted_record_types),
-            "status": self.status,
-            "answer_statement_ids": list(self.answer_statement_ids),
-        }
+        """Return the JSON-safe minimal action variant."""
+        record: dict[str, object] = {"action": self.action}
+        if self.source_ref is not None:
+            record["source_ref"] = self.source_ref
+        if self.question is not None:
+            record["question"] = self.question
+        if self.reason is not None:
+            record["reason"] = self.reason
+        return record
 
 
 @dataclass(frozen=True)
 class GroundingActionAttempt:
-    """Record one exact provider and source revision attempted for a need."""
+    """Record one host-resolved provider action and its result."""
 
     attempt_id: str
-    need_id: str
+    action: str
     provider_id: str
     source_ref: str
     source_revision: str
+    question: str | None
     status: str
     record_refs: tuple[str, ...]
 
@@ -212,10 +186,11 @@ class GroundingActionAttempt:
             value,
             {
                 "attempt_id",
-                "need_id",
+                "action",
                 "provider_id",
                 "source_ref",
                 "source_revision",
+                "question",
                 "status",
                 "record_refs",
             },
@@ -231,13 +206,25 @@ class GroundingActionAttempt:
             raise GroundingContractError(
                 "An accepted GroundingActionAttempt requires record_refs."
             )
+        action = _required_string(value["action"], "GroundingActionAttempt.action")
+        if action not in {"retrieve", "inspect", "ask_user"}:
+            raise GroundingContractError("GroundingActionAttempt.action is invalid.")
+        question = _optional_string(
+            value["question"], "GroundingActionAttempt.question"
+        )
+        if action in {"inspect", "ask_user"} and question is None:
+            raise GroundingContractError(
+                "An inspect or ask_user attempt requires its exact question."
+            )
+        if action == "retrieve" and question is not None:
+            raise GroundingContractError(
+                "A retrieve attempt must not contain a question."
+            )
         return cls(
             attempt_id=_required_symbol(
                 value["attempt_id"], "GroundingActionAttempt.attempt_id"
             ),
-            need_id=_required_symbol(
-                value["need_id"], "GroundingActionAttempt.need_id"
-            ),
+            action=action,
             provider_id=_required_symbol(
                 value["provider_id"], "GroundingActionAttempt.provider_id"
             ),
@@ -247,122 +234,47 @@ class GroundingActionAttempt:
             source_revision=_required_symbol(
                 value["source_revision"], "GroundingActionAttempt.source_revision"
             ),
+            question=question,
             status=status,
             record_refs=record_refs,
         )
 
     @property
-    def action_key(self) -> tuple[str, str, str]:
+    def action_key(self) -> tuple[str, str, str, str, str | None]:
         """Return the exact replay-protection key for this attempt."""
-        return (self.need_id, self.provider_id, self.source_revision)
+        return (
+            self.action,
+            self.provider_id,
+            self.source_ref,
+            self.source_revision,
+            self.question,
+        )
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe action-attempt record."""
         return {
             "attempt_id": self.attempt_id,
-            "need_id": self.need_id,
+            "action": self.action,
             "provider_id": self.provider_id,
             "source_ref": self.source_ref,
             "source_revision": self.source_revision,
+            "question": self.question,
             "status": self.status,
             "record_refs": list(self.record_refs),
         }
 
 
 @dataclass(frozen=True)
-class GroundingDecision:
-    """Hold one bounded next action or terminal PA grounding decision."""
-
-    decision_type: str
-    need_id: str | None
-    provider_id: str | None
-    source_ref: str | None
-    source_revision: str | None
-    query: str | None
-    reason: str
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> GroundingDecision:
-        """Validate and construct one grounding decision."""
-        _require_exact_keys(
-            value,
-            {
-                "decision_type",
-                "need_id",
-                "provider_id",
-                "source_ref",
-                "source_revision",
-                "query",
-                "reason",
-            },
-            "GroundingDecision",
-        )
-        decision_type = _required_string(
-            value["decision_type"], "GroundingDecision.decision_type"
-        )
-        if decision_type not in _GROUNDING_DECISION_TYPES:
-            raise GroundingContractError("GroundingDecision.decision_type is invalid.")
-        need_id = _optional_symbol(value["need_id"], "GroundingDecision.need_id")
-        provider_id = _optional_symbol(
-            value["provider_id"], "GroundingDecision.provider_id"
-        )
-        source_ref = _optional_symbol(
-            value["source_ref"], "GroundingDecision.source_ref"
-        )
-        source_revision = _optional_symbol(
-            value["source_revision"], "GroundingDecision.source_revision"
-        )
-        query = _optional_string(value["query"], "GroundingDecision.query")
-        action_values = (need_id, provider_id, source_ref, source_revision, query)
-        if decision_type == "request_evidence" and any(
-            item is None for item in action_values
-        ):
-            raise GroundingContractError(
-                "A request_evidence GroundingDecision requires one exact action."
-            )
-        if decision_type != "request_evidence" and any(
-            item is not None for item in action_values
-        ):
-            raise GroundingContractError(
-                "A terminal GroundingDecision must not contain an action."
-            )
-        return cls(
-            decision_type=decision_type,
-            need_id=need_id,
-            provider_id=provider_id,
-            source_ref=source_ref,
-            source_revision=source_revision,
-            query=query,
-            reason=_required_string(value["reason"], "GroundingDecision.reason"),
-        )
-
-    def to_record(self) -> dict[str, object]:
-        """Return the JSON-safe decision record."""
-        return {
-            "decision_type": self.decision_type,
-            "need_id": self.need_id,
-            "provider_id": self.provider_id,
-            "source_ref": self.source_ref,
-            "source_revision": self.source_revision,
-            "query": self.query,
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
 class GroundingSession:
-    """Hold PA's ontology-neutral, source-cited grounding state."""
+    """Hold only the requirement and controller-owned action journal."""
 
     revision: int
     requirement_text: str
-    statements: tuple[GroundingStatement, ...]
-    information_needs: tuple[InformationNeed, ...]
     attempted_actions: tuple[GroundingActionAttempt, ...]
-    evidence_refs: tuple[str, ...]
-    decision: GroundingDecision
+    next_action: GroundingNextAction
+    selected_provider_id: str | None
+    selected_source_revision: str | None
     status: str
-    missing_information: tuple[str, ...]
-    information_status: str
     fingerprint: str
 
     @classmethod
@@ -371,33 +283,23 @@ class GroundingSession:
         *,
         revision: int,
         requirement_text: str,
-        statements: Sequence[GroundingStatement] = (),
-        information_needs: Sequence[InformationNeed] = (),
         attempted_actions: Sequence[GroundingActionAttempt] = (),
-        evidence_refs: Sequence[str] = (),
-        decision: GroundingDecision,
+        next_action: GroundingNextAction,
+        selected_provider_id: str | None = None,
+        selected_source_revision: str | None = None,
         status: str,
-        information_status: str,
     ) -> GroundingSession:
-        """Create a fingerprinted session from already validated child records."""
-        missing_information = tuple(
-            need.question
-            for need in information_needs
-            if need.status in {"open", "exhausted"}
-        )
+        """Create a fingerprinted session from one action and prior attempts."""
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "GroundingSession",
             "revision": revision,
             "requirement_text": requirement_text,
-            "statements": [item.to_record() for item in statements],
-            "information_needs": [item.to_record() for item in information_needs],
             "attempted_actions": [item.to_record() for item in attempted_actions],
-            "evidence_refs": list(evidence_refs),
-            "decision": decision.to_record(),
+            "next_action": next_action.to_record(),
+            "selected_provider_id": selected_provider_id,
+            "selected_source_revision": selected_source_revision,
             "status": status,
-            "missing_information": list(missing_information),
-            "information_status": information_status,
         }
         record["fingerprint"] = _fingerprint(record)
         return cls.from_mapping(record)
@@ -412,105 +314,50 @@ class GroundingSession:
                 "record_type",
                 "revision",
                 "requirement_text",
-                "statements",
-                "information_needs",
                 "attempted_actions",
-                "evidence_refs",
-                "decision",
+                "next_action",
+                "selected_provider_id",
+                "selected_source_revision",
                 "status",
-                "missing_information",
-                "information_status",
                 "fingerprint",
             },
             "GroundingSession",
         )
-        if value["schema_version"] != 1 or value["record_type"] != "GroundingSession":
+        if value["schema_version"] != 2 or value["record_type"] != "GroundingSession":
             raise GroundingContractError("GroundingSession identity is invalid.")
-        statements = _record_tuple(
-            value["statements"], GroundingStatement.from_mapping, "statements"
-        )
-        needs = _record_tuple(
-            value["information_needs"],
-            InformationNeed.from_mapping,
-            "information_needs",
-        )
         attempts = _record_tuple(
             value["attempted_actions"],
             GroundingActionAttempt.from_mapping,
             "attempted_actions",
         )
-        statement_ids = [item.statement_id for item in statements]
-        need_ids = [item.need_id for item in needs]
         attempt_ids = [item.attempt_id for item in attempts]
-        if len(set(statement_ids)) != len(statement_ids):
-            raise GroundingContractError("GroundingSession statement IDs must be unique.")
-        if len(set(need_ids)) != len(need_ids):
-            raise GroundingContractError("GroundingSession need IDs must be unique.")
         if len(set(attempt_ids)) != len(attempt_ids):
             raise GroundingContractError("GroundingSession attempt IDs must be unique.")
         if len({item.action_key for item in attempts}) != len(attempts):
             raise GroundingContractError(
                 "GroundingSession must not repeat an action for one source revision."
             )
-        known_statement_ids = set(statement_ids)
-        known_need_ids = set(need_ids)
-        for need in needs:
-            if not set(need.answer_statement_ids).issubset(known_statement_ids):
-                raise GroundingContractError(
-                    "InformationNeed references an unknown answer statement."
-                )
-        for attempt in attempts:
-            if attempt.need_id not in known_need_ids:
-                raise GroundingContractError(
-                    "GroundingActionAttempt references an unknown information need."
-                )
-        decision = GroundingDecision.from_mapping(
-            _required_mapping(value["decision"], "GroundingSession.decision")
+        next_action = GroundingNextAction.from_mapping(
+            _required_mapping(value["next_action"], "GroundingSession.next_action")
         )
-        if decision.need_id is not None and decision.need_id not in known_need_ids:
+        selected_provider_id = _optional_symbol(
+            value["selected_provider_id"], "GroundingSession.selected_provider_id"
+        )
+        selected_source_revision = _optional_symbol(
+            value["selected_source_revision"],
+            "GroundingSession.selected_source_revision",
+        )
+        selects_provider = next_action.action in {"retrieve", "inspect", "ask_user"}
+        if selects_provider != (
+            selected_provider_id is not None and selected_source_revision is not None
+        ):
             raise GroundingContractError(
-                "GroundingDecision references an unknown information need."
+                "GroundingSession provider metadata does not match its next action."
             )
-        if decision.decision_type == "request_evidence":
-            selected_need = next(
-                item for item in needs if item.need_id == decision.need_id
-            )
-            if selected_need.status != "open":
-                raise GroundingContractError(
-                    "GroundingDecision must request an open information need."
-                )
-            action_key = (
-                decision.need_id,
-                decision.provider_id,
-                decision.source_revision,
-            )
-            if action_key in {item.action_key for item in attempts}:
-                raise GroundingContractError(
-                    "GroundingDecision repeats an attempted provider source revision."
-                )
         status = _required_string(value["status"], "GroundingSession.status")
         if status not in _GROUNDING_SESSION_STATUSES:
             raise GroundingContractError("GroundingSession.status is invalid.")
-        information_status = _required_string(
-            value["information_status"], "GroundingSession.information_status"
-        )
-        if information_status not in _INFORMATION_STATUSES:
-            raise GroundingContractError(
-                "GroundingSession.information_status is invalid."
-            )
-        missing_information = _string_tuple(
-            value["missing_information"], "GroundingSession.missing_information"
-        )
-        expected_missing = tuple(
-            need.question
-            for need in needs
-            if need.status in {"open", "exhausted"}
-        )
-        if missing_information != expected_missing:
-            raise GroundingContractError(
-                "GroundingSession.missing_information does not match its needs."
-            )
-        _validate_session_decision_status(status, decision, needs)
+        _validate_session_action_status(status, next_action)
         fingerprint = _sha256_string(
             value["fingerprint"], "GroundingSession.fingerprint"
         )
@@ -523,34 +370,26 @@ class GroundingSession:
             requirement_text=_required_string(
                 value["requirement_text"], "GroundingSession.requirement_text"
             ),
-            statements=statements,
-            information_needs=needs,
             attempted_actions=attempts,
-            evidence_refs=_string_tuple(
-                value["evidence_refs"], "GroundingSession.evidence_refs"
-            ),
-            decision=decision,
+            next_action=next_action,
+            selected_provider_id=selected_provider_id,
+            selected_source_revision=selected_source_revision,
             status=status,
-            missing_information=missing_information,
-            information_status=information_status,
             fingerprint=fingerprint,
         )
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe grounding-session record."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "GroundingSession",
             "revision": self.revision,
             "requirement_text": self.requirement_text,
-            "statements": [item.to_record() for item in self.statements],
-            "information_needs": [item.to_record() for item in self.information_needs],
             "attempted_actions": [item.to_record() for item in self.attempted_actions],
-            "evidence_refs": list(self.evidence_refs),
-            "decision": self.decision.to_record(),
+            "next_action": self.next_action.to_record(),
+            "selected_provider_id": self.selected_provider_id,
+            "selected_source_revision": self.selected_source_revision,
             "status": self.status,
-            "missing_information": list(self.missing_information),
-            "information_status": self.information_status,
             "fingerprint": self.fingerprint,
         }
 
@@ -805,19 +644,18 @@ class ProductContextView:
 
 @dataclass(frozen=True)
 class TypedGroundingContract:
-    """Carry grounded meaning that is not limited to the current ontology."""
+    """Carry one final cited context summary beside the ontology projection."""
 
     requirement_text: str
     session_ref: str
     session_fingerprint: str
     ontology_projection_ref: str
-    statements: tuple[GroundingStatement, ...]
+    context_summary: str
+    context_evidence_refs: tuple[str, ...]
     missing_information: tuple[str, ...]
-    information_status: str
     typed_record_refs: tuple[Mapping[str, str], ...]
     source_refs: tuple[Mapping[str, str], ...]
     clarification_refs: tuple[Mapping[str, str], ...]
-    unrepresented_statement_ids: tuple[str, ...]
     fingerprint: str
 
     @classmethod
@@ -828,29 +666,27 @@ class TypedGroundingContract:
         session_ref: str,
         session_fingerprint: str,
         ontology_projection_ref: str,
-        statements: Sequence[GroundingStatement],
+        context_summary: str,
+        context_evidence_refs: Sequence[str],
         missing_information: Sequence[str],
-        information_status: str,
         typed_record_refs: Sequence[Mapping[str, str]],
         source_refs: Sequence[Mapping[str, str]],
         clarification_refs: Sequence[Mapping[str, str]],
-        unrepresented_statement_ids: Sequence[str],
     ) -> TypedGroundingContract:
         """Create one fingerprinted typed contract from validated completion inputs."""
         record: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "TypedGroundingContract",
             "requirement_text": requirement_text,
             "session_ref": session_ref,
             "session_fingerprint": session_fingerprint,
             "ontology_projection_ref": ontology_projection_ref,
-            "statements": [item.to_record() for item in statements],
+            "context_summary": context_summary,
+            "context_evidence_refs": list(context_evidence_refs),
             "missing_information": list(missing_information),
-            "information_status": information_status,
             "typed_record_refs": [dict(item) for item in typed_record_refs],
             "source_refs": [dict(item) for item in source_refs],
             "clarification_refs": [dict(item) for item in clarification_refs],
-            "unrepresented_statement_ids": list(unrepresented_statement_ids),
         }
         record["fingerprint"] = _fingerprint(record)
         return cls.from_mapping(record)
@@ -867,36 +703,24 @@ class TypedGroundingContract:
                 "session_ref",
                 "session_fingerprint",
                 "ontology_projection_ref",
-                "statements",
+                "context_summary",
+                "context_evidence_refs",
                 "missing_information",
-                "information_status",
                 "typed_record_refs",
                 "source_refs",
                 "clarification_refs",
-                "unrepresented_statement_ids",
                 "fingerprint",
             },
             "TypedGroundingContract",
         )
-        if value["schema_version"] != 1 or value["record_type"] != "TypedGroundingContract":
+        if value["schema_version"] != 2 or value["record_type"] != "TypedGroundingContract":
             raise GroundingContractError("TypedGroundingContract identity is invalid.")
-        statements = _record_tuple(
-            value["statements"], GroundingStatement.from_mapping, "statements"
+        context_evidence_refs = _string_tuple(
+            value["context_evidence_refs"], "context_evidence_refs"
         )
-        statement_ids = {item.statement_id for item in statements}
-        unrepresented = _string_tuple(
-            value["unrepresented_statement_ids"], "unrepresented_statement_ids"
-        )
-        if not set(unrepresented).issubset(statement_ids):
+        if not context_evidence_refs:
             raise GroundingContractError(
-                "TypedGroundingContract has an unknown unrepresented statement."
-            )
-        information_status = _required_string(
-            value["information_status"], "information_status"
-        )
-        if information_status not in _INFORMATION_STATUSES:
-            raise GroundingContractError(
-                "TypedGroundingContract information_status is invalid."
+                "TypedGroundingContract requires cited context evidence."
             )
         fingerprint = _sha256_string(value["fingerprint"], "fingerprint")
         payload = dict(value)
@@ -914,11 +738,13 @@ class TypedGroundingContract:
             ontology_projection_ref=_required_string(
                 value["ontology_projection_ref"], "ontology_projection_ref"
             ),
-            statements=statements,
+            context_summary=_required_string(
+                value["context_summary"], "context_summary"
+            ),
+            context_evidence_refs=context_evidence_refs,
             missing_information=_string_tuple(
                 value["missing_information"], "missing_information"
             ),
-            information_status=information_status,
             typed_record_refs=_hashed_ref_tuple(
                 value["typed_record_refs"], "typed_record_refs"
             ),
@@ -926,26 +752,24 @@ class TypedGroundingContract:
             clarification_refs=_hashed_ref_tuple(
                 value["clarification_refs"], "clarification_refs"
             ),
-            unrepresented_statement_ids=unrepresented,
             fingerprint=fingerprint,
         )
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe typed grounding contract."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "TypedGroundingContract",
             "requirement_text": self.requirement_text,
             "session_ref": self.session_ref,
             "session_fingerprint": self.session_fingerprint,
             "ontology_projection_ref": self.ontology_projection_ref,
-            "statements": [item.to_record() for item in self.statements],
+            "context_summary": self.context_summary,
+            "context_evidence_refs": list(self.context_evidence_refs),
             "missing_information": list(self.missing_information),
-            "information_status": self.information_status,
             "typed_record_refs": [dict(item) for item in self.typed_record_refs],
             "source_refs": [dict(item) for item in self.source_refs],
             "clarification_refs": [dict(item) for item in self.clarification_refs],
-            "unrepresented_statement_ids": list(self.unrepresented_statement_ids),
             "fingerprint": self.fingerprint,
         }
 
@@ -965,6 +789,10 @@ class PAContextGroundingCompletionV2:
     typed_grounding_contract_ref: str
     typed_grounding_contract_sha256: str
     typed_grounding_contract_fingerprint: str
+    resource_selection_ref: str
+    resource_selection_sha256: str
+    resource_assignment_delta_ref: str
+    resource_assignment_delta_sha256: str
     tbox_fingerprint: str
     abox_fingerprint: str
     typed_context_refs: tuple[Mapping[str, str], ...]
@@ -993,6 +821,10 @@ class PAContextGroundingCompletionV2:
             "typed_grounding_contract_ref",
             "typed_grounding_contract_sha256",
             "typed_grounding_contract_fingerprint",
+            "resource_selection_ref",
+            "resource_selection_sha256",
+            "resource_assignment_delta_ref",
+            "resource_assignment_delta_sha256",
             "tbox_fingerprint",
             "abox_fingerprint",
             "typed_context_refs",
@@ -1046,6 +878,20 @@ class PAContextGroundingCompletionV2:
                 value["typed_grounding_contract_fingerprint"],
                 "typed_grounding_contract_fingerprint",
             ),
+            resource_selection_ref=_required_string(
+                value["resource_selection_ref"], "resource_selection_ref"
+            ),
+            resource_selection_sha256=_sha256_string(
+                value["resource_selection_sha256"], "resource_selection_sha256"
+            ),
+            resource_assignment_delta_ref=_required_string(
+                value["resource_assignment_delta_ref"],
+                "resource_assignment_delta_ref",
+            ),
+            resource_assignment_delta_sha256=_sha256_string(
+                value["resource_assignment_delta_sha256"],
+                "resource_assignment_delta_sha256",
+            ),
             tbox_fingerprint=_sha256_string(
                 value["tbox_fingerprint"], "tbox_fingerprint"
             ),
@@ -1089,6 +935,10 @@ class PAContextGroundingCompletionV2:
             "typed_grounding_contract_ref": self.typed_grounding_contract_ref,
             "typed_grounding_contract_sha256": self.typed_grounding_contract_sha256,
             "typed_grounding_contract_fingerprint": self.typed_grounding_contract_fingerprint,
+            "resource_selection_ref": self.resource_selection_ref,
+            "resource_selection_sha256": self.resource_selection_sha256,
+            "resource_assignment_delta_ref": self.resource_assignment_delta_ref,
+            "resource_assignment_delta_sha256": self.resource_assignment_delta_sha256,
             "tbox_fingerprint": self.tbox_fingerprint,
             "abox_fingerprint": self.abox_fingerprint,
             "typed_context_refs": [dict(item) for item in self.typed_context_refs],
@@ -1315,45 +1165,77 @@ def persist_pa_context_grounding_completion_v2(  # noqa: PLR0913
             "PAContextGroundingCompletion v2 requires a complete GroundingSession."
         )
     session_path = root / _SESSION_ROOT / f"revision_{session.revision:04d}.json"
-    proposal_paths = sorted(
-        (root / "products/grounding/ontology_grounding").glob("proposal_*.json")
+    proposal_candidates = [
+        (path, _read_json_mapping(path, "OntologyGroundingProposal"))
+        for path in sorted(
+            (root / "products/grounding/ontology_grounding").glob("proposal_*.json")
+        )
+    ]
+    accepted_proposals = [
+        (path, proposal)
+        for path, proposal in proposal_candidates
+        if proposal.get("schema_version") == 3
+        and proposal.get("status") == "accepted"
+    ]
+    if len(accepted_proposals) != 1:
+        raise GroundingContractError(
+            "PAContextGroundingCompletion v2 requires exactly one accepted "
+            "ontology projection."
+        )
+    proposal_path, proposal = accepted_proposals[0]
+    proposal_session = _proposal_grounding_session(root, proposal)
+    _validate_completion_lineage(session, proposal_session)
+    resource_selection_ref, resource_assignment_delta_ref = (
+        _validate_completion_assignment(root, product_context)
     )
-    if not proposal_paths:
-        raise GroundingContractError(
-            "PAContextGroundingCompletion v2 requires an ontology projection."
-        )
-    proposal_path = proposal_paths[-1]
-    proposal = _read_json_mapping(proposal_path, "OntologyGroundingProposal")
-    if proposal.get("schema_version") != 2 or proposal.get("status") != "accepted":
-        raise GroundingContractError(
-            "PAContextGroundingCompletion v2 ontology projection is not accepted."
-        )
+    resource_selection_path = _completion_ref_path(
+        root,
+        resource_selection_ref,
+        prefix=_RESOURCE_SELECTION_PREFIX,
+    )
+    resource_assignment_delta_path = _completion_ref_path(
+        root,
+        resource_assignment_delta_ref,
+        prefix=("products", "grounding", "ontology"),
+    )
     output = proposal.get("output")
     proposal_value = (
         output.get("ontology_grounding_proposal")
         if isinstance(output, Mapping)
         else None
     )
-    unrepresented = (
-        proposal_value.get("unrepresented_statement_ids")
+    context_summary = (
+        proposal_value.get("context_summary")
         if isinstance(proposal_value, Mapping)
         else None
     )
-    if not isinstance(unrepresented, list):
+    context_evidence_refs = (
+        proposal_value.get("evidence_refs")
+        if isinstance(proposal_value, Mapping)
+        else None
+    )
+    missing_information = (
+        proposal_value.get("missing_information")
+        if isinstance(proposal_value, Mapping)
+        else None
+    )
+    if (
+        not isinstance(context_summary, str)
+        or not context_summary.strip()
+        or not isinstance(context_evidence_refs, list)
+        or not context_evidence_refs
+        or not all(isinstance(item, str) and item for item in context_evidence_refs)
+        or not isinstance(missing_information, list)
+        or not all(isinstance(item, str) and item for item in missing_information)
+    ):
         raise GroundingContractError(
-            "Ontology projection unrepresented statements are invalid."
+            "Ontology projection final context is invalid."
         )
     typed_refs = tuple(
         {"ref": item.record_ref, "sha256": item.record_sha256}
         for item in product_context.typed_bindings
     )
-    source_ids = sorted(
-        {
-            source
-            for statement in session.statements
-            for source in statement.sources
-        }
-    )
+    source_ids = sorted(set(context_evidence_refs))
     source_refs = tuple(
         {"ref": source, "sha256": _grounding_source_hash(root, source, session)}
         for source in source_ids
@@ -1374,13 +1256,12 @@ def persist_pa_context_grounding_completion_v2(  # noqa: PLR0913
         session_ref=session_ref,
         session_fingerprint=session.fingerprint,
         ontology_projection_ref=proposal_ref,
-        statements=session.statements,
-        missing_information=session.missing_information,
-        information_status=session.information_status,
+        context_summary=context_summary,
+        context_evidence_refs=context_evidence_refs,
+        missing_information=missing_information,
         typed_record_refs=typed_refs,
         source_refs=source_refs,
         clarification_refs=clarification_records,
-        unrepresented_statement_ids=[str(item) for item in unrepresented],
     )
     contract_path = (
         root
@@ -1402,6 +1283,12 @@ def persist_pa_context_grounding_completion_v2(  # noqa: PLR0913
         "typed_grounding_contract_ref": str(contract_path.relative_to(root)),
         "typed_grounding_contract_sha256": _sha256_path(contract_path),
         "typed_grounding_contract_fingerprint": contract.fingerprint,
+        "resource_selection_ref": resource_selection_ref,
+        "resource_selection_sha256": _sha256_path(resource_selection_path),
+        "resource_assignment_delta_ref": resource_assignment_delta_ref,
+        "resource_assignment_delta_sha256": _sha256_path(
+            resource_assignment_delta_path
+        ),
         "tbox_fingerprint": product_context.tbox_fingerprint,
         "abox_fingerprint": product_context.abox_fingerprint,
         "typed_context_refs": [dict(item) for item in typed_refs],
@@ -1435,7 +1322,7 @@ def load_pa_context_grounding_completion(
     return _load_pa_context_grounding_completion_v2(root, completion_value)
 
 
-def _load_pa_context_grounding_completion_v2(
+def _load_pa_context_grounding_completion_v2(  # noqa: C901
     root: Path,
     value: Mapping[str, object],
 ) -> PAContextGroundingCompletionV2:
@@ -1482,13 +1369,16 @@ def _load_pa_context_grounding_completion_v2(
     if _sha256_path(projection_path) != completion.ontology_projection_sha256:
         raise GroundingContractError("Phase 3.5 v2 ontology projection hash is invalid.")
     projection = _read_json_mapping(projection_path, "OntologyGroundingProposal")
+    proposal_session = _proposal_grounding_session(root, projection)
     if (
-        projection.get("schema_version") != 2
+        projection.get("schema_version") != 3
         or projection.get("status") != "accepted"
-        or projection.get("session_fingerprint")
-        not in {session.fingerprint, _previous_session_fingerprint(root, session)}
+        or proposal_session.requirement_text != completion.product_requirement
+        or proposal_session.next_action.action != "propose_grounding"
+        or proposal_session.status != "ready_for_ontology"
     ):
         raise GroundingContractError("Phase 3.5 v2 ontology projection is invalid.")
+    _validate_completion_lineage(session, proposal_session)
 
     contract_path = _completion_ref_path(
         root,
@@ -1515,18 +1405,411 @@ def _load_pa_context_grounding_completion_v2(
         ref_path = _completion_ref_path(root, item["ref"], prefix=None)
         if _sha256_path(ref_path) != item["sha256"]:
             raise GroundingContractError("Phase 3.5 v2 pinned record hash is invalid.")
+    for item in completion.source_refs:
+        if _grounding_source_hash(root, item["ref"], session) != item["sha256"]:
+            raise GroundingContractError("Phase 3.5 v2 source hash is invalid.")
+    resource_selection_path = _completion_ref_path(
+        root,
+        completion.resource_selection_ref,
+        prefix=_RESOURCE_SELECTION_PREFIX,
+    )
+    if _sha256_path(resource_selection_path) != completion.resource_selection_sha256:
+        raise GroundingContractError(
+            "Phase 3.5 v2 ResourceSelectionRecord hash is invalid."
+        )
+    resource_assignment_delta_path = _completion_ref_path(
+        root,
+        completion.resource_assignment_delta_ref,
+        prefix=("products", "grounding", "ontology"),
+    )
+    if (
+        _sha256_path(resource_assignment_delta_path)
+        != completion.resource_assignment_delta_sha256
+    ):
+        raise GroundingContractError(
+            "Phase 3.5 v2 resource assignment delta hash is invalid."
+        )
+    latest_view = _latest_product_context_view(root)
+    if (
+        latest_view.product_requirement != completion.product_requirement
+        or latest_view.tbox_fingerprint != completion.tbox_fingerprint
+        or latest_view.abox_fingerprint != completion.abox_fingerprint
+        or latest_view.assessed_at_ns != completion.completed_at_ns
+        or tuple(
+            {"ref": item.record_ref, "sha256": item.record_sha256}
+            for item in latest_view.typed_bindings
+        )
+        != completion.typed_context_refs
+    ):
+        raise GroundingContractError(
+            "Phase 3.5 v2 final ProductContextView is inconsistent."
+        )
+    validated_selection_ref, validated_assignment_delta_ref = (
+        _validate_completion_assignment(root, latest_view)
+    )
+    if (
+        validated_selection_ref != completion.resource_selection_ref
+        or validated_assignment_delta_ref
+        != completion.resource_assignment_delta_ref
+    ):
+        raise GroundingContractError(
+            "Phase 3.5 v2 resource assignment lineage is inconsistent."
+        )
     return completion
 
 
-def _previous_session_fingerprint(root: Path, session: GroundingSession) -> str:
-    if session.revision <= 1:
-        return ""
-    path = root / _SESSION_ROOT / f"revision_{session.revision - 1:04d}.json"
-    if not path.is_file():
-        return ""
-    return GroundingSession.from_mapping(
-        _read_json_mapping(path, "previous GroundingSession")
-    ).fingerprint
+def _validate_completion_lineage(
+    session: GroundingSession,
+    proposal_session: GroundingSession,
+) -> None:
+    """Require a complete host session to descend from its exact proposal session."""
+    if (
+        session.next_action.action != "propose_grounding"
+        or proposal_session.next_action.action != "propose_grounding"
+        or proposal_session.status != "ready_for_ontology"
+        or proposal_session.revision >= session.revision
+        or session.attempted_actions[: len(proposal_session.attempted_actions)]
+        != proposal_session.attempted_actions
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion proposal/session lineage is invalid."
+        )
+
+
+def _validate_completion_assignment(
+    root: Path,
+    product_context: ProductContextView,
+) -> tuple[str, str]:
+    """Require the exact post-selection process-execution slice in the final ABox."""
+    execution_iri = f"{product_context.interaction_namespace}process_execution_0001"
+    specification_iri = f"{product_context.interaction_namespace}specification_1"
+    expected = {
+        (
+            specification_iri,
+            "hasProcessExecution",
+            execution_iri,
+        ),
+        (
+            execution_iri,
+            "type",
+            "processExecution",
+        ),
+        (
+            execution_iri,
+            "runsProcess",
+            _ASSEMBLY_PROCESS_IRI,
+        ),
+    }
+    actual: set[tuple[str, str, str]] = set()
+    assigned_resource: str | None = None
+    execution_assertion_count = 0
+    for assertion in product_context.assertions:
+        subject = assertion.get("subject")
+        predicate = assertion.get("predicate")
+        object_value = assertion.get("object")
+        if (
+            not isinstance(subject, str)
+            or not isinstance(predicate, str)
+            or not isinstance(object_value, Mapping)
+            or object_value.get("kind") != "iri"
+            or not isinstance(object_value.get("value"), str)
+        ):
+            continue
+        local_predicate = _iri_local_name(predicate)
+        object_iri = str(object_value["value"])
+        if local_predicate in {
+            "hasProcessExecution",
+            "runsProcess",
+            "runsOnResource",
+        } or (
+            subject == execution_iri
+            and local_predicate == "type"
+            and _iri_local_name(object_iri) == "processExecution"
+        ):
+            execution_assertion_count += 1
+        actual.add(
+            (subject, local_predicate, _iri_local_name(object_iri))
+            if local_predicate == "type"
+            else (subject, local_predicate, object_iri)
+        )
+        if subject == execution_iri and local_predicate == "runsOnResource":
+            assigned_resource = object_iri
+    if (
+        not expected.issubset(actual)
+        or assigned_resource
+        not in {resource_iri for _symbol, resource_iri in _PREDEFINED_RESOURCES}
+        or execution_assertion_count != 4
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion requires the exact host resource assignment."
+        )
+    selection_ref = _assignment_selection_ref(root, product_context)
+    _validate_completion_resource_selection(
+        root,
+        product_context,
+        selection_ref=selection_ref,
+        assigned_resource=str(assigned_resource),
+    )
+    assignment_delta_ref = (
+        "products/grounding/ontology/"
+        f"delta_{product_context.delta_count:04d}.json"
+    )
+    return selection_ref, assignment_delta_ref
+
+
+def _assignment_selection_ref(root: Path, product_context: ProductContextView) -> str:
+    """Return the sole selection record cited by the host assignment delta."""
+    delta_path = (
+        root
+        / "products/grounding/ontology"
+        / f"delta_{product_context.delta_count:04d}.json"
+    )
+    delta = _read_json_mapping(delta_path, "resource assignment delta")
+    assertions = delta.get("assertions")
+    if (
+        set(delta) != _DELTA_KEYS
+        or delta.get("schema_version") != 1
+        or delta.get("delta_number") != product_context.delta_count
+        or delta.get("producer") != "resource_grounding_host"
+        or not isinstance(assertions, list)
+        or len(assertions) != 4
+        or delta.get("uncertainty") != []
+        or delta.get("unresolved_evidence_needs") != []
+        or delta.get("typed_context_refs") != []
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion requires the host resource-selection delta."
+        )
+    selection_refs: set[str] = set()
+    for assertion in assertions:
+        evidence_refs = (
+            assertion.get("evidence_refs")
+            if isinstance(assertion, Mapping)
+            else None
+        )
+        if (
+            not isinstance(evidence_refs, list)
+            or len(evidence_refs) != 1
+            or not isinstance(evidence_refs[0], str)
+        ):
+            raise GroundingContractError(
+                "Every assignment assertion must cite one ResourceSelectionRecord."
+            )
+        selection_refs.add(evidence_refs[0])
+    if len(selection_refs) != 1:
+        raise GroundingContractError(
+            "Assignment assertions do not share one ResourceSelectionRecord."
+        )
+    return next(iter(selection_refs))
+
+
+def _validate_completion_resource_selection(  # noqa: C901
+    root: Path,
+    product_context: ProductContextView,
+    *,
+    selection_ref: str,
+    assigned_resource: str,
+) -> None:
+    """Validate the selection decision and its exact accepted world-pose input."""
+    selection_path = _completion_ref_path(
+        root,
+        selection_ref,
+        prefix=_RESOURCE_SELECTION_PREFIX,
+    )
+    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord")
+    selection_number = selection.get("selection_number")
+    if (
+        set(selection) != _RESOURCE_SELECTION_KEYS
+        or selection.get("schema_version") != 1
+        or selection.get("record_type") != "ResourceSelectionRecord"
+        or isinstance(selection_number, bool)
+        or not isinstance(selection_number, int)
+        or selection_number < 1
+        or Path(selection_ref).parts
+        != (
+            *_RESOURCE_SELECTION_PREFIX,
+            f"selection_{selection_number:04d}",
+            _RESOURCE_SELECTION_RECORD_NAME,
+        )
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion ResourceSelectionRecord identity is invalid."
+        )
+    fingerprint = selection.get("fingerprint")
+    fingerprint_payload = dict(selection)
+    fingerprint_payload.pop("fingerprint")
+    if (
+        not isinstance(fingerprint, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+        or _fingerprint(fingerprint_payload) != fingerprint
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion ResourceSelectionRecord fingerprint is invalid."
+        )
+
+    specification_iri = f"{product_context.interaction_namespace}specification_1"
+    candidate_resources = [item[1] for item in _PREDEFINED_RESOURCES]
+    if (
+        selection.get("specification_iri") != specification_iri
+        or selection.get("feature_iri")
+        != f"{product_context.interaction_namespace}medium_gear_feature"
+        or selection.get("process_iri") != _ASSEMBLY_PROCESS_IRI
+        or selection.get("candidate_resource_iris") != candidate_resources
+        or selection.get("required_record_type") != "RobotFramePoseRecord"
+        or selection.get("target_frame") != "world"
+        or selection.get("tbox_fingerprint") != product_context.tbox_fingerprint
+        or not _is_sha256_value(selection.get("registry_fingerprint"))
+        or not _is_sha256_value(selection.get("workcell_fingerprint"))
+        or selection.get("selection_policy") != _RESOURCE_SELECTION_POLICY
+        or selection.get("selected_resource_iri") != assigned_resource
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion ResourceSelectionRecord does not match "
+            "the final assignment."
+        )
+    _validate_completion_candidate_verdicts(selection, assigned_resource)
+
+    pose_ref = selection.get("pose_record_ref")
+    pose_sha256 = selection.get("pose_record_sha256")
+    observation_timestamp_ns = selection.get("observation_timestamp_ns")
+    if (
+        not isinstance(pose_ref, str)
+        or not _is_sha256_value(pose_sha256)
+        or isinstance(observation_timestamp_ns, bool)
+        or not isinstance(observation_timestamp_ns, int)
+        or observation_timestamp_ns < 0
+    ):
+        raise GroundingContractError(
+            "ResourceSelectionRecord world-pose reference is invalid."
+        )
+    pose_path = _completion_ref_path(
+        root,
+        pose_ref,
+        prefix=("products", "grounding"),
+    )
+    if _sha256_path(pose_path) != pose_sha256:
+        raise GroundingContractError(
+            "ResourceSelectionRecord world-pose hash is invalid."
+        )
+    pose_bindings = [
+        binding
+        for binding in product_context.typed_bindings
+        if binding.record_type == "RobotFramePoseRecord"
+        and binding.record_ref == pose_ref
+        and binding.record_sha256 == pose_sha256
+        and binding.status == "accepted"
+        and binding.frame == "world"
+        and binding.observed_at_ns == observation_timestamp_ns
+    ]
+    if len(pose_bindings) != 1:
+        raise GroundingContractError(
+            "ResourceSelectionRecord is not pinned to the final accepted world pose."
+        )
+    pose_record = _read_json_mapping(pose_path, "RobotFramePoseRecord")
+    if _validate_embedded_hash_refs(pose_record, root) < 1:
+        raise GroundingContractError(
+            "RobotFramePoseRecord requires a pinned source-evidence chain."
+        )
+
+
+def _validate_completion_candidate_verdicts(
+    selection: Mapping[str, object],
+    assigned_resource: str,
+) -> None:
+    """Require exact ordered candidate verdicts and first-reachable selection."""
+    candidates = selection.get("candidate_reach_evidence")
+    if not isinstance(candidates, list) or len(candidates) != len(
+        _PREDEFINED_RESOURCES
+    ):
+        raise GroundingContractError(
+            "ResourceSelectionRecord candidate verdicts are invalid."
+        )
+    reachable: list[Mapping[str, object]] = []
+    for candidate, (symbol, resource_iri) in zip(
+        candidates,
+        _PREDEFINED_RESOURCES,
+        strict=True,
+    ):
+        if (
+            not isinstance(candidate, Mapping)
+            or set(candidate) != _CANDIDATE_REACH_KEYS
+            or candidate.get("resource_symbol") != symbol
+            or candidate.get("resource_iri") != resource_iri
+            or not isinstance(candidate.get("resource_jid"), str)
+            or not candidate.get("resource_jid")
+            or not isinstance(candidate.get("manifest_ref"), str)
+            or not candidate.get("manifest_ref")
+            or not _is_sha256_value(candidate.get("manifest_sha256"))
+            or not isinstance(candidate.get("execution_mode"), str)
+            or not candidate.get("execution_mode")
+            or not isinstance(candidate.get("reachable"), bool)
+            or not isinstance(candidate.get("verdicts"), list)
+            or not all(isinstance(item, str) and item for item in candidate["verdicts"])
+        ):
+            raise GroundingContractError(
+                "ResourceSelectionRecord candidate verdict is invalid."
+            )
+        if candidate["reachable"] is True:
+            reachable.append(candidate)
+    if not reachable or reachable[0].get("resource_iri") != assigned_resource:
+        raise GroundingContractError(
+            "ResourceSelectionRecord violates first-reachable registry order."
+        )
+    selected = reachable[0]
+    if (
+        selection.get("selected_resource_symbol") != selected.get("resource_symbol")
+        or selection.get("selected_resource_jid") != selected.get("resource_jid")
+        or selection.get("selected_execution_mode") != selected.get("execution_mode")
+    ):
+        raise GroundingContractError(
+            "ResourceSelectionRecord selected fields do not match its verdict."
+        )
+
+
+def _is_sha256_value(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _latest_product_context_view(root: Path) -> ProductContextView:
+    paths = sorted((root / _VIEW_ROOT).glob("view_*.json"))
+    if not paths:
+        raise GroundingContractError(
+            "PAContextGroundingCompletion requires a final ProductContextView."
+        )
+    return ProductContextView.from_mapping(
+        _read_json_mapping(paths[-1], "final ProductContextView")
+    )
+
+
+def _iri_local_name(iri: str) -> str:
+    return iri.rsplit("#", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _proposal_grounding_session(
+    root: Path,
+    proposal: Mapping[str, object],
+) -> GroundingSession:
+    """Load the exact session revision that authored an ontology proposal."""
+    revision = proposal.get("session_revision")
+    fingerprint = proposal.get("session_fingerprint")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+        or not isinstance(fingerprint, str)
+    ):
+        raise GroundingContractError(
+            "Ontology projection session identity is invalid."
+        )
+    path = root / _SESSION_ROOT / f"revision_{revision:04d}.json"
+    session = GroundingSession.from_mapping(
+        _read_json_mapping(path, "ontology proposal GroundingSession")
+    )
+    if session.revision != revision or session.fingerprint != fingerprint:
+        raise GroundingContractError(
+            "Ontology projection does not match its exact GroundingSession."
+        )
+    return session
 
 
 def _read_delta(abox: ABoxSnapshot, delta_number: int) -> Mapping[str, Any]:
@@ -1580,15 +1863,30 @@ def _typed_binding_from_ref(
         ) from exc
     if not isinstance(record, Mapping) or record.get("schema_version") != 1:
         raise GroundingContractError(f"Typed context record is invalid: {record_ref}.")
-    _validate_embedded_hash_refs(record, interaction_root)
-
     record_type = _required_symbol(record.get("record_type"), "typed record_type")
+    embedded_evidence_stale = False
+    try:
+        embedded_hash_ref_count = _validate_embedded_hash_refs(
+            record,
+            interaction_root,
+        )
+    except _EmbeddedEvidenceStateError:
+        embedded_evidence_stale = True
+        embedded_hash_ref_count = 1
+    if record_type == "RobotFramePoseRecord" and embedded_hash_ref_count < 1:
+        raise GroundingContractError(
+            "RobotFramePoseRecord requires a pinned source-evidence chain."
+        )
     record_producer = _required_symbol(record.get("producer"), "typed producer")
     if record_producer != producer:
         raise GroundingContractError(
             f"Typed context producer mismatch for {record_ref}."
         )
-    status = _binding_status(record_type, record)
+    status = (
+        "stale"
+        if embedded_evidence_stale
+        else _binding_status(record_type, record)
+    )
     if status not in _BINDING_STATUSES:
         raise GroundingContractError(f"Typed context status is invalid: {record_ref}.")
     evidence_refs = _record_evidence_refs(record)
@@ -1686,11 +1984,17 @@ def _record_evidence_refs(record: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(refs)
 
 
-def _validate_embedded_hash_refs(value: object, interaction_root: Path) -> None:
+def _validate_embedded_hash_refs(value: object, interaction_root: Path) -> int:
+    """Validate nested local hash references and return their exact count."""
+    count = 0
     if isinstance(value, Mapping):
         ref = value.get("ref")
         sha256 = value.get("sha256")
-        if isinstance(ref, str) and isinstance(sha256, str):
+        if isinstance(ref, str) or isinstance(sha256, str):
+            if not isinstance(ref, str) or not isinstance(sha256, str):
+                raise GroundingContractError(
+                    "Typed record artifact hash reference is incomplete."
+                )
             relative = Path(ref)
             if relative.is_absolute() or ".." in relative.parts:
                 raise GroundingContractError("Typed record artifact ref is invalid.")
@@ -1698,19 +2002,25 @@ def _validate_embedded_hash_refs(value: object, interaction_root: Path) -> None:
             try:
                 path.relative_to(interaction_root)
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            except (OSError, ValueError) as exc:
-                raise GroundingContractError(
+            except OSError as exc:
+                raise _EmbeddedEvidenceStateError(
                     f"Typed record artifact could not be validated: {ref}."
                 ) from exc
-            if digest != sha256:
+            except ValueError as exc:
                 raise GroundingContractError(
+                    f"Typed record artifact ref is invalid: {ref}."
+                ) from exc
+            if digest != sha256:
+                raise _EmbeddedEvidenceStateError(
                     f"Typed record artifact hash does not match: {ref}."
                 )
+            count += 1
         for item in value.values():
-            _validate_embedded_hash_refs(item, interaction_root)
+            count += _validate_embedded_hash_refs(item, interaction_root)
     elif isinstance(value, list):
         for item in value:
-            _validate_embedded_hash_refs(item, interaction_root)
+            count += _validate_embedded_hash_refs(item, interaction_root)
+    return count
 
 
 def _abox_assertion_records(abox: ABoxSnapshot) -> list[dict[str, object]]:
@@ -1875,38 +2185,20 @@ def _hashed_ref_tuple(
     return tuple(result)
 
 
-def _validate_session_decision_status(
+def _validate_session_action_status(
     status: str,
-    decision: GroundingDecision,
-    needs: Sequence[InformationNeed],
+    next_action: GroundingNextAction,
 ) -> None:
-    open_required = any(item.required and item.status == "open" for item in needs)
-    unresolved_required = any(
-        item.required and item.status in {"open", "exhausted"} for item in needs
-    )
-    if decision.decision_type == "request_evidence":
-        if status not in {"waiting_for_evidence", "waiting_for_user"}:
-            raise GroundingContractError(
-                "An evidence request requires a waiting GroundingSession status."
-            )
-        return
-    if decision.decision_type == "ready_for_ontology":
-        if status not in {"ready_for_ontology", "complete"} or unresolved_required:
-            raise GroundingContractError(
-                "ready_for_ontology requires every required need to be resolved."
-            )
-        return
-    if status not in {"incomplete", "ontology_gap"}:
+    expected = {
+        "retrieve": {"waiting_for_evidence"},
+        "inspect": {"waiting_for_evidence"},
+        "ask_user": {"waiting_for_user"},
+        "propose_grounding": {"ready_for_ontology", "complete"},
+        "incomplete": {"incomplete", "ontology_gap"},
+    }[next_action.action]
+    if status not in expected:
         raise GroundingContractError(
-            "An incomplete decision requires an incomplete session status."
-        )
-    if status == "incomplete" and not unresolved_required:
-        raise GroundingContractError(
-            "An incomplete GroundingSession requires unresolved information."
-        )
-    if status == "ontology_gap" and open_required:
-        raise GroundingContractError(
-            "An ontology_gap cannot retain an open required information need."
+            "GroundingSession status does not match its next action."
         )
 
 

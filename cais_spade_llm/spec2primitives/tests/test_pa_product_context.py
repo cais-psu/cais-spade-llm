@@ -417,6 +417,55 @@ def test_resource_catalog_assertion_is_rejected_from_the_pa_abox(
     )
 
 
+def test_pa_authored_execution_assignment_is_rejected_atomically(
+    tmp_path: Path,
+) -> None:
+    tbox = _load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
+    evidence_ref = "pa_proposal"
+    execution = URIRef(f"{abox.namespace}process_execution_0001")
+    before = _ontology_file_bytes(abox)
+
+    with pytest.raises(OntologyContextError):
+        validate_and_merge_triple_delta(
+            tmp_path,
+            tbox,
+            "ontology_grounding",
+            {
+                "assertions": [
+                    _iri_assertion(
+                        URIRef(abox.specification_iri),
+                        PPR.hasProcessExecution,
+                        execution,
+                        evidence_ref,
+                    ),
+                    _iri_assertion(
+                        execution,
+                        RDF.type,
+                        PPR.processExecution,
+                        evidence_ref,
+                    ),
+                    _iri_assertion(
+                        execution,
+                        PPR.runsProcess,
+                        URIRef("https://cais-spade-llm.local/process/assembly"),
+                        evidence_ref,
+                    ),
+                    _iri_assertion(
+                        execution,
+                        PPR.runsOnResource,
+                        URIRef("https://cais-spade-llm.local/resource/xarm6"),
+                        evidence_ref,
+                    ),
+                ]
+            },
+            authorized_evidence_refs=[evidence_ref],
+        )
+
+    assert _ontology_file_bytes(abox) == before
+    assert not list(abox.ontology_root.glob("delta_*.json"))
+
+
 @pytest.mark.parametrize("recipe_predicate", [PPR.requires, PPR.precedes])
 def test_task_to_primitive_recipe_assertion_is_rejected_from_the_pa_abox(
     tmp_path: Path,

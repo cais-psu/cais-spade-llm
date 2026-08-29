@@ -31,10 +31,18 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
         PPR.product,
         PPR.feature,
         PPR.process,
+        PPR.processExecution,
         PPR.resource,
         PPR.capability,
     }
-    expected_properties = {PPR.defines, PPR.realizes, PPR.capableOf}
+    expected_properties = {
+        PPR.defines,
+        PPR.realizes,
+        PPR.capableOf,
+        PPR.hasProcessExecution,
+        PPR.runsProcess,
+        PPR.runsOnResource,
+    }
 
     assert set(tbox.classes) == {str(value) for value in expected_classes}
     assert set(tbox.object_properties) == {
@@ -47,6 +55,23 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
     assert set(tbox.graph.objects(PPR.realizes, RDFS.range)) == {PPR.feature}
     assert set(tbox.graph.objects(PPR.capableOf, RDFS.domain)) == {PPR.resource}
     assert set(tbox.graph.objects(PPR.capableOf, RDFS.range)) == {PPR.process}
+    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.domain)) == {
+        PPR.specification
+    }
+    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.range)) == {
+        PPR.processExecution
+    }
+    assert set(tbox.graph.objects(PPR.runsProcess, RDFS.domain)) == {
+        PPR.processExecution
+    }
+    assert set(tbox.graph.objects(PPR.runsProcess, RDFS.range)) == {PPR.process}
+    assert set(tbox.graph.objects(PPR.runsOnResource, RDFS.domain)) == {
+        PPR.processExecution
+    }
+    assert set(tbox.graph.objects(PPR.runsOnResource, RDFS.range)) == {PPR.resource}
+    assert (PPR.runsProcess, RDF.type, OWL.FunctionalProperty) in tbox.graph
+    assert (PPR.runsOnResource, RDF.type, OWL.FunctionalProperty) in tbox.graph
+    assert (PPR.hasProcessExecution, RDF.type, OWL.FunctionalProperty) not in tbox.graph
     assert not any(tbox.graph.subjects(RDF.type, OWL.NamedIndividual))
     assert not any(tbox.graph.subjects(RDF.type, OWL.Restriction))
     for recipe_property in (PPR.requires, PPR.precedes, PPR.consistsOf):
@@ -60,10 +85,18 @@ def test_schema_only_tbox_loads_with_exact_required_vocabulary() -> None:
         PPR.product,
         PPR.feature,
         PPR.process,
+        PPR.processExecution,
         PPR.resource,
         PPR.capability,
     }
-    required_properties = {PPR.defines, PPR.realizes, PPR.capableOf}
+    required_properties = {
+        PPR.defines,
+        PPR.realizes,
+        PPR.capableOf,
+        PPR.hasProcessExecution,
+        PPR.runsProcess,
+        PPR.runsOnResource,
+    }
 
     assert isinstance(tbox, TBoxSnapshot)
     assert {str(value) for value in required_classes} <= set(tbox.classes)
@@ -106,6 +139,41 @@ def test_tbox_fingerprint_changes_when_the_schema_changes(tmp_path: Path) -> Non
         ).fingerprint
         != _load_tbox().fingerprint
     )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            '<rdfs:domain rdf:resource="#specification"/>',
+            '<rdfs:domain rdf:resource="#feature"/>',
+            "invalid domain",
+        ),
+        (
+            '<rdfs:range rdf:resource="#process"/>',
+            '<rdfs:range rdf:resource="#feature"/>',
+            "invalid range",
+        ),
+        (
+            '    <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>\n',
+            "",
+            "invalid functional profile",
+        ),
+    ],
+)
+def test_process_execution_slice_fails_closed_on_profile_changes(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    source = MINIMAL_TBOX_PATH.read_text(encoding="utf-8")
+    assert old in source
+    changed_path = tmp_path / "changed_execution_slice.owl"
+    changed_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+    with pytest.raises(OntologyContextError, match=message):
+        load_ppr_tbox(changed_path, ppr_namespace=PPR_NAMESPACE)
 
 
 def test_malformed_tbox_is_rejected(tmp_path: Path) -> None:
