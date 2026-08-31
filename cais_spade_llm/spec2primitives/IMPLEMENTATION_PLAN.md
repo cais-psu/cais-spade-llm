@@ -176,6 +176,18 @@ diagnostics. Genuine proposal `missing_information` and document uncertainty
 appear under **Known non-blocking context limits**; historical unresolved
 markers do not. Completion does not claim execution readiness.
 
+The same page contains an always-visible temporary **Phase 5 · RobotAgent
+Diagnostics** card. Its current **5.1 · Assigned RA activation and context
+snapshot** section reads the active interaction's validated Phase 4 completion,
+immutable assignment audit, and paired RA state/catalog revisions. It shows the
+exact selected JID and execution mode, snapshot refs and counts, catalog
+fingerprint, exact primitive symbols, and expandable raw `robot_state` and
+`primitive_catalog`. Refresh is read-only: it does not invoke
+`activate_selected_ra_context(...)`, contact an RA, or write an artifact. Later
+Phase 5 implementation steps may add their own diagnostics to this temporary
+card. After Phase 5 is implemented, the diagnostic surface is intended to be
+replaced by the operator-facing primitive composition card.
+
 ## Implemented Phase 5.1 assigned-RA context handoff
 
 `activate_selected_ra_context(...)` loads and verifies one version-3
@@ -194,6 +206,11 @@ primitive interface, and writes matching append-only `RobotStateSnapshot` and
 `PrimitiveCatalogSnapshot` revisions. Existing paired revisions are reloaded
 and revalidated before another RA request; malformed, changed, unpaired, or
 gapped histories fail closed.
+
+`read_phase_5_1_diagnostic(...)` exposes those validations as the UI statuses
+`waiting_for_phase_4`, `ready_for_assignment`, `waiting_for_ra`,
+`context_captured`, and `blocked`. It never repairs or extends the immutable
+history.
 
 This is a contract-first runtime boundary, not a live shared-RobotAgent or
 SPADE connection. It sends no full ABox, typed evidence payload, raw RDF, or

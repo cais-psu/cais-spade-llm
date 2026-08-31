@@ -15,6 +15,7 @@ from cais_spade_llm.spec2primitives.agents.ra.context_handoff import (
     RAContextHandoffError,
     SelectedRAAssignmentEnvelope,
     activate_selected_ra_context,
+    read_phase_5_1_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
     persist_native_completion_fixture,
@@ -58,6 +59,26 @@ class _AssignedContextRuntime:
         if self.transform is not None:
             self.transform(response)
         return response
+
+
+def test_phase_5_1_diagnostic_waits_for_phase_4_then_reports_selected_ra(
+    tmp_path: Path,
+) -> None:
+    waiting = read_phase_5_1_diagnostic(tmp_path).to_view()
+
+    assert waiting["status"] == "waiting_for_phase_4"
+    assert waiting["selected_resource_jid"] is None
+    assert waiting["primitive_catalog"] == []
+
+    persist_native_completion_fixture(tmp_path)
+    ready = read_phase_5_1_diagnostic(tmp_path).to_view()
+
+    assert ready["status"] == "ready_for_assignment"
+    assert ready["product_requirement"] == "assemble medium gear"
+    assert ready["selected_resource_jid"] == "xarm6@localhost"
+    assert ready["selected_execution_mode"] == "simulation"
+    assert ready["assignment_ref"] is None
+    assert ready["primitive_count"] == 0
 
 
 def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
@@ -105,6 +126,22 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert not (tmp_path / "composition/missing_context_batches").exists()
     assert not (tmp_path / "resources/xarm6@localhost/primitive_steps").exists()
     assert not (tmp_path / "resources/xarm6@localhost/validation").exists()
+
+    diagnostic = read_phase_5_1_diagnostic(tmp_path).to_view()
+    assert diagnostic["status"] == "context_captured"
+    assert diagnostic["assignment_ref"] == (
+        "composition/selected_ra_assignments/assignment_0001.json"
+    )
+    assert diagnostic["state_snapshot_count"] == 2
+    assert diagnostic["catalog_snapshot_count"] == 2
+    assert diagnostic["latest_state_ref"].endswith("snapshot_0002.json")
+    assert diagnostic["latest_catalog_ref"].endswith("snapshot_0002.json")
+    assert diagnostic["robot_state"]["current_state"] == "idle"
+    assert diagnostic["primitive_symbols"] == ["detect_parts", "move_pose"]
+    assert diagnostic["primitive_count"] == 2
+    assert diagnostic["catalog_fingerprint"] == (
+        second.primitive_catalog.catalog_fingerprint
+    )
 
 
 def test_changed_phase_4_selection_prevents_ra_dispatch(tmp_path: Path) -> None:
@@ -206,6 +243,10 @@ def test_unpaired_snapshot_prevents_ra_dispatch(tmp_path: Path) -> None:
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
 
     assert runtime.assignments == []
+    diagnostic = read_phase_5_1_diagnostic(tmp_path)
+    assert diagnostic.status == "blocked"
+    assert diagnostic.failure is not None
+    assert "revisions are unpaired" in diagnostic.failure
 
 
 def test_runtime_failure_leaves_only_assignment_audit(tmp_path: Path) -> None:
@@ -218,6 +259,11 @@ def test_runtime_failure_leaves_only_assignment_audit(tmp_path: Path) -> None:
     assert len(runtime.assignments) == 1
     assert (tmp_path / "composition/selected_ra_assignments/assignment_0001.json").is_file()
     assert not (tmp_path / "resources/xarm6@localhost").exists()
+    diagnostic = read_phase_5_1_diagnostic(tmp_path)
+    assert diagnostic.status == "waiting_for_ra"
+    assert diagnostic.assignment_ref == (
+        "composition/selected_ra_assignments/assignment_0001.json"
+    )
 
 
 def _valid_catalog() -> list[dict[str, Any]]:

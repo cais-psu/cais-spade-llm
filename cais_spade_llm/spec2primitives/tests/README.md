@@ -111,6 +111,12 @@ closed. They also cover complete ordered catalogs, invalid or composite catalog
 entries, non-finite state, paired append-only revisions, unpaired-history
 rejection, failure-only assignment audits, and the absence of all Phase 5.2,
 validation, and execution artifacts.
+The read-only diagnostic coverage checks its transition from
+`waiting_for_phase_4` to `ready_for_assignment`, `waiting_for_ra`,
+`context_captured`, or `blocked`; exact `xarm6@localhost` assignment display;
+latest paired revision counts and refs; full ordered primitive symbols; current
+state; and catalog fingerprint. The PA UI test proves a valid Phase 4 completion
+surfaces the selected assignment without pretending that an RA response exists.
 
 Later phases will add focused tests for live selected-RA delivery,
 `PrimitiveProgramDraft`, `MissingContextBatch`, `CompositionContextBundle`,

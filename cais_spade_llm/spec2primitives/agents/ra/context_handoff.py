@@ -239,6 +239,51 @@ class SelectedRAContextSnapshot:
     primitive_catalog_path: Path
 
 
+@dataclass(frozen=True)
+class Phase51Diagnostic:
+    """Describe the read-only persisted status of one Phase 5.1 interaction."""
+
+    status: str
+    message: str
+    product_requirement: str | None = None
+    selected_resource_jid: str | None = None
+    selected_execution_mode: str | None = None
+    assignment_ref: str | None = None
+    state_snapshot_count: int = 0
+    latest_state_ref: str | None = None
+    catalog_snapshot_count: int = 0
+    latest_catalog_ref: str | None = None
+    catalog_fingerprint: str | None = None
+    robot_state: Mapping[str, object] | None = None
+    primitive_catalog: tuple[Mapping[str, object], ...] = ()
+    failure: str | None = None
+
+    def to_view(self) -> dict[str, object]:
+        """Return a JSON-safe view for the read-only Spec2Primitives UI card."""
+        return {
+            "status": self.status,
+            "message": self.message,
+            "product_requirement": self.product_requirement,
+            "selected_resource_jid": self.selected_resource_jid,
+            "selected_execution_mode": self.selected_execution_mode,
+            "assignment_ref": self.assignment_ref,
+            "state_snapshot_count": self.state_snapshot_count,
+            "latest_state_ref": self.latest_state_ref,
+            "catalog_snapshot_count": self.catalog_snapshot_count,
+            "latest_catalog_ref": self.latest_catalog_ref,
+            "catalog_fingerprint": self.catalog_fingerprint,
+            "robot_state": (
+                deepcopy(dict(self.robot_state)) if self.robot_state is not None else None
+            ),
+            "primitive_count": len(self.primitive_catalog),
+            "primitive_symbols": [
+                str(entry["primitive_symbol"]) for entry in self.primitive_catalog
+            ],
+            "primitive_catalog": [deepcopy(dict(entry)) for entry in self.primitive_catalog],
+            "failure": self.failure,
+        }
+
+
 class RobotAgentCompositionRuntime(Protocol):
     """Read-only selected-RA operation used by the Phase 5.1 adapter."""
 
@@ -329,6 +374,118 @@ async def activate_selected_ra_context(
         primitive_catalog=catalog_snapshot,
         primitive_catalog_path=catalog_path,
     )
+
+
+def read_phase_5_1_diagnostic(interaction_root: Path) -> Phase51Diagnostic:
+    """Read and validate Phase 5.1 artifacts without activating or contacting an RA."""
+    root = Path(interaction_root).resolve()
+    assignment_directory = root.joinpath(*_ASSIGNMENT_ROOT)
+    assignment_paths = sorted(assignment_directory.glob("*.json"))
+    completion_paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
+    if not completion_paths:
+        if assignment_paths:
+            return Phase51Diagnostic(
+                status="blocked",
+                message="Phase 5.1 artifacts exist without a Phase 4 completion.",
+                failure="SelectedRAAssignmentEnvelope has no Phase 4 authority.",
+            )
+        return Phase51Diagnostic(
+            status="waiting_for_phase_4",
+            message="Waiting for one validated Phase 4 completion.",
+        )
+
+    try:
+        assignment, selection = _build_assignment_envelope(root)
+    except RAContextHandoffError as exc:
+        return Phase51Diagnostic(
+            status="blocked",
+            message="Phase 4 cannot authorize the Phase 5.1 handoff.",
+            failure=str(exc),
+        )
+
+    common = {
+        "product_requirement": assignment.product_requirement,
+        "selected_resource_jid": assignment.selected_resource_jid,
+        "selected_execution_mode": assignment.selected_execution_mode,
+    }
+    expected_assignment_path = assignment_directory / _ASSIGNMENT_NAME
+    resource_root = root / "resources" / assignment.selected_resource_jid
+    state_directory = resource_root / _ROBOT_STATE_DIRECTORY
+    catalog_directory = resource_root / _PRIMITIVE_CATALOG_DIRECTORY
+    try:
+        state_paths = _numbered_snapshot_paths(state_directory)
+        catalog_paths = _numbered_snapshot_paths(catalog_directory)
+        if not assignment_paths:
+            if state_paths or catalog_paths:
+                raise RAContextHandoffError(
+                    "RA snapshots exist without SelectedRAAssignmentEnvelope."
+                )
+            return Phase51Diagnostic(
+                status="ready_for_assignment",
+                message=("Phase 4 selected this RA; Phase 5.1 activation has not been requested."),
+                **common,
+            )
+        if assignment_paths != [expected_assignment_path]:
+            raise RAContextHandoffError("Phase 5.1 requires exactly assignment_0001.json.")
+        persisted_assignment = _assignment_from_mapping(
+            _read_json_mapping(
+                expected_assignment_path,
+                "SelectedRAAssignmentEnvelope",
+            )
+        )
+        if persisted_assignment != assignment:
+            raise RAContextHandoffError(
+                "Persisted SelectedRAAssignmentEnvelope does not match Phase 4."
+            )
+        assignment_ref = expected_assignment_path.relative_to(root).as_posix()
+        if set(state_paths) != set(catalog_paths):
+            raise RAContextHandoffError(
+                "Robot state and primitive catalog snapshot revisions are unpaired."
+            )
+        if not state_paths:
+            return Phase51Diagnostic(
+                status="waiting_for_ra",
+                message=(
+                    "The assignment is recorded; no valid RA state/catalog response "
+                    "has been persisted."
+                ),
+                assignment_ref=assignment_ref,
+                **common,
+            )
+        _next_snapshot_number(
+            root,
+            assignment=assignment,
+            assignment_path=expected_assignment_path,
+            selection=selection,
+        )
+        latest_number = max(state_paths)
+        latest_state_path = state_paths[latest_number]
+        latest_catalog_path = catalog_paths[latest_number]
+        latest_state = _load_robot_state_snapshot(latest_state_path)
+        latest_catalog = _load_primitive_catalog_snapshot(latest_catalog_path)
+        return Phase51Diagnostic(
+            status="context_captured",
+            message=(
+                "The selected RA assignment, current state, and complete catalog "
+                "snapshot are valid."
+            ),
+            assignment_ref=assignment_ref,
+            state_snapshot_count=len(state_paths),
+            latest_state_ref=latest_state_path.relative_to(root).as_posix(),
+            catalog_snapshot_count=len(catalog_paths),
+            latest_catalog_ref=latest_catalog_path.relative_to(root).as_posix(),
+            catalog_fingerprint=latest_catalog.catalog_fingerprint,
+            robot_state=latest_state.robot_state,
+            primitive_catalog=latest_catalog.primitive_catalog,
+            **common,
+        )
+    except RAContextHandoffError as exc:
+        return Phase51Diagnostic(
+            status="blocked",
+            message="Phase 5.1 persisted evidence failed validation.",
+            failure=str(exc),
+            **common,
+        )
 
 
 def _build_assignment_envelope(
@@ -593,7 +750,7 @@ def _persist_or_load_assignment(
     assignment: SelectedRAAssignmentEnvelope,
 ) -> Path:
     directory = root.joinpath(*_ASSIGNMENT_ROOT)
-    paths = sorted(directory.glob("assignment_*.json"))
+    paths = sorted(directory.glob("*.json"))
     path = directory / _ASSIGNMENT_NAME
     if not paths:
         _write_json_exclusive(path, assignment.to_record())

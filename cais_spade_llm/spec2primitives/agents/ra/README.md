@@ -20,6 +20,17 @@ order and symbols, and writes matching append-only `RobotStateSnapshot` and
 assignment audit without claiming that RA state was retrieved. Existing
 snapshot histories must remain complete, paired, hash-valid, and gap-free.
 
+`read_phase_5_1_diagnostic(...)` validates the same persisted authority without
+contacting or activating an RA. The temporary **Phase 5 · RobotAgent
+Diagnostics** UI card uses it for its 5.1 section to show whether Phase 4 is
+incomplete, the selected assignment is ready, the assignment is waiting for an
+RA response, paired context was captured, or persisted evidence is blocked.
+When context exists, the section exposes the exact selected JID, snapshot refs,
+current `robot_state`, ordered primitive symbols, full catalog, and catalog
+fingerprint. Its refresh control only rereads persisted records. Later Phase 5
+diagnostics can be added to that temporary card without treating it as the
+final primitive composition UI.
+
 Phase 5.1 does not connect to a running SPADE RobotAgent, author primitives,
 load raw RDF, send the full ABox or typed context, plan motion, validate a
 candidate, or execute anything.

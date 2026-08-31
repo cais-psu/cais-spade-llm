@@ -256,6 +256,15 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["limitations"] == [
         "The available evidence does not identify the destination shaft."
     ]
+    phase_5_1 = view["phase_5_1"]
+    assert isinstance(phase_5_1, dict)
+    assert phase_5_1["status"] == "ready_for_assignment"
+    assert phase_5_1["product_requirement"] == "assemble medium gear"
+    assert phase_5_1["selected_resource_jid"] == "xarm6@localhost"
+    assert phase_5_1["selected_execution_mode"] == "simulation"
+    assert phase_5_1["assignment_ref"] is None
+    assert phase_5_1["robot_state"] is None
+    assert phase_5_1["primitive_catalog"] == []
     serialized = json.dumps(view)
     for removed_wording in (
         "Target grounded",

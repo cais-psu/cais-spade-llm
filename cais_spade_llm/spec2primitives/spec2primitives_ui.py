@@ -33,6 +33,7 @@ from cais_spade_llm.spec2primitives.agents.pa import (
     start_pa_context_interaction,
     submit_pa_clarification_reply,
 )
+from cais_spade_llm.spec2primitives.agents.ra import read_phase_5_1_diagnostic
 
 _TURTLE_PREFIX_PATTERN = re.compile(
     r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$"
@@ -982,6 +983,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         final_result=final_result,
         terminal_failure=terminal_failure,
     )
+    phase_5_1 = read_phase_5_1_diagnostic(interaction_root).to_view()
     return {
         "activity_state": activity_state,
         "activity_color": activity_color,
@@ -994,6 +996,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
             else ""
         ),
         "pending_clarification_turn": str(pending_clarification_turn or ""),
+        "phase_5_1": phase_5_1,
         "diagnostics": {
             "interaction_identifier": interaction_identifier,
             "interaction_path": str(interaction_root),
@@ -1529,6 +1532,261 @@ def _apply_final_grounding_result(
     card.set_visibility(True)
 
 
+def _phase_5_1_waiting_view(
+    message: str = "Complete ProductAgent grounding to select a RobotAgent.",
+) -> dict[str, object]:
+    """Return the empty read-only Phase 5.1 card state."""
+    return {
+        "status": "waiting_for_phase_4",
+        "message": message,
+        "product_requirement": None,
+        "selected_resource_jid": None,
+        "selected_execution_mode": None,
+        "assignment_ref": None,
+        "state_snapshot_count": 0,
+        "latest_state_ref": None,
+        "catalog_snapshot_count": 0,
+        "latest_catalog_ref": None,
+        "catalog_fingerprint": None,
+        "robot_state": None,
+        "primitive_count": 0,
+        "primitive_symbols": [],
+        "primitive_catalog": [],
+        "failure": None,
+    }
+
+
+def _phase_5_1_status_color(status: str) -> str:
+    """Return the diagnostic badge color for one exact Phase 5.1 status."""
+    return {
+        "context_captured": "green",
+        "ready_for_assignment": "amber",
+        "waiting_for_ra": "amber",
+        "blocked": "red",
+        "waiting_for_phase_4": "grey",
+    }.get(status, "grey")
+
+
+def _render_phase_5_diagnostics() -> dict[str, Any]:
+    """Render the temporary read-only RobotAgent diagnostics card."""
+    with ui.card().classes(
+        "w-full border-2 border-violet-200 bg-violet-50 shadow-sm"
+    ):
+        with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
+            with ui.column().classes("gap-0"):
+                ui.label("Phase 5 · RobotAgent Diagnostics").classes(
+                    "text-xl font-semibold text-slate-900"
+                )
+                ui.label(
+                    "Temporary read-only inspection while Phase 5 is implemented"
+                ).classes("text-xs text-slate-500")
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                ui.badge("temporary diagnostic").props("color=violet outline")
+                ui.badge("read-only").props("color=grey outline")
+                refresh_button = ui.button("Refresh", icon="refresh").props(
+                    "flat disable"
+                )
+
+        with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+            ui.label("5.1 · Assigned RA activation and context snapshot").classes(
+                "text-sm font-semibold text-violet-900"
+            )
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                status_badge = ui.badge("waiting_for_phase_4").props(
+                    "color=grey outline"
+                )
+                ui.badge("contract-first").props("color=violet outline")
+        message_value = ui.label("").classes(
+            "text-sm text-slate-700 whitespace-pre-wrap break-words"
+        )
+
+        with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
+            with ui.card().classes(
+                "flex-1 min-w-64 border border-slate-200 bg-white shadow-none"
+            ):
+                ui.label("Selected assignment").classes(
+                    "text-xs font-semibold text-slate-500"
+                )
+                requirement_value = ui.label("not selected").classes(
+                    "text-sm font-semibold text-slate-900 whitespace-pre-wrap"
+                )
+                resource_value = ui.label("RobotAgent: not selected").classes(
+                    "text-xs text-slate-700 break-all"
+                )
+                assignment_value = ui.label("Assignment: not recorded").classes(
+                    "text-xs text-slate-600 break-all"
+                )
+            with ui.card().classes(
+                "flex-1 min-w-64 border border-slate-200 bg-white shadow-none"
+            ):
+                ui.label("Paired immutable snapshots").classes(
+                    "text-xs font-semibold text-slate-500"
+                )
+                snapshot_counts_value = ui.label("State: 0 · catalog: 0").classes(
+                    "text-sm font-semibold text-slate-900"
+                )
+                state_ref_value = ui.label("Latest state: none").classes(
+                    "text-xs text-slate-600 break-all"
+                )
+                catalog_ref_value = ui.label("Latest catalog: none").classes(
+                    "text-xs text-slate-600 break-all"
+                )
+            with ui.card().classes(
+                "flex-1 min-w-64 border border-slate-200 bg-white shadow-none"
+            ):
+                ui.label("Complete primitive-only catalog").classes(
+                    "text-xs font-semibold text-slate-500"
+                )
+                primitive_count_value = ui.label("Primitives: 0").classes(
+                    "text-sm font-semibold text-slate-900"
+                )
+                primitive_symbols_container = ui.row().classes(
+                    "w-full gap-1 flex-wrap"
+                )
+                catalog_fingerprint_value = ui.label("Fingerprint: none").classes(
+                    "text-xs text-slate-600 break-all"
+                )
+
+        with ui.expansion("Current robot_state", icon="smart_toy").classes(
+            "w-full border border-slate-200 bg-white rounded"
+        ) as robot_state_expansion:
+            robot_state_value = ui.code("", language="json").classes(
+                "w-full text-xs overflow-x-auto"
+            )
+        robot_state_expansion.set_visibility(False)
+
+        with ui.expansion("Full primitive_catalog", icon="account_tree").classes(
+            "w-full border border-slate-200 bg-white rounded"
+        ) as primitive_catalog_expansion:
+            primitive_catalog_value = ui.code("", language="json").classes(
+                "w-full text-xs overflow-x-auto"
+            )
+        primitive_catalog_expansion.set_visibility(False)
+
+        with ui.card().classes(
+            "w-full border border-red-200 bg-red-50 shadow-none"
+        ) as failure_card:
+            ui.label("Fail-closed diagnostic").classes(
+                "text-sm font-semibold text-red-900"
+            )
+            failure_value = ui.label("").classes(
+                "text-xs text-red-800 whitespace-pre-wrap break-words"
+            )
+        failure_card.set_visibility(False)
+
+    return {
+        "status_badge": status_badge,
+        "refresh_button": refresh_button,
+        "message": message_value,
+        "requirement": requirement_value,
+        "resource": resource_value,
+        "assignment": assignment_value,
+        "snapshot_counts": snapshot_counts_value,
+        "state_ref": state_ref_value,
+        "catalog_ref": catalog_ref_value,
+        "primitive_count": primitive_count_value,
+        "primitive_symbols": primitive_symbols_container,
+        "catalog_fingerprint": catalog_fingerprint_value,
+        "robot_state_expansion": robot_state_expansion,
+        "robot_state": robot_state_value,
+        "primitive_catalog_expansion": primitive_catalog_expansion,
+        "primitive_catalog": primitive_catalog_value,
+        "failure_card": failure_card,
+        "failure": failure_value,
+    }
+
+
+def _apply_phase_5_1_diagnostic(
+    elements: Mapping[str, Any],
+    diagnostic: Mapping[str, object],
+) -> None:
+    """Apply one JSON-safe persisted Phase 5.1 diagnostic to the UI card."""
+    status = str(diagnostic.get("status", "waiting_for_phase_4"))
+    elements["status_badge"].set_text(status)
+    elements["status_badge"].props(
+        f"color={_phase_5_1_status_color(status)} outline"
+    )
+    elements["message"].set_text(str(diagnostic.get("message", "")))
+
+    product_requirement = diagnostic.get("product_requirement")
+    selected_resource_jid = diagnostic.get("selected_resource_jid")
+    selected_execution_mode = diagnostic.get("selected_execution_mode")
+    assignment_ref = diagnostic.get("assignment_ref")
+    elements["requirement"].set_text(
+        str(product_requirement) if product_requirement else "not selected"
+    )
+    resource_parts = [
+        str(value)
+        for value in (selected_resource_jid, selected_execution_mode)
+        if value not in {None, ""}
+    ]
+    elements["resource"].set_text(
+        f"RobotAgent: {' · '.join(resource_parts)}"
+        if resource_parts
+        else "RobotAgent: not selected"
+    )
+    elements["assignment"].set_text(
+        f"Assignment: {assignment_ref}"
+        if assignment_ref
+        else "Assignment: not recorded"
+    )
+
+    state_count = diagnostic.get("state_snapshot_count", 0)
+    catalog_count = diagnostic.get("catalog_snapshot_count", 0)
+    elements["snapshot_counts"].set_text(
+        f"State: {state_count} · catalog: {catalog_count}"
+    )
+    elements["state_ref"].set_text(
+        f"Latest state: {diagnostic.get('latest_state_ref') or 'none'}"
+    )
+    elements["catalog_ref"].set_text(
+        f"Latest catalog: {diagnostic.get('latest_catalog_ref') or 'none'}"
+    )
+
+    primitive_count = diagnostic.get("primitive_count", 0)
+    elements["primitive_count"].set_text(f"Primitives: {primitive_count}")
+    primitive_symbols = diagnostic.get("primitive_symbols")
+    symbols = primitive_symbols if isinstance(primitive_symbols, list) else []
+    elements["primitive_symbols"].clear()
+    with elements["primitive_symbols"]:
+        for symbol in symbols:
+            ui.badge(str(symbol)).props("color=violet outline")
+    elements["catalog_fingerprint"].set_text(
+        f"Fingerprint: {diagnostic.get('catalog_fingerprint') or 'none'}"
+    )
+
+    robot_state = diagnostic.get("robot_state")
+    has_robot_state = isinstance(robot_state, Mapping)
+    elements["robot_state"].content = (
+        json.dumps(robot_state, indent=2, ensure_ascii=False, allow_nan=False)
+        if has_robot_state
+        else ""
+    )
+    elements["robot_state"].update()
+    elements["robot_state_expansion"].set_visibility(has_robot_state)
+
+    primitive_catalog = diagnostic.get("primitive_catalog")
+    has_primitive_catalog = isinstance(primitive_catalog, list) and bool(
+        primitive_catalog
+    )
+    elements["primitive_catalog"].content = (
+        json.dumps(
+            primitive_catalog,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        if has_primitive_catalog
+        else ""
+    )
+    elements["primitive_catalog"].update()
+    elements["primitive_catalog_expansion"].set_visibility(has_primitive_catalog)
+
+    failure = diagnostic.get("failure")
+    elements["failure"].set_text(str(failure or ""))
+    elements["failure_card"].set_visibility(bool(failure))
+
+
 def _calibration_readiness(
     runtime: Spec2PrimitivesUIRuntime,
 ) -> tuple[str, str, str]:
@@ -1661,6 +1919,11 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         outcome_alert_card.set_visibility(False)
 
         final_result_elements = _render_final_grounding_result()
+        phase_5_elements = _render_phase_5_diagnostics()
+        _apply_phase_5_1_diagnostic(
+            phase_5_elements,
+            _phase_5_1_waiting_view(),
+        )
 
         with ui.expansion("Developer diagnostics", icon="terminal", value=False).classes(
             "w-full border border-slate-200 rounded"
@@ -1708,6 +1971,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         action_state: dict[str, object] = {
             "busy": False,
             "pending_clarification": False,
+            "phase_5_1_refreshing": False,
             "interaction": None,
             "timeline": [],
         }
@@ -1766,6 +2030,14 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 final_result_elements,
                 result if isinstance(result, Mapping) else None,
             )
+            phase_5_1 = view.get("phase_5_1")
+            _apply_phase_5_1_diagnostic(
+                phase_5_elements,
+                phase_5_1
+                if isinstance(phase_5_1, Mapping)
+                else _phase_5_1_waiting_view(),
+            )
+            _set_enabled(phase_5_elements["refresh_button"], True)
 
             diagnostics = view.get("diagnostics")
             diagnostic_values = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -1829,6 +2101,13 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             diagnostic_failure_card.set_visibility(False)
             recovered_label.set_visibility(False)
             _apply_final_grounding_result(final_result_elements, None)
+            _apply_phase_5_1_diagnostic(
+                phase_5_elements,
+                _phase_5_1_waiting_view(
+                    "ProductAgent grounding is running; Phase 5.1 is read-only."
+                ),
+            )
+            _set_enabled(phase_5_elements["refresh_button"], False)
             activity_strip.set_visibility(True)
             activity_badge.set_text("grounding")
             activity_badge.props("color=indigo")
@@ -2004,11 +2283,46 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 requirement_input.props(remove="disable")
                 _update_start_enabled()
 
+        async def _refresh_phase_5_1() -> None:
+            interaction = action_state["interaction"]
+            if action_state["phase_5_1_refreshing"] or not isinstance(
+                interaction, dict
+            ):
+                return
+            interaction_root = interaction.get("interaction_root")
+            if not isinstance(interaction_root, Path):
+                return
+            action_state["phase_5_1_refreshing"] = True
+            _set_enabled(phase_5_elements["refresh_button"], False)
+            try:
+                diagnostic = await asyncio.to_thread(
+                    read_phase_5_1_diagnostic,
+                    interaction_root,
+                )
+                _apply_phase_5_1_diagnostic(
+                    phase_5_elements,
+                    diagnostic.to_view(),
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failure_view = _phase_5_1_waiting_view(
+                    "Phase 5.1 persisted evidence could not be inspected."
+                )
+                failure_view["status"] = "blocked"
+                failure_view["failure"] = f"{type(exc).__name__}: {exc}"
+                _apply_phase_5_1_diagnostic(
+                    phase_5_elements,
+                    failure_view,
+                )
+            finally:
+                action_state["phase_5_1_refreshing"] = False
+                _set_enabled(phase_5_elements["refresh_button"], True)
+
         requirement_input.on_value_change(lambda _: _update_start_enabled())
         clarification_reply_input.on_value_change(lambda _: _update_reply_enabled())
         start_button.on_click(_start_pa_interaction)
         submit_reply_button.on_click(_submit_clarification)
         cancel_interaction_button.on_click(_cancel_clarification)
+        phase_5_elements["refresh_button"].on_click(_refresh_phase_5_1)
         _update_start_enabled()
 
         try:

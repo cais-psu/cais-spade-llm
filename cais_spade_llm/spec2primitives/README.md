@@ -177,6 +177,17 @@ non-blocking context limits**. Historical `unresolved_evidence_needs` are not
 copied into that summary. “Grounding complete” does not mean the assembly is
 ready to execute.
 
+Below the final grounding result, the temporary **Phase 5 · RobotAgent
+Diagnostics** card provides read-only implementation inspection. Its current
+**5.1 · Assigned RA activation and context snapshot** section shows
+`xarm6@localhost` and its execution mode when selected, then paired state and
+catalog revision counts, exact primitive symbols, the catalog fingerprint, and
+expandable `robot_state` and full `primitive_catalog` after capture. A red
+fail-closed diagnostic identifies invalid or unpaired evidence. Refresh only
+rereads the active interaction; the UI has no RA activation or execution
+control. Later Phase 5 diagnostics can share this temporary card. After Phase 5
+is complete, it is intended to be replaced by the primitive composition card.
+
 The existing application entry point remains:
 
 ```bash
