@@ -10,6 +10,7 @@ import pytest
 from rdflib import Namespace, URIRef
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.config import load_workcell_profile
 from cais_spade_llm.spec2primitives.ontology import (
     ResourceRegistryError,
     load_ppr_tbox,
@@ -88,11 +89,11 @@ def test_registry_fingerprint_is_deterministic() -> None:
 
 def test_registry_detects_graph_and_manifest_changes(tmp_path: Path) -> None:
     manifest_paths = _write_valid_manifests(tmp_path)
+    profile = _write_profile(tmp_path, manifest_paths)
     tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
     registry = load_predefined_resource_registry(
         tbox,
-        manifest_paths=manifest_paths,
-        source_root=tmp_path,
+        profile=profile,
     )
 
     registry.graph.add((URIRef(f"{RESOURCE_NAMESPACE}unexpected"), RDF.type, Namespace(PPR_NAMESPACE).resource))
@@ -130,13 +131,13 @@ def test_registry_rejects_invalid_resource_identity(
     message: str,
 ) -> None:
     manifest_paths = _write_valid_manifests(tmp_path)
+    profile = _write_profile(tmp_path, manifest_paths)
     manifest_paths[resource_symbol].write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ResourceRegistryError, match=message):
         load_predefined_resource_registry(
             load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE),
-            manifest_paths=manifest_paths,
-            source_root=tmp_path,
+            profile=profile,
         )
 
 
@@ -145,24 +146,25 @@ def test_registry_rejects_missing_malformed_duplicate_and_unexpected_resources(
 ) -> None:
     tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
     manifest_paths = _write_valid_manifests(tmp_path)
+    profile = _write_profile(tmp_path, manifest_paths)
     manifest_paths["xarm6"].unlink()
     with pytest.raises(ResourceRegistryError, match="cannot be read"):
         load_predefined_resource_registry(
             tbox,
-            manifest_paths=manifest_paths,
-            source_root=tmp_path,
+            profile=profile,
         )
 
     manifest_paths = _write_valid_manifests(tmp_path)
+    profile = _write_profile(tmp_path, manifest_paths)
     manifest_paths["xarm6"].write_text("{", encoding="utf-8")
     with pytest.raises(ResourceRegistryError, match="not valid JSON"):
         load_predefined_resource_registry(
             tbox,
-            manifest_paths=manifest_paths,
-            source_root=tmp_path,
+            profile=profile,
         )
 
     manifest_paths = _write_valid_manifests(tmp_path)
+    profile = _write_profile(tmp_path, manifest_paths)
     manifest_paths["ur5e"].write_text(
         json.dumps({"ur5e": {"type": "robot", "jid": "xarm6@localhost"}}),
         encoding="utf-8",
@@ -170,17 +172,24 @@ def test_registry_rejects_missing_malformed_duplicate_and_unexpected_resources(
     with pytest.raises(ResourceRegistryError, match="not unique"):
         load_predefined_resource_registry(
             tbox,
-            manifest_paths=manifest_paths,
-            source_root=tmp_path,
+            profile=profile,
         )
 
-    unexpected_paths = {**_write_valid_manifests(tmp_path), "third": tmp_path / "third.json"}
-    with pytest.raises(ResourceRegistryError, match="exactly the predefined symbols"):
-        load_predefined_resource_registry(
-            tbox,
-            manifest_paths=unexpected_paths,
-            source_root=tmp_path,
-        )
+    configured_paths = _write_valid_manifests(tmp_path)
+    configured_paths["third"] = tmp_path / "third.json"
+    configured_paths["third"].write_text(
+        json.dumps({"third": {"type": "robot", "jid": "third@localhost"}}),
+        encoding="utf-8",
+    )
+    configured = load_predefined_resource_registry(
+        tbox,
+        profile=_write_profile(tmp_path, configured_paths),
+    )
+    assert [entry.resource_symbol for entry in configured.resources] == [
+        "xarm6",
+        "ur5e",
+        "third",
+    ]
 
 
 def _write_valid_manifests(root: Path) -> dict[str, Path]:
@@ -203,3 +212,31 @@ def _write_valid_manifests(root: Path) -> dict[str, Path]:
             encoding="utf-8",
         )
     return manifest_paths
+
+
+def _write_profile(
+    root: Path,
+    manifest_paths: dict[str, Path],
+):
+    profile_path = root / "workcell_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "process": {
+                    "symbol": "assembly",
+                    "iri": "https://cais-spade-llm.local/process/assembly",
+                },
+                "resources": [
+                    {
+                        "symbol": symbol,
+                        "iri": f"{RESOURCE_NAMESPACE}{symbol}",
+                        "manifest_ref": path.relative_to(root).as_posix(),
+                    }
+                    for symbol, path in manifest_paths.items()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return load_workcell_profile(profile_path, repository_root=root)

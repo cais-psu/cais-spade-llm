@@ -1,8 +1,8 @@
 """Ground one semantic assembly process to a predefined robot resource.
 
 The PA supplies only product semantics.  This module owns the deterministic
-join against the predefined Workcell ABox, validates one accepted world-frame
-pose against the manifest-pinned coarse reach envelopes, and delegates the
+join against the predefined Workcell ABox, validates one accepted robot-frame
+location against manifest-pinned coarse reach envelopes, and delegates the
 exact process-execution write to the host-only ABox boundary.
 """
 
@@ -40,16 +40,9 @@ from cais_spade_llm.spec2primitives.ontology.workcell import (
 
 _RESOURCE_SELECTION_ROOT = Path("products/grounding/resource_selection")
 _SELECTION_RECORD_NAME = "resource_selection_record.json"
-_REQUIRED_RECORD_TYPE = "RobotFramePoseRecord"
-_TARGET_FRAME = "world"
+_REQUIRED_RECORD_TYPE = "RobotFrameLocationRecord"
 _SELECTION_POLICY = "first_reachable_in_predefined_registry_order"
 _HOST_PRODUCER = "resource_grounding_host"
-_EXPECTED_RESOURCE_SYMBOLS = ("xarm6", "ur5e")
-_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_MANIFEST_PATHS = {
-    "xarm6": _PACKAGE_ROOT / "initialization/resources/robot_xarm6.json",
-    "ur5e": _PACKAGE_ROOT / "initialization/resources/robot_ur5e.json",
-}
 _EXECUTION_ENVIRONMENT = {
     "simulation": "gazebo",
     "physical": "real",
@@ -60,8 +53,8 @@ class ResourceGroundingError(OntologyContextError):
     """Raised when semantic resource grounding cannot be trusted."""
 
 
-class RobotFramePoseEvidenceError(ResourceGroundingError):
-    """Raised when a RobotFramePoseRecord cannot support resource selection."""
+class RobotFrameLocationEvidenceError(ResourceGroundingError):
+    """Raised when a RobotFrameLocationRecord cannot support resource selection."""
 
 
 @dataclass(frozen=True)
@@ -118,8 +111,8 @@ class ResourceSelectionRecord:
     candidate_resource_iris: tuple[str, ...]
     required_record_type: str
     target_frame: str
-    pose_record_ref: str
-    pose_record_sha256: str
+    grounding_record_ref: str
+    grounding_record_sha256: str
     observation_timestamp_ns: int
     tbox_fingerprint: str
     registry_fingerprint: str
@@ -132,7 +125,7 @@ class ResourceSelectionRecord:
     selected_execution_mode: str | None
     fingerprint: str
     _interaction_root: Path = field(repr=False, compare=False)
-    _pose_path: Path = field(repr=False, compare=False)
+    _grounding_path: Path = field(repr=False, compare=False)
     _manifest_paths: tuple[tuple[str, Path], ...] = field(repr=False, compare=False)
     _registry: ResourceRegistrySnapshot = field(repr=False, compare=False)
     _workcell: PredefinedWorkcellSnapshot = field(repr=False, compare=False)
@@ -140,7 +133,7 @@ class ResourceSelectionRecord:
     def to_record(self) -> dict[str, object]:
         """Return the exact JSON-safe persisted selection record."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "ResourceSelectionRecord",
             "selection_number": self.selection_number,
             "specification_iri": self.specification_iri,
@@ -149,8 +142,8 @@ class ResourceSelectionRecord:
             "candidate_resource_iris": list(self.candidate_resource_iris),
             "required_record_type": self.required_record_type,
             "target_frame": self.target_frame,
-            "pose_record_ref": self.pose_record_ref,
-            "pose_record_sha256": self.pose_record_sha256,
+            "grounding_record_ref": self.grounding_record_ref,
+            "grounding_record_sha256": self.grounding_record_sha256,
             "observation_timestamp_ns": self.observation_timestamp_ns,
             "tbox_fingerprint": self.tbox_fingerprint,
             "registry_fingerprint": self.registry_fingerprint,
@@ -169,12 +162,19 @@ class ResourceSelectionRecord:
     def assert_unchanged(self) -> None:
         """Raise if the decision record or any pinned selection input changed."""
         _assert_authorities(self._workcell, self._registry)
-        pose = _load_world_pose(self._pose_path, self._interaction_root)
-        if pose.record_ref != self.pose_record_ref or pose.sha256 != self.pose_record_sha256:
+        location = _load_robot_frame_location(
+            self._grounding_path,
+            self._interaction_root,
+            target_frame=self.target_frame,
+        )
+        if (
+            location.record_ref != self.grounding_record_ref
+            or location.sha256 != self.grounding_record_sha256
+        ):
             raise ResourceGroundingError(
-                "Resource selection world-frame pose changed after validation."
+                "Resource selection robot-frame location changed after validation."
             )
-        if pose.observation_timestamp_ns != self.observation_timestamp_ns:
+        if location.observation_timestamp_ns != self.observation_timestamp_ns:
             raise ResourceGroundingError(
                 "Resource selection observation timestamp changed after validation."
             )
@@ -185,7 +185,8 @@ class ResourceSelectionRecord:
             _candidate_reach_evidence(
                 entries[resource_iri],
                 manifest_paths[entries[resource_iri].resource_symbol],
-                pose.translation_m,
+                location.translation_m,
+                target_frame=self.target_frame,
             )
             for resource_iri in self.candidate_resource_iris
         )
@@ -221,7 +222,7 @@ class ResourceSelectionRecord:
 
 
 @dataclass(frozen=True)
-class _WorldPoseEvidence:
+class _RobotFrameLocationEvidence:
     path: Path
     record_ref: str
     sha256: str
@@ -233,7 +234,7 @@ def derive_resource_assignment_need(
     abox: ABoxSnapshot,
     workcell: PredefinedWorkcellSnapshot,
 ) -> ResourceAssignmentNeed | None:
-    """Derive a world-pose need only from an unresolved semantic Workcell join.
+    """Derive a location need only from an unresolved semantic Workcell join.
 
     The result is intentionally transient.  Provider routing consumes its
     required record type and frame; it is not another task-transition record.
@@ -290,13 +291,14 @@ def derive_resource_assignment_need(
     )
     if not candidates:
         return None
+    target_frame = _candidate_target_frame(workcell, candidates)
     return ResourceAssignmentNeed(
         specification_iri=abox.specification_iri,
         feature_iri=str(next(iter(joined_features))),
         process_iri=workcell.process_iri,
         candidate_resource_iris=candidates,
         required_record_type=_REQUIRED_RECORD_TYPE,
-        target_frame=_TARGET_FRAME,
+        target_frame=target_frame,
         tbox_fingerprint=abox.tbox_fingerprint,
         workcell_fingerprint=workcell.fingerprint,
     )
@@ -309,8 +311,7 @@ def select_predefined_resource(  # noqa: PLR0913
     registry: ResourceRegistrySnapshot,
     workcell: PredefinedWorkcellSnapshot,
     need: ResourceAssignmentNeed,
-    robot_frame_pose_path: Path,
-    manifest_paths: Mapping[str, Path] | None = None,
+    grounding_record_path: Path,
     selection_number: int = 1,
 ) -> ResourceSelectionRecord:
     """Select the first coarsely reachable predefined resource and persist it."""
@@ -325,14 +326,19 @@ def select_predefined_resource(  # noqa: PLR0913
         )
     _validate_need(need, tbox, registry, workcell)
 
-    pose = _load_world_pose(Path(robot_frame_pose_path), root)
-    configured_paths = _validated_manifest_paths(manifest_paths)
+    location = _load_robot_frame_location(
+        Path(grounding_record_path),
+        root,
+        target_frame=need.target_frame,
+    )
+    configured_paths = _validated_manifest_paths(workcell)
     registry_entries = {entry.resource_iri: entry for entry in registry.resources}
     evidence = tuple(
         _candidate_reach_evidence(
             registry_entries[resource_iri],
             configured_paths[registry_entries[resource_iri].resource_symbol],
-            pose.translation_m,
+            location.translation_m,
+            target_frame=need.target_frame,
         )
         for resource_iri in need.candidate_resource_iris
     )
@@ -342,7 +348,7 @@ def select_predefined_resource(  # noqa: PLR0913
     )
 
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_type": "ResourceSelectionRecord",
         "selection_number": selection_number,
         "specification_iri": need.specification_iri,
@@ -351,9 +357,9 @@ def select_predefined_resource(  # noqa: PLR0913
         "candidate_resource_iris": list(need.candidate_resource_iris),
         "required_record_type": need.required_record_type,
         "target_frame": need.target_frame,
-        "pose_record_ref": pose.record_ref,
-        "pose_record_sha256": pose.sha256,
-        "observation_timestamp_ns": pose.observation_timestamp_ns,
+        "grounding_record_ref": location.record_ref,
+        "grounding_record_sha256": location.sha256,
+        "observation_timestamp_ns": location.observation_timestamp_ns,
         "tbox_fingerprint": tbox.fingerprint,
         "registry_fingerprint": registry.fingerprint,
         "workcell_fingerprint": workcell.fingerprint,
@@ -382,9 +388,9 @@ def select_predefined_resource(  # noqa: PLR0913
         candidate_resource_iris=need.candidate_resource_iris,
         required_record_type=need.required_record_type,
         target_frame=need.target_frame,
-        pose_record_ref=pose.record_ref,
-        pose_record_sha256=pose.sha256,
-        observation_timestamp_ns=pose.observation_timestamp_ns,
+        grounding_record_ref=location.record_ref,
+        grounding_record_sha256=location.sha256,
+        observation_timestamp_ns=location.observation_timestamp_ns,
         tbox_fingerprint=tbox.fingerprint,
         registry_fingerprint=registry.fingerprint,
         workcell_fingerprint=workcell.fingerprint,
@@ -396,13 +402,71 @@ def select_predefined_resource(  # noqa: PLR0913
         selected_execution_mode=selected_mode,
         fingerprint=str(payload["fingerprint"]),
         _interaction_root=root,
-        _pose_path=pose.path,
+        _grounding_path=location.path,
         _manifest_paths=tuple(configured_paths.items()),
         _registry=registry,
         _workcell=workcell,
     )
     result.assert_unchanged()
     return result
+
+
+def _candidate_target_frame(
+    workcell: PredefinedWorkcellSnapshot,
+    candidate_resource_iris: Sequence[str],
+) -> str:
+    """Derive one common reach frame from the candidates' pinned manifests."""
+    entries = {entry.resource_iri: entry for entry in workcell._registry.resources}
+    paths = {
+        item.symbol: item.manifest_path for item in workcell._profile.resources
+    }
+    frames: list[str] = []
+    for resource_iri in candidate_resource_iris:
+        entry = entries.get(resource_iri)
+        if entry is None:
+            raise ResourceGroundingError(
+                "Resource assignment candidate is absent from the registry."
+            )
+        source = _read_bytes(paths[entry.resource_symbol], "resource manifest")
+        if hashlib.sha256(source).hexdigest() != entry.source_sha256:
+            raise ResourceGroundingError(
+                f"Resource manifest hash changed: {entry.resource_symbol}."
+            )
+        try:
+            payload = json.loads(source.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResourceGroundingError("Resource manifest is malformed.") from exc
+        resource = payload.get(entry.resource_symbol) if isinstance(payload, dict) else None
+        execution_mode = (
+            resource.get("execution_mode") if isinstance(resource, Mapping) else None
+        )
+        environment_name = _EXECUTION_ENVIRONMENT.get(str(execution_mode))
+        environment = (
+            resource.get(environment_name)
+            if isinstance(resource, Mapping) and environment_name is not None
+            else None
+        )
+        static_capabilities = (
+            environment.get("static_capabilities")
+            if isinstance(environment, Mapping)
+            else None
+        )
+        gripper_reach = (
+            static_capabilities.get("gripper_reach")
+            if isinstance(static_capabilities, Mapping)
+            else None
+        )
+        frame = gripper_reach.get("frame") if isinstance(gripper_reach, Mapping) else None
+        if not isinstance(frame, str) or not frame:
+            raise ResourceGroundingError(
+                f"Resource gripper_reach frame is missing: {entry.resource_symbol}."
+            )
+        frames.append(frame)
+    if not frames or len(set(frames)) != 1:
+        raise ResourceGroundingError(
+            "Eligible resources declare inconsistent gripper_reach frames."
+        )
+    return frames[0]
 
 
 def commit_resource_assignment(
@@ -414,7 +478,7 @@ def commit_resource_assignment(
     need: ResourceAssignmentNeed,
     selection: ResourceSelectionRecord,
 ) -> MergeResult:
-    """Commit the exact host-derived process execution for one selection."""
+    """Commit the exact system-derived process execution for one selection."""
     root = Path(interaction_root).resolve()
     _assert_authorities(workcell, registry, tbox=tbox)
     abox = load_interaction_abox(root, tbox)
@@ -469,6 +533,8 @@ def commit_resource_assignment(
         root,
         tbox,
         producer=_HOST_PRODUCER,
+        process_iri=workcell.process_iri,
+        resource_iris=workcell.resource_iris,
         assertions=assertions,
         authorized_evidence_refs=evidence_refs,
     )
@@ -523,7 +589,9 @@ def _validate_need(
         need.process_iri != workcell.process_iri
         or need.candidate_resource_iris != workcell.resource_iris
         or need.required_record_type != _REQUIRED_RECORD_TYPE
-        or need.target_frame != _TARGET_FRAME
+        or need.target_frame != _candidate_target_frame(
+            workcell, need.candidate_resource_iris
+        )
         or need.tbox_fingerprint != tbox.fingerprint
         or need.workcell_fingerprint != workcell.fingerprint
         or tuple(entry.resource_iri for entry in registry.resources)
@@ -570,7 +638,12 @@ def _validate_selection_matches_need(
         )
 
 
-def _load_world_pose(path: Path, interaction_root: Path) -> _WorldPoseEvidence:
+def _load_robot_frame_location(
+    path: Path,
+    interaction_root: Path,
+    *,
+    target_frame: str,
+) -> _RobotFrameLocationEvidence:
     root = Path(interaction_root).resolve()
     resolved = Path(path).resolve()
     try:
@@ -578,66 +651,60 @@ def _load_world_pose(path: Path, interaction_root: Path) -> _WorldPoseEvidence:
         source = resolved.read_bytes()
         record = json.loads(source.decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RobotFramePoseEvidenceError(
-            "RobotFramePoseRecord could not be read from this interaction."
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord could not be read from this interaction."
         ) from exc
     if not isinstance(record, Mapping):
-        raise RobotFramePoseEvidenceError(
-            "RobotFramePoseRecord must be a JSON object."
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord must be a JSON object."
         )
     if (
         record.get("schema_version") != 1
         or record.get("record_type") != _REQUIRED_RECORD_TYPE
-        or record.get("target_frame") != _TARGET_FRAME
+        or record.get("target_frame") != target_frame
     ):
-        raise RobotFramePoseEvidenceError(
-            "Resource selection requires an exact world-frame RobotFramePoseRecord."
+        raise RobotFrameLocationEvidenceError(
+            "Resource selection requires an exact RobotFrameLocationRecord."
         )
-    status = record.get("robot_frame_conversion", record.get("status"))
+    status = record.get("robot_frame_conversion")
     if status != "accepted":
-        raise RobotFramePoseEvidenceError(
-            "Resource selection requires an accepted RobotFramePoseRecord."
+        raise RobotFrameLocationEvidenceError(
+            "Resource selection requires an accepted RobotFrameLocationRecord."
         )
-    for key, accepted in (
-        ("CAD_correspondence", "accepted"),
-        ("location", "available"),
-        ("pose", "accepted"),
-    ):
-        if key in record and record[key] != accepted:
-            raise RobotFramePoseEvidenceError(
-                f"RobotFramePoseRecord {key} is not accepted."
-            )
+    if record.get("CAD_correspondence") != "accepted":
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord CAD_correspondence is not accepted."
+        )
+    if record.get("location") != "available":
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord location is not available."
+        )
     observation_timestamp_ns = record.get("observation_timestamp_ns")
     if (
         isinstance(observation_timestamp_ns, bool)
         or not isinstance(observation_timestamp_ns, int)
         or observation_timestamp_ns < 0
     ):
-        raise RobotFramePoseEvidenceError(
-            "RobotFramePoseRecord observation timestamp is invalid."
-        )
-    robot_pose = record.get("robot_frame_pose")
-    if not isinstance(robot_pose, Mapping):
-        raise RobotFramePoseEvidenceError(
-            "Accepted RobotFramePoseRecord has no robot_frame_pose."
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord observation timestamp is invalid."
         )
     try:
         translation = _finite_vector3(
-            robot_pose.get("CAD_origin_translation_m"),
-            "RobotFramePoseRecord CAD_origin_translation_m",
+            record.get("translated_location_m"),
+            "RobotFrameLocationRecord translated_location_m",
         )
         validated_hash_refs = _validate_embedded_hash_refs(record, root)
-    except RobotFramePoseEvidenceError:
+    except RobotFrameLocationEvidenceError:
         raise
     except ResourceGroundingError as exc:
-        raise RobotFramePoseEvidenceError(str(exc)) from exc
+        raise RobotFrameLocationEvidenceError(str(exc)) from exc
     if validated_hash_refs < 1:
-        # A pose without an intact source chain cannot be distinguished from an
+        # A location without an intact source chain cannot be distinguished from an
         # ungrounded coordinate supplied directly in the terminal record.
-        raise RobotFramePoseEvidenceError(
-            "RobotFramePoseRecord requires at least one embedded hash reference."
+        raise RobotFrameLocationEvidenceError(
+            "RobotFrameLocationRecord requires embedded hash references."
         )
-    return _WorldPoseEvidence(
+    return _RobotFrameLocationEvidence(
         path=resolved,
         record_ref=relative.as_posix(),
         sha256=hashlib.sha256(source).hexdigest(),
@@ -647,20 +714,20 @@ def _load_world_pose(path: Path, interaction_root: Path) -> _WorldPoseEvidence:
 
 
 def _validated_manifest_paths(
-    manifest_paths: Mapping[str, Path] | None,
+    workcell: PredefinedWorkcellSnapshot,
 ) -> dict[str, Path]:
-    values = dict(_DEFAULT_MANIFEST_PATHS if manifest_paths is None else manifest_paths)
-    if set(values) != set(_EXPECTED_RESOURCE_SYMBOLS):
-        raise ResourceGroundingError(
-            "Resource selection requires exact xarm6 then ur5e manifest paths."
-        )
-    return {symbol: Path(values[symbol]).resolve() for symbol in _EXPECTED_RESOURCE_SYMBOLS}
+    return {
+        item.symbol: item.manifest_path.resolve()
+        for item in workcell._profile.resources
+    }
 
 
 def _candidate_reach_evidence(
     entry: ResourceRegistryEntry,
     manifest_path: Path,
     translation_m: tuple[float, float, float],
+    *,
+    target_frame: str,
 ) -> CandidateReachEvidence:
     source = _read_bytes(manifest_path, f"{entry.resource_symbol} manifest")
     digest = hashlib.sha256(source).hexdigest()
@@ -703,9 +770,11 @@ def _candidate_reach_evidence(
             f"Resource static_capabilities are missing: {entry.resource_symbol}."
         )
 
-    supports_pick_place = static_capabilities.get("supports_manipulator_pick_place")
     workspace = _workspace_bounds(static_capabilities.get("workspace_bounds"))
-    reach = _gripper_reach(static_capabilities.get("gripper_reach"))
+    reach = _gripper_reach(
+        static_capabilities.get("gripper_reach"),
+        target_frame=target_frame,
+    )
     x, y, z = translation_m
     tolerance = reach[5]
     in_workspace = (
@@ -719,8 +788,6 @@ def _candidate_reach_evidence(
         and reach[3] - tolerance <= z <= reach[4] + tolerance
     )
     verdicts: list[str] = []
-    if supports_pick_place is not True:
-        verdicts.append("supports_manipulator_pick_place_false")
     if not in_workspace:
         verdicts.append("outside_workspace_bounds")
     if not in_gripper_reach:
@@ -761,9 +828,13 @@ def _workspace_bounds(value: object) -> tuple[float, float, float, float, float,
 
 def _gripper_reach(
     value: object,
+    *,
+    target_frame: str,
 ) -> tuple[float, float, float, float, float, float]:
-    if not isinstance(value, Mapping) or value.get("frame") != _TARGET_FRAME:
-        raise ResourceGroundingError("Resource gripper_reach frame must be world.")
+    if not isinstance(value, Mapping) or value.get("frame") != target_frame:
+        raise ResourceGroundingError(
+            "Resource gripper_reach frame does not match the grounding frame."
+        )
     origin = value.get("origin_pose")
     if not isinstance(origin, Mapping):
         raise ResourceGroundingError("Resource gripper_reach origin_pose is invalid.")
@@ -805,24 +876,24 @@ def _validate_embedded_hash_refs(value: object, interaction_root: Path) -> int:
                 or not isinstance(sha256, str)
                 or not sha256
             ):
-                raise RobotFramePoseEvidenceError(
-                    "RobotFramePoseRecord embedded hash reference is incomplete."
+                raise RobotFrameLocationEvidenceError(
+                    "RobotFrameLocationRecord embedded hash reference is incomplete."
                 )
             relative = Path(ref)
             if relative.is_absolute() or ".." in relative.parts:
-                raise RobotFramePoseEvidenceError(
-                    "RobotFramePoseRecord embedded reference leaves its interaction."
+                raise RobotFrameLocationEvidenceError(
+                    "RobotFrameLocationRecord embedded reference leaves its interaction."
                 )
             source_path = (interaction_root / relative).resolve()
             try:
                 source_path.relative_to(interaction_root)
             except ValueError as exc:
-                raise RobotFramePoseEvidenceError(
-                    "RobotFramePoseRecord embedded reference leaves its interaction."
+                raise RobotFrameLocationEvidenceError(
+                    "RobotFrameLocationRecord embedded reference leaves its interaction."
                 ) from exc
             if hashlib.sha256(_read_bytes(source_path, ref)).hexdigest() != sha256:
-                raise RobotFramePoseEvidenceError(
-                    f"RobotFramePoseRecord embedded hash does not match: {ref}."
+                raise RobotFrameLocationEvidenceError(
+                    f"RobotFrameLocationRecord embedded hash does not match: {ref}."
                 )
             validated += 1
         for item in value.values():
@@ -893,13 +964,44 @@ def _validate_selection_number(value: object) -> None:
 
 
 def _finite_vector3(value: object, label: str) -> tuple[float, float, float]:
+    result = _finite_vector(value, size=3, label=label)
+    return result  # type: ignore[return-value]
+
+
+def _finite_vector(
+    value: object,
+    *,
+    size: int,
+    label: str,
+) -> tuple[float, ...]:
     if (
         not isinstance(value, Sequence)
         or isinstance(value, (str, bytes))
-        or len(value) != 3
+        or len(value) != size
     ):
-        raise ResourceGroundingError(f"{label} must contain exactly three values.")
-    return tuple(_finite_number(item, label) for item in value)  # type: ignore[return-value]
+        raise ResourceGroundingError(
+            f"{label} must contain exactly {size} values."
+        )
+    return tuple(_finite_number(item, label) for item in value)
+
+
+def _finite_matrix(
+    value: object,
+    *,
+    rows: int,
+    columns: int,
+    label: str,
+) -> tuple[tuple[float, ...], ...]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or len(value) != rows
+    ):
+        raise ResourceGroundingError(f"{label} must contain exactly {rows} rows.")
+    return tuple(
+        _finite_vector(row, size=columns, label=f"{label} row")
+        for row in value
+    )
 
 
 def _finite_number(value: object, label: str) -> float:

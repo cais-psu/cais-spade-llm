@@ -92,20 +92,39 @@ operation.
 When a controlled caller supplies that intact size-correspondence record, the
 pose step writes
 `products/grounding/rgb_d_cad_grounding/pose_<number>/pose_record.json`
-atomically. A clear fit stores the camera-from-CAD transform; weak or competing
-fits remain rejected or ambiguous. No cross-camera or robot-frame transform,
-PA decision, planning, or execution is stored by this operation, and the
+atomically. A clear asymmetric fit stores the camera-from-CAD transform. When
+qualified symmetric rotations agree on the transformed physical CAD centroid,
+the version 2 record retains `location: available`, `pose: ambiguous`, and only
+`CAD_centroid_translation_m`; it does not reinterpret the off-center STL origin
+as the object location or fabricate a rotation. Genuinely different centroids
+remain `location: ambiguous`. No cross-camera or robot-frame transform, PA
+decision, planning, or execution is stored by this operation, and the
 status-only UI never exposes its coordinates or rotation.
 
-When a controlled caller supplies one approved extrinsic calibration,
+The simulation-only UI runtime loads the bundled, versioned
+`config/gazebo_camera_to_world_calibration.json` by default. Its four transforms
+were composed once from the fixed camera poses in the hash-pinned
+`table_spec2primitives.world` and the ROS optical-frame convention authorized
+for this Gazebo case. Runtime recognition never reads the world file and
+continues to select the active exact frame dynamically: `cam_mk3_link`,
+`cam_mk4_1_link`, `cam_mk4_2_link`, or `cam_assembly_link`. A deployment may
+replace the bundled simulation manifest through
+`SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH`. The PA panel displays
+calibration readiness and any exact actionable configuration failure.
+
+When a controlled caller supplies the matching approved extrinsic calibration,
 `calibration_<number>/calibration_record.json` stores its exact source and
 target frames, rigid transform, validity window, source details, and payload hash.
 The frame-conversion step then writes
 `robot_pose_<number>/robot_frame_pose_record.json` atomically. It checks the
-calibration against the originating observation timestamp and composes a
-robot-frame pose only when the camera-frame pose is accepted. Ambiguous and
-rejected poses retain no robot-frame coordinates, and the status-only UI never
-exposes an accepted transform.
+calibration against the originating observation timestamp. An available
+camera-frame centroid is converted to `world` even while yaw remains
+`pose: ambiguous`; that location-only result contains
+`CAD_centroid_translation_m` and no rotation or executable transform. Missing,
+invalid, stale, or selected-frame-missing calibration persists an `incomplete`
+grounding session, creates no world pose or resource assignment, and does not
+send PA back to document inspection. Rejected or location-ambiguous poses retain
+no robot-frame coordinates, and the status-only UI never exposes a transform.
 
 Generated interaction directories are ignored by Git. Ground-truth evaluation
 is excluded from runtime context and belongs under `../evaluations/` so it

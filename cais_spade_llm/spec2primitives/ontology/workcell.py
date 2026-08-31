@@ -10,16 +10,10 @@ from rdflib import Graph, Namespace, URIRef
 from rdflib.compare import to_isomorphic
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.config import WorkcellProfile, load_workcell_profile
+
 from .ppr_tbox import OntologyContextError, TBoxSnapshot
 from .resource_registry import ResourceRegistrySnapshot
-
-_PROCESS_NAMESPACE = "https://cais-spade-llm.local/process/"
-_ASSEMBLY_SYMBOL = "assembly"
-_EXPECTED_RESOURCES = (
-    ("xarm6", "https://cais-spade-llm.local/resource/xarm6"),
-    ("ur5e", "https://cais-spade-llm.local/resource/ur5e"),
-)
-
 
 class PredefinedWorkcellError(OntologyContextError):
     """Raised when the predefined Workcell ABox cannot be trusted."""
@@ -41,6 +35,7 @@ class PredefinedWorkcellSnapshot:
     fingerprint: str
     _tbox: TBoxSnapshot = field(repr=False, compare=False)
     _registry: ResourceRegistrySnapshot = field(repr=False, compare=False)
+    _profile: WorkcellProfile = field(repr=False, compare=False)
 
     def assert_unchanged(self) -> None:
         """Raise if a pinned ontology authority or this graph has changed."""
@@ -56,6 +51,7 @@ class PredefinedWorkcellSnapshot:
             raise PredefinedWorkcellError(
                 "Predefined Workcell resource registry changed after validation."
             ) from exc
+        self._profile.assert_unchanged()
 
         if self._tbox.fingerprint != self.tbox_fingerprint:
             raise PredefinedWorkcellError(
@@ -69,6 +65,7 @@ class PredefinedWorkcellSnapshot:
         if set(self.graph) != _expected_graph(
             ppr_namespace=self.ppr_namespace,
             process_iri=self.process_iri,
+            resource_iris=self.resource_iris,
         ):
             raise PredefinedWorkcellError(
                 "Predefined Workcell graph changed after validation."
@@ -94,6 +91,7 @@ class PredefinedWorkcellSnapshot:
             "resource_namespace": self.resource_namespace,
             "tbox_fingerprint": self.tbox_fingerprint,
             "registry_fingerprint": self.registry_fingerprint,
+            "workcell_profile_sha256": self._profile.source_sha256,
             "graph_fingerprint": _graph_fingerprint(self.graph),
             "fingerprint": self.fingerprint,
         }
@@ -102,6 +100,8 @@ class PredefinedWorkcellSnapshot:
 def load_predefined_workcell(
     tbox: TBoxSnapshot,
     registry: ResourceRegistrySnapshot,
+    *,
+    profile: WorkcellProfile | None = None,
 ) -> PredefinedWorkcellSnapshot:
     """Load the exact broad assembly capabilities for the predefined workcell.
 
@@ -143,67 +143,71 @@ def load_predefined_workcell(
         raise PredefinedWorkcellError(
             "Predefined Workcell PPR namespace does not match the resource registry."
         )
+    configured_profile = registry._profile if profile is None else profile
+    configured_profile.assert_unchanged()
     resource_identities = tuple(
         (entry.resource_symbol, entry.resource_iri) for entry in registry.resources
     )
-    if resource_identities != _EXPECTED_RESOURCES:
-        # Broad capability assertions are safe only for the reviewed fixed workcell.
+    configured_resources = tuple(
+        (entry.symbol, entry.iri) for entry in configured_profile.resources
+    )
+    if resource_identities != configured_resources:
         raise PredefinedWorkcellError(
-            "Predefined Workcell requires exactly xarm6 and ur5e in registry order."
+            "Predefined Workcell resources do not match the validated profile."
         )
 
-    process_iri = f"{_PROCESS_NAMESPACE}{_ASSEMBLY_SYMBOL}"
+    process_iri = configured_profile.process_iri
+    process_namespace = process_iri.rsplit("/", 1)[0] + "/"
     graph = Graph()
     graph.bind("ppr", Namespace(tbox.ppr_namespace))
-    graph.bind("process", Namespace(_PROCESS_NAMESPACE))
+    graph.bind("process", Namespace(process_namespace))
     graph.bind("resource", Namespace(registry.resource_namespace))
     for triple in _expected_graph(
         ppr_namespace=tbox.ppr_namespace,
         process_iri=process_iri,
+        resource_iris=tuple(iri for _, iri in configured_resources),
     ):
         graph.add(triple)
 
     payload: dict[str, object] = {
         "schema_version": 1,
         "record_type": "PredefinedWorkcellSnapshot",
-        "process_symbol": _ASSEMBLY_SYMBOL,
+        "process_symbol": configured_profile.process_symbol,
         "process_iri": process_iri,
-        "resource_iris": [resource_iri for _, resource_iri in _EXPECTED_RESOURCES],
+        "resource_iris": [resource_iri for _, resource_iri in configured_resources],
         "ppr_namespace": tbox.ppr_namespace,
-        "process_namespace": _PROCESS_NAMESPACE,
+        "process_namespace": process_namespace,
         "resource_namespace": registry.resource_namespace,
         "tbox_fingerprint": tbox.fingerprint,
         "registry_fingerprint": registry.fingerprint,
+        "workcell_profile_sha256": configured_profile.source_sha256,
         "graph_fingerprint": _graph_fingerprint(graph),
     }
     snapshot = PredefinedWorkcellSnapshot(
         graph=graph,
-        process_symbol=_ASSEMBLY_SYMBOL,
+        process_symbol=configured_profile.process_symbol,
         process_iri=process_iri,
-        resource_iris=tuple(resource_iri for _, resource_iri in _EXPECTED_RESOURCES),
+        resource_iris=tuple(resource_iri for _, resource_iri in configured_resources),
         ppr_namespace=tbox.ppr_namespace,
-        process_namespace=_PROCESS_NAMESPACE,
+        process_namespace=process_namespace,
         resource_namespace=registry.resource_namespace,
         tbox_fingerprint=tbox.fingerprint,
         registry_fingerprint=registry.fingerprint,
         fingerprint=_record_fingerprint(payload),
         _tbox=tbox,
         _registry=registry,
+        _profile=configured_profile,
     )
     snapshot.assert_unchanged()
     return snapshot
 
 
 def _validate_snapshot_symbols(snapshot: PredefinedWorkcellSnapshot) -> None:
-    expected_process_iri = f"{_PROCESS_NAMESPACE}{_ASSEMBLY_SYMBOL}"
-    expected_resource_iris = tuple(
-        resource_iri for _, resource_iri in _EXPECTED_RESOURCES
-    )
+    expected_resource_iris = tuple(item.iri for item in snapshot._profile.resources)
     if (
-        snapshot.process_symbol != _ASSEMBLY_SYMBOL
-        or snapshot.process_iri != expected_process_iri
+        snapshot.process_symbol != snapshot._profile.process_symbol
+        or snapshot.process_iri != snapshot._profile.process_iri
         or snapshot.resource_iris != expected_resource_iris
-        or snapshot.process_namespace != _PROCESS_NAMESPACE
         or snapshot.ppr_namespace != snapshot._tbox.ppr_namespace
         or snapshot.resource_namespace != snapshot._registry.resource_namespace
     ):
@@ -216,11 +220,12 @@ def _expected_graph(
     *,
     ppr_namespace: str,
     process_iri: str,
+    resource_iris: tuple[str, ...],
 ) -> set[tuple[URIRef, URIRef, URIRef]]:
     ppr = Namespace(ppr_namespace)
     process = URIRef(process_iri)
     graph = {(process, RDF.type, ppr.process)}
-    for _, resource_iri in _EXPECTED_RESOURCES:
+    for resource_iri in resource_iris:
         resource = URIRef(resource_iri)
         graph.add((resource, RDF.type, ppr.resource))
         graph.add((resource, ppr.capableOf, process))

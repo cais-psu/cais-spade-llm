@@ -90,11 +90,13 @@ def test_unique_shape_fit_persists_complete_camera_frame_pose(
     assert len(result.selected_candidate["quaternion_xyzw"]) == 4
     record = _read_json(result.record_path)
     assert record == result.record
+    assert record["schema_version"] == 2
     assert record["record_type"] == "CADPoseEstimationRecord"
     assert record["method"] == "principal_axis_multistart_point_to_point_ICP"
     assert record["coordinate_frame"] == "cam_mk3_optical_frame"
     assert record["cross_camera_fusion"] == "not_evaluated"
     assert record["robot_frame_conversion"] == "not_evaluated"
+    assert len(result.selected_candidate["CAD_centroid_translation_m"]) == 3
     assert record["source_correspondence"]["ref"].endswith(
         "correspondence_0001/correspondence_record.json"
     )
@@ -152,12 +154,15 @@ def test_symmetric_rotation_hypotheses_remain_pose_ambiguous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     correspondence_path = _prepare_correspondence(tmp_path, (0.042,))
+    inputs = pose_module._load_pose_inputs(tmp_path.resolve(), correspondence_path)
+    cad_centroid_m = inputs.cad_triangles_m.reshape(-1, 3).mean(axis=0)
+    camera_centroid_m = cad_centroid_m + np.asarray([0.12, -0.04, 0.75])
 
     def register(*args: object, **kwargs: object) -> list[_RegistrationHypothesis]:
         first = _hypothesis(kwargs, fitness=0.92)
         rotated = np.eye(4)
         rotated[:3, :3] = Rotation.from_euler("z", 90.0, degrees=True).as_matrix()
-        rotated[:3, 3] = first.transformation[:3, 3]
+        rotated[:3, 3] = camera_centroid_m - rotated[:3, :3] @ cad_centroid_m
         second = _hypothesis(
             kwargs,
             fitness=0.90,
@@ -178,7 +183,67 @@ def test_symmetric_rotation_hypotheses_remain_pose_ambiguous(
     assert result.pose == "ambiguous"
     assert result.selected_candidate is not None
     assert len(result.record["qualified_pose_hypotheses"]) == 2
+    np.testing.assert_allclose(
+        result.selected_candidate["CAD_centroid_translation_m"],
+        camera_centroid_m,
+    )
+    first_origin = result.record["qualified_pose_hypotheses"][0][
+        "camera_from_CAD_transform"
+    ][:3]
+    second_origin = result.record["qualified_pose_hypotheses"][1][
+        "camera_from_CAD_transform"
+    ][:3]
+    assert not np.allclose(
+        np.asarray(first_origin)[:, 3],
+        np.asarray(second_origin)[:, 3],
+    )
     assert "rotation_matrix" not in result.selected_candidate
+    assert "CAD_origin_translation_m" not in result.selected_candidate
+
+
+def test_symmetric_rotations_with_different_centroids_keep_location_ambiguous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    correspondence_path = _prepare_correspondence(tmp_path, (0.042,))
+    inputs = pose_module._load_pose_inputs(tmp_path.resolve(), correspondence_path)
+    cad_centroid_m = inputs.cad_triangles_m.reshape(-1, 3).mean(axis=0)
+
+    def register(*args: object, **kwargs: object) -> list[_RegistrationHypothesis]:
+        first = _hypothesis(kwargs, fitness=0.92)
+        rotated = np.eye(4)
+        rotated[:3, :3] = Rotation.from_euler("z", 90.0, degrees=True).as_matrix()
+        camera_centroid_m = (
+            first.transformation[:3, :3] @ cad_centroid_m
+            + first.transformation[:3, 3]
+        )
+        rotated[:3, 3] = (
+            camera_centroid_m
+            + np.asarray([0.01, 0.0, 0.0])
+            - rotated[:3, :3] @ cad_centroid_m
+        )
+        return [
+            first,
+            _hypothesis(
+                kwargs,
+                fitness=0.90,
+                initialization=2,
+                transformation=rotated,
+            ),
+        ]
+
+    monkeypatch.setattr(pose_module, "_register_candidate", register)
+
+    result = estimate_camera_frame_pose(
+        interaction_root=tmp_path,
+        correspondence_record_path=correspondence_path,
+    )
+
+    assert result.CAD_correspondence == "accepted"
+    assert result.location == "ambiguous"
+    assert result.pose == "ambiguous"
+    assert result.selected_candidate is not None
+    assert "CAD_centroid_translation_m" not in result.selected_candidate
 
 
 def test_zero_candidates_persist_rejected_pose_without_registration(

@@ -14,9 +14,11 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.frame_conversion i
     CameraToRobotCalibrationError,
     CameraToRobotCalibrationResult,
     RobotFrameConversionError,
+    RobotFrameLocationResult,
     RobotFramePoseResult,
     record_camera_to_robot_calibration,
     transform_camera_pose_to_robot_frame,
+    transform_correspondence_location_to_robot_frame,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.pose_estimation import (
     CADPoseEstimationError,
@@ -53,6 +55,7 @@ __all__ = [
     "RGBDSegmentationError",
     "RGBDSegmentationResult",
     "RobotFrameConversionError",
+    "RobotFrameLocationResult",
     "RobotFramePoseResult",
     "associate_segmented_candidate_by_size",
     "estimate_camera_frame_pose",
@@ -66,4 +69,5 @@ __all__ = [
     "run_rgbd_cad_preprocessing_diagnostic",
     "segment_preprocessed_observation",
     "transform_camera_pose_to_robot_frame",
+    "transform_correspondence_location_to_robot_frame",
 ]

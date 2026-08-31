@@ -148,7 +148,7 @@ def test_cad_preprocessing_preserves_full_mesh_units_hashes_and_delta(
     assert result.delta["typed_context_refs"] == [
         "products/grounding/rgb_d_cad_grounding/operation_0001/geometry_record.json"
     ]
-    assert len(result.delta["unresolved_evidence_needs"]) == 2
+    assert result.delta["unresolved_evidence_needs"] == []
     assert _read_json(result.record_path) == record
 
 

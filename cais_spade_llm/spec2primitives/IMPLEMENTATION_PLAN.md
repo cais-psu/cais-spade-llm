@@ -1,112 +1,138 @@
-# Spec2Primitives implementation plan
+# Spec2Primitives implementation status
 
-## Plan-maintenance rule
+This file describes verified repository behavior. It is not an aspirational
+phase schedule.
 
-Every authorized increment updates this file in the same change. The update must
-identify what is implemented, the current boundary, the next separately
-authorized increment, and behavior that remains deferred. Status describes
-verified repository behavior, not an aspirational architecture.
-
-## Implemented through Phase 4.4
-
-The active ontology-driven resource-grounding path is:
+## Implemented native PA grounding
 
 ```text
-requirement + ontology
-→ retrieve only currently relevant approved evidence
-→ propose_grounding commits a provisional semantic task ABox
-→ join the task ABox with the predefined Workcell ABox
-→ derive ResourceAssignmentNeed(RobotFramePoseRecord, world)
-→ resolve the typed provider prerequisites dynamically
-→ evaluate manifest-backed coarse reach in fixed registry order
-→ host commits the selected processExecution assignment
-→ persist completion against the post-assignment ABox
+blank UI requirement input
+→ start one PA investigation
+→ expose the PPR projection and approved evidence handles
+→ PA optionally calls retrieve(evidence_id) multiple times
+→ return typed evidence into the same PA conversation
+→ PA directly returns proposal, clarification, or insufficient evidence
+→ validate and commit the evidence-cited ABox delta
+→ derive observed 3D location when resource grounding requires it
+→ evaluate configured resource candidates in profile order
+→ persist hash-pinned completion against the final ABox
 ```
 
-ProductAgent returns only one semantic action:
+New model responses contain no `next_action`, focused inspection request,
+separate grounding-proposal action, provider ID, source path, frame, or record
+type. The one PA tool is:
 
-- `retrieve(source_ref)`
-- `inspect(source_ref, question)`
-- `propose_grounding`
-- `ask_user(question)`
-- `incomplete(reason)`
-
-There is no `fill_ontology` compatibility alias. `propose_grounding` may commit
-the evidence-backed specification, feature, and `assembly realizes feature`
-facts without ending the interaction. The host, not ProductAgent, derives the
-remaining resource-assignment need from the accepted ABox and current typed
-records.
-
-The predefined Workcell ABox records only that exact resources `xarm6` and
-`ur5e` are broadly `capableOf` the exact process `assembly`. It does not claim
-that either robot can reach the current Medium Gear, and it contains no
-primitive-level `capableOf` assertions or primitive sequence.
-
-When the semantic join has candidates but no accepted same-interaction
-`RobotFramePoseRecord` in `world`, the host derives a non-persisted
-`ResourceAssignmentNeed`. Provider descriptors map that typed output and its
-prerequisites to approved sources. The path may therefore obtain
-`Gear_Medium.STL`, a fresh RGB-D observation, a camera-frame pose, and injected
-`CameraToWorldCalibrationRuntime`, but it never selects a camera through a
-Medium Gear, `Gear_Medium`, `xarm6`, or modality-specific conditional. No
-semantic candidates means no camera request; an already accepted world-frame
-pose means no repeated capture. Missing, ambiguous, stale, wrong-frame, or
-hash-invalid evidence reopens the unresolved need at a new evidence revision.
-Unchanged derived inputs are evaluated only once: a rejected or ambiguous
-derived result returns control to PA, while a newer CAD or RGB-D record
-invalidates and regenerates only its downstream records. Manifest, authority,
-configuration, and selection-persistence failures remain terminal fail-closed
-errors rather than triggering another camera request.
-
-The calibration boundary is injectable and production refuses conversion when
-no approved calibration is supplied. The current default UI composition does
-not install an approved `CameraToWorldCalibrationRuntime`, so that deployment
-correctly stops before frame conversion until one is configured.
-
-After revalidating the pinned manifests, coarse reach uses only
-`supports_manipulator_pick_place`, `workspace_bounds`, and `gripper_reach`.
-Candidate order is the immutable resource-registry order: `xarm6`, then `ur5e`.
-The first reachable resource is recorded in `ResourceSelectionRecord`, including
-the exact JID, source and evidence fingerprints, execution mode, per-candidate
-verdicts, and selection policy. Numeric poses, workspace values, JIDs,
-credentials, and controller details stay outside RDF.
-
-Only the host may add the functional PPR execution slice:
-
-```text
-specification ppr:hasProcessExecution processExecution
-processExecution ppr:runsProcess assembly
-processExecution ppr:runsOnResource selected resource
+```json
+{
+  "name": "retrieve",
+  "arguments": {"evidence_id": "evidence_0001"}
+}
 ```
 
-ProductAgent-authored resource or execution assertions are rejected atomically.
-Completion remains unavailable until the exact originating ontology proposal is
-linked to a valid host assignment and the post-assignment ABox fingerprint. The
-completion bundle also pins and reloads the exact `ResourceSelectionRecord` and
-the four-assertion `resource_grounding_host` delta, whose assertions all cite
-that one selection record.
+PA may call it zero, one, or multiple times and may choose document, CAD, or
+live observation evidence in any order. Prompt-local IDs resolve only to the
+currently approved and eligible catalog. Unknown, stale, unavailable, altered,
+or unauthorized IDs fail closed before source access. Static typed evidence is
+reused only while its source hash remains valid; live observation always makes
+a fresh revision.
 
-## Intentionally unchanged and deferred
+The shared ProductAgent is unchanged. The Spec2Primitives adapter supplies the
+controlled tools and bridges the shared synchronous callback to asynchronous
+evidence services with a bounded timeout.
 
-- ProductAgent and RobotAgent remain shared, read-only runtime authorities.
-- `SystemBridge` and the public UI-to-runtime surface are unchanged.
-- Detailed resource configuration remains authoritative in the shared JSON
-  manifests and is not duplicated in OWL.
-- The identity-only resource registry remains a two-triple projection.
-- There is no separate `TaskTransitionContract`.
-- Primitive implementations and catalogs remain outside the ontology; no
-  primitive receives `ppr:capableOf`.
-- Primitive composition, IK, collision checking, execution, and realized-outcome
-  evaluation remain deferred.
+## Evidence records
 
-## Next planned boundary
+### Documents
 
-Phase 5 is the next separately authorized increment. It starts from the exact
-resource selected in Phase 4.4 and adds selected-JID RA handoff, retrieval and
-fingerprinting of that RA's complete typed primitive-only catalog, and
-structured `PrimitiveProgramDraft`/`primitive_steps` composition. It must not
-introduce a second task-transition contract, infer a primitive sequence from
-the ontology, or expose primitive implementations through `ppr:capableOf`.
+One document retrieval creates `DocumentOverviewRecord` version 2. It processes
+every page in order and records extracted text, rendered-page hashes, neutral
+visual observations, uncertainty, and page citations. Processing is independent
+of the product requirement and ontology. There is no new
+`DocumentEvidenceRecord` production. Version-1 overview records remain readable
+for recovered interactions; a new retrieval builds version 2.
 
-Robot-local validation and revision, simulation execution, and physical
-execution remain later, separately authorized increments.
+### CAD
+
+One approved STL retrieval creates `CADMeshRecord` with the authority-pinned
+source hash, units, CAD-local frame, counts, dimensions, centroid, and mesh
+artifact references. A filename is evidence metadata, not an ontology answer.
+
+### Observation and location
+
+A live RGB-D retrieval creates hash-pinned observation, point-cloud, and
+segmentation records. Compatible CAD and observation records automatically
+activate descriptor-driven correspondence. Low-level derived services are not
+PA tools.
+
+Accepted correspondence plus approved calibration creates
+`RobotFrameLocationRecord` version 1 containing the observed candidate center
+translated from the camera frame to the required resource frame. Full
+`CADPoseEstimationRecord` remains available only for a future orientation-
+sensitive consumer.
+
+## Ontology proposal
+
+New runs write `OntologyGroundingProposal` version 5 using the multi-feature v4
+payload:
+
+- each individual has an index, PPR class, grounded meaning, and citations;
+- each relation has assertion-specific citations;
+- every feature is defined by the existing specification;
+- exactly one feature is also realized by the configured process; and
+- proposal context, uncertainty, and missing information remain cited.
+
+Validation rejects unsupported vocabulary, literal facts, recipes, primitives,
+resources, process creation, orphan features, duplicate indices, empty
+meanings, unauthorized citations, and zero or multiple primary joins. The
+system compiles each RDF assertion with only its own citations.
+
+This is schema-constrained, evidence-backed instance grounding under the input
+PPR TBox. It is not independent ontology-schema discovery.
+
+## Resource grounding
+
+`config/workcell_profile.json` defines the process identity, ordered resource
+identities, and authoritative manifest references. Resource candidates come
+from this profile and PPR graph relations. Product names, CAD filenames,
+modality branches, and task-support flags do not route selection.
+
+`ResourceAssignmentNeed` requires `RobotFrameLocationRecord`. Its target frame
+is derived from all candidates' `gripper_reach.frame`; inconsistent frames fail
+closed. Coarse reach reads validated manifest geometry and selects the first
+reachable resource in profile order. `ResourceSelectionRecord` version 2 pins a
+generic grounding-record reference and hash. Version-1 pose-linked records are
+read-only recovery inputs.
+
+## Completion and UI
+
+New runs write session-free `PAContextGroundingCompletion` version 3 and
+`TypedGroundingContract` version 3. They pin the direct PA decision, proposal,
+typed evidence, source authority, tool audits, resource selection, assignment
+delta, and final ABox. Existing version-2 completion/session records remain
+readable but are never produced or migrated.
+
+A completed UI timeline contains exactly:
+
+1. `Requirement received`
+2. `Evidence investigated`
+3. `Context grounded`
+4. `Resource selected`
+5. `Grounding complete`
+
+The visible target state is location-based. Tool protocol details remain in
+diagnostics. Genuine proposal `missing_information` and document uncertainty
+appear under **Known non-blocking context limits**; historical unresolved
+markers do not. Completion does not claim execution readiness.
+
+## Deliberately deferred
+
+- future RA `MissingContextBatch → PA producers/clarification →
+  CompositionContextBundle`;
+- primitive catalogs and composition;
+- orientation-sensitive manipulation requirements;
+- IK, collision checking, execution, and outcome validation;
+- public API, `SystemBridge`, PPR TBox, or persisted-record migration.
+
+Destination-shaft, attachment, and placement-order facts remain non-blocking
+when the current location-based resource consumer does not require them. A
+future authorized consumer may request them dynamically.

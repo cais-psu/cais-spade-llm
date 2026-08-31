@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,9 +12,6 @@ from rdflib import RDF, RDFS, URIRef
 
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
-)
-from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingSession,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     ABoxSnapshot,
@@ -36,7 +33,12 @@ _PROPOSAL_KEYS = {
     "evidence_refs",
     "missing_information",
 }
-_INDIVIDUAL_KEYS = {"individual_index", "class_iri"}
+_INDIVIDUAL_KEYS = {
+    "individual_index",
+    "class_iri",
+    "grounded_meaning",
+    "evidence_refs",
+}
 _RELATION_KEYS = {
     "subject_kind",
     "subject_individual_index",
@@ -45,6 +47,7 @@ _RELATION_KEYS = {
     "object_kind",
     "object_individual_index",
     "object_iri",
+    "evidence_refs",
 }
 _LITERAL_KEYS = {
     "subject_kind",
@@ -103,6 +106,14 @@ class OntologyGroundingResult:
     proposal: OntologyGroundingProposal
 
 
+@dataclass(frozen=True)
+class OntologyGroundingInterruption:
+    """Return a direct ProductAgent clarification or insufficiency result."""
+
+    kind: str
+    message: str
+
+
 async def propose_and_validate_ontology_grounding(
     product_agent: ProductAgentContextRuntime,
     *,
@@ -110,11 +121,16 @@ async def propose_and_validate_ontology_grounding(
     tbox: TBoxSnapshot,
     abox: ABoxSnapshot,
     workcell: PredefinedWorkcellSnapshot,
-    session: GroundingSession,
-    evidence_previews: Sequence[Mapping[str, object]],
+    evidence_catalog: Sequence[Mapping[str, object]],
     authorized_evidence_refs: set[str],
-) -> OntologyGroundingResult:
-    """Create one final cited context and atomically validate its ontology projection."""
+    tools: list[dict[str, Any]],
+    tool_executor: Callable[
+        [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+    ],
+    max_tool_rounds: int,
+    required_output_projection: Mapping[str, object],
+) -> OntologyGroundingResult | OntologyGroundingInterruption:
+    """Let PA investigate with controlled tools, then validate its direct result."""
     root = Path(interaction_root).resolve()
     if abox.interaction_root != root or abox.tbox_fingerprint != tbox.fingerprint:
         raise OntologyGroundingError(
@@ -134,19 +150,6 @@ async def propose_and_validate_ontology_grounding(
         raise OntologyGroundingError(
             "Ontology grounding Workcell does not match the authoritative TBox."
         )
-    if (
-        session.requirement_text != abox.product_requirement
-        or session.status != "ready_for_ontology"
-        or session.next_action.action != "propose_grounding"
-    ):
-        raise OntologyGroundingError(
-            "Late ontology mapping requires the ready GroundingSession."
-        )
-    if not authorized_evidence_refs:
-        raise OntologyGroundingError(
-            "Late ontology mapping requires authorized evidence references."
-        )
-
     allowed_classes = frozenset({f"{tbox.ppr_namespace}feature"})
     if not allowed_classes.issubset(_allowed_classes(tbox)):
         raise OntologyGroundingError(
@@ -171,9 +174,9 @@ async def propose_and_validate_ontology_grounding(
         allowed_object_properties | allowed_datatype_properties,
     )
     prompt_input = {
-        "exact_requirement": session.requirement_text,
-        "available_evidence": [dict(item) for item in evidence_previews],
-        "allowed_evidence_refs": sorted(authorized_evidence_refs),
+        "exact_requirement": abox.product_requirement,
+        "approved_evidence_catalog": [dict(item) for item in evidence_catalog],
+        "required_output_projection": dict(required_output_projection),
         "initialized_specification_iri": abox.specification_iri,
         "allowed_classes": sorted(allowed_classes),
         "allowed_object_properties": sorted(allowed_object_properties),
@@ -184,26 +187,46 @@ async def propose_and_validate_ontology_grounding(
             "process_symbol": workcell.process_symbol,
             "process_iri": workcell.process_iri,
         },
+        "current_grounding_goal": {
+            "required_meaning": "evidence-supported requirement features",
+            "primary_execution_target_count": 1,
+            "supporting_feature_count": "zero_or_more",
+        },
     }
     base_prompt = (
-        "Using the requirement, ontology, and retrieved evidence together, create "
-        "one provisional task ontology proposal and one concise context summary. "
-        "Create exactly one feature individual, link the initialized specification "
-        "to it with defines, and link the exact predefined assembly process to the "
-        "same feature with realizes. Cite the result with only "
-        "allowed_evidence_refs. Keep useful details that the current "
+        "Investigate the requirement using the controlled retrieve tool whenever "
+        "additional approved evidence is useful. You may retrieve zero, one, or "
+        "multiple catalog entries in any order. Catalog metadata is discovery-only; "
+        "only evidence refs returned by retrieve may support assertions. After tool "
+        "use, return proposal fields directly, one clarification_question, or one "
+        "insufficient_evidence result. For a proposal, create one concise context "
+        "summary and "
+        "Ground the smallest set of distinct, evidence-supported requirement-level "
+        "features needed for current_grounding_goal. Choose the feature count from "
+        "the evidence. Give every feature one concise grounded_meaning and direct "
+        "evidence_refs. Use the supplied property signatures and current individuals "
+        "to identify exactly one current execution target for the predefined process; "
+        "any other grounded features are supporting specification context. Give every "
+        "relation its direct evidence_refs and cite only refs returned by retrieve "
+        "or requirement_0001. Keep "
+        "useful details that the current "
         "ontology cannot represent in context_summary and missing_information. The "
         "initialized specification IRI is controller-owned: never create, rename, or "
         "type it. The controller assigns IRIs to new individuals. Refer to current "
         "individuals only by their exact supplied IRIs. Respect every property domain "
         "and range. Do not add primitive, resource, capability, recipe, requires, "
         "precedes, process-execution, resource-selection, or composition facts. Do "
-        "not create a process individual. Do not force a relation "
+        "not create a process individual. Use missing_information only for "
+        "evidence-backed product or scene facts that remain unknown after considering "
+        "the retrieved evidence. Do not report information as missing solely because "
+        "it is represented by a typed context record instead of an RDF predicate. "
+        "Information outside the allowed ontology projection does not block a valid "
+        "proposal unless the required ontology-level meaning is unsupported. "
+        "Do not force a relation "
         "that the available evidence does not support.\n\n"
-        f"Late mapping input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
+        f"Grounding input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
     response_format = _proposal_response_format(
-        evidence_refs=sorted(authorized_evidence_refs),
         classes=sorted(allowed_classes),
         existing_iris=sorted(existing_individuals),
         object_properties=sorted(allowed_object_properties),
@@ -211,94 +234,77 @@ async def propose_and_validate_ontology_grounding(
     )
     proposal_number = _next_proposal_number(root)
     proposal_path = root / _PROPOSAL_ROOT / f"proposal_{proposal_number:04d}.json"
-    validation_failure = "unknown ontology validation failure"
-    last_output: object = {}
-    last_delta: Mapping[str, object] | None = None
+    output = await product_agent.ask_llm_structured(
+        base_prompt,
+        response_format=response_format,
+        tools=tools,
+        tool_executor=tool_executor,
+        max_tool_rounds=max_tool_rounds,
+    )
+    if isinstance(output, Mapping) and set(output) == {"clarification_question"}:
+        message = output["clarification_question"]
+        if not isinstance(message, str) or not message.strip():
+            raise OntologyGroundingError("clarification_question is invalid.")
+        return OntologyGroundingInterruption("clarification_question", message)
+    if isinstance(output, Mapping) and set(output) == {"insufficient_evidence"}:
+        message = output["insufficient_evidence"]
+        if not isinstance(message, str) or not message.strip():
+            raise OntologyGroundingError("insufficient_evidence is invalid.")
+        return OntologyGroundingInterruption("insufficient_evidence", message)
 
-    for response_number in range(2):
-        prompt = base_prompt
-        if response_number:
-            prompt += (
-                "\n\nThe prior proposal was rejected. Return one corrected proposal "
-                f"only. Validation error: {validation_failure}"
-            )
-        output = await product_agent.ask_llm_structured(
-            prompt,
-            response_format=response_format,
+    try:
+        proposal = _validated_proposal(
+            output,
+            authorized_evidence_refs=authorized_evidence_refs,
+            allowed_classes=allowed_classes,
+            allowed_object_properties=allowed_object_properties,
+            allowed_datatype_properties=allowed_datatype_properties,
+            existing_individuals=existing_individuals,
+            property_signatures=property_signatures,
+            specification_iri=abox.specification_iri,
         )
-        last_output = output
-        try:
-            if not isinstance(output, Mapping) or set(output) != {
-                "ontology_grounding_proposal"
-            }:
-                raise OntologyGroundingError(
-                    "ProductAgent returned an invalid OntologyGroundingProposal envelope."
-                )
-            proposal = _validated_proposal(
-                output["ontology_grounding_proposal"],
-                authorized_evidence_refs=authorized_evidence_refs,
-                allowed_classes=allowed_classes,
-                allowed_object_properties=allowed_object_properties,
-                allowed_datatype_properties=allowed_datatype_properties,
-                existing_individuals=existing_individuals,
-                property_signatures=property_signatures,
-                specification_iri=abox.specification_iri,
-            )
-            _validate_provisional_task_proposal(
-                proposal,
-                tbox=tbox,
-                workcell=workcell,
-            )
-            delta = _compile_proposal_delta(
-                proposal,
-                proposal_number=proposal_number,
-                abox=abox,
-            )
-            last_delta = delta
-            merge = validate_and_merge_triple_delta(
-                root,
-                tbox,
-                _PRODUCER,
-                delta,
-                authorized_evidence_refs=sorted(authorized_evidence_refs),
-            )
-        except (KeyError, OntologyGroundingError, TypeError, ValueError) as exc:
-            validation_failure = f"{type(exc).__name__}: {exc}"
-            continue
-
+        _validate_provisional_task_proposal(proposal, tbox=tbox, workcell=workcell)
+        delta = _compile_proposal_delta(
+            proposal,
+            proposal_number=proposal_number,
+            abox=abox,
+        )
+        merge = validate_and_merge_triple_delta(
+            root,
+            tbox,
+            _PRODUCER,
+            delta,
+            authorized_evidence_refs=sorted(authorized_evidence_refs),
+            authorized_external_process_iris={workcell.process_iri},
+        )
+    except (KeyError, OntologyGroundingError, TypeError, ValueError) as exc:
+        failure = f"{type(exc).__name__}: {exc}"
         _write_proposal_record(
             proposal_path,
             proposal_number=proposal_number,
-            session=session,
             specification_iri=abox.specification_iri,
-            output=output,
-            compiled_delta=delta,
-            status="accepted",
-            failure=None,
+            output=output if isinstance(output, Mapping) else {"output": output},
+            compiled_delta=None,
+            status="rejected",
+            failure=failure,
         )
-        return OntologyGroundingResult(
-            merge=merge,
-            proposal_path=proposal_path,
-            proposal=proposal,
-        )
+        raise OntologyGroundingError(
+            f"OntologyGroundingProposal is invalid: {failure}"
+        ) from exc
 
     _write_proposal_record(
         proposal_path,
         proposal_number=proposal_number,
-        session=session,
         specification_iri=abox.specification_iri,
-        output=(
-            last_output
-            if isinstance(last_output, Mapping)
-            else {"output": last_output}
-        ),
-        compiled_delta=last_delta,
-        status="rejected",
-        failure=validation_failure,
+        output=output,
+        compiled_delta=delta,
+        status="accepted",
+        failure=None,
     )
-    raise OntologyGroundingError(
-        "OntologyGroundingProposal remained invalid after one repair: "
-        f"{validation_failure}"
+    return OntologyGroundingResult(
+        merge=merge,
+        proposal_path=proposal_path,
+        proposal=proposal,
     )
 
 
@@ -308,54 +314,77 @@ def _validate_provisional_task_proposal(
     tbox: TBoxSnapshot,
     workcell: PredefinedWorkcellSnapshot,
 ) -> None:
-    """Require the exact PA-authored semantic slice used by resource grounding."""
+    """Require connected features and one graph-derived execution target."""
     feature_iri = f"{tbox.ppr_namespace}feature"
     defines_iri = f"{tbox.ppr_namespace}defines"
     realizes_iri = f"{tbox.ppr_namespace}realizes"
-    if (
-        len(proposal.individuals) != 1
-        or proposal.individuals[0]["class_iri"] != feature_iri
-        or proposal.literal_facts
-        or len(proposal.relations) != 2
+    if not proposal.individuals or any(
+        item["class_iri"] != feature_iri for item in proposal.individuals
     ):
         raise OntologyGroundingError(
-            "The provisional task proposal must contain exactly one feature, "
-            "two semantic relations, and no literal facts."
+            "The provisional task proposal requires at least one feature."
         )
-    feature_index = proposal.individuals[0]["individual_index"]
-    defines = [
-        item
-        for item in proposal.relations
-        if item["predicate_iri"] == defines_iri
-    ]
-    realizes = [
-        item
-        for item in proposal.relations
-        if item["predicate_iri"] == realizes_iri
-    ]
-    if len(defines) != 1 or len(realizes) != 1:
+    if proposal.literal_facts:
         raise OntologyGroundingError(
-            "The provisional task proposal requires one defines and one realizes relation."
+            "The provisional task proposal does not allow literal facts."
         )
-    defines_relation = defines[0]
-    realizes_relation = realizes[0]
-    if (
-        defines_relation["subject_kind"] != "specification"
-        or defines_relation["subject_individual_index"] is not None
-        or defines_relation["subject_iri"] is not None
-        or defines_relation["object_kind"] != "new_individual"
-        or defines_relation["object_individual_index"] != feature_index
-        or defines_relation["object_iri"] is not None
-        or realizes_relation["subject_kind"] != "existing_individual"
-        or realizes_relation["subject_individual_index"] is not None
-        or realizes_relation["subject_iri"] != workcell.process_iri
-        or realizes_relation["object_kind"] != "new_individual"
-        or realizes_relation["object_individual_index"] != feature_index
-        or realizes_relation["object_iri"] is not None
-    ):
+
+    feature_indices = {
+        int(item["individual_index"]) for item in proposal.individuals
+    }
+    defined_indices: list[int] = []
+    realized_indices: list[int] = []
+    for relation in proposal.relations:
+        predicate = relation["predicate_iri"]
+        object_index = relation["object_individual_index"]
+        if (
+            relation["object_kind"] != "new_individual"
+            or not isinstance(object_index, int)
+            or isinstance(object_index, bool)
+            or object_index not in feature_indices
+            or relation["object_iri"] is not None
+        ):
+            raise OntologyGroundingError(
+                "Every task-grounding relation must target a proposed feature."
+            )
+        if predicate == defines_iri:
+            if (
+                relation["subject_kind"] != "specification"
+                or relation["subject_individual_index"] is not None
+                or relation["subject_iri"] is not None
+            ):
+                raise OntologyGroundingError(
+                    "Every grounded feature must be defined by the specification."
+                )
+            defined_indices.append(object_index)
+            continue
+        if predicate == realizes_iri:
+            if (
+                relation["subject_kind"] != "existing_individual"
+                or relation["subject_individual_index"] is not None
+                or relation["subject_iri"] != workcell.process_iri
+            ):
+                raise OntologyGroundingError(
+                    "The execution target must be realized by the predefined process."
+                )
+            realized_indices.append(object_index)
+            continue
         raise OntologyGroundingError(
-            "The provisional task proposal must join specification and assembly "
-            "to the same new feature."
+            "The provisional task proposal contains an unrelated relation."
+        )
+
+    if len(defined_indices) != len(set(defined_indices)):
+        raise OntologyGroundingError(
+            "Each grounded feature must have exactly one specification definition."
+        )
+    if set(defined_indices) != feature_indices:
+        raise OntologyGroundingError(
+            "Every grounded feature must be defined by the specification."
+        )
+    if len(realized_indices) != 1:
+        raise OntologyGroundingError(
+            "The provisional task proposal requires exactly one graph-derived "
+            "execution target."
         )
 
 
@@ -398,7 +427,7 @@ def _validated_proposal(  # noqa: C901, PLR0913
     literal_facts = _mapping_list(value["literal_facts"], "literal_facts")
     if not individuals and not relations and not literal_facts:
         raise OntologyGroundingError(
-            "A propose_grounding proposal must contain at least one ontology fact."
+            "A grounding proposal must contain at least one ontology fact."
         )
     validated_individuals: list[Mapping[str, object]] = []
     new_types: dict[int, str] = {}
@@ -411,8 +440,20 @@ def _validated_proposal(  # noqa: C901, PLR0913
             raise OntologyGroundingError("Proposal individual class is not allowed.")
         if index in new_types:
             raise OntologyGroundingError("Proposal individual indices must be unique.")
+        grounded_meaning = item["grounded_meaning"]
+        if not isinstance(grounded_meaning, str) or not grounded_meaning.strip():
+            raise OntologyGroundingError(
+                "Proposal individual grounded_meaning is invalid."
+            )
+        item_evidence_refs = _validated_evidence_refs(
+            item["evidence_refs"],
+            "individual evidence_refs",
+            authorized_evidence_refs=authorized_evidence_refs,
+        )
         new_types[index] = class_iri
-        validated_individuals.append(dict(item))
+        validated_item = dict(item)
+        validated_item["evidence_refs"] = item_evidence_refs
+        validated_individuals.append(validated_item)
 
     validated_relations: list[Mapping[str, object]] = []
     for item in relations:
@@ -421,6 +462,11 @@ def _validated_proposal(  # noqa: C901, PLR0913
         predicate = item["predicate_iri"]
         if not isinstance(predicate, str) or predicate not in allowed_object_properties:
             raise OntologyGroundingError("Proposal object property is not allowed.")
+        relation_evidence_refs = _validated_evidence_refs(
+            item["evidence_refs"],
+            "relation evidence_refs",
+            authorized_evidence_refs=authorized_evidence_refs,
+        )
         subject_types = _subject_types(
             item,
             new_types=new_types,
@@ -438,7 +484,9 @@ def _validated_proposal(  # noqa: C901, PLR0913
             object_types=object_types,
             property_signatures=property_signatures,
         )
-        validated_relations.append(dict(item))
+        validated_item = dict(item)
+        validated_item["evidence_refs"] = relation_evidence_refs
+        validated_relations.append(validated_item)
 
     validated_literals: list[Mapping[str, object]] = []
     for item in literal_facts:
@@ -478,10 +526,11 @@ def _compile_proposal_delta(
 ) -> dict[str, object]:
     del proposal_number
     individual_iris = {
-        int(item["individual_index"]): f"{abox.namespace}medium_gear_feature"
+        int(item["individual_index"]): (
+            f"{abox.namespace}feature_{int(item['individual_index']):04d}"
+        )
         for item in proposal.individuals
     }
-    evidence_refs = list(proposal.evidence_refs)
     assertions: list[dict[str, object]] = []
     for item in proposal.individuals:
         assertions.append(
@@ -489,7 +538,7 @@ def _compile_proposal_delta(
                 "subject": individual_iris[int(item["individual_index"])],
                 "predicate": str(RDF.type),
                 "object": {"kind": "iri", "value": item["class_iri"]},
-                "evidence_refs": evidence_refs,
+                "evidence_refs": list(item["evidence_refs"]),
             }
         )
     for item in proposal.relations:
@@ -501,7 +550,7 @@ def _compile_proposal_delta(
                     "kind": "iri",
                     "value": _compiled_object(item, individual_iris),
                 },
-                "evidence_refs": evidence_refs,
+                "evidence_refs": list(item["evidence_refs"]),
             }
         )
     for item in proposal.literal_facts:
@@ -518,7 +567,7 @@ def _compile_proposal_delta(
                 "subject": _compiled_subject(item, abox, individual_iris),
                 "predicate": item["predicate_iri"],
                 "object": object_value,
-                "evidence_refs": evidence_refs,
+                "evidence_refs": list(proposal.evidence_refs),
             }
         )
     return {
@@ -526,7 +575,7 @@ def _compile_proposal_delta(
         "uncertainty": [
             {
                 "description": item,
-                "evidence_refs": evidence_refs,
+                "evidence_refs": list(proposal.evidence_refs),
             }
             for item in proposal.missing_information
         ],
@@ -537,7 +586,6 @@ def _compile_proposal_delta(
 
 def _proposal_response_format(  # noqa: PLR0913
     *,
-    evidence_refs: Sequence[str],
     classes: Sequence[str],
     existing_iris: Sequence[str],
     object_properties: Sequence[str],
@@ -564,6 +612,12 @@ def _proposal_response_format(  # noqa: PLR0913
                 "type": "string",
                 "enum": list(classes) or ["no_class_available"],
             },
+            "grounded_meaning": {"type": "string", "minLength": 1},
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+            },
         },
     }
     relation = {
@@ -587,6 +641,11 @@ def _proposal_response_format(  # noqa: PLR0913
             "object_iri": {
                 "type": ["string", "null"],
                 "enum": [None, *existing_iris],
+            },
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
             },
         },
     }
@@ -615,14 +674,12 @@ def _proposal_response_format(  # noqa: PLR0913
     # The structured-output API rejects uniqueItems; _validated_proposal keeps
     # uniqueness deterministic after parsing instead of weakening the contract.
     return {
-        "name": "spec2primitives_ontology_grounding_proposal",
+        "name": "spec2primitives_grounding_result",
         "strict": True,
         "schema": {
             "type": "object",
-            "additionalProperties": False,
-            "required": ["ontology_grounding_proposal"],
-            "properties": {
-                "ontology_grounding_proposal": {
+            "anyOf": [
+                {
                     "type": "object",
                     "additionalProperties": False,
                     "required": sorted(_PROPOSAL_KEYS),
@@ -648,10 +705,7 @@ def _proposal_response_format(  # noqa: PLR0913
                         },
                         "evidence_refs": {
                             "type": "array",
-                            "items": {
-                                "type": "string",
-                                "enum": list(evidence_refs),
-                            },
+                            "items": {"type": "string", "minLength": 1},
                             "minItems": 1,
                         },
                         "missing_information": {
@@ -659,8 +713,30 @@ def _proposal_response_format(  # noqa: PLR0913
                             "items": {"type": "string", "minLength": 1},
                         },
                     },
-                }
-            },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["clarification_question"],
+                    "properties": {
+                        "clarification_question": {
+                            "type": "string",
+                            "minLength": 1,
+                        }
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["insufficient_evidence"],
+                    "properties": {
+                        "insufficient_evidence": {
+                            "type": "string",
+                            "minLength": 1,
+                        }
+                    },
+                },
+            ],
         },
     }
 
@@ -873,6 +949,24 @@ def _string_list(
     return list(value)
 
 
+def _validated_evidence_refs(
+    value: object,
+    field: str,
+    *,
+    authorized_evidence_refs: set[str],
+) -> list[str]:
+    """Return one unique list of citations within the authorized evidence set."""
+    evidence_refs = _string_list(value, field)
+    if (
+        len(set(evidence_refs)) != len(evidence_refs)
+        or not set(evidence_refs).issubset(authorized_evidence_refs)
+    ):
+        raise OntologyGroundingError(
+            f"{field} cites duplicate or unauthorized evidence."
+        )
+    return evidence_refs
+
+
 def _positive_integer(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise OntologyGroundingError(f"{field} must be a positive integer.")
@@ -891,7 +985,6 @@ def _write_proposal_record(  # noqa: PLR0913
     path: Path,
     *,
     proposal_number: int,
-    session: GroundingSession,
     specification_iri: str,
     output: Mapping[str, object],
     compiled_delta: Mapping[str, object] | None,
@@ -899,11 +992,9 @@ def _write_proposal_record(  # noqa: PLR0913
     failure: str | None,
 ) -> None:
     record = {
-        "schema_version": 3,
+        "schema_version": 5,
         "record_type": "OntologyGroundingProposal",
         "proposal_number": proposal_number,
-        "session_revision": session.revision,
-        "session_fingerprint": session.fingerprint,
         "initialized_specification_iri": specification_iri,
         "output": dict(output),
         "compiled_delta": None if compiled_delta is None else dict(compiled_delta),

@@ -139,7 +139,7 @@ def estimate_camera_frame_pose(
 
     try:
         hypotheses = _estimate_hypotheses(inputs)
-        decision = _pose_decision(hypotheses)
+        decision = _pose_decision(hypotheses, inputs.cad_triangles_m)
         record = _pose_record(
             root=root,
             pose_number=pose_number,
@@ -537,6 +537,7 @@ def _valid_transformation(value: np.ndarray) -> bool:
 
 def _pose_decision(
     hypotheses: list[_RegistrationHypothesis],
+    cad_triangles_m: np.ndarray,
 ) -> dict[str, object]:
     qualified = [
         item
@@ -574,37 +575,48 @@ def _pose_decision(
             "qualified_hypotheses": qualified,
         }
 
-    competing_rotation = next(
-        (
-            item
-            for item in qualified[1:]
-            if (item.camera_id, item.candidate_id) == (best.camera_id, best.candidate_id)
-            and not _same_pose(best, item)
-            and best.fitness - item.fitness < _ROTATION_FITNESS_MARGIN
-        ),
-        None,
-    )
+    cad_centroid_m = cad_triangles_m.reshape(-1, 3).mean(axis=0)
+    competing_rotations = [
+        item
+        for item in qualified[1:]
+        if (item.camera_id, item.candidate_id) == (best.camera_id, best.candidate_id)
+        and not _same_pose(best, item)
+        and best.fitness - item.fitness < _ROTATION_FITNESS_MARGIN
+    ]
     base_candidate = _candidate_identity(best)
-    if competing_rotation is not None:
-        translation_distance = float(
-            np.linalg.norm(
-                best.transformation[:3, 3] - competing_rotation.transformation[:3, 3]
-            )
+    best_centroid_translation_m = _transformed_point(
+        best.transformation,
+        cad_centroid_m,
+    )
+    if competing_rotations:
+        centroid_translations_m = [
+            best_centroid_translation_m,
+            *[
+                _transformed_point(item.transformation, cad_centroid_m)
+                for item in competing_rotations
+            ],
+        ]
+        centroid_is_stable = all(
+            float(np.linalg.norm(best_centroid_translation_m - centroid))
+            <= best.voxel_size_m * _TRANSLATION_CLUSTER_FACTOR
+            for centroid in centroid_translations_m[1:]
         )
+        if centroid_is_stable:
+            base_candidate["CAD_centroid_translation_m"] = _float_vector(
+                np.mean(centroid_translations_m, axis=0)
+            )
         return {
             "CAD_correspondence": "accepted",
-            "location": (
-                "available"
-                if translation_distance
-                <= best.voxel_size_m * _TRANSLATION_CLUSTER_FACTOR
-                else "ambiguous"
-            ),
+            "location": "available" if centroid_is_stable else "ambiguous",
             "pose": "ambiguous",
             "selected_candidate": base_candidate,
             "qualified_hypotheses": qualified,
         }
 
     selected = dict(base_candidate)
+    selected["CAD_centroid_translation_m"] = _float_vector(
+        best_centroid_translation_m
+    )
     selected["CAD_origin_translation_m"] = _float_vector(best.transformation[:3, 3])
     selected["rotation_matrix"] = [
         _float_vector(row) for row in best.transformation[:3, :3]
@@ -623,6 +635,10 @@ def _pose_decision(
         "selected_candidate": selected,
         "qualified_hypotheses": qualified,
     }
+
+
+def _transformed_point(transformation: np.ndarray, point: np.ndarray) -> np.ndarray:
+    return transformation[:3, :3] @ point + transformation[:3, 3]
 
 
 def _same_pose(first: _RegistrationHypothesis, second: _RegistrationHypothesis) -> bool:
@@ -651,7 +667,7 @@ def _pose_record(
         raise CADPoseEstimationError("Qualified pose hypotheses are invalid.")
     correspondence = inputs.correspondence_record
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_type": "CADPoseEstimationRecord",
         "producer": _PRODUCER,
         "pose_number": pose_number,

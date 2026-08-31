@@ -12,12 +12,9 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
-from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingNextAction,
-    GroundingSession,
-)
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
+    OntologyGroundingInterruption,
     propose_and_validate_ontology_grounding,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -52,7 +49,7 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
     config: DocumentVLMConfig,
     vision_runtime: DocumentVisionRuntime,
 ) -> dict[str, object]:
-    """Run overview, cited-statement, late-proposal, and validation stages.
+    """Run one-page-set overview and direct ontology validation stages.
 
     The diagnostic is isolated from the main PA interaction. The selected
     document is an explicit operator input; no semantic target is supplied to
@@ -78,9 +75,7 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
         )
 
     overview_stage: dict[str, object] | None = None
-    targeted_stage: dict[str, object] | None = None
     proposal_stage: dict[str, object] | None = None
-    session_stage: dict[str, object] | None = None
     try:
         tbox = ontology_config.load_tbox()
         abox = initialize_interaction_abox(root, product_requirement, tbox)
@@ -128,25 +123,20 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             "observations": overview["observations"],
             "uncertainty": overview["uncertainty"],
         }
-        evidence_refs = sorted(
-            {
-                ref
-                for item in overview["observations"]
-                if isinstance(item, Mapping)
-                for ref in item.get("evidence_refs", [])
-                if isinstance(ref, str)
+        evidence_refs = [context_ref, overview_ref, *page_refs]
+
+        async def no_retrieval(
+            tool_name: str,
+            arguments: Mapping[str, object],
+        ) -> Mapping[str, object]:
+            del tool_name, arguments
+            return {
+                "error": {
+                    "reason": "diagnostic_evidence_fixed",
+                    "message": "This diagnostic already supplied its selected document.",
+                }
             }
-        )
-        session = GroundingSession.create(
-            revision=1,
-            requirement_text=product_requirement,
-            attempted_actions=(),
-            next_action=GroundingNextAction.from_mapping(
-                {"action": "propose_grounding"}
-            ),
-            status="ready_for_ontology",
-        )
-        session_stage = session.to_record()
+
         proposal = await propose_and_validate_ontology_grounding(
             product_agent,
             interaction_root=root,
@@ -156,16 +146,33 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
                 tbox,
                 load_predefined_resource_registry(tbox),
             ),
-            session=session,
-            evidence_previews=[
+            evidence_catalog=[
                 {
-                    "evidence_type": "accepted_typed_record",
-                    "source_ref": overview_ref,
-                    "content": dict(overview),
+                    "retrieval_state": "already_retrieved",
+                    "evidence_type": "document",
+                    "source": context_ref,
+                    "evidence_refs": evidence_refs,
+                    "record_refs": [overview_ref],
+                    "summary": overview.get("summary"),
+                    "pages": overview.get("pages"),
+                    "visual_observations": overview.get("observations"),
+                    "uncertainty": overview.get("uncertainty"),
                 }
             ],
             authorized_evidence_refs=set(evidence_refs),
+            tools=[],
+            tool_executor=no_retrieval,
+            max_tool_rounds=1,
+            required_output_projection={
+                "record_type": "RobotFrameLocationRecord",
+                "target_frame": "configured resource reach frame",
+                "purpose": "diagnostic schema projection only",
+            },
         )
+        if isinstance(proposal, OntologyGroundingInterruption):
+            raise OntologyGroundingError(
+                f"Document diagnostic did not return a proposal: {proposal.message}"
+            )
         proposal_record = _read_mapping(
             proposal.proposal_path,
             "OntologyGroundingProposal",
@@ -194,8 +201,6 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             f"{type(exc).__name__}: {exc}",
         )
         result["overview"] = overview_stage
-        result["targeted_evidence"] = targeted_stage
-        result["grounding_session"] = session_stage
         result["ontology_proposal"] = proposal_stage
         _write_record_if_absent(record_path, result)
         return result
@@ -206,8 +211,6 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
         "product_requirement": product_requirement,
         "context_ref": context_ref,
         "overview": overview_stage,
-        "targeted_evidence": targeted_stage,
-        "grounding_session": session_stage,
         "ontology_proposal": proposal_stage,
         "accepted_assertions": accepted_delta["assertions"],
         "abox_path": str(proposal.merge.abox.abox_path),
@@ -230,8 +233,6 @@ def _failure_result(
         "product_requirement": product_requirement,
         "context_ref": context_ref,
         "overview": None,
-        "targeted_evidence": None,
-        "grounding_session": None,
         "ontology_proposal": None,
         "accepted_assertions": [],
         "abox_path": None,

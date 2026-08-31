@@ -1,467 +1,232 @@
-"""Tests for the first Spec2Primitives PA needed-context decision."""
+"""Tests for starting one native ProductAgent grounding interaction."""
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
 import pytest
-from rdflib import OWL, RDF, URIRef
 
-from cais_spade_llm.spec2primitives.agents.pa import context_interaction
-from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
-    PAOntologyConfig,
-)
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     start_pa_context_interaction,
 )
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    GroundingProducerDescriptor,
+)
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
-    PPR_NAMESPACE,
-    ControlledGroundingRuntime,
     ontology_config,
 )
-from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
-    approved_context_refs,
-)
 
 
-class FakeProductAgent:
-    """Provide one controlled structured response without agent lifecycle behavior."""
+class _UnusedProductAgent:
+    async def ask_llm_structured(self, *args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise AssertionError("The controlled grounding runtime owns this test result.")
 
+
+class _GroundingRuntime:
     def __init__(
         self,
-        response: object | None = None,
-        error: Exception | None = None,
+        outputs: Sequence[Mapping[str, object] | Exception],
     ) -> None:
-        self.response = response
-        self.error = error
+        self.outputs = list(outputs)
         self.calls: list[dict[str, object]] = []
 
-    async def ask_llm_structured(
+    def grounding_producer_descriptors(self) -> tuple[GroundingProducerDescriptor, ...]:
+        return _descriptors()
+
+    async def ground_product_context(
         self,
-        prompt: str,
+        product_agent: object,
         *,
-        response_format: dict[str, Any],
-    ) -> dict[str, Any]:
+        interaction_root: Path,
+        tbox: object,
+        abox: object,
+        product_context: Mapping[str, object],
+        max_pa_turns: int,
+        clarification_history: tuple[Mapping[str, object], ...] = (),
+    ) -> Mapping[str, object]:
+        del product_agent, tbox
         self.calls.append(
             {
-                "prompt": prompt,
-                "response_format": response_format,
+                "interaction_root": interaction_root,
+                "delta_count": abox.delta_count,
+                "product_context": dict(product_context),
+                "max_pa_turns": max_pa_turns,
+                "clarification_history": clarification_history,
             }
         )
-        if self.error is not None:
-            raise self.error
-        return self.response  # type: ignore[return-value]
+        output = self.outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
 
 
 @pytest.mark.parametrize(
-    "needed_context",
+    "output",
     [
         {
-            "context_ref": "NIST_assembly_instructions.pdf",
-            "request_live_observation": False,
-            "clarification_question": None,
+            "grounding_status": "clarification_required",
+            "clarification_question": "Which product variant is intended?",
+            "tool_call_refs": [],
         },
         {
-            "context_ref": None,
-            "request_live_observation": True,
-            "clarification_question": None,
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "No evidence supports a feature.",
+            "tool_call_refs": [],
         },
     ],
 )
-def test_each_valid_first_decision_is_returned_and_recorded(
+def test_start_runs_one_native_investigation_and_persists_direct_result(
     tmp_path: Path,
-    needed_context: dict[str, object],
+    output: dict[str, object],
 ) -> None:
-    product_requirement = "  assemble Medium Gear exactly  "
-    response = {"needed_context": needed_context}
-    product_agent = FakeProductAgent(response=response)
+    runtime = _GroundingRuntime([output])
 
-    result = _start(
-        product_agent,
-        tmp_path,
-        product_requirement,
+    result = asyncio.run(
+        start_pa_context_interaction(
+            _UnusedProductAgent(),
+            tmp_path,
+            "assemble medium gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
     )
 
-    assert result == response
-    assert len(product_agent.calls) == 1
-    call = product_agent.calls[0]
-    assert json.dumps(product_requirement) in call["prompt"]
-    response_format = call["response_format"]
-    assert response_format["strict"] is True
-    context_ref_schema = response_format["schema"]["properties"]["needed_context"]["properties"][
-        "context_ref"
-    ]
-    assert context_ref_schema["type"] == ["string", "null"]
-    assert context_ref_schema["enum"] == [None, *approved_context_refs()]
-    assert response_format["schema"]["properties"]["needed_context"]["properties"][
-        "clarification_question"
-    ] == {"type": ["string", "null"], "minLength": 1}
-    assert "approved_context_ref_evidence_types" in call["prompt"]
-    assert PPR_NAMESPACE in call["prompt"]
-    assert 'status": "unresolved' in call["prompt"]
-
-    requirement_record = _read_json(tmp_path / "products/user_requirement/product_requirement.json")
-    assert requirement_record == {"product_requirement": product_requirement}
-    turn_record = _read_json(tmp_path / "interaction_record/turn_0001.json")
-    assert turn_record["turn"] == 1
-    assert turn_record["product_requirement"] == product_requirement
-    assert turn_record["PA_input"] == call
-    assert turn_record["PA_output"] == response
-    assert turn_record["failure"] is None
-    assert (tmp_path / "products/grounding/ontology/interaction_abox.ttl").is_file()
+    assert result == output
+    assert len(runtime.calls) == 1
+    assert runtime.calls[0]["delta_count"] == 0
+    assert runtime.calls[0]["max_pa_turns"] == 12
+    turn = _read_json(tmp_path / "interaction_record/turn_0001.json")
+    assert turn["PA_input"]["mode"] == "native_tool_grounding"
+    assert turn["PA_output"] == output
+    assert turn["failure"] is None
+    serialized = json.dumps(turn)
+    assert "next_action" not in serialized
+    assert "needed_context" not in serialized
+    assert not (tmp_path / "products/grounding/session").exists()
 
 
-@pytest.mark.parametrize("product_requirement", ["", " \t\n"])
-def test_empty_product_requirement_is_rejected_without_call_or_records(
+@pytest.mark.parametrize("requirement", ["", " \t\n"])
+def test_blank_requirement_is_rejected_without_records(
     tmp_path: Path,
-    product_requirement: str,
+    requirement: str,
 ) -> None:
-    product_agent = FakeProductAgent(
-        response={
-            "needed_context": {
-                "context_ref": "NIST_assembly_instructions.pdf",
-                "request_live_observation": False,
-                "clarification_question": None,
-            }
-        }
-    )
+    runtime = _GroundingRuntime([])
 
-    result = asyncio.run(start_pa_context_interaction(product_agent, tmp_path, product_requirement))
+    result = asyncio.run(
+        start_pa_context_interaction(
+            _UnusedProductAgent(),
+            tmp_path,
+            requirement,
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+    )
 
     assert result["failure"]["reason"] == "invalid_product_requirement"
-    assert product_agent.calls == []
+    assert runtime.calls == []
     assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
-    "pa_output",
+    "output",
     [
         {},
-        {"needed_context": None},
+        {"grounding_status": "unknown"},
+        {"grounding_status": "clarification_required"},
+        {"grounding_status": "incomplete"},
         {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": False,
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": "Question?",
-                "extra": True,
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": "NIST_assembly_instructions.pdf",
-                "request_live_observation": True,
-                "clarification_question": None,
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": "Not_Approved.STL",
-                "request_live_observation": False,
-                "clarification_question": None,
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": None,
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": "   ",
-            }
-        },
-        {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": 1,
-                "clarification_question": None,
-            }
-        },
-        {
-            "context understanding complete": True,
-        },
-        {
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": True,
-                "clarification_question": None,
-            },
-            "extra": True,
+            "grounding_status": "complete",
+            "ontology_projection_ref": "proposal.json",
+            "resource_selection_ref": "selection.json",
+            "tool_call_refs": "not-a-list",
         },
     ],
 )
-def test_invalid_pa_responses_are_rejected_and_recorded(
+def test_invalid_native_result_is_rejected_and_preserved_for_audit(
     tmp_path: Path,
-    pa_output: object,
+    output: dict[str, object],
 ) -> None:
-    product_agent = FakeProductAgent(response=pa_output)
-
-    result = _start(
-        product_agent,
-        tmp_path,
-        "assemble Medium Gear",
-    )
-
-    assert result["failure"]["reason"] == "invalid_pa_response"
-    assert len(product_agent.calls) == 1
-    turn_record = _read_json(tmp_path / "interaction_record/turn_0001.json")
-    assert turn_record["PA_output"] == pa_output
-    assert turn_record["failure"] == result["failure"]
-
-
-def test_pa_call_failure_is_returned_and_recorded(tmp_path: Path) -> None:
-    product_agent = FakeProductAgent(error=RuntimeError("controlled PA failure"))
-
-    result = _start(
-        product_agent,
-        tmp_path,
-        "assemble Medium Gear",
-    )
-
-    assert result["failure"]["reason"] == "pa_call_failed"
-    assert "RuntimeError: controlled PA failure" in result["failure"]["message"]
-    assert result["failure"]["diagnostic"] == {
-        "stage": "Phase 3.1 ProductAgent structured call",
-        "exception": "RuntimeError",
-        "status_code": None,
-        "request_id": None,
-        "error_type": None,
-        "param": None,
-        "code": None,
-        "message": "controlled PA failure",
-    }
-    turn_record = _read_json(tmp_path / "interaction_record/turn_0001.json")
-    assert turn_record["PA_output"] is None
-    assert turn_record["failure"] == result["failure"]
-
-
-def test_pa_call_failure_persists_only_sanitized_api_diagnostic(
-    tmp_path: Path,
-) -> None:
-    class ControlledBadRequestError(Exception):
-        pass
-
-    api_error = ControlledBadRequestError("raw exception text")
-    api_error.status_code = 400  # type: ignore[attr-defined]
-    api_error.request_id = "req_controlled"  # type: ignore[attr-defined]
-    api_error.type = "invalid_request_error"  # type: ignore[attr-defined]
-    api_error.param = "response_format"  # type: ignore[attr-defined]
-    api_error.code = None  # type: ignore[attr-defined]
-    api_error.body = {  # type: ignore[attr-defined]
-        "message": "schema must have a 'type' key",
-        "private_body_field": "must not persist",
-    }
-    wrapped = RuntimeError("LLM call failed")
-    wrapped.__cause__ = api_error
-    product_agent = FakeProductAgent(error=wrapped)
-
-    result = _start(product_agent, tmp_path, "assemble Medium Gear")
-
-    assert result["failure"]["diagnostic"] == {
-        "stage": "Phase 3.1 ProductAgent structured call",
-        "exception": "ControlledBadRequestError",
-        "status_code": 400,
-        "request_id": "req_controlled",
-        "error_type": "invalid_request_error",
-        "param": "response_format",
-        "code": None,
-        "message": "schema must have a 'type' key",
-    }
-    turn_text = (tmp_path / "interaction_record/turn_0001.json").read_text(
-        encoding="utf-8"
-    )
-    assert "private_body_field" not in turn_text
-    assert "raw exception text" not in turn_text
-
-
-@pytest.mark.parametrize(
-    "existing_relative_path",
-    [
-        "products/user_requirement/product_requirement.json",
-        "interaction_record/turn_0001.json",
-    ],
-)
-def test_existing_phase_3_1_record_is_never_overwritten(
-    tmp_path: Path,
-    existing_relative_path: str,
-) -> None:
-    existing_path = tmp_path / existing_relative_path
-    existing_path.parent.mkdir(parents=True)
-    existing_path.write_text("controlled existing record", encoding="utf-8")
-    product_agent = FakeProductAgent(response={})
-
-    result = _start(
-        product_agent,
-        tmp_path,
-        "assemble Medium Gear",
-    )
-
-    assert result["failure"]["reason"] == "interaction_exists"
-    assert product_agent.calls == []
-    assert existing_path.read_text(encoding="utf-8") == "controlled existing record"
-
-
-def test_pa_context_interaction_has_only_the_approved_dependencies() -> None:
-    source_path = Path(context_interaction.__file__)
-    source = source_path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(source_path))
-    imported_modules = {
-        node.module for node in tree.body if isinstance(node, ast.ImportFrom) and node.module
-    }
-    imported_modules.update(
-        alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names
-    )
-
-    assert not any(
-        forbidden in module
-        for module in imported_modules
-        for forbidden in (
-            "intelligent_product",
-            "llm_agent",
-            "rgb_d_cad_grounding",
-            ".ui",
-            ".agents.ra",
-        )
-    )
-    assert "resolve_context_ref" not in source
-    assert "capture_gazebo_observation" not in source
-    assert ".setup(" not in source
-    assert "primitive_steps" in source
-
-
-def test_first_turn_clarification_is_allowed_after_abox_initialization(
-    tmp_path: Path,
-) -> None:
-    product_agent = FakeProductAgent(
-        response={
-            "needed_context": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": "Which gear shaft?",
-            }
-        }
-    )
-
-    result = _start(product_agent, tmp_path, "assemble Medium Gear")
-
-    assert result == {
-        "needed_context": {
-            "context_ref": None,
-            "request_live_observation": False,
-            "clarification_question": "Which gear shaft?",
-        }
-    }
-    assert (tmp_path / "products/grounding/ontology/interaction_abox.ttl").is_file()
-
-
-def test_missing_ontology_dependencies_fail_before_pa_or_records(tmp_path: Path) -> None:
-    product_agent = FakeProductAgent(response={})
+    runtime = _GroundingRuntime([output])
 
     result = asyncio.run(
         start_pa_context_interaction(
-            product_agent,
+            _UnusedProductAgent(),
             tmp_path,
-            "assemble Medium Gear",
+            "assemble medium gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+    )
+
+    assert result["failure"]["reason"] == "invalid_pa_response"
+    turn = _read_json(tmp_path / "interaction_record/turn_0001.json")
+    assert turn["PA_output"] == output
+    assert turn["failure"]["reason"] == "invalid_pa_response"
+
+
+def test_grounding_exception_is_fail_closed_and_recorded(tmp_path: Path) -> None:
+    runtime = _GroundingRuntime([RuntimeError("controlled failure")])
+
+    result = asyncio.run(
+        start_pa_context_interaction(
+            _UnusedProductAgent(),
+            tmp_path,
+            "assemble medium gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+    )
+
+    assert result["failure"]["reason"] == "pa_call_failed"
+    assert "controlled failure" in result["failure"]["message"]
+    turn = _read_json(tmp_path / "interaction_record/turn_0001.json")
+    assert turn["PA_output"] is None
+    assert turn["failure"]["reason"] == "pa_call_failed"
+
+
+def test_missing_grounding_dependencies_fail_before_writes(tmp_path: Path) -> None:
+    result = asyncio.run(
+        start_pa_context_interaction(
+            _UnusedProductAgent(),
+            tmp_path,
+            "assemble medium gear",
         )
     )
 
     assert result["failure"]["reason"] == "grounding_unavailable"
-    assert product_agent.calls == []
     assert not any(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("source_name", ["missing.owl", "mixed_paonto_sample.owl"])
-def test_invalid_runtime_tbox_fails_before_pa_evidence_selection(
-    tmp_path: Path,
-    source_name: str,
-) -> None:
-    tbox_path = (
-        tmp_path / source_name
-        if source_name == "missing.owl"
-        else Path(__file__).parent / "fixtures/ontology" / source_name
-    )
-    product_agent = FakeProductAgent(response={})
-
-    result = asyncio.run(
-        start_pa_context_interaction(
-            product_agent,
-            tmp_path / "interaction",
-            "assemble Medium Gear",
-            ontology_config=PAOntologyConfig(tbox_path, PPR_NAMESPACE),
-            grounding_runtime=ControlledGroundingRuntime(),
-        )
-    )
-
-    assert result["failure"]["reason"] == "ontology_initialization_failed"
-    assert product_agent.calls == []
-    assert _read_json(
-        tmp_path / "interaction/products/user_requirement/product_requirement.json"
-    ) == {"product_requirement": "assemble Medium Gear"}
-    assert (
-        _read_json(tmp_path / "interaction/interaction_record/turn_0001.json")["failure"]
-        == result["failure"]
+def _descriptors() -> tuple[GroundingProducerDescriptor, ...]:
+    return (
+        GroundingProducerDescriptor.from_mapping(
+            {
+                "provider_id": "document_test_provider",
+                "description": "Produce document evidence.",
+                "accepted_evidence_types": ["document"],
+                "produced_record_types": ["DocumentOverviewRecord"],
+                "prerequisites": {"DocumentOverviewRecord": []},
+                "availability": True,
+                "estimated_cost": 1,
+            }
+        ),
+        GroundingProducerDescriptor.from_mapping(
+            {
+                "provider_id": "geometry_test_provider",
+                "description": "Produce CAD and observation evidence.",
+                "accepted_evidence_types": ["CAD", "observation"],
+                "produced_record_types": ["CADMeshRecord"],
+                "prerequisites": {"CADMeshRecord": []},
+                "availability": True,
+                "estimated_cost": 1,
+            }
+        ),
     )
 
 
-def test_mutated_tbox_snapshot_is_rejected_before_pa_call(tmp_path: Path) -> None:
-    class MutatedOntologyConfig:
-        def load_tbox(self) -> object:
-            tbox = ontology_config().load_tbox()
-            tbox.graph.add(
-                (
-                    URIRef(f"{PPR_NAMESPACE}mutated"),
-                    RDF.type,
-                    OWL.Class,
-                )
-            )
-            return tbox
-
-    product_agent = FakeProductAgent(response={})
-
-    result = asyncio.run(
-        start_pa_context_interaction(
-            product_agent,
-            tmp_path,
-            "assemble Medium Gear",
-            ontology_config=MutatedOntologyConfig(),  # type: ignore[arg-type]
-            grounding_runtime=ControlledGroundingRuntime(),
-        )
-    )
-
-    assert result["failure"]["reason"] == "ontology_initialization_failed"
-    assert "changed after validation" in result["failure"]["message"]
-    assert product_agent.calls == []
-
-
-def _start(
-    product_agent: FakeProductAgent,
-    interaction_root: Path,
-    product_requirement: str,
-) -> dict[str, object]:
-    return asyncio.run(
-        start_pa_context_interaction(
-            product_agent,
-            interaction_root,
-            product_requirement,
-            ontology_config=ontology_config(),
-            grounding_runtime=ControlledGroundingRuntime(),
-        )
-    )
-
-
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))

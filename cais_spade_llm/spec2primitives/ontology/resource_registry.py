@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,17 +11,9 @@ from rdflib import Graph, Namespace, URIRef
 from rdflib.compare import to_isomorphic
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.config import WorkcellProfile, load_workcell_profile
+
 from .ppr_tbox import OntologyContextError, TBoxSnapshot
-
-_RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
-_EXPECTED_RESOURCE_SYMBOLS = ("xarm6", "ur5e")
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-_REPOSITORY_ROOT = _PACKAGE_ROOT.parent
-_DEFAULT_MANIFEST_PATHS = {
-    "xarm6": _PACKAGE_ROOT / "initialization/resources/robot_xarm6.json",
-    "ur5e": _PACKAGE_ROOT / "initialization/resources/robot_ur5e.json",
-}
-
 
 class ResourceRegistryError(OntologyContextError):
     """Raised when a predefined resource registry cannot be trusted."""
@@ -63,6 +54,7 @@ class ResourceRegistrySnapshot:
     fingerprint: str
     _source_paths: tuple[Path, ...] = field(repr=False, compare=False)
     _tbox: TBoxSnapshot = field(repr=False, compare=False)
+    _profile: WorkcellProfile = field(repr=False, compare=False)
 
     def assert_unchanged(self) -> None:
         """Raise if the TBox, graph, or an authoritative manifest changed."""
@@ -72,6 +64,7 @@ class ResourceRegistrySnapshot:
             raise ResourceRegistryError(
                 "Resource registry TBox changed after validation."
             ) from exc
+        self._profile.assert_unchanged()
         if self._tbox.fingerprint != self.tbox_fingerprint:
             raise ResourceRegistryError(
                 "Resource registry TBox fingerprint changed after validation."
@@ -108,6 +101,7 @@ class ResourceRegistrySnapshot:
             "ppr_namespace": self.ppr_namespace,
             "resource_namespace": self.resource_namespace,
             "tbox_fingerprint": self.tbox_fingerprint,
+            "workcell_profile_sha256": self._profile.source_sha256,
             "graph_fingerprint": _graph_fingerprint(self.graph),
             "resources": [entry.to_record() for entry in self.resources],
             "fingerprint": self.fingerprint,
@@ -117,15 +111,13 @@ class ResourceRegistrySnapshot:
 def load_predefined_resource_registry(
     tbox: TBoxSnapshot,
     *,
-    manifest_paths: Mapping[str, Path] | None = None,
-    source_root: Path | None = None,
+    profile: WorkcellProfile | None = None,
 ) -> ResourceRegistrySnapshot:
-    """Load the exact predefined robot identities from authoritative manifests.
+    """Load ordered resource identities from the validated workcell profile.
 
     Args:
         tbox: Validated immutable PPR TBox used to type resource individuals.
-        manifest_paths: Optional exact symbol-to-manifest mapping for tests.
-        source_root: Root used to create portable manifest references.
+        profile: Validated process, ordered resources, and manifest authorities.
 
     Returns:
         A configuration-free registry snapshot for ``xarm6`` and ``ur5e``.
@@ -141,26 +133,19 @@ def load_predefined_resource_registry(
     except OntologyContextError as exc:
         raise ResourceRegistryError("Resource registry TBox is not immutable.") from exc
 
-    configured_paths = dict(
-        _DEFAULT_MANIFEST_PATHS if manifest_paths is None else manifest_paths
-    )
-    if set(configured_paths) != set(_EXPECTED_RESOURCE_SYMBOLS):
-        raise ResourceRegistryError(
-            "Resource registry requires exactly the predefined symbols: "
-            + ", ".join(_EXPECTED_RESOURCE_SYMBOLS)
-        )
-
-    resolved_source_root = Path(
-        _REPOSITORY_ROOT if source_root is None else source_root
-    ).resolve()
+    configured_profile = load_workcell_profile() if profile is None else profile
+    configured_profile.assert_unchanged()
+    resource_profiles = configured_profile.resources
     resources: list[ResourceRegistryEntry] = []
     source_paths: list[Path] = []
     resource_jids: set[str] = set()
-    for resource_symbol in _EXPECTED_RESOURCE_SYMBOLS:
+    for resource_profile in resource_profiles:
+        resource_symbol = resource_profile.symbol
         entry, source_path = _load_resource_entry(
             resource_symbol,
-            configured_paths[resource_symbol],
-            source_root=resolved_source_root,
+            resource_profile.manifest_path,
+            resource_iri=resource_profile.iri,
+            source_ref=resource_profile.manifest_ref,
         )
         if entry.resource_jid in resource_jids:
             raise ResourceRegistryError(
@@ -173,7 +158,10 @@ def load_predefined_resource_registry(
     ppr = Namespace(tbox.ppr_namespace)
     graph = Graph()
     graph.bind("ppr", ppr)
-    graph.bind("resource", Namespace(_RESOURCE_NAMESPACE))
+    resource_namespace = _common_resource_namespace(
+        tuple(entry.resource_iri for entry in resources)
+    )
+    graph.bind("resource", Namespace(resource_namespace))
     for entry in resources:
         graph.add((URIRef(entry.resource_iri), RDF.type, ppr.resource))
 
@@ -181,8 +169,9 @@ def load_predefined_resource_registry(
         "schema_version": 1,
         "record_type": "ResourceRegistrySnapshot",
         "ppr_namespace": tbox.ppr_namespace,
-        "resource_namespace": _RESOURCE_NAMESPACE,
+        "resource_namespace": resource_namespace,
         "tbox_fingerprint": tbox.fingerprint,
+        "workcell_profile_sha256": configured_profile.source_sha256,
         "graph_fingerprint": _graph_fingerprint(graph),
         "resources": [entry.to_record() for entry in resources],
     }
@@ -190,11 +179,12 @@ def load_predefined_resource_registry(
         graph=graph,
         resources=tuple(resources),
         ppr_namespace=tbox.ppr_namespace,
-        resource_namespace=_RESOURCE_NAMESPACE,
+        resource_namespace=resource_namespace,
         tbox_fingerprint=tbox.fingerprint,
         fingerprint=_record_fingerprint(payload),
         _source_paths=tuple(source_paths),
         _tbox=tbox,
+        _profile=configured_profile,
     )
 
 
@@ -202,7 +192,8 @@ def _load_resource_entry(
     resource_symbol: str,
     manifest_path: Path,
     *,
-    source_root: Path,
+    resource_iri: str,
+    source_ref: str,
 ) -> tuple[ResourceRegistryEntry, Path]:
     source_path = Path(manifest_path).resolve()
     source_bytes = _read_source_bytes(source_path)
@@ -231,11 +222,10 @@ def _load_resource_entry(
         resource.get("jid"),
         f"Resource JID for {resource_symbol}",
     )
-    source_ref = _relative_source_ref(source_path, source_root)
     return (
         ResourceRegistryEntry(
             resource_symbol=resource_symbol,
-            resource_iri=f"{_RESOURCE_NAMESPACE}{resource_symbol}",
+            resource_iri=resource_iri,
             resource_jid=resource_jid,
             resource_type=resource_type,
             source_ref=source_ref,
@@ -243,6 +233,16 @@ def _load_resource_entry(
         ),
         source_path,
     )
+
+
+def _common_resource_namespace(resource_iris: tuple[str, ...]) -> str:
+    """Return the common IRI prefix used only for readable RDF bindings."""
+    if not resource_iris:
+        raise ResourceRegistryError("Resource registry is empty.")
+    prefixes = [iri.rsplit("/", 1)[0] + "/" for iri in resource_iris]
+    if len(set(prefixes)) != 1:
+        raise ResourceRegistryError("Resource IRIs do not share one namespace.")
+    return prefixes[0]
 
 
 def _read_source_bytes(source_path: Path) -> bytes:
@@ -256,15 +256,6 @@ def _read_source_bytes(source_path: Path) -> bytes:
 
 def _source_sha256(source_path: Path) -> str:
     return hashlib.sha256(_read_source_bytes(source_path)).hexdigest()
-
-
-def _relative_source_ref(source_path: Path, source_root: Path) -> str:
-    try:
-        return source_path.relative_to(source_root).as_posix()
-    except ValueError as exc:
-        raise ResourceRegistryError(
-            f"Resource manifest is outside the configured source root: {source_path}"
-        ) from exc
 
 
 def _exact_nonempty_string(value: object, label: str) -> str:

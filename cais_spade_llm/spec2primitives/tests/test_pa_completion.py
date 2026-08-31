@@ -1,280 +1,346 @@
-"""Tests for the formal Phase 3.5 PA grounding-completion boundary."""
+"""Tests for the native PA grounding-completion contract."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from cais_spade_llm.spec2primitives.agents.pa import (
-    PAContextGroundingCompletionV2,
-    load_pa_context_grounding_completion,
-    submit_pa_clarification_reply,
-)
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingContractError,
-    GroundingNextAction,
-    GroundingSession,
-    load_latest_grounding_session,
-    persist_grounding_session,
+    PAContextGroundingCompletionV3,
+    build_product_context_view,
+    load_pa_context_grounding_completion,
+    persist_pa_context_grounding_completion_v3,
+    persist_product_context_view,
+)
+from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
+    OntologyGroundingResult,
+    propose_and_validate_ontology_grounding,
+)
+from cais_spade_llm.spec2primitives.agents.pa.product_context import (
+    initialize_interaction_abox,
+    validate_and_merge_triple_delta,
+)
+from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    commit_resource_assignment,
+    derive_resource_assignment_need,
+    select_predefined_resource,
+)
+from cais_spade_llm.spec2primitives.ontology import (
+    load_predefined_resource_registry,
+    load_predefined_workcell,
 )
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
-    ControlledGroundingRuntime,
-    complete_context,
+    PPR_NAMESPACE,
     ontology_config,
-    request_clarification,
-)
-from cais_spade_llm.spec2primitives.tests.test_pa_clarification import (
-    _continue,
-    _initialize,
-    _read_json,
 )
 
 
-def test_completion_record_pins_generalized_grounding_bundle(
-    tmp_path: Path,
-) -> None:
-    grounding = ControlledGroundingRuntime(assessments=[complete_context()])
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble Medium Gear",
-    )
+class _ProposalAgent:
+    async def ask_llm_structured(
+        self,
+        prompt: str,
+        *,
+        response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[
+            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+        ]
+        | None = None,
+        max_tool_rounds: int = 3,
+    ) -> dict[str, Any]:
+        del prompt, tools, tool_executor, max_tool_rounds
+        assert response_format["name"] == "spec2primitives_grounding_result"
+        return {
+            "individuals": [
+                {
+                    "individual_index": 1,
+                    "class_iri": f"{PPR_NAMESPACE}feature",
+                    "grounded_meaning": "The requested assembly feature.",
+                    "evidence_refs": ["requirement_0001"],
+                }
+            ],
+            "relations": [
+                {
+                    "subject_kind": "specification",
+                    "subject_individual_index": None,
+                    "subject_iri": None,
+                    "predicate_iri": f"{PPR_NAMESPACE}defines",
+                    "object_kind": "new_individual",
+                    "object_individual_index": 1,
+                    "object_iri": None,
+                    "evidence_refs": ["requirement_0001"],
+                },
+                {
+                    "subject_kind": "existing_individual",
+                    "subject_individual_index": None,
+                    "subject_iri": "https://cais-spade-llm.local/process/assembly",
+                    "predicate_iri": f"{PPR_NAMESPACE}realizes",
+                    "object_kind": "new_individual",
+                    "object_individual_index": 1,
+                    "object_iri": None,
+                    "evidence_refs": ["requirement_0001"],
+                },
+            ],
+            "literal_facts": [],
+            "context_summary": "The requirement identifies an assembly feature.",
+            "evidence_refs": ["requirement_0001"],
+            "missing_information": [
+                "The available evidence does not identify the destination shaft."
+            ],
+        }
 
-    result = _continue(product_agent, tmp_path, grounding)
 
-    assert result["context understanding complete"] is True
-    completion = load_pa_context_grounding_completion(tmp_path)
-    assert isinstance(completion, PAContextGroundingCompletionV2)
-    assert completion.product_requirement == "assemble Medium Gear"
-    assert completion.completion_turn == 2
-    assert completion.source_refs[0]["ref"] == "NIST_assembly_instructions.pdf"
-    assert len(completion.typed_context_refs) == 1
-    assert completion.typed_context_refs[0]["ref"].endswith("world_pose_0001.json")
-    assert completion.clarification_refs == ()
+def test_completion_v3_pins_location_grounding_without_session(tmp_path: Path) -> None:
+    completion = persist_native_completion_fixture(tmp_path)
+
+    assert isinstance(completion, PAContextGroundingCompletionV3)
     record = completion.to_record()
-    assert record["status"] == "context understanding complete"
-    assert record["schema_version"] == 2
-    assert record["grounding_session_ref"].endswith("revision_0002.json")
-    assert record["typed_grounding_contract_ref"].endswith(
-        "typed_grounding_contract_0001.json"
-    )
-    assert record["resource_selection_ref"].endswith(
-        "selection_0001/resource_selection_record.json"
-    )
-    assert record["resource_assignment_delta_ref"].endswith("delta_0004.json")
+    assert record["schema_version"] == 3
+    assert record["status"] == "grounding complete"
+    assert "grounding_session_ref" not in record
+    assert len(record["typed_context_refs"]) == 1
     contract = _read_json(tmp_path / str(record["typed_grounding_contract_ref"]))
-    assert contract["schema_version"] == 2
-    assert contract["context_summary"] == (
-        "The controlled interaction has enough cited product context."
-    )
-    assert contract["context_evidence_refs"] == [
-        "NIST_assembly_instructions.pdf"
+    assert contract["schema_version"] == 3
+    assert contract["context_evidence_refs"] == ["requirement_0001"]
+    assert contract["missing_information"] == [
+        "The available evidence does not identify the destination shaft."
     ]
-    assert contract["missing_information"] == []
+    assert contract["tool_call_refs"] == []
+    location_ref = record["typed_context_refs"][0]["ref"]
+    assert _read_json(tmp_path / location_ref)["record_type"] == (
+        "RobotFrameLocationRecord"
+    )
     serialized = json.dumps(record)
     for forbidden in (
+        "GroundingSession",
         "TaskTransitionContract",
         "primitive_steps",
-        "RobotAgent",
-        "robot_frame",
+        "RobotFramePoseRecord",
     ):
         assert forbidden not in serialized
 
 
-def test_completion_loader_rejects_changed_resource_selection(tmp_path: Path) -> None:
-    grounding = ControlledGroundingRuntime(assessments=[complete_context()])
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble Medium Gear",
-    )
-    _continue(product_agent, tmp_path, grounding)
-    completion = load_pa_context_grounding_completion(tmp_path)
-    selection_path = tmp_path / completion.resource_selection_ref
-    selection = _read_json(selection_path)
-    selection["selected_resource_jid"] = "changed@localhost"
-    _write_json(selection_path, selection)
-
-    with pytest.raises(GroundingContractError, match="ResourceSelectionRecord hash"):
-        load_pa_context_grounding_completion(tmp_path)
-
-
-def test_completion_loader_rejects_changed_assignment_delta_authority(
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        ("selection", "resource_selection_ref hash"),
+        ("assignment", "resource_assignment_delta_ref hash"),
+        ("location", "pinned record changed"),
+        ("proposal", "ontology_projection_ref hash"),
+    ],
+)
+def test_completion_loader_rejects_changed_native_inputs(
     tmp_path: Path,
+    target: str,
+    message: str,
 ) -> None:
-    grounding = ControlledGroundingRuntime(assessments=[complete_context()])
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble Medium Gear",
-    )
-    _continue(product_agent, tmp_path, grounding)
-    completion = load_pa_context_grounding_completion(tmp_path)
-    delta_path = tmp_path / completion.resource_assignment_delta_ref
-    delta = _read_json(delta_path)
-    delta["producer"] = "ontology_grounding"
-    _write_json(delta_path, delta)
-
-    with pytest.raises(GroundingContractError, match="assignment delta hash"):
-        load_pa_context_grounding_completion(tmp_path)
-
-
-def test_completion_loader_rejects_removed_version_1_artifact(
-    tmp_path: Path,
-) -> None:
-    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
-    completion_path.parent.mkdir(parents=True)
-    _write_json(completion_path, {"schema_version": 1})
-
-    with pytest.raises(
-        GroundingContractError,
-        match="schema version 2 is supported",
-    ):
-        load_pa_context_grounding_completion(tmp_path)
-
-
-def test_completion_preserves_answered_clarification_ref(tmp_path: Path) -> None:
-    grounding = ControlledGroundingRuntime(
-        assessments=[request_clarification("Which gear size?"), complete_context()]
-    )
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble gear",
-    )
-    _continue(product_agent, tmp_path, grounding)
-
-    result = asyncio.run(
-        submit_pa_clarification_reply(
-            product_agent,
-            tmp_path,
-            "Medium Gear",
-            ontology_config=ontology_config(),
-            grounding_runtime=grounding,
-        )
-    )
-
-    assert result["context understanding complete"] is True
-    completion = load_pa_context_grounding_completion(tmp_path)
-    assert completion.clarification_refs[0]["ref"] == (
-        "interaction_record/clarification_0002.json"
-    )
-
-
-@pytest.mark.parametrize("tamper_target", ["completion", "session", "clarification"])
-def test_completion_loader_rejects_tampered_records(
-    tmp_path: Path,
-    tamper_target: str,
-) -> None:
-    grounding = ControlledGroundingRuntime(
-        assessments=[request_clarification("Which gear size?"), complete_context()]
-    )
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble gear",
-    )
-    _continue(product_agent, tmp_path, grounding)
-    asyncio.run(
-        submit_pa_clarification_reply(
-            product_agent,
-            tmp_path,
-            "Medium Gear",
-            ontology_config=ontology_config(),
-            grounding_runtime=grounding,
-        )
-    )
-    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
-    completion = _read_json(completion_path)
-    if tamper_target == "completion":
-        completion["completion_turn"] = 99
-        _write_json(completion_path, completion)
-    elif tamper_target == "session":
-        session_path = tmp_path / str(completion["grounding_session_ref"])
-        session = _read_json(session_path)
-        session["status"] = "incomplete"
-        _write_json(session_path, session)
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    ref_field = {
+        "selection": "resource_selection_ref",
+        "assignment": "resource_assignment_delta_ref",
+        "proposal": "ontology_projection_ref",
+    }.get(target)
+    if ref_field is not None:
+        path = tmp_path / str(completion[ref_field])
     else:
-        clarification_path = tmp_path / str(
-            completion["clarification_refs"][0]["ref"]
-        )
-        clarification = _read_json(clarification_path)
-        clarification["reply"] = "Small Gear"
-        _write_json(clarification_path, clarification)
+        path = tmp_path / str(completion["typed_context_refs"][0]["ref"])
+    value = _read_json(path)
+    value["tampered"] = True
+    _write_json(path, value)
 
-    with pytest.raises(GroundingContractError):
+    with pytest.raises(GroundingContractError, match=message):
         load_pa_context_grounding_completion(tmp_path)
 
 
-def test_completion_is_rejected_when_latest_session_is_incomplete(
+def test_completion_loader_rejects_changed_decision_and_contract(
     tmp_path: Path,
 ) -> None:
-    grounding = _UnresolvedCompletionRuntime(assessments=[complete_context()])
-    product_agent = _initialize(
-        tmp_path,
-        grounding,
-        product_requirement="assemble gear",
+    decision_root = tmp_path / "decision"
+    decision_completion = persist_native_completion_fixture(decision_root).to_record()
+    decision_path = decision_root / str(decision_completion["decision_ref"])
+    decision = _read_json(decision_path)
+    decision["PA_output"]["grounding_status"] = "incomplete"
+    _write_json(decision_path, decision)
+    with pytest.raises(GroundingContractError, match="decision reference"):
+        load_pa_context_grounding_completion(decision_root)
+
+    contract_root = tmp_path / "contract"
+    contract_completion = persist_native_completion_fixture(contract_root).to_record()
+    contract_path = contract_root / str(
+        contract_completion["typed_grounding_contract_ref"]
     )
+    contract = _read_json(contract_path)
+    contract["missing_information"] = []
+    _write_json(contract_path, contract)
+    with pytest.raises(GroundingContractError, match="typed_grounding_contract_ref hash"):
+        load_pa_context_grounding_completion(contract_root)
 
-    result = _continue(product_agent, tmp_path, grounding)
 
-    assert result["failure"]["reason"] == "context_completion_failed"
-    assert not (tmp_path / "interaction_record/context_completion_0001.json").exists()
+def test_unsupported_completion_version_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "interaction_record/context_completion_0001.json"
+    _write_json(path, {"schema_version": 1})
+
+    with pytest.raises(GroundingContractError, match="version is unsupported"):
+        load_pa_context_grounding_completion(tmp_path)
 
 
-class _UnresolvedCompletionRuntime(ControlledGroundingRuntime):
-    """Append an incomplete session before the Phase 3.5 validator runs."""
-
-    async def assess_product_context(  # noqa: PLR0913
-        self,
-        product_agent: object,
-        *,
-        interaction_root: Path,
-        tbox: object,
-        abox: object,
-        abox_view: Mapping[str, object],
-        attempted_evidence: tuple[str, ...],
-        clarification_history: tuple[Mapping[str, object], ...] = (),
-        turn_number: int,
-        max_pa_turns: int,
-    ) -> Mapping[str, object]:
-        result = await super().assess_product_context(  # type: ignore[arg-type]
-            product_agent,
-            interaction_root=interaction_root,
+def persist_native_completion_fixture(
+    root: Path,
+) -> PAContextGroundingCompletionV3:
+    """Create one complete native record chain for completion and UI tests."""
+    requirement = "assemble medium gear"
+    _write_json(
+        root / "products/user_requirement/product_requirement.json",
+        {"product_requirement": requirement},
+    )
+    tbox = ontology_config().load_tbox()
+    initial_abox = initialize_interaction_abox(root, requirement, tbox)
+    registry = load_predefined_resource_registry(tbox)
+    workcell = load_predefined_workcell(tbox, registry)
+    proposal = asyncio.run(
+        propose_and_validate_ontology_grounding(
+            _ProposalAgent(),
+            interaction_root=root,
             tbox=tbox,
-            abox=abox,
-            abox_view=abox_view,
-            attempted_evidence=attempted_evidence,
-            clarification_history=clarification_history,
-            turn_number=turn_number,
-            max_pa_turns=max_pa_turns,
+            abox=initial_abox,
+            workcell=workcell,
+            evidence_catalog=[],
+            authorized_evidence_refs={"requirement_0001"},
+            tools=[],
+            tool_executor=_unused_tool,
+            max_tool_rounds=1,
+            required_output_projection={
+                "record_type": "RobotFrameLocationRecord",
+                "target_frame": "world",
+            },
         )
-        previous = load_latest_grounding_session(interaction_root)
-        assert previous is not None
-        persist_grounding_session(
-            interaction_root,
-            GroundingSession.create(
-                revision=previous.revision + 1,
-                requirement_text=previous.requirement_text,
-                attempted_actions=previous.attempted_actions,
-                next_action=GroundingNextAction.from_mapping(
-                    {
-                        "action": "incomplete",
-                        "reason": "The controlled interaction remains incomplete.",
-                    }
-                ),
-                status="incomplete",
-            ),
-        )
-        return result
+    )
+    assert isinstance(proposal, OntologyGroundingResult)
+
+    location_path, source_ref = _write_location(root)
+    location_ref = location_path.relative_to(root).as_posix()
+    location_merge = validate_and_merge_triple_delta(
+        root,
+        tbox,
+        "synthetic_world_location_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [location_ref],
+        },
+        authorized_evidence_refs={source_ref},
+    )
+    need = derive_resource_assignment_need(location_merge.abox, workcell)
+    assert need is not None
+    selection = select_predefined_resource(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        need=need,
+        grounding_record_path=location_path,
+    )
+    assignment = commit_resource_assignment(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        need=need,
+        selection=selection,
+    )
+    final_view = build_product_context_view(
+        root,
+        assignment.abox,
+        attempted_evidence=(),
+        assessed_at_ns=time.time_ns(),
+    )
+    persist_product_context_view(root, final_view)
+    proposal_ref = proposal.proposal_path.relative_to(root).as_posix()
+    turn_path = root / "interaction_record/turn_0001.json"
+    _write_json(
+        turn_path,
+        {
+            "turn": 1,
+            "product_requirement": requirement,
+            "PA_input": {"mode": "native_tool_grounding"},
+            "PA_output": {
+                "grounding_status": "complete",
+                "ontology_projection_ref": proposal_ref,
+                "resource_selection_ref": selection.record_ref,
+                "tool_call_refs": [],
+            },
+            "failure": None,
+        },
+    )
+    persist_pa_context_grounding_completion_v3(
+        root,
+        product_requirement=requirement,
+        completion_turn=1,
+        decision_ref=turn_path.relative_to(root).as_posix(),
+        product_context=final_view,
+        ontology_projection_ref=proposal_ref,
+        resource_selection_ref=selection.record_ref,
+        tool_call_refs=(),
+    )
+    loaded = load_pa_context_grounding_completion(root)
+    assert isinstance(loaded, PAContextGroundingCompletionV3)
+    return loaded
 
 
-def _write_json(path: Path, value: Any) -> None:
+async def _unused_tool(
+    tool_name: str,
+    arguments: Mapping[str, object],
+) -> Mapping[str, object]:
+    del tool_name, arguments
+    raise AssertionError("No tool call was expected.")
+
+
+def _write_location(root: Path) -> tuple[Path, str]:
+    destination = root / "products/grounding/synthetic_world_location"
+    destination.mkdir(parents=True, exist_ok=True)
+    source_path = destination / "source_evidence.json"
+    _write_json(source_path, {"source": "synthetic observed center"})
+    source_ref = source_path.relative_to(root).as_posix()
+    path = destination / "robot_frame_location_record.json"
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "record_type": "RobotFrameLocationRecord",
+            "producer": "synthetic_world_location_provider",
+            "robot_frame_conversion": "accepted",
+            "CAD_correspondence": "accepted",
+            "location": "available",
+            "source_frame": "camera_optical_frame",
+            "target_frame": "world",
+            "observation_timestamp_ns": 11,
+            "translated_location_m": [0.0, 0.0, 1.1],
+            "source_hashes": [
+                {
+                    "ref": source_ref,
+                    "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                }
+            ],
+        },
+    )
+    return path, source_ref
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(value, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",

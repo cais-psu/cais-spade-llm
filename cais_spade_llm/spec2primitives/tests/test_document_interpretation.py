@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -28,9 +29,7 @@ from cais_spade_llm.spec2primitives.tools.document_evidence import (
     DocumentVisionRequest,
     DocumentVisionResponse,
     OpenAIDocumentVisionRuntime,
-    TargetedDocumentVisionRequest,
     document_overview_cache_status,
-    inspect_document_evidence,
     interpret_document_evidence,
     prepare_document_overview,
     run_document_interpretation_diagnostic,
@@ -38,7 +37,6 @@ from cais_spade_llm.spec2primitives.tools.document_evidence import (
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
     RenderedDocumentPage,
     document_interpretation_schema,
-    targeted_document_evidence_schema,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence.prepare import (
     main as prepare_document_main,
@@ -57,14 +55,11 @@ class ControlledVisionRuntime:
         self,
         output: dict[str, object] | None = None,
         *,
-        targeted_output: dict[str, object] | None = None,
         model: str = "gpt-5.4-mini-2026-03-17",
     ) -> None:
         self.output = output or _valid_output()
-        self.targeted_output = targeted_output
         self.model = model
         self.requests: list[DocumentVisionRequest] = []
-        self.targeted_requests: list[TargetedDocumentVisionRequest] = []
 
     async def interpret_document(
         self,
@@ -76,27 +71,6 @@ class ControlledVisionRuntime:
             model=self.model,
             output=self.output,
         )
-
-    async def inspect_document_pages(
-        self,
-        request: TargetedDocumentVisionRequest,
-    ) -> DocumentVisionResponse:
-        self.targeted_requests.append(request)
-        output = self.targeted_output or {
-            "observations": [
-                {
-                    "description": "The requested item is visible in the document.",
-                    "evidence_pages": [request.pages[0].page_number],
-                }
-            ],
-            "uncertainty": [],
-        }
-        return DocumentVisionResponse(
-            response_id="resp_targeted_controlled",
-            model=self.model,
-            output=output,
-        )
-
 
 def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
     class ControlledResponses:
@@ -163,8 +137,7 @@ def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
 
 def test_document_schemas_are_neutral_and_use_supported_constraints() -> None:
     overview_schema = document_interpretation_schema()
-    targeted_schema = targeted_document_evidence_schema()
-    serialized = json.dumps([overview_schema, targeted_schema])
+    serialized = json.dumps(overview_schema)
 
     assert "uniqueItems" not in serialized
     for forbidden in (
@@ -179,10 +152,6 @@ def test_document_schemas_are_neutral_and_use_supported_constraints() -> None:
         assert forbidden not in serialized
     assert set(overview_schema["properties"]) == {
         "summary",
-        "observations",
-        "uncertainty",
-    }
-    assert set(targeted_schema["properties"]) == {
         "observations",
         "uncertainty",
     }
@@ -224,6 +193,12 @@ def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
     assert "relations" not in record
     assert "assertions" not in record
     assert record["observations"][0]["observation_id"] == "observation_0001"
+    assert [page["page"] for page in record["pages"]] == list(range(1, 7))
+    assert all(page["extracted_text"] for page in record["pages"])
+    assert all(len(page["image_sha256"]) == 64 for page in record["pages"])
+    assert [page["evidence_ref"] for page in record["pages"]] == [
+        f"{_TEST_DOCUMENT_REF}#page={page}" for page in range(1, 7)
+    ]
 
     changed_config = replace(config, model="controlled-new-model")
     changed_vision = ControlledVisionRuntime(model="controlled-new-model")
@@ -288,71 +263,43 @@ def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
     assert snapshot["producer"] == "document_evidence"
 
 
-def test_targeted_evidence_inspects_every_nist_page_in_order(
+def test_one_document_interpretation_persists_every_ordered_page(
     tmp_path: Path,
 ) -> None:
     config = load_model_runtime_config().document_vlm
     served_context = _served_document(_TEST_DOCUMENT_REF)
     vision = ControlledVisionRuntime()
-    overview = asyncio.run(
-        prepare_document_overview(
+    interaction_root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(
+        interaction_root,
+        "a requirement that must not shape document extraction",
+        tbox,
+    )
+
+    result = asyncio.run(
+        interpret_document_evidence(
+            interaction_root=interaction_root,
+            tbox=tbox,
+            abox=abox,
             served_context=served_context,
-            cache_root=tmp_path / "source_cache",
+            operation_number=1,
             config=config,
             vision_runtime=vision,
         )
     )
-    snapshot = {
-        "schema_version": 1,
-        "record_type": "DocumentOverviewRecord",
-        "producer": "document_evidence",
-        "operation_number": 1,
-        "cache_status": overview.cache_status,
-        "cache_record_ref": str(overview.record_path),
-        "evidence_refs": [
-            _TEST_DOCUMENT_REF,
-            *(f"{_TEST_DOCUMENT_REF}#page={page}" for page in range(1, 7)),
-        ],
-        "overview": dict(overview.record),
-    }
-
-    evidence = asyncio.run(
-        inspect_document_evidence(
-            interaction_root=tmp_path / "interaction",
-            overview_snapshot=snapshot,
-            evidence_question="What does page 4 say about assembling Medium Gear?",
-            config=config,
-            vision_runtime=vision,
-        )
-    )
-
-    assert [page.page_number for page in vision.targeted_requests[0].pages] == list(
-        range(1, 7)
-    )
-    assert 4 in [page.page_number for page in vision.targeted_requests[0].pages]
-    assert evidence.record["selected_pages"] == list(range(1, 7))
-
-    invalid_vision = ControlledVisionRuntime(
-        targeted_output={
-            "observations": [
-                {
-                    "description": "This citation is outside the document.",
-                    "evidence_pages": [7],
-                }
-            ],
-            "uncertainty": [],
-        }
-    )
-    with pytest.raises(DocumentInterpretationError, match="evidence page is invalid"):
-        asyncio.run(
-            inspect_document_evidence(
-                interaction_root=tmp_path / "invalid_interaction",
-                overview_snapshot=snapshot,
-                evidence_question="What does the document say?",
-                config=config,
-                vision_runtime=invalid_vision,
-            )
-        )
+    snapshot = _read_json(result.overview_record_path)
+    overview = snapshot["overview"]
+    assert snapshot["schema_version"] == 2
+    assert [page["page"] for page in overview["pages"]] == list(range(1, 7))
+    assert [page["extracted_text"] for page in overview["pages"]] == [
+        page.text for page in vision.requests[0].pages
+    ]
+    assert snapshot["evidence_refs"] == [
+        _TEST_DOCUMENT_REF,
+        *(f"{_TEST_DOCUMENT_REF}#page={page}" for page in range(1, 7)),
+    ]
+    assert result.delta["unresolved_evidence_needs"] == []
 
 
 def test_invalid_overview_is_removed_atomically_and_abox_is_unchanged(
@@ -485,6 +432,7 @@ def test_second_registered_pdf_uses_the_same_overview_pipeline(
                         "repository_path": "references/products/Second_Product_Manual.pdf",
                         "source_url": "https://example.test/second-manual",
                         "page_count": 1,
+                        "source_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
                     }
                 ]
             }
@@ -525,19 +473,11 @@ def test_second_registered_pdf_uses_the_same_overview_pipeline(
     assert vision.requests[0].context_ref == "Second_Product_Manual.pdf"
 
     Image.new("RGB", (320, 200), color="black").save(pdf_path, format="PDF")
-    changed_served = _served_document(pdf_path.name)
-    changed = asyncio.run(
-        prepare_document_overview(
-            served_context=changed_served,
-            cache_root=tmp_path / "cache",
-            config=load_model_runtime_config().document_vlm,
-            vision_runtime=vision,
-        )
-    )
-    assert changed.cache_status == "miss"
-    assert changed.record_path != result.record_path
-    assert changed.record["source_sha256"] != result.record["source_sha256"]
-    assert len(vision.requests) == 2
+    changed = resolve_context_ref({"context_ref": pdf_path.name})
+
+    assert changed["rejection"]["reason"] == "source_hash_mismatch"
+    assert "served_context" not in changed
+    assert len(vision.requests) == 1
 
 
 def test_prepare_command_supports_all_and_one_exact_context_ref(
@@ -592,49 +532,51 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             prompt: str,
             *,
             response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Any = None,
+            max_tool_rounds: int = 3,
         ) -> dict[str, Any]:
             assert "initialized_specification_iri" in prompt
-            proposal_schema = response_format["schema"]["properties"][
-                "ontology_grounding_proposal"
-            ]["properties"]
-            evidence_refs = proposal_schema["evidence_refs"]["items"]["enum"]
+            assert response_format["name"] == "spec2primitives_grounding_result"
+            assert tools == []
+            assert tool_executor is not None
+            assert max_tool_rounds == 1
+            evidence_ref = f"{_TEST_DOCUMENT_REF}#page=4"
             return {
-                "ontology_grounding_proposal": {
-                    "individuals": [
-                        {
-                            "individual_index": 1,
-                            "class_iri": "http://PAonto.com#feature",
-                        }
-                    ],
-                    "relations": [
-                        {
-                            "subject_kind": "specification",
-                            "subject_individual_index": None,
-                            "subject_iri": None,
-                            "predicate_iri": "http://PAonto.com#defines",
-                            "object_kind": "new_individual",
-                            "object_individual_index": 1,
-                            "object_iri": None,
-                        },
-                        {
-                            "subject_kind": "existing_individual",
-                            "subject_individual_index": None,
-                            "subject_iri": (
-                                "https://cais-spade-llm.local/process/assembly"
-                            ),
-                            "predicate_iri": "http://PAonto.com#realizes",
-                            "object_kind": "new_individual",
-                            "object_individual_index": 1,
-                            "object_iri": None,
-                        },
-                    ],
-                    "literal_facts": [],
-                    "context_summary": (
-                        "The document describes the requested assembly context."
-                    ),
-                    "evidence_refs": [evidence_refs[0]],
-                    "missing_information": [],
-                }
+                "individuals": [
+                    {
+                        "individual_index": 1,
+                        "class_iri": "http://PAonto.com#feature",
+                        "grounded_meaning": "The requirement-level assembly target.",
+                        "evidence_refs": [evidence_ref],
+                    }
+                ],
+                "relations": [
+                    {
+                        "subject_kind": "specification",
+                        "subject_individual_index": None,
+                        "subject_iri": None,
+                        "predicate_iri": "http://PAonto.com#defines",
+                        "object_kind": "new_individual",
+                        "object_individual_index": 1,
+                        "object_iri": None,
+                        "evidence_refs": [evidence_ref],
+                    },
+                    {
+                        "subject_kind": "existing_individual",
+                        "subject_individual_index": None,
+                        "subject_iri": "https://cais-spade-llm.local/process/assembly",
+                        "predicate_iri": "http://PAonto.com#realizes",
+                        "object_kind": "new_individual",
+                        "object_individual_index": 1,
+                        "object_iri": None,
+                        "evidence_refs": [evidence_ref],
+                    },
+                ],
+                "literal_facts": [],
+                "context_summary": "The document describes the assembly context.",
+                "evidence_refs": [evidence_ref],
+                "missing_information": [],
             }
 
     result = asyncio.run(
@@ -651,9 +593,12 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
 
     assert result["status"] == "accepted"
     assert result["overview"]["status"] == "accepted"
-    assert result["targeted_evidence"] is None
-    assert result["grounding_session"]["status"] == "ready_for_ontology"
     assert result["ontology_proposal"]["status"] == "accepted"
+    proposal_record = _read_json(
+        tmp_path
+        / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
+    )
+    assert proposal_record["schema_version"] == 5
     assert len(result["accepted_assertions"]) == 3
     assert result["failure"] is None
 

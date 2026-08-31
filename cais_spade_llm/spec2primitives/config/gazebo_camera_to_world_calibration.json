@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "calibrations": [
+    {
+      "calibration_id": "table_spec2primitives_cam_mk3_link_v1",
+      "source_frame": "cam_mk3_link",
+      "target_frame": "world",
+      "target_from_camera_transform": [
+        [0.0, -0.9999999999932537, -0.000003673205103346574, -0.4],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.000003673205103346574, -0.9999999999932537, 1.4],
+        [0.0, 0.0, 0.0, 1.0]
+      ],
+      "valid_from_ns": 0,
+      "valid_until_ns": null,
+      "provenance_source": "cais_spade_llm/spec2primitives/config/gazebo_camera_to_world_calibration_provenance.json",
+      "provenance_sha256": "db5b8dad144c9a96440fde33302fbc88639e3350dd6a9aadec90b9504a2d78b1"
+    },
+    {
+      "calibration_id": "table_spec2primitives_cam_mk4_1_link_v1",
+      "source_frame": "cam_mk4_1_link",
+      "target_frame": "world",
+      "target_from_camera_transform": [
+        [0.0, -0.9999999999932537, -0.000003673205103346574, 0.4],
+        [-1.0, 0.0, 0.0, 0.3],
+        [0.0, 0.000003673205103346574, -0.9999999999932537, 1.4],
+        [0.0, 0.0, 0.0, 1.0]
+      ],
+      "valid_from_ns": 0,
+      "valid_until_ns": null,
+      "provenance_source": "cais_spade_llm/spec2primitives/config/gazebo_camera_to_world_calibration_provenance.json",
+      "provenance_sha256": "db5b8dad144c9a96440fde33302fbc88639e3350dd6a9aadec90b9504a2d78b1"
+    },
+    {
+      "calibration_id": "table_spec2primitives_cam_mk4_2_link_v1",
+      "source_frame": "cam_mk4_2_link",
+      "target_frame": "world",
+      "target_from_camera_transform": [
+        [0.0, -0.9999999999932537, -0.000003673205103346574, 0.4],
+        [-1.0, 0.0, 0.0, -0.3],
+        [0.0, 0.000003673205103346574, -0.9999999999932537, 1.4],
+        [0.0, 0.0, 0.0, 1.0]
+      ],
+      "valid_from_ns": 0,
+      "valid_until_ns": null,
+      "provenance_source": "cais_spade_llm/spec2primitives/config/gazebo_camera_to_world_calibration_provenance.json",
+      "provenance_sha256": "db5b8dad144c9a96440fde33302fbc88639e3350dd6a9aadec90b9504a2d78b1"
+    },
+    {
+      "calibration_id": "table_spec2primitives_cam_assembly_link_v1",
+      "source_frame": "cam_assembly_link",
+      "target_frame": "world",
+      "target_from_camera_transform": [
+        [0.0, -0.9999999999932537, -0.000003673205103346574, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.000003673205103346574, -0.9999999999932537, 1.55],
+        [0.0, 0.0, 0.0, 1.0]
+      ],
+      "valid_from_ns": 0,
+      "valid_until_ns": null,
+      "provenance_source": "cais_spade_llm/spec2primitives/config/gazebo_camera_to_world_calibration_provenance.json",
+      "provenance_sha256": "db5b8dad144c9a96440fde33302fbc88639e3350dd6a9aadec90b9504a2d78b1"
+    }
+  ]
+}

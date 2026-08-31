@@ -1,4 +1,4 @@
-"""Tests for the dual Gazebo adapter and connected Phase 2 PA UI."""
+"""Tests for the dual Gazebo adapter and streamlined ProductAgent UI."""
 
 from __future__ import annotations
 
@@ -13,9 +13,6 @@ from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
     read_dual_gazebo_status,
     start_dual_gazebo,
     stop_dual_gazebo,
-)
-from cais_spade_llm.spec2primitives.spec2primitives_ui import (
-    _phase_2_connection_message,
 )
 
 
@@ -127,48 +124,27 @@ def test_stop_uses_exact_dual_gazebo_name() -> None:
     assert runtime.stop_calls == [DUAL_GAZEBO_NAME]
 
 
-def test_phase_2_message_states_the_connected_and_unavailable_boundaries() -> None:
-    message = _phase_2_connection_message()
-
-    assert "Connected through Phase 3.5" in message
-    for unavailable_boundary in (
-        "grounding",
-        "planning",
-        "RA",
-        "robot action",
-    ):
-        assert unavailable_boundary in message
-
-
-def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
+def test_pa_ui_declares_the_streamlined_grounding_workspace() -> None:
     source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
 
     for exact_ui_term in (
         'label="product_requirement"',
         'value="assemble medium gear"',
-        'ui.label("Run settings")',
+        'ui.expansion("Run options"',
         'label="Maximum PA turns"',
-        '"Start PA Context Interaction"',
-        'ui.label("PA Interaction")',
+        '"Start ProductAgent"',
+        'ui.label("ProductAgent Grounding")',
         'ui.label("ProductAgent")',
-        'ui.label("ProductAgent Request Failure")',
-        'ui.badge("connected through Phase 3.5")',
-        'ui.badge("idle")',
-        '"needed_context"',
-        '"served context"',
-        '"Evidence Sources"',
-        '"retrieval error"',
-        '"clarification"',
-        'ui.label("User ↔ ProductAgent Messages")',
-        'ui.label("Assembly Plan")',
-        'ui.label("Robot-independent assembly plan")',
-        'ui.badge("Phase 5")',
-        'ui.badge("not available")',
-        '"Step"',
-        '"Assembly Task"',
-        '"Required Outcome"',
-        'ui.button("Open Assembly Plan"',
-        'ui.expansion("ordered interaction record"',
+        'ui.label("ProductAgent Timeline")',
+        'ui.label("Final Grounding Result")',
+        'ui.label("Final Ontology")',
+        'ui.label("Authoritative final interaction ABox")',
+        'ui.expansion("Raw Turtle"',
+        'ui.expansion("Developer diagnostics"',
+        'ui.label("Failure details")',
+        'ui.label("Recovered latest interaction")',
+        'f"Interaction: {diagnostic_values.get',
+        'f"Persisted path: {diagnostic_values.get',
     ):
         assert exact_ui_term in source
 
@@ -179,8 +155,7 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
     assert 'max_pa_turns_input.props("disable")' in source
     assert 'max_pa_turns_input.props(remove="disable")' in source
     assert 'start_button.on_click(_start_pa_interaction)' in source
-    assert 'product_agent_failure_card.set_visibility(False)' in source
-    assert 'if title == "Ontology Grounding"' in source
+    assert 'diagnostic_failure_card.set_visibility(False)' in source
     assert '"w-full border border-red-200 bg-red-50 shadow-none"' in source
     assert (
         "        cancel_interaction_button.on_click(_cancel_clarification)\n"
@@ -189,12 +164,28 @@ def test_phase_2_pa_ui_declares_the_connected_workspace() -> None:
     assert "start_pa_context_interaction(" in source
     assert "serve_pa_requested_context," in source
     assert "continue_pa_context_interaction," in source
-    assert '"No assembly plan is available."' in source
-    assert '"No interaction record exists because Phase 3 was not started."' in source
-    assert '("provenance",' not in source
+    for removed_diagnostic in (
+        "Detailed ProductAgent transcript",
+        "Ordered interaction record",
+        "Phase 4.1 Document Interpretation Diagnostic",
+        "RGB-D Observation Processing",
+        "No needed_context decision is available.",
+    ):
+        assert removed_diagnostic not in source
     assert "_render_ra" not in source
     assert '"RA Interaction"' not in source
     assert 'ui.badge("not connected")' not in source
+    for removed_placeholder in (
+        'ui.label("Assembly Plan")',
+        'ui.label("Robot-independent assembly plan")',
+        'ui.badge("Phase 5")',
+        'ui.button("Open Assembly Plan"',
+        'ui.label("Proposed Workflow")',
+        'ui.label("RobotAgent execution")',
+        'ui.label("User ↔ ProductAgent Messages")',
+        '"No assembly plan is available."',
+    ):
+        assert removed_placeholder not in source
 
 
 def test_phase_2_top_controls_are_full_width_and_responsive() -> None:

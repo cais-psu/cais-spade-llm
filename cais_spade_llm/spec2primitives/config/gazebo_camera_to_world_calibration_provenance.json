@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "calibration_profile": "table_spec2primitives_fixed_cameras_v1",
+  "authority": "user_authorized_gazebo_simulation_calibration",
+  "source_world": {
+    "repository_path": "ros2/cais_lab_robotics/worlds/table_spec2primitives.world",
+    "sha256": "2a208659e236e062365ba9ecd19b58f2c934418f402ee9409c5d23e6bfda6986"
+  },
+  "coordinate_conventions": {
+    "world_from_camera_body": "SDF pose xyz roll pitch yaw with Rz(yaw) Ry(pitch) Rx(roll)",
+    "camera_points": "ROS optical frame: x right, y down, z forward",
+    "camera_body_from_optical_transform": [
+      [0.0, 0.0, 1.0, 0.0],
+      [-1.0, 0.0, 0.0, 0.0],
+      [0.0, -1.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 1.0]
+    ],
+    "composition": "world_from_camera = world_from_camera_body @ camera_body_from_optical"
+  },
+  "validity": {
+    "valid_from_ns": 0,
+    "valid_until_ns": null,
+    "condition": "Only valid for the pinned table_spec2primitives.world camera definitions"
+  }
+}

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -27,104 +29,56 @@ from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
 from cais_spade_llm.spec2primitives.agents.pa import (
     ProductAgentContextRuntime,
     cancel_pa_context_interaction,
-    continue_pa_context_interaction,
     load_pa_context_grounding_completion,
-    serve_pa_requested_context,
     start_pa_context_interaction,
     submit_pa_clarification_reply,
 )
-from cais_spade_llm.spec2primitives.tools.document_evidence import (
-    run_document_interpretation_diagnostic,
-)
-from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
-    approved_document_refs,
-)
-from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
-    read_rgbd_segmentation_status,
-)
 
-_FLOW_STEPS = (
-    "exact product requirement",
-    "PA reads cached previews and selects evidence when needed",
-    "PA records cited statements and missing information",
-    "PA creates a late validated ontology projection and typed contract",
-    "RA retrieves fresh resource state and resource-owned primitive catalog",
-    "RA authors primitive_steps",
-    "state checks + IK/collision/trajectory validation",
-)
-_PHASE_2_CONNECTED_MESSAGE = (
-    "Connected through the evidence-first PA grounding and completion-v2 boundary. "
-    "The production runtime is available only with an authoritative TBox and "
-    "controlled Phase 4 producers; Phase 5 planning, RA, primitive composition, "
-    "and robot action remain unavailable. Phase 3.4 clarification replies and "
-    "cancellation stay inside the same PA interaction."
-)
-_PHASE_2_RESULT_AREAS = (
-    ("needed_context", "No needed_context decision is available."),
-    ("served context", "No document, CAD, or observation context was served."),
-    (
-        "Evidence Sources",
-        "Document pages, CAD files, and observation references will appear here.",
-    ),
-    ("retrieval error", "No retrieval was attempted."),
-    ("clarification", "No clarification_question is available."),
-    ("Ontology Grounding", "No validated ProductContextView is available."),
-    ("Typed Runtime Context", "No typed runtime context is available."),
-    ("Grounding Decisions", "No grounding session is available."),
-    ("PA Grounding Completion", "No Phase 3.5 completion record is available."),
-)
-_ASSEMBLY_PLAN_COLUMNS = (
-    "Step",
-    "Assembly Task",
-    "Required Outcome",
-    "Evidence Sources",
+_TURTLE_PREFIX_PATTERN = re.compile(
+    r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$"
 )
 
 
 class _PAUIRuntimeObserver:
-    """Update the UI before delegating each structured ProductAgent call."""
+    """Report semantic ProductAgent stages around structured calls."""
 
     def __init__(
         self,
         product_agent: ProductAgentContextRuntime,
         *,
-        max_pa_turns: int,
-        on_pa_turn: Callable[[int, int], None],
-        starting_turn: int = 0,
+        on_pa_stage: Callable[[str], None],
+        on_pa_event: Callable[[dict[str, str]], None] | None = None,
     ) -> None:
         self._product_agent = product_agent
-        self._max_pa_turns = max_pa_turns
-        self._on_pa_turn = on_pa_turn
-        self._turn_number = starting_turn
+        self._on_pa_stage = on_pa_stage
+        self._on_pa_event = on_pa_event
 
     async def ask_llm_structured(
         self,
         prompt: str,
         *,
         response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[
+            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+        ]
+        | None = None,
+        max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        """Report the next turn and call only the composed PA interface."""
-        self._turn_number += 1
-        self._on_pa_turn(self._turn_number, self._max_pa_turns)
-        return await self._product_agent.ask_llm_structured(
+        """Report the response contract's semantic stage and validated result."""
+        self._on_pa_stage(_live_pa_stage(response_format))
+        response = await self._product_agent.ask_llm_structured(
             prompt,
             response_format=response_format,
+            tools=tools,
+            tool_executor=tool_executor,
+            max_tool_rounds=max_tool_rounds,
         )
-
-
-def _phase_2_connection_message() -> str:
-    """Return the fixed Phase 2 connected-state boundary message."""
-    return _PHASE_2_CONNECTED_MESSAGE
-
-
-def _render_flow_step(number: int, text: str) -> None:
-    """Render one static workflow step."""
-    with (
-        ui.card().classes("w-full border border-slate-200 shadow-sm"),
-        ui.row().classes("items-center gap-4 w-full"),
-    ):
-        ui.badge(str(number)).props("color=indigo rounded")
-        ui.label(text).classes("text-base text-slate-800")
+        if self._on_pa_event is not None:
+            event = _live_pa_response_event(response, response_format)
+            if event is not None:
+                self._on_pa_event(event)
+        return response
 
 
 def _status_color(state: str) -> str:
@@ -275,17 +229,19 @@ async def _run_pa_ui_interaction(
     runtime: Spec2PrimitivesUIRuntime,
     product_requirement: str,
     max_pa_turns: int = 12,
-    on_pa_turn: Callable[[int, int], None] | None = None,
+    on_pa_stage: Callable[[str], None] | None = None,
+    on_pa_event: Callable[[dict[str, str]], None] | None = None,
 ) -> dict[str, object]:
-    """Run the connected Phase 3.1 through Phase 3.5 backend workflow."""
+    """Run one connected native ProductAgent grounding workflow."""
+    del max_pa_turns
     interaction_identifier = f"interaction_{uuid.uuid4().hex}"
     interaction_root = runtime.contexts_root / interaction_identifier
     product_agent = runtime.product_agent
-    if on_pa_turn is not None:
+    if on_pa_stage is not None:
         product_agent = _PAUIRuntimeObserver(
             product_agent,
-            max_pa_turns=max_pa_turns,
-            on_pa_turn=on_pa_turn,
+            on_pa_stage=on_pa_stage,
+            on_pa_event=on_pa_event,
         )
     phase_3_1 = await start_pa_context_interaction(
         product_agent,
@@ -294,26 +250,14 @@ async def _run_pa_ui_interaction(
         ontology_config=runtime.ontology_config,
         grounding_runtime=runtime.grounding_runtime,
     )
-    phase_3_2 = None
-    phase_3_3 = None
-    if isinstance(phase_3_1.get("needed_context"), dict):
-        phase_3_2 = serve_pa_requested_context(interaction_root)
-    if isinstance(phase_3_2, dict) and "served_context" in phase_3_2:
-        phase_3_3 = await continue_pa_context_interaction(
-            product_agent,
-            interaction_root,
-            ontology_config=runtime.ontology_config,
-            grounding_runtime=runtime.grounding_runtime,
-            max_pa_turns=max_pa_turns,
-        )
     return {
         "interaction_identifier": interaction_identifier,
         "interaction_root": interaction_root,
         "product_requirement": product_requirement,
         "phase_3_1": phase_3_1,
-        "phase_3_2": phase_3_2,
-        "phase_3_3": phase_3_3,
-        "max_pa_turns": max_pa_turns,
+        "phase_3_2": None,
+        "phase_3_3": None,
+        "max_pa_turns": 12,
     }
 
 
@@ -322,7 +266,8 @@ async def _submit_pa_ui_clarification(
     interaction: dict[str, object],
     user_reply: str,
     *,
-    on_pa_turn: Callable[[int, int], None] | None = None,
+    on_pa_stage: Callable[[str], None] | None = None,
+    on_pa_event: Callable[[dict[str, str]], None] | None = None,
 ) -> dict[str, object]:
     """Submit one clarification reply and update the same UI interaction."""
     interaction_root = interaction.get("interaction_root")
@@ -330,13 +275,11 @@ async def _submit_pa_ui_clarification(
     if not isinstance(interaction_root, Path) or not isinstance(max_pa_turns, int):
         raise ValueError("PA UI clarification interaction is malformed.")
     product_agent = runtime.product_agent
-    if on_pa_turn is not None:
-        current_turn = _latest_turn_number(interaction_root)
+    if on_pa_stage is not None:
         product_agent = _PAUIRuntimeObserver(
             product_agent,
-            max_pa_turns=max_pa_turns,
-            on_pa_turn=on_pa_turn,
-            starting_turn=current_turn,
+            on_pa_stage=on_pa_stage,
+            on_pa_event=on_pa_event,
         )
     result = await submit_pa_clarification_reply(
         product_agent,
@@ -363,65 +306,512 @@ def _cancel_pa_ui_interaction(
     return interaction
 
 
-def _latest_turn_number(interaction_root: Path) -> int:
-    numbers = [
-        int(path.stem.removeprefix("turn_"))
-        for path in (interaction_root / "interaction_record").glob("turn_*.json")
-        if path.stem.removeprefix("turn_").isdigit()
-    ]
-    return max(numbers, default=0)
+def _timeline_event(state: str, title: str, detail: str) -> dict[str, str]:
+    """Return one compact operator-facing ProductAgent event."""
+    return {"state": state, "title": title, "detail": detail}
 
 
-async def _run_document_diagnostic_ui(
-    runtime: Spec2PrimitivesUIRuntime,
-    product_requirement: str,
-    *,
-    context_ref: str,
+def _live_pa_stage(response_format: Mapping[str, object]) -> str:
+    """Describe the current structured ProductAgent task in one sentence."""
+    if response_format.get("name") == "spec2primitives_grounding_result":
+        return "Investigating approved evidence and grounding the product context."
+    return "Grounding the validated product context."
+
+
+def _live_pa_response_event(
+    response: Mapping[str, object],
+    response_format: Mapping[str, object],
+) -> dict[str, str] | None:
+    """Translate one structured ProductAgent result without exposing raw payloads."""
+    del response_format
+    if isinstance(response.get("clarification_question"), str):
+        return _timeline_event(
+            "waiting",
+            "Clarification requested",
+            str(response["clarification_question"]),
+        )
+    if isinstance(response.get("insufficient_evidence"), str):
+        return _timeline_event(
+            "waiting",
+            "Grounding incomplete",
+            str(response["insufficient_evidence"]),
+        )
+    if isinstance(response.get("context_summary"), str):
+        return _timeline_event(
+            "running",
+            "Context proposal returned",
+            "The evidence-backed context proposal is being validated.",
+        )
+    return None
+
+
+def _interaction_ref_path(interaction_root: Path, ref: object) -> Path:
+    """Resolve one persisted interaction reference without escaping its root."""
+    if not isinstance(ref, str) or not ref:
+        raise ValueError("Interaction record reference is invalid.")
+    root = interaction_root.resolve()
+    path = (root / ref).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Interaction record reference escapes its root.") from exc
+    if not path.is_file():
+        raise ValueError(f"Interaction record does not exist: {ref}")
+    return path
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    """Read one JSON object used by the validated UI result."""
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Interaction record is not an object: {path.name}")
+    return value
+
+
+def _latest_interaction_json_object(
+    interaction_root: Path,
+    relative_pattern: str,
 ) -> dict[str, object]:
-    """Run evidence-first document stages in a separate diagnostic ABox."""
-    if (
-        runtime.ontology_config is None
-        or runtime.model_config is None
-        or runtime.document_vision_runtime is None
-        or runtime.tbox is None
-    ):
-        return {
-            "status": "unavailable",
-            "failure": {
-                "reason": "document_interpretation_unavailable",
-                "message": runtime.document_diagnostic_unavailable_reason
-                or "The document interpretation diagnostic is not configured.",
-            },
-        }
-    interaction_root = runtime.contexts_root / f"document_diagnostic_{uuid.uuid4().hex}"
-    return await run_document_interpretation_diagnostic(
-        interaction_root=interaction_root,
-        product_requirement=product_requirement,
-        context_ref=context_ref,
-        product_agent=runtime.product_agent,
-        ontology_config=runtime.ontology_config,
-        config=runtime.model_config.document_vlm,
-        vision_runtime=runtime.document_vision_runtime,
+    """Read the latest matching JSON object through the interaction root."""
+    root = interaction_root.resolve()
+    paths = sorted(root.glob(relative_pattern))
+    if not paths:
+        raise ValueError(f"Final interaction record is unavailable: {relative_pattern}")
+    return _read_json_object(
+        _interaction_ref_path(root, str(paths[-1].relative_to(root)))
     )
 
 
-def _validated_max_pa_turns(value: object) -> int | None:
-    """Return one valid whole-number UI limit or `None`."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not float(value).is_integer():
-        return None
-    max_pa_turns = int(value)
-    return max_pa_turns if 2 <= max_pa_turns <= 50 else None
+def _latest_record(
+    records: Mapping[str, object],
+    prefix: str,
+) -> dict[str, object] | None:
+    """Return the latest ordered persisted object with the exact prefix."""
+    values = [
+        value
+        for name, value in records.items()
+        if name.startswith(prefix) and isinstance(value, dict)
+    ]
+    return values[-1] if values else None
 
 
-def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
+def _turtle_prefixes(raw_turtle: str) -> tuple[tuple[str, str], ...]:
+    """Return prefixes exactly as declared by the authoritative Turtle file."""
+    prefixes = []
+    for line in raw_turtle.splitlines():
+        match = _TURTLE_PREFIX_PATTERN.match(line)
+        if match is not None:
+            prefixes.append((match.group(1), match.group(2)))
+    return tuple(sorted(prefixes, key=lambda item: (-len(item[1]), item[0])))
+
+
+def _compact_iri(iri: object, prefixes: tuple[tuple[str, str], ...]) -> str:
+    """Display one exact IRI using a prefix declared by the persisted ABox."""
+    if not isinstance(iri, str):
+        raise ValueError("Ontology IRI is invalid.")
+    for prefix, namespace in prefixes:
+        if iri.startswith(namespace):
+            return f"{prefix}:{iri.removeprefix(namespace)}"
+    return iri
+
+
+def _ontology_object_text(
+    value: object,
+    prefixes: tuple[tuple[str, str], ...],
+) -> tuple[str, str]:
+    """Return the exact readable object term and its Mermaid node kind."""
+    if not isinstance(value, Mapping):
+        raise ValueError("Ontology assertion object is invalid.")
+    kind = value.get("kind")
+    object_value = value.get("value")
+    if kind == "iri":
+        return _compact_iri(object_value, prefixes), "iri"
+    if kind != "literal" or not isinstance(object_value, (str, int, float, bool)):
+        raise ValueError("Ontology assertion object kind is invalid.")
+    text = json.dumps(object_value, ensure_ascii=False, allow_nan=False)
+    datatype = value.get("datatype")
+    language = value.get("language")
+    if isinstance(datatype, str):
+        text = f"{text}^^{_compact_iri(datatype, prefixes)}"
+    elif isinstance(language, str):
+        text = f"{text}@{language}"
+    return text, "literal"
+
+
+def _mermaid_text(value: str) -> str:
+    """Escape one exact ontology term for a Mermaid label."""
+    return escape(value.replace("\n", " "), quote=True).replace("|", "&#124;")
+
+
+def _final_ontology_view(
+    product_context: Mapping[str, object],
+    raw_turtle: str,
+) -> dict[str, object]:
+    """Build deterministic graph and table views of the final validated ABox."""
+    assertions = product_context.get("assertions")
+    if not isinstance(assertions, list):
+        raise ValueError("Final ProductContextView assertions are invalid.")
+    prefixes = _turtle_prefixes(raw_turtle)
+    rows: list[dict[str, str]] = []
+    node_kinds: dict[str, str] = {}
+    for assertion in assertions:
+        if not isinstance(assertion, Mapping):
+            raise ValueError("Final ProductContextView assertion is invalid.")
+        subject = _compact_iri(assertion.get("subject"), prefixes)
+        predicate = _compact_iri(assertion.get("predicate"), prefixes)
+        object_text, object_kind = _ontology_object_text(
+            assertion.get("object"),
+            prefixes,
+        )
+        rows.append(
+            {
+                "subject": subject,
+                "predicate": predicate,
+                "object": object_text,
+            }
+        )
+        node_kinds.setdefault(subject, "iri")
+        node_kinds.setdefault(object_text, object_kind)
+    rows.sort(key=lambda row: (row["subject"], row["predicate"], row["object"]))
+
+    node_ids = {
+        term: f"n{index}"
+        for index, term in enumerate(sorted(node_kinds))
+    }
+    lines = [
+        "flowchart LR",
+        "    classDef iri fill:#eef2ff,stroke:#4f46e5,color:#1e1b4b",
+        "    classDef literal fill:#f8fafc,stroke:#64748b,color:#0f172a",
+    ]
+    for term, node_id in node_ids.items():
+        lines.append(
+            f'    {node_id}["{_mermaid_text(term)}"]:::{node_kinds[term]}'
+        )
+    for row in rows:
+        lines.append(
+            f'    {node_ids[row["subject"]]} -->|"'
+            f'{_mermaid_text(row["predicate"])}"| {node_ids[row["object"]]}'
+        )
+    return {
+        "mermaid": "\n".join(lines),
+        "rows": rows,
+        "raw_turtle": raw_turtle,
+    }
+
+
+def _unique_text(values: list[object]) -> list[str]:
+    """Return non-empty display strings once in their persisted order."""
+    result: list[str] = []
+    for value in values:
+        text = value if isinstance(value, str) else None
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _final_result_limitations(
+    product_context: Mapping[str, object],
+    contract: Mapping[str, object],
+) -> list[str]:
+    """Collect exact non-blocking limits for one validated completion."""
+    missing_information = contract.get("missing_information")
+    values: list[object] = (
+        list(missing_information) if isinstance(missing_information, list) else []
+    )
+    uncertainty = product_context.get("uncertainty")
+    if isinstance(uncertainty, list):
+        values.extend(
+            item.get("description") if isinstance(item, Mapping) else item
+            for item in uncertainty
+        )
+    return _unique_text(values)
+
+
+def _final_result_evidence(
+    *,
+    product_context: Mapping[str, object],
+    contract: Mapping[str, object],
+    session: Mapping[str, object] | None,
+    selection: Mapping[str, object],
+) -> list[dict[str, str]]:
+    """Build compact evidence badges from validated final records."""
+    evidence: list[dict[str, str]] = []
+
+    def _add(label: object, status: object, kind: str) -> None:
+        if not isinstance(label, str) or not label:
+            return
+        item = {"label": label, "status": str(status), "kind": kind}
+        if item not in evidence:
+            evidence.append(item)
+
+    context_evidence_refs = contract.get("context_evidence_refs")
+    if isinstance(context_evidence_refs, list):
+        for ref in context_evidence_refs:
+            _add(ref, "accepted", "source")
+    attempts = session.get("attempted_actions") if session is not None else None
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if isinstance(attempt, Mapping):
+                _add(
+                    attempt.get("source_ref"),
+                    attempt.get("status", "recorded"),
+                    "source",
+                )
+    typed_bindings = product_context.get("typed_bindings")
+    if isinstance(typed_bindings, list):
+        for binding in typed_bindings:
+            if isinstance(binding, Mapping):
+                _add(
+                    binding.get("output_symbol"),
+                    binding.get("status", "recorded"),
+                    "typed record",
+                )
+    _add(
+        "ResourceSelectionRecord",
+        "accepted" if selection.get("selected_resource_symbol") else "unavailable",
+        "decision",
+    )
+    return evidence
+
+
+def _target_context_ref(
+    pose_record: Mapping[str, object],
+    pose_binding: Mapping[str, object],
+    contract: Mapping[str, object],
+) -> str | None:
+    """Return the exact CAD reference associated with the final target."""
+    CAD = pose_record.get("CAD")
+    context_ref = CAD.get("context_ref") if isinstance(CAD, Mapping) else None
+    if isinstance(context_ref, str):
+        return context_ref
+    evidence_refs = pose_binding.get("evidence_refs")
+    if isinstance(evidence_refs, list):
+        context_ref = next(
+            (
+                value
+                for value in evidence_refs
+                if isinstance(value, str) and value.endswith(".STL")
+            ),
+            None,
+        )
+    if isinstance(context_ref, str):
+        return context_ref
+    context_evidence_refs = contract.get("context_evidence_refs")
+    if not isinstance(context_evidence_refs, list):
+        return None
+    return next(
+        (
+            value
+            for value in context_evidence_refs
+            if isinstance(value, str) and value.endswith(".STL")
+        ),
+        None,
+    )
+
+
+def _final_grounding_result(
+    interaction_root: Path,
+    completion: Mapping[str, object],
+) -> dict[str, object]:
+    """Build the operator result from one already validated completion bundle."""
+    product_context = _latest_interaction_json_object(
+        interaction_root,
+        "products/grounding/product_context/view_*.json",
+    )
+    contract = _read_json_object(
+        _interaction_ref_path(
+            interaction_root,
+            completion.get("typed_grounding_contract_ref"),
+        )
+    )
+    selection = _read_json_object(
+        _interaction_ref_path(
+            interaction_root,
+            completion.get("resource_selection_ref"),
+        )
+    )
+    raw_turtle = _interaction_ref_path(
+        interaction_root,
+        "products/grounding/ontology/interaction_abox.ttl",
+    ).read_text(encoding="utf-8")
+    prefixes = _turtle_prefixes(raw_turtle)
+
+    typed_bindings = product_context.get("typed_bindings")
+    if not isinstance(typed_bindings, list):
+        raise ValueError("Final typed context bindings are invalid.")
+    grounding_record_type = (
+        "RobotFrameLocationRecord"
+        if completion.get("schema_version") == 3
+        else "RobotFramePoseRecord"
+    )
+    pose_binding = next(
+        (
+            item
+            for item in typed_bindings
+            if isinstance(item, Mapping)
+            and item.get("output_symbol") == grounding_record_type
+        ),
+        None,
+    )
+    if not isinstance(pose_binding, Mapping):
+        raise ValueError(f"Final {grounding_record_type} binding is unavailable.")
+    pose_record = _read_json_object(
+        _interaction_ref_path(interaction_root, pose_binding.get("record_ref"))
+    )
+
+    context_summary = contract.get("context_summary")
+    if not isinstance(context_summary, str) or not context_summary:
+        raise ValueError("Final context summary is invalid.")
+    session = None
+    if completion.get("schema_version") == 2:
+        session = _read_json_object(
+            _interaction_ref_path(
+                interaction_root,
+                completion.get("grounding_session_ref"),
+            )
+        )
+    robot_frame_pose = pose_record.get("robot_frame_pose")
+    translation = pose_record.get("translated_location_m")
+    if translation is None:
+        translation = (
+            robot_frame_pose.get("CAD_centroid_translation_m")
+            if isinstance(robot_frame_pose, Mapping)
+            else None
+        )
+    return {
+        "status": completion.get("status"),
+        "product_requirement": completion.get("product_requirement"),
+        "context_summary": context_summary,
+        "process": _compact_iri(selection.get("process_iri"), prefixes),
+        "selected_resource": selection.get("selected_resource_symbol"),
+        "selected_resource_jid": selection.get("selected_resource_jid"),
+        "execution_mode": selection.get("selected_execution_mode"),
+        "target_context_ref": _target_context_ref(
+            pose_record,
+            pose_binding,
+            contract,
+        ),
+        "target_frame": pose_record.get("target_frame"),
+        "location": pose_record.get("location"),
+        "pose": pose_record.get("pose"),
+        "robot_frame_conversion": pose_record.get("robot_frame_conversion"),
+        "CAD_centroid_translation_m": translation,
+        "evidence": _final_result_evidence(
+            product_context=product_context,
+            contract=contract,
+            session=session,
+            selection=selection,
+        ),
+        "limitations": _final_result_limitations(product_context, contract),
+        "ontology": _final_ontology_view(product_context, raw_turtle),
+    }
+
+
+def _persisted_pa_timeline(
+    product_requirement: str,
+    *,
+    turns: list[dict[str, object]],
+    retrievals: list[dict[str, object]],
+    clarifications: list[dict[str, object]],
+    records: Mapping[str, object],
+    final_result: Mapping[str, object] | None,
+    terminal_failure: object,
+) -> list[dict[str, str]]:
+    """Build a compact semantic timeline from persisted interaction records."""
+    del retrievals, clarifications
+    events = [
+        _timeline_event("accepted", "Requirement received", product_requirement)
+    ]
+    tool_calls = [
+        value
+        for name, value in records.items()
+        if name.startswith("tool_call_") and isinstance(value, Mapping)
+    ]
+    successful_calls = [item for item in tool_calls if item.get("failure") is None]
+    evidence_detail = (
+        f"{len(successful_calls)} approved evidence retrievals were accepted."
+        if tool_calls
+        else "No external evidence retrieval was needed for this grounding."
+    )
+    events.append(
+        _timeline_event(
+            "accepted" if successful_calls or not tool_calls else "failed",
+            "Evidence investigated",
+            evidence_detail,
+        )
+    )
+    proposal = _latest_record(records, "ontology_grounding_proposal_")
+    if isinstance(proposal, Mapping) and proposal.get("status") == "accepted":
+        events.append(
+            _timeline_event(
+                "accepted",
+                "Context grounded",
+                "The evidence-backed ontology context passed deterministic validation.",
+            )
+        )
+    if final_result is not None:
+        resource = final_result.get("selected_resource")
+        mode = final_result.get("execution_mode")
+        events.append(
+            _timeline_event(
+                "accepted",
+                "Resource selected",
+                " · ".join(
+                    str(value)
+                    for value in (resource, mode)
+                    if value not in {None, ""}
+                ),
+            )
+        )
+        events.append(
+            _timeline_event(
+                "accepted",
+                "Grounding complete",
+                "The validated context and coarse resource assignment are available.",
+            )
+        )
+        return events
+    latest_output = next(
+        (
+            turn.get("PA_output")
+            for turn in reversed(turns)
+            if isinstance(turn.get("PA_output"), Mapping)
+        ),
+        None,
+    )
+    if terminal_failure is not None:
+        events.append(
+            _timeline_event(
+                "failed",
+                "Grounding incomplete",
+                _failure_message(terminal_failure),
+            )
+        )
+    elif (
+        isinstance(latest_output, Mapping)
+        and latest_output.get("grounding_status") != "complete"
+    ):
+        message = latest_output.get("insufficient_evidence") or latest_output.get(
+            "clarification_question"
+        )
+        events.append(
+            _timeline_event(
+                "waiting",
+                "Grounding incomplete",
+                str(message or "More context is required."),
+            )
+        )
+    return events
+
+
+def _pa_ui_view(  # noqa: C901, PLR0915
+    interaction: dict[str, object],
+) -> dict[str, object]:
     """Build operator-facing text from one connected PA interaction."""
     product_requirement = interaction["product_requirement"]
     phase_3_1 = interaction["phase_3_1"]
     phase_3_2 = interaction["phase_3_2"]
     phase_3_3 = interaction.get("phase_3_3")
-    max_pa_turns = interaction.get("max_pa_turns", 12)
     if not isinstance(product_requirement, str) or not isinstance(phase_3_1, dict):
         raise ValueError("PA UI interaction result is malformed.")
 
@@ -430,12 +820,6 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     if not isinstance(interaction_root, Path) or not isinstance(interaction_identifier, str):
         raise ValueError("PA UI interaction path is malformed.")
     records = _interaction_records(interaction_root)
-    ontology_record = records.get("ontology_initialization")
-    ontology_initialized = (
-        isinstance(ontology_record, dict)
-        and ontology_record.get("status") == "unresolved"
-        and isinstance(ontology_record.get("tbox_fingerprint"), str)
-    )
     turns = [
         record
         for name, record in records.items()
@@ -446,38 +830,11 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
         for name, record in records.items()
         if name.startswith("retrieval_") and isinstance(record, dict)
     ]
-    decisions = [
-        record
-        for name, record in records.items()
-        if name.startswith("decision_") and isinstance(record, dict)
-    ]
     clarifications = [
         record
         for name, record in records.items()
         if name.startswith("clarification_") and isinstance(record, dict)
     ]
-    needed_contexts = [
-        needed_context
-        for turn in turns
-        if isinstance((pa_output := turn.get("PA_output")), dict)
-        and isinstance((needed_context := pa_output.get("needed_context")), dict)
-    ]
-    served_contexts = [
-        served_context
-        for retrieval in retrievals
-        if isinstance((served_context := retrieval.get("served_context")), dict)
-    ]
-    retrieval_errors = [
-        retrieval_error
-        for retrieval in retrievals
-        if isinstance((retrieval_error := retrieval.get("retrieval_error")), dict)
-    ]
-    evidence_sources = [
-        provenance
-        for served_context in served_contexts
-        if isinstance((provenance := served_context.get("provenance")), dict)
-    ]
-    grounding_values = _grounding_result_values(records, interaction_root)
     clarification_by_turn = {
         record.get("question_turn"): record
         for record in clarifications
@@ -485,29 +842,54 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     }
     pending_clarification_turn: int | None = None
     clarification_question: str | None = None
-    for decision in reversed(decisions):
-        assessment = _validated_persisted_assessment(decision)
-        needed_context = (
-            assessment.get("needed_context") if isinstance(assessment, dict) else None
-        )
-        question = (
-            needed_context.get("clarification_question")
-            if isinstance(needed_context, dict)
-            else None
-        )
-        turn = decision.get("turn")
-        if isinstance(question, str) and isinstance(turn, int):
-            if turn not in clarification_by_turn:
-                pending_clarification_turn = turn
-                clarification_question = question
-            break
+    latest_turn = turns[-1] if turns else None
+    latest_output = (
+        latest_turn.get("PA_output") if isinstance(latest_turn, Mapping) else None
+    )
+    latest_turn_number = (
+        latest_turn.get("turn") if isinstance(latest_turn, Mapping) else None
+    )
+    if (
+        isinstance(latest_output, Mapping)
+        and latest_output.get("grounding_status") == "clarification_required"
+        and isinstance(latest_output.get("clarification_question"), str)
+        and isinstance(latest_turn_number, int)
+        and latest_turn_number not in clarification_by_turn
+    ):
+        pending_clarification_turn = latest_turn_number
+        clarification_question = str(latest_output["clarification_question"])
     latest_clarification = clarifications[-1] if clarifications else None
     cancelled = (
         isinstance(latest_clarification, dict)
         and latest_clarification.get("action") == "cancelled"
     )
+    completion_candidates = [
+        value
+        for name, value in records.items()
+        if name.startswith("context_completion_") and isinstance(value, dict)
+    ]
     completion_record = _validated_persisted_completion(records, interaction_root)
-    completed = completion_record is not None
+    final_result: dict[str, object] | None = None
+    presentation_failure: dict[str, str] | None = (
+        {
+            "reason": "invalid_context_completion",
+            "message": "The persisted context completion failed validation.",
+        }
+        if completion_candidates and completion_record is None
+        else None
+    )
+    if completion_record is not None:
+        try:
+            final_result = _final_grounding_result(
+                interaction_root,
+                completion_record,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            presentation_failure = {
+                "reason": "final_result_unavailable",
+                "message": f"Final grounding result could not be loaded: {type(exc).__name__}: {exc}",
+            }
+    completed = final_result is not None
     session_records = [
         record
         for name, record in records.items()
@@ -516,44 +898,17 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     ]
     latest_session = session_records[-1] if session_records else None
     grounding_status = (
-        latest_session.get("status") if isinstance(latest_session, dict) else None
+        latest_output.get("grounding_status")
+        if isinstance(latest_output, Mapping)
+        else None
     )
-    completed_turns = {
-        decision.get("turn")
-        for decision in decisions
-        if isinstance((assessment := _validated_persisted_assessment(decision)), dict)
-        and assessment.get("context understanding complete") is True
-        and assessment.get("needed_context") is None
-    }
-    clarification_turns = {
-        decision.get("turn")
-        for decision in decisions
-        if isinstance((assessment := _validated_persisted_assessment(decision)), dict)
-        and isinstance((needed_context := assessment.get("needed_context")), dict)
-        and isinstance(needed_context.get("clarification_question"), str)
-    }
-    messages = _pa_messages(
-        product_requirement,
-        turns=turns,
-        retrievals=retrievals,
-        completed_turns=completed_turns,
-        clarification_turns=clarification_turns,
-        clarifications=clarifications,
-        max_pa_turns=max_pa_turns,
+    if grounding_status is None and isinstance(latest_session, dict):
+        grounding_status = latest_session.get("status")
+    terminal_failure = presentation_failure or _terminal_failure(
+        phase_3_1,
+        phase_3_2,
+        phase_3_3,
     )
-    if ontology_initialized:
-        messages = "Phase 4.0 ontology initialization\n\ninitialized\n\n" + messages
-
-    terminal_failure = _terminal_failure(phase_3_1, phase_3_2, phase_3_3)
-    current_turn = max(
-        (
-            turn["turn"]
-            for turn in turns
-            if isinstance(turn.get("turn"), int) and not isinstance(turn.get("turn"), bool)
-        ),
-        default=1,
-    )
-    turn_status = f"PA turn {current_turn} of {max_pa_turns}."
     phase_3_1_failure = phase_3_1.get("failure")
     grounding_unavailable = (
         isinstance(phase_3_1_failure, dict)
@@ -562,109 +917,92 @@ def _pa_ui_view(interaction: dict[str, object]) -> dict[str, str]:
     if grounding_unavailable:
         activity_state, activity_color = "grounding unavailable", "amber"
         activity_message = (
-            f"{turn_status} {_failure_message(phase_3_1_failure)} No PA evidence "
+            f"{_failure_message(phase_3_1_failure)} No PA evidence "
             "decision was requested."
         )
     elif phase_3_1_failure is not None:
         activity_state, activity_color = "failed", "red"
-        activity_message = f"{turn_status} {_failure_message(phase_3_1_failure)}"
+        activity_message = _failure_message(phase_3_1_failure)
     elif terminal_failure is not None:
         activity_state, activity_color = "failed", "red"
-        activity_message = f"{turn_status} {_failure_message(terminal_failure)}"
+        activity_message = _failure_message(terminal_failure)
     elif cancelled:
         activity_state, activity_color = "cancelled", "grey"
-        activity_message = (
-            f"{turn_status} The operator cancelled the pending Phase 3.4 "
-            "clarification. No later phase was invoked."
-        )
+        activity_message = "The operator cancelled the pending clarification."
     elif isinstance(clarification_question, str):
         activity_state, activity_color = "clarification needed", "amber"
-        activity_message = (
-            f"{turn_status} ProductAgent requested clarification. User reply "
-            "handling begins in Phase 3.4."
-        )
+        activity_message = "ProductAgent is waiting for the operator's reply."
     elif completed:
-        activity_state, activity_color = "context understanding complete", "green"
+        activity_state, activity_color = "grounding complete", "green"
         activity_message = (
-            f"{turn_status} The validated Phase 3.5 record reports complete "
-            "product context. Ready for Phase 5; Phase 5 remains unavailable."
+            "The validated context and coarse resource assignment are available below."
         )
     elif grounding_status in {"incomplete", "ontology_gap"}:
         activity_state, activity_color = "grounding incomplete", "amber"
-        next_action = latest_session.get("next_action")
         reason = (
-            next_action.get("reason")
-            if isinstance(next_action, Mapping)
+            latest_output.get("insufficient_evidence")
+            if isinstance(latest_output, Mapping)
             else None
         )
         activity_message = (
-            f"{turn_status} PA grounding stopped as {grounding_status}. "
+            f"PA grounding stopped as {grounding_status}. "
             f"Reason: {reason or 'No safe grounding action remained.'}"
         )
     elif grounding_status in {"waiting_for_evidence", "waiting_for_user"}:
         activity_state, activity_color = "grounding waiting", "amber"
         activity_message = (
-            f"{turn_status} PA grounding is {str(grounding_status).replace('_', ' ')}."
+            f"PA grounding is {str(grounding_status).replace('_', ' ')}."
         )
-    elif served_contexts:
-        activity_state, activity_color = "context served", "green"
-        activity_message = f"{turn_status} The requested context was served."
+    elif any(
+        name.startswith("tool_call_")
+        and isinstance(value, Mapping)
+        and value.get("failure") is None
+        for name, value in records.items()
+    ):
+        activity_state, activity_color = "stopped", "grey"
+        activity_message = (
+            "The interaction stopped after evidence serving and has no validated "
+            "completion."
+        )
     else:
         activity_state, activity_color = "stopped", "grey"
-        activity_message = f"{turn_status} The workflow stopped before context serving."
-    if ontology_initialized and not grounding_unavailable:
-        activity_message = f"Phase 4.0 ontology initialized. {activity_message}"
+        activity_message = "The interaction stopped before validated completion."
 
-    latest_needed_context = needed_contexts[-1] if needed_contexts else None
+    timeline = _persisted_pa_timeline(
+        product_requirement,
+        turns=turns,
+        retrievals=retrievals,
+        clarifications=clarifications,
+        records=records,
+        final_result=final_result,
+        terminal_failure=terminal_failure,
+    )
     return {
         "activity_state": activity_state,
         "activity_color": activity_color,
         "activity_message": activity_message,
-        "messages": messages,
-        "needed_context": (
-            _json_text(latest_needed_context)
-            if latest_needed_context is not None
-            else (
-                "No further needed_context. context understanding complete."
-                if completed
-                else (
-                    "No further needed_context. Grounding is incomplete."
-                    if grounding_status in {"incomplete", "ontology_gap"}
-                    else "No needed_context decision is available."
-                )
-            )
-        ),
-        "served context": (
-            "\n".join(_compact_served_context(value) for value in served_contexts)
-            if served_contexts
-            else "No document, CAD, or observation context was served."
-        ),
-        "Evidence Sources": (
-            _json_text(evidence_sources)
-            if evidence_sources
-            else "No Evidence Sources are available."
-        ),
-        "retrieval error": (
-            _json_text(retrieval_errors) if retrieval_errors else "No retrieval error is available."
-        ),
+        "timeline": timeline,
+        "final_result": final_result,
         "clarification": (
             clarification_question
             if isinstance(clarification_question, str)
-            else (
-                _json_text(latest_clarification)
-                if isinstance(latest_clarification, dict)
-                else "No clarification_question is available."
-            )
+            else ""
         ),
         "pending_clarification_turn": str(pending_clarification_turn or ""),
-        "ProductAgent Request Failure": _product_agent_request_failure_text(
-            terminal_failure
-        ),
-        **grounding_values,
-        "interaction_record": _ordered_interaction_record_text(
-            interaction_identifier,
-            interaction_root,
-        ),
+        "diagnostics": {
+            "interaction_identifier": interaction_identifier,
+            "interaction_path": str(interaction_root),
+            "turn_count": len(turns),
+            "evidence_count": sum(
+                1
+                for name, value in records.items()
+                if name.startswith("tool_call_")
+                and isinstance(value, Mapping)
+                and value.get("failure") is None
+            ),
+            "decision_count": len(turns),
+            "failure": _product_agent_request_failure_text(terminal_failure),
+        },
     }
 
 
@@ -717,17 +1055,6 @@ def _validated_persisted_assessment(
     return assessment
 
 
-def _ordered_interaction_record_text(
-    interaction_identifier: str,
-    interaction_root: Path,
-) -> str:
-    records: dict[str, object] = {
-        "interaction_identifier": interaction_identifier,
-    }
-    records.update(_interaction_records(interaction_root))
-    return _json_text(records)
-
-
 def _interaction_records(interaction_root: Path) -> dict[str, object]:
     records: dict[str, object] = {}
     ontology_manifest_path = interaction_root / "products/grounding/ontology/abox_manifest.json"
@@ -748,6 +1075,7 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
     paths.extend(record_root.glob("clarification_*.json"))
     paths.extend(record_root.glob("context_completion_*.json"))
     paths.extend(record_root.glob("producer_selection_*.json"))
+    paths.extend(record_root.glob("tool_call_*.json"))
     settings_path = record_root / "pa_context_settings.json"
     if settings_path.is_file():
         paths.append(settings_path)
@@ -814,6 +1142,89 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
     return records
 
 
+def _persisted_turn_result(turn: Mapping[str, object]) -> dict[str, object]:
+    """Reconstruct the public turn result from one persisted interaction record."""
+    failure = turn.get("failure")
+    if isinstance(failure, Mapping):
+        return {"failure": dict(failure)}
+    output = turn.get("PA_output")
+    return dict(output) if isinstance(output, Mapping) else {}
+
+
+def _latest_pa_ui_interaction(contexts_root: Path) -> dict[str, object] | None:
+    """Recover the newest real interaction by requirement-record modification time."""
+    root = contexts_root.resolve()
+    candidates: list[tuple[int, Path]] = []
+    for candidate in root.glob("interaction_*"):
+        if not candidate.is_dir():
+            continue
+        try:
+            candidate.resolve().relative_to(root)
+            requirement_path = _interaction_ref_path(
+                candidate,
+                "products/user_requirement/product_requirement.json",
+            )
+            candidates.append((requirement_path.stat().st_mtime_ns, candidate))
+        except (OSError, ValueError):
+            continue
+    if not candidates:
+        return None
+
+    _, interaction_root = max(candidates, key=lambda item: item[0])
+    requirement = _read_json_object(
+        _interaction_ref_path(
+            interaction_root,
+            "products/user_requirement/product_requirement.json",
+        )
+    ).get("product_requirement")
+    if not isinstance(requirement, str):
+        return None
+
+    records = _interaction_records(interaction_root)
+    turns = [
+        value
+        for name, value in records.items()
+        if name.startswith("turn_") and isinstance(value, Mapping)
+    ]
+    retrievals = [
+        value
+        for name, value in records.items()
+        if name.startswith("retrieval_") and isinstance(value, dict)
+    ]
+    settings = records.get("pa_context_settings")
+    max_pa_turns = (
+        settings.get("max_pa_turns") if isinstance(settings, Mapping) else 12
+    )
+    if not isinstance(max_pa_turns, int) or isinstance(max_pa_turns, bool):
+        max_pa_turns = 12
+
+    phase_3_1 = (
+        _persisted_turn_result(turns[0])
+        if turns
+        else {"needed_context": None, "context understanding complete": False}
+    )
+    phase_3_3 = _persisted_turn_result(turns[-1]) if len(turns) > 1 else None
+    if phase_3_3 is None:
+        latest_decision = _latest_record(records, "decision_")
+        assessment = (
+            _validated_persisted_assessment(latest_decision)
+            if isinstance(latest_decision, dict)
+            else None
+        )
+        if assessment is not None:
+            phase_3_3 = assessment
+    return {
+        "interaction_identifier": interaction_root.name,
+        "interaction_root": interaction_root,
+        "product_requirement": requirement,
+        "phase_3_1": phase_3_1,
+        "phase_3_2": retrievals[0] if retrievals else None,
+        "phase_3_3": phase_3_3,
+        "max_pa_turns": max_pa_turns,
+        "recovered": True,
+    }
+
+
 def _interaction_record_sort_key(path: Path) -> tuple[int, int]:
     if path.stem == "pa_context_settings":
         return (0, 0)
@@ -826,144 +1237,9 @@ def _interaction_record_sort_key(path: Path) -> tuple[int, int]:
         "clarification": 4,
         "context_completion": 5,
         "producer_selection": 6,
+        "tool_call": 1,
     }.get(prefix, 4)
     return (int(suffix), order)
-
-
-def _grounding_result_values(
-    records: dict[str, object],
-    interaction_root: Path,
-) -> dict[str, str]:
-    views = [
-        value
-        for name, value in records.items()
-        if name.startswith("product_context_view_") and isinstance(value, dict)
-    ]
-    latest_view = views[-1] if views else None
-    if latest_view is None:
-        ontology_text = "No validated ProductContextView is available."
-        typed_text = "No typed runtime context is available."
-    else:
-        ontology_text = _ontology_grounding_text(
-            latest_view,
-            records.get("ontology_assertion_provenance"),
-        )
-        typed_text = _json_text(latest_view.get("typed_bindings", []))
-    sessions = [
-        value
-        for name, value in records.items()
-        if name.startswith("grounding_session_revision_")
-        and isinstance(value, dict)
-    ]
-    proposals = [
-        value
-        for name, value in records.items()
-        if name.startswith("ontology_grounding_proposal_")
-        and isinstance(value, dict)
-    ]
-    decisions_text = (
-        _json_text(
-            {
-                "latest_GroundingSession": sessions[-1] if sessions else None,
-                "latest_OntologyGroundingProposal": (
-                    proposals[-1] if proposals else None
-                ),
-            }
-        )
-        if sessions or proposals
-        else "No grounding session is available."
-    )
-    return {
-        "Ontology Grounding": ontology_text,
-        "Typed Runtime Context": typed_text,
-        "Grounding Decisions": decisions_text,
-        "PA Grounding Completion": (
-            "Ready for Phase 5\n\n" + _json_text(completion)
-            if (
-                completion := _validated_persisted_completion(
-                    records, interaction_root
-                )
-            )
-            is not None
-            else "No Phase 3.5 completion record is available."
-        ),
-    }
-
-
-def _ontology_grounding_text(
-    latest_view: dict[str, object],
-    assertion_provenance: object,
-) -> str:
-    """Format exact ontology values into readable operator-facing sections."""
-    lines = [
-        "ProductContextView",
-        f"product_requirement: {_json_text(latest_view.get('product_requirement'))}",
-        f"tbox_fingerprint: {_json_text(latest_view.get('tbox_fingerprint'))}",
-        f"abox_fingerprint: {_json_text(latest_view.get('abox_fingerprint'))}",
-        f"delta_count: {_json_text(latest_view.get('delta_count'))}",
-    ]
-
-    assertions = latest_view.get("assertions")
-    assertion_values = assertions if isinstance(assertions, list) else []
-    lines.extend(("", f"assertions: {len(assertion_values)}"))
-    for index, assertion in enumerate(assertion_values):
-        lines.extend(("", f"assertions[{index}]"))
-        if not isinstance(assertion, dict):
-            lines.append(_json_text(assertion))
-            continue
-        lines.append(f"subject: {_json_text(assertion.get('subject'))}")
-        lines.append(f"predicate: {_json_text(assertion.get('predicate'))}")
-        object_value = assertion.get("object")
-        if not isinstance(object_value, dict):
-            lines.append(f"object: {_json_text(object_value)}")
-            continue
-        for field in ("kind", "value", "datatype", "language"):
-            if field in object_value:
-                lines.append(
-                    f"object.{field}: {_json_text(object_value.get(field))}"
-                )
-
-    lines.extend(
-        (
-            "",
-            f"uncertainty: {_json_text(latest_view.get('uncertainty'))}",
-            "unresolved_evidence_needs: "
-            f"{_json_text(latest_view.get('unresolved_evidence_needs'))}",
-            "",
-            "assertion_provenance",
-        )
-    )
-    if not isinstance(assertion_provenance, dict):
-        lines.append(_json_text(assertion_provenance))
-        return "\n".join(lines)
-
-    lines.append(
-        f"schema_version: {_json_text(assertion_provenance.get('schema_version'))}"
-    )
-    lines.append(
-        "tbox_fingerprint: "
-        f"{_json_text(assertion_provenance.get('tbox_fingerprint'))}"
-    )
-    provenance_assertions = assertion_provenance.get("assertions")
-    provenance_values = (
-        provenance_assertions if isinstance(provenance_assertions, list) else []
-    )
-    lines.append(f"assertions: {len(provenance_values)}")
-    for index, assertion in enumerate(provenance_values):
-        lines.extend(("", f"assertion_provenance.assertions[{index}]"))
-        if not isinstance(assertion, dict):
-            lines.append(_json_text(assertion))
-            continue
-        for field in (
-            "subject",
-            "predicate",
-            "object",
-            "producer",
-            "evidence_refs",
-            "delta_ref",
-        ):
-            lines.append(f"{field}: {_json_text(assertion.get(field))}")
-    return "\n".join(lines)
 
 
 def _validated_persisted_completion(
@@ -983,112 +1259,6 @@ def _validated_persisted_completion(
         return None
 
 
-def _pa_messages(
-    product_requirement: str,
-    *,
-    turns: list[dict[str, object]],
-    retrievals: list[dict[str, object]],
-    completed_turns: set[object],
-    clarification_turns: set[object],
-    clarifications: list[dict[str, object]],
-    max_pa_turns: object,
-) -> str:
-    retrieval_by_number = {
-        retrieval["retrieval"]: retrieval
-        for retrieval in retrievals
-        if isinstance(retrieval.get("retrieval"), int)
-    }
-    messages = [
-        "User product_requirement",
-        product_requirement,
-        "Operator Maximum PA turns",
-        str(max_pa_turns),
-    ]
-    clarification_by_turn = {
-        record.get("question_turn"): record
-        for record in clarifications
-        if isinstance(record.get("question_turn"), int)
-    }
-    for turn in turns:
-        turn_number = turn.get("turn")
-        pa_output = turn.get("PA_output")
-        if isinstance(pa_output, dict):
-            needed_context = pa_output.get("needed_context")
-            if isinstance(needed_context, dict):
-                messages.extend(
-                    [
-                        f"ProductAgent turn {turn_number} needed_context",
-                        _json_text(needed_context),
-                    ]
-                )
-                clarification = needed_context.get("clarification_question")
-                if isinstance(clarification, str) and turn_number in clarification_turns:
-                    clarification_record = clarification_by_turn.get(turn_number)
-                    if isinstance(clarification_record, dict):
-                        if clarification_record.get("action") == "answered":
-                            messages.extend(
-                                ["User clarification reply", str(clarification_record["reply"])]
-                            )
-                        elif clarification_record.get("action") == "cancelled":
-                            messages.extend(["User clarification action", "cancelled"])
-            if (
-                pa_output.get("context understanding complete") is True
-                and turn_number in completed_turns
-            ):
-                messages.extend(
-                    [
-                        f"ProductAgent turn {turn_number} context understanding complete",
-                        (
-                            "Validated Phase 3.5 PA grounding completion is ready "
-                            "for Phase 5; Phase 5 remains unavailable."
-                        ),
-                    ]
-                )
-        if turn.get("failure") is not None:
-            messages.extend(
-                [f"ProductAgent turn {turn_number} failure", _json_text(turn["failure"])]
-            )
-        retrieval = retrieval_by_number.get(turn_number)
-        if isinstance(retrieval, dict):
-            served_context = retrieval.get("served_context")
-            if isinstance(served_context, dict):
-                messages.extend(
-                    [
-                        f"Phase 3 retrieval {turn_number} served",
-                        _compact_served_context(served_context),
-                    ]
-                )
-            if retrieval.get("retrieval_error") is not None:
-                messages.extend(
-                    [
-                        f"Phase 3 retrieval {turn_number} retrieval_error",
-                        _json_text(retrieval["retrieval_error"]),
-                    ]
-                )
-    return "\n\n".join(messages)
-
-
-def _compact_served_context(served_context: dict[str, object]) -> str:
-    evidence_type = served_context.get("evidence_type")
-    context_ref = served_context.get("context_ref")
-    if evidence_type == "document":
-        evidence = served_context.get("document_evidence")
-        page_count = evidence.get("page_count") if isinstance(evidence, dict) else None
-        return f"{context_ref} · document · {page_count} pages"
-    if evidence_type == "CAD":
-        evidence = served_context.get("CAD_evidence")
-        triangle_count = evidence.get("triangle_count") if isinstance(evidence, dict) else None
-        return f"{context_ref} · CAD · {triangle_count} triangles"
-    observation_ref = served_context.get("observation_ref")
-    observation_evidence = served_context.get("observation_evidence")
-    manifest = (
-        observation_evidence.get("manifest") if isinstance(observation_evidence, dict) else None
-    )
-    cameras = manifest.get("cameras") if isinstance(manifest, dict) else None
-    camera_count = len(cameras) if isinstance(cameras, list) else 0
-    return f"{observation_ref} · live observation · {camera_count} cameras"
-
-
 def _terminal_failure(*results: object) -> object:
     for result in reversed(results):
         if isinstance(result, dict) and result.get("failure") is not None:
@@ -1104,8 +1274,8 @@ def _failure_message(failure: object) -> str:
 
 
 def _product_agent_request_failure_text(failure: object) -> str:
-    """Format one ProductAgent request failure without exposing request data."""
-    if not isinstance(failure, dict) or failure.get("reason") != "pa_call_failed":
+    """Format compact failure details without exposing requests or raw payloads."""
+    if not isinstance(failure, dict):
         return ""
     lines = [
         f"reason: {_json_text(failure.get('reason'))}",
@@ -1113,7 +1283,6 @@ def _product_agent_request_failure_text(failure: object) -> str:
     ]
     diagnostic = failure.get("diagnostic")
     if not isinstance(diagnostic, dict):
-        lines.append("diagnostic: unavailable for this record")
         return "\n".join(lines)
     lines.append("diagnostic")
     for field in (
@@ -1134,60 +1303,248 @@ def _json_text(value: object) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
 
 
-def _render_pa_result_area(title: str, message: str) -> Label:
-    """Render one PA result area and return its updateable value label."""
-    card_classes = (
-        "w-full border border-slate-200 bg-slate-50 shadow-none"
-        if title == "Ontology Grounding"
-        else "flex-1 min-w-56 border border-slate-200 bg-slate-50 shadow-none"
-    )
-    with ui.card().classes(card_classes):
-        ui.label(title).classes("text-sm font-semibold text-slate-800")
-        value_classes = (
-            "text-xs text-slate-500 whitespace-pre-wrap break-words"
-            if title == "Ontology Grounding"
-            else "text-xs text-slate-500 whitespace-pre-wrap break-all"
-        )
-        return ui.label(message).classes(value_classes)
+def _render_pa_timeline_events(
+    container: Any,
+    events: list[dict[str, str]],
+) -> None:
+    """Replace the live timeline with the supplied compact events."""
+    colors = {
+        "accepted": "text-emerald-600",
+        "running": "text-indigo-600",
+        "waiting": "text-amber-600",
+        "failed": "text-red-600",
+        "stopped": "text-slate-500",
+    }
+    icons = {
+        "accepted": "check_circle",
+        "running": "pending",
+        "waiting": "help",
+        "failed": "error",
+        "stopped": "cancel",
+    }
+    container.clear()
+    with container:
+        for event in events:
+            state = event.get("state", "running")
+            with ui.row().classes("w-full items-start gap-3 flex-nowrap"):
+                ui.icon(icons.get(state, "circle")).classes(
+                    f"mt-0.5 {colors.get(state, 'text-slate-500')}"
+                )
+                with ui.column().classes("min-w-0 flex-1 gap-0"):
+                    ui.label(event.get("title", "ProductAgent event")).classes(
+                        "text-sm font-semibold text-slate-800"
+                    )
+                    ui.label(event.get("detail", "")).classes(
+                        "text-xs text-slate-600 whitespace-pre-wrap break-words"
+                    )
 
 
-def _render_pa_messages() -> tuple[Badge, Label]:
-    """Render the connected user and ProductAgent message transcript."""
-    with ui.card().classes("w-full border border-slate-200 bg-white shadow-none"):
-        with ui.row().classes("w-full items-center justify-between gap-2"):
-            ui.label("User ↔ ProductAgent Messages").classes("text-sm font-semibold text-slate-900")
-            message_badge = ui.badge("no messages").props("color=grey outline")
-        message_value = ui.label(
-            "Submit a product_requirement to start the connected Phase 3 loop."
-        ).classes("text-xs text-slate-500 whitespace-pre-wrap break-all")
-    return message_badge, message_value
-
-
-def _render_assembly_plan_preview() -> None:
-    """Render the disabled robot-independent Phase 5 assembly plan layout."""
-    with ui.card().classes("w-full border border-slate-200 bg-white shadow-none"):
+def _render_final_grounding_result() -> dict[str, Any]:
+    """Render the hidden final grounding result and return updateable elements."""
+    with ui.card().classes(
+        "w-full border-2 border-emerald-200 bg-white shadow-sm"
+    ) as card:
         with ui.row().classes("w-full items-start justify-between gap-3"):
             with ui.column().classes("gap-0"):
-                ui.label("Assembly Plan").classes("text-base font-semibold text-slate-900")
-                ui.label("Robot-independent assembly plan").classes("text-xs text-slate-500")
-            with ui.row().classes("items-center gap-2"):
-                ui.badge("Phase 5").props("color=indigo outline")
-                ui.badge("not available").props("color=grey outline")
+                ui.label("Final Grounding Result").classes(
+                    "text-xl font-semibold text-slate-900"
+                )
+                ui.label("Validated ProductAgent context").classes(
+                    "text-xs text-slate-500"
+                )
+            status_badge = ui.badge("complete").props("color=green outline")
 
-        with ui.row().classes("w-full gap-2 rounded-t bg-slate-100 px-3 py-2 flex-nowrap"):
-            for column in _ASSEMBLY_PLAN_COLUMNS:
-                ui.label(column).classes("flex-1 text-xs font-semibold text-slate-700")
-        ui.label("No assembly plan is available.").classes(
-            "w-full rounded-b border border-t-0 border-slate-200 px-3 py-4 "
-            "text-center text-xs text-slate-500"
+        ui.label("product_requirement").classes(
+            "text-xs font-semibold text-slate-500"
         )
-        ui.button("Open Assembly Plan", icon="description").props("disable outline")
+        requirement_value = ui.label("").classes(
+            "text-base font-medium text-slate-900 whitespace-pre-wrap"
+        )
+        ui.label("ProductAgent context summary").classes(
+            "text-xs font-semibold text-slate-500"
+        )
+        context_summary_value = ui.label("").classes(
+            "text-sm text-slate-700 whitespace-pre-wrap break-words"
+        )
+
+        with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
+            with ui.card().classes(
+                "flex-1 min-w-48 border border-slate-200 bg-slate-50 shadow-none"
+            ):
+                ui.label("Process").classes("text-xs font-semibold text-slate-500")
+                process_value = ui.label("").classes(
+                    "text-base font-semibold text-slate-900"
+                )
+            with ui.card().classes(
+                "flex-1 min-w-48 border border-slate-200 bg-slate-50 shadow-none"
+            ):
+                ui.label("Selected Resource").classes(
+                    "text-xs font-semibold text-slate-500"
+                )
+                resource_value = ui.label("").classes(
+                    "text-base font-semibold text-slate-900"
+                )
+            with ui.card().classes(
+                "flex-[2] min-w-72 border border-slate-200 bg-slate-50 shadow-none"
+            ):
+                ui.label("Grounded Location").classes(
+                    "text-xs font-semibold text-slate-500"
+                )
+                target_value = ui.label("").classes(
+                    "text-sm font-medium text-slate-900 whitespace-pre-wrap"
+                )
+
+        ui.label("Validated Evidence").classes(
+            "text-sm font-semibold text-slate-800"
+        )
+        evidence_container = ui.row().classes("w-full gap-2 flex-wrap")
+
+        with ui.expansion("Known non-blocking context limits", icon="warning").classes(
+            "w-full border border-amber-200 rounded"
+        ) as limitations_expansion:
+            limitations_value = ui.label("").classes(
+                "text-xs text-amber-800 p-2 whitespace-pre-wrap break-words"
+            )
+        limitations_expansion.set_visibility(False)
+
+        ui.separator()
+        ui.label("Final Ontology").classes("text-lg font-semibold text-slate-900")
+        ui.label("Authoritative final interaction ABox").classes(
+            "text-xs text-slate-500"
+        )
+        ontology_graph = ui.mermaid("flowchart LR\n    empty[No final ABox]").classes(
+            "w-full overflow-x-auto"
+        )
+        ontology_table = ui.table(
+            columns=[
+                {"name": "subject", "label": "Subject", "field": "subject"},
+                {
+                    "name": "predicate",
+                    "label": "Predicate",
+                    "field": "predicate",
+                },
+                {"name": "object", "label": "Object", "field": "object"},
+            ],
+            rows=[],
+            row_key="row_id",
+        ).props("flat bordered wrap-cells hide-bottom").classes("w-full")
+        with ui.expansion("Raw Turtle", icon="data_object").classes(
+            "w-full border border-slate-200 rounded"
+        ):
+            raw_turtle_value = ui.code("", language="turtle").classes(
+                "w-full text-xs overflow-x-auto"
+            )
+    card.set_visibility(False)
+    return {
+        "card": card,
+        "status_badge": status_badge,
+        "requirement": requirement_value,
+        "context_summary": context_summary_value,
+        "process": process_value,
+        "resource": resource_value,
+        "target": target_value,
+        "evidence": evidence_container,
+        "limitations_expansion": limitations_expansion,
+        "limitations": limitations_value,
+        "ontology_graph": ontology_graph,
+        "ontology_table": ontology_table,
+        "raw_turtle": raw_turtle_value,
+    }
+
+
+def _apply_final_grounding_result(
+    elements: Mapping[str, Any],
+    result: Mapping[str, object] | None,
+) -> None:
+    """Apply one validated final result or hide the entire result section."""
+    card = elements["card"]
+    if result is None:
+        card.set_visibility(False)
+        return
+    elements["status_badge"].set_text(str(result.get("status", "complete")))
+    elements["requirement"].set_text(str(result.get("product_requirement", "")))
+    elements["context_summary"].set_text(str(result.get("context_summary", "")))
+    elements["process"].set_text(str(result.get("process", "")))
+    resource_text = " · ".join(
+        str(result[field])
+        for field in ("selected_resource", "execution_mode")
+        if result.get(field) not in {None, ""}
+    )
+    elements["resource"].set_text(resource_text)
+    target_lines = [
+        " · ".join(
+            str(result[field])
+            for field in ("target_context_ref", "target_frame")
+            if result.get(field) not in {None, ""}
+        ),
+        f"location: {result.get('location')}",
+    ]
+    translation = result.get("CAD_centroid_translation_m")
+    if isinstance(translation, list):
+        target_lines.append(
+            "CAD_centroid_translation_m: "
+            + json.dumps(translation, ensure_ascii=False, allow_nan=False)
+        )
+    elements["target"].set_text("\n".join(line for line in target_lines if line))
+
+    evidence_container = elements["evidence"]
+    evidence_container.clear()
+    evidence = result.get("evidence")
+    with evidence_container:
+        if isinstance(evidence, list):
+            for item in evidence:
+                if not isinstance(item, Mapping):
+                    continue
+                status = str(item.get("status", "recorded"))
+                color = "green" if status == "accepted" else "amber"
+                ui.badge(f"{item.get('label')} · {status}").props(
+                    f"color={color} outline"
+                )
+
+    limitations = result.get("limitations")
+    limitation_values = limitations if isinstance(limitations, list) else []
+    elements["limitations"].set_text(
+        "\n".join(f"• {value}" for value in limitation_values)
+    )
+    elements["limitations_expansion"].set_visibility(bool(limitation_values))
+
+    ontology = result.get("ontology")
+    if not isinstance(ontology, Mapping):
+        raise ValueError("Final ontology view is malformed.")
+    elements["ontology_graph"].content = str(ontology.get("mermaid", ""))
+    elements["ontology_graph"].update()
+    rows = ontology.get("rows")
+    elements["ontology_table"].rows = [
+        {"row_id": index, **row}
+        for index, row in enumerate(rows if isinstance(rows, list) else [])
+        if isinstance(row, dict)
+    ]
+    elements["raw_turtle"].content = str(ontology.get("raw_turtle", ""))
+    elements["raw_turtle"].update()
+    card.set_visibility(True)
+
+
+def _calibration_readiness(
+    runtime: Spec2PrimitivesUIRuntime,
+) -> tuple[str, str, str]:
+    """Return operator-facing fixed-camera calibration readiness."""
+    if runtime.camera_to_world_calibration_runtime is not None:
+        return (
+            "calibration ready",
+            "green",
+            "The runtime-selected camera frame will use its matching approved "
+            "camera-to-world calibration.",
+        )
+    reason = runtime.camera_to_world_calibration_unavailable_reason or (
+        "Approved camera-to-world calibration is unavailable."
+    )
+    return "calibration unavailable", "amber", reason
 
 
 def _render_pa_interaction(  # noqa: C901, PLR0915
     runtime: Spec2PrimitivesUIRuntime,
 ) -> None:
-    """Render the Phase 2 UI connected through Phase 3.5."""
+    """Render the streamlined ProductAgent grounding interaction."""
     grounding_ready = (
         runtime.ontology_config is not None and runtime.grounding_runtime is not None
     )
@@ -1197,75 +1554,81 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
     )
 
     with ui.card().classes("w-full border border-slate-200 shadow-sm"):
-        with ui.row().classes("w-full items-start justify-between gap-3"):
+        with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
             with ui.column().classes("gap-0"):
-                ui.label("PA Interaction").classes("text-lg font-semibold text-slate-900")
-                ui.label("Phase 2 PA interaction UI").classes("text-xs text-slate-500")
-            ui.badge("connected through Phase 3.5").props("color=green outline")
-
-        ui.label(_phase_2_connection_message()).classes("text-sm text-emerald-700")
-
-        requirement_input = (
-            ui.input(
-                label="product_requirement",
-                value="assemble medium gear",
-                placeholder="assemble Medium Gear",
-            )
-            .props("outlined")
-            .classes("w-full")
-        )
-
-        with (
-            ui.card().classes("w-full border border-slate-200 bg-slate-50 shadow-none"),
-            ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"),
-        ):
-            with ui.column().classes("flex-1 min-w-64 gap-0"):
-                ui.label("Run settings").classes("text-sm font-semibold text-slate-800")
-                ui.label(
-                    "Phase 3.1 counts as turn 1. This limit is only an "
-                    "emergency stop for the PA context loop."
-                ).classes("text-xs text-slate-500")
-
-            with ui.row().classes("items-center gap-2 flex-wrap"):
-                max_pa_turns_input = (
-                    ui.number(
-                        label="Maximum PA turns",
-                        value=12,
-                        min=2,
-                        max=50,
-                        step=1,
-                        format="%.0f",
-                    )
-                    .props("outlined")
-                    .classes("w-40")
+                ui.label("ProductAgent Grounding").classes(
+                    "text-lg font-semibold text-slate-900"
                 )
-                start_button = ui.button(
-                    "Start PA Context Interaction",
-                    icon="play_arrow",
-                ).props("disable")
+                ui.label("Requirement to validated product context").classes(
+                    "text-xs text-slate-500"
+                )
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                ui.badge(
+                    "grounding ready" if grounding_ready else "grounding unavailable"
+                ).props(
+                    f"color={'green' if grounding_ready else 'amber'} outline"
+                )
+                calibration_state, calibration_color, calibration_message = (
+                    _calibration_readiness(runtime)
+                )
+                ui.badge(calibration_state).props(
+                    f"color={calibration_color} outline"
+                )
 
-        with ui.card().classes("w-full border border-indigo-100 bg-indigo-50 shadow-none"):
-            with ui.row().classes("w-full items-center justify-between gap-2"):
-                ui.label("ProductAgent").classes("text-sm font-semibold text-indigo-900")
-                activity_badge = ui.badge(
-                    "idle" if grounding_ready else "grounding unavailable"
-                ).props(f"color={'indigo' if grounding_ready else 'amber'} outline")
+        if not grounding_ready:
+            ui.label(grounding_unavailable_reason).classes("text-sm text-amber-700")
+
+        with ui.row().classes("w-full items-end gap-3 flex-wrap"):
+            requirement_input = (
+                ui.input(
+                    label="product_requirement",
+                    value="",
+                    placeholder="Describe the assembly requirement",
+                )
+                .props("outlined")
+                .classes("flex-1 min-w-72")
+            )
+            start_button = ui.button(
+                "Start ProductAgent",
+                icon="play_arrow",
+            ).props("disable")
+
+        with ui.row().classes(
+            "w-full items-center gap-3 rounded border border-indigo-100 "
+            "bg-indigo-50 px-3 py-2 flex-wrap"
+        ) as activity_strip:
+            ui.label("ProductAgent").classes(
+                "text-sm font-semibold text-indigo-900"
+            )
+            activity_badge = ui.badge(
+                "idle" if grounding_ready else "grounding unavailable"
+            ).props(f"color={'indigo' if grounding_ready else 'amber'} outline")
             activity_message = ui.label(
-                "No PA retrieval or clarification activity."
+                "Ready for a product_requirement."
                 if grounding_ready
                 else grounding_unavailable_reason
             ).classes(
-                "text-xs text-indigo-700"
+                "flex-1 min-w-64 text-xs text-indigo-700"
                 if grounding_ready
-                else "text-xs text-amber-700"
+                else "flex-1 min-w-64 text-xs text-amber-700"
             )
+        activity_strip.set_visibility(False)
 
-        message_badge, message_value = _render_pa_messages()
+        with ui.card().classes(
+            "w-full border border-indigo-100 bg-white shadow-none"
+        ) as timeline_card:
+            with ui.row().classes("w-full items-center justify-between gap-2"):
+                ui.label("ProductAgent Timeline").classes(
+                    "text-base font-semibold text-slate-900"
+                )
+                timeline_badge = ui.badge("live").props("color=indigo outline")
+            timeline_container = ui.column().classes("w-full gap-3")
+        timeline_card.set_visibility(False)
 
         with ui.card().classes(
             "w-full border border-amber-200 bg-amber-50 shadow-none"
         ) as clarification_card:
-            ui.label("Phase 3.4 User Clarification").classes(
+            ui.label("ProductAgent clarification").classes(
                 "text-sm font-semibold text-amber-900"
             )
             clarification_prompt = ui.label("").classes("text-xs text-amber-800")
@@ -1283,72 +1646,157 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 
         with ui.card().classes(
             "w-full border border-red-200 bg-red-50 shadow-none"
-        ) as product_agent_failure_card:
-            ui.label("ProductAgent Request Failure").classes(
+        ) as outcome_alert_card:
+            outcome_alert_title = ui.label("Grounding did not complete").classes(
                 "text-sm font-semibold text-red-900"
             )
-            product_agent_failure_value = ui.label("").classes(
+            outcome_alert_value = ui.label("").classes(
                 "text-xs text-red-800 whitespace-pre-wrap break-words"
             )
-        product_agent_failure_card.set_visibility(False)
+        outcome_alert_card.set_visibility(False)
 
-        result_values: dict[str, Label] = {}
-        with ui.row().classes("w-full gap-2 items-stretch flex-wrap"):
-            for title, message in _PHASE_2_RESULT_AREAS:
-                result_values[title] = _render_pa_result_area(title, message)
+        final_result_elements = _render_final_grounding_result()
 
-        _render_assembly_plan_preview()
-
-        with ui.expansion("ordered interaction record", icon="history").classes(
+        with ui.expansion("Developer diagnostics", icon="terminal", value=False).classes(
             "w-full border border-slate-200 rounded"
         ):
-            interaction_record_value = ui.label(
-                "No interaction record exists because Phase 3 was not started."
-            ).classes("text-xs text-slate-500 p-2 whitespace-pre-wrap break-all")
+            model = (
+                runtime.model_config.product_agent_llm.model
+                if runtime.model_config is not None
+                else "unconfigured"
+            )
+            ui.label(
+                "Runtime: "
+                f"ProductAgent model={model} · "
+                f"grounding={'ready' if grounding_ready else 'unavailable'}"
+            ).classes("text-xs text-slate-600")
+            ui.label(f"Calibration: {calibration_message}").classes(
+                "text-xs text-emerald-700"
+                if calibration_state == "calibration ready"
+                else "text-xs text-amber-700"
+            )
+            diagnostic_identifier = ui.label("Interaction: none").classes(
+                "text-xs text-slate-600"
+            )
+            diagnostic_path = ui.label("Persisted path: none").classes(
+                "text-xs text-slate-600 break-all"
+            )
+            diagnostic_counts = ui.label(
+                "Turns: 0 · evidence: 0 · decisions: 0"
+            ).classes("text-xs text-slate-600")
+            with ui.card().classes(
+                "w-full border border-red-200 bg-red-50 shadow-none"
+            ) as diagnostic_failure_card:
+                ui.label("Failure details").classes(
+                    "text-sm font-semibold text-red-900"
+                )
+                diagnostic_failure_value = ui.label("").classes(
+                    "text-xs text-red-800 whitespace-pre-wrap break-words"
+                )
+            diagnostic_failure_card.set_visibility(False)
+
+        recovered_label = ui.label("Recovered latest interaction").classes(
+            "text-xs font-medium text-indigo-700"
+        )
+        recovered_label.set_visibility(False)
 
         action_state: dict[str, object] = {
             "busy": False,
             "pending_clarification": False,
             "interaction": None,
+            "timeline": [],
         }
 
         def _update_start_enabled() -> None:
             value = requirement_input.value
-            max_pa_turns = _validated_max_pa_turns(max_pa_turns_input.value)
             _set_enabled(
                 start_button,
                 grounding_ready
                 and not action_state["busy"]
                 and not action_state["pending_clarification"]
                 and isinstance(value, str)
-                and bool(value.strip())
-                and max_pa_turns is not None,
+                and bool(value.strip()),
             )
 
         def _apply_pa_view(
             interaction: dict[str, object],
-            view: dict[str, str],
+            view: dict[str, object],
         ) -> None:
             action_state["interaction"] = interaction
+            activity_strip.set_visibility(True)
             pending = view["activity_state"] == "clarification needed"
             action_state["pending_clarification"] = pending
-            activity_badge.set_text(view["activity_state"])
+            activity_badge.set_text(str(view["activity_state"]))
             activity_badge.props(f"color={view['activity_color']}")
-            activity_message.set_text(view["activity_message"])
-            message_badge.set_text("interaction recorded")
-            message_badge.props("color=indigo")
-            message_value.set_text(view["messages"])
-            for title, value_label in result_values.items():
-                value_label.set_text(view[title])
-            product_agent_failure_text = view["ProductAgent Request Failure"]
-            product_agent_failure_value.set_text(product_agent_failure_text)
-            product_agent_failure_card.set_visibility(
-                bool(product_agent_failure_text)
+            activity_message.set_text(str(view["activity_message"]))
+
+            timeline = view.get("timeline")
+            persisted_events = [
+                event for event in timeline if isinstance(event, dict)
+            ] if isinstance(timeline, list) else []
+            action_state["timeline"] = persisted_events
+            _render_pa_timeline_events(timeline_container, persisted_events)
+            timeline_card.set_visibility(bool(persisted_events))
+            timeline_state = str(view["activity_state"])
+            timeline_colors = {
+                "grounding complete": "green",
+                "clarification needed": "amber",
+                "grounding waiting": "amber",
+                "grounding incomplete": "amber",
+                "failed": "red",
+                "grounding unavailable": "red",
+                "cancelled": "grey",
+                "stopped": "grey",
+            }
+            recovered = interaction.get("recovered") is True
+            timeline_badge.set_text(
+                f"recovered · {timeline_state}" if recovered else timeline_state
             )
-            interaction_record_value.set_text(view["interaction_record"])
+            timeline_badge.props(
+                f"color={timeline_colors.get(timeline_state, 'indigo')} outline"
+            )
+            recovered_label.set_visibility(recovered)
+            result = view.get("final_result")
+            _apply_final_grounding_result(
+                final_result_elements,
+                result if isinstance(result, Mapping) else None,
+            )
+
+            diagnostics = view.get("diagnostics")
+            diagnostic_values = diagnostics if isinstance(diagnostics, Mapping) else {}
+            diagnostic_identifier.set_text(
+                f"Interaction: {diagnostic_values.get('interaction_identifier', 'none')}"
+            )
+            diagnostic_path.set_text(
+                f"Persisted path: {diagnostic_values.get('interaction_path', 'none')}"
+            )
+            diagnostic_counts.set_text(
+                f"Turns: {diagnostic_values.get('turn_count', 0)} · "
+                f"evidence: {diagnostic_values.get('evidence_count', 0)} · "
+                f"decisions: {diagnostic_values.get('decision_count', 0)}"
+            )
+            failure_text = str(diagnostic_values.get("failure", ""))
+            diagnostic_failure_value.set_text(failure_text)
+            diagnostic_failure_card.set_visibility(bool(failure_text))
+
+            activity_state = str(view["activity_state"])
+            terminal = activity_state in {
+                "cancelled",
+                "failed",
+                "grounding incomplete",
+                "grounding unavailable",
+                "stopped",
+            }
+            outcome_alert_title.set_text(
+                "Grounding incomplete"
+                if activity_state == "grounding incomplete"
+                else "Grounding did not complete"
+            )
+            outcome_alert_value.set_text(str(view["activity_message"]))
+            outcome_alert_card.set_visibility(terminal)
             clarification_card.set_visibility(pending)
             if pending:
-                clarification_prompt.set_text(view["clarification"])
+                clarification_prompt.set_text(str(view["clarification"]))
                 clarification_reply_input.props(remove="disable")
                 cancel_interaction_button.props(remove="disable")
             else:
@@ -1359,68 +1807,92 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 
         async def _start_pa_interaction() -> None:
             value = requirement_input.value
-            max_pa_turns = _validated_max_pa_turns(max_pa_turns_input.value)
             if (
                 not grounding_ready
                 or action_state["busy"]
                 or not isinstance(value, str)
                 or not value.strip()
-                or max_pa_turns is None
             ):
                 return
             action_state["busy"] = True
+            action_state["pending_clarification"] = False
+            action_state["interaction"] = None
             _set_enabled(start_button, False)
             requirement_input.props("disable")
-            max_pa_turns_input.props("disable")
-            product_agent_failure_card.set_visibility(False)
-            activity_badge.set_text(f"PA turn 1 of {max_pa_turns}")
+            clarification_card.set_visibility(False)
+            outcome_alert_card.set_visibility(False)
+            diagnostic_failure_card.set_visibility(False)
+            recovered_label.set_visibility(False)
+            _apply_final_grounding_result(final_result_elements, None)
+            activity_strip.set_visibility(True)
+            activity_badge.set_text("grounding")
             activity_badge.props("color=indigo")
-            activity_message.set_text("ProductAgent is assessing and requesting context.")
-            message_badge.set_text("1 user message")
-            message_value.set_text(f"User product_requirement\n\n{value}")
+            activity_message.set_text("Investigating approved evidence.")
+            live_events = [
+                _timeline_event("accepted", "Requirement received", value),
+            ]
+            action_state["timeline"] = live_events
+            _render_pa_timeline_events(timeline_container, live_events)
+            timeline_card.set_visibility(True)
+            timeline_badge.set_text("live")
+            timeline_badge.props("color=indigo outline")
+            diagnostic_identifier.set_text("Interaction: pending")
+            diagnostic_path.set_text("Persisted path: pending")
+            diagnostic_counts.set_text("Turns: 0 · evidence: 0 · decisions: 0")
 
-            def _show_pa_turn(turn_number: int, turn_limit: int) -> None:
-                activity_badge.set_text(f"PA turn {turn_number} of {turn_limit}")
-                activity_message.set_text(
-                    "ProductAgent is assessing accumulated context and deciding "
-                    "the next observable action."
-                )
+            def _show_pa_event(event: dict[str, str]) -> None:
+                events = action_state["timeline"]
+                if not isinstance(events, list):
+                    events = []
+                    action_state["timeline"] = events
+                events.append(event)
+                _render_pa_timeline_events(timeline_container, events)
+
+            def _show_pa_stage(sentence: str) -> None:
+                activity_badge.set_text("grounding")
+                activity_badge.props("color=indigo")
+                activity_message.set_text(sentence)
 
             try:
                 interaction = await _run_pa_ui_interaction(
                     runtime,
                     value,
-                    max_pa_turns=max_pa_turns,
-                    on_pa_turn=_show_pa_turn,
+                    on_pa_stage=_show_pa_stage,
+                    on_pa_event=_show_pa_event,
                 )
                 view = _pa_ui_view(interaction)
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failure_message = (
+                    f"Connected PA workflow failed: {type(exc).__name__}: {exc}"
+                )
                 activity_badge.set_text("failed")
                 activity_badge.props("color=red")
-                activity_message.set_text(
-                    f"Connected PA workflow failed: {type(exc).__name__}: {exc}"
+                timeline_badge.set_text("failed")
+                timeline_badge.props("color=red outline")
+                activity_message.set_text(failure_message)
+                outcome_alert_title.set_text("Grounding did not complete")
+                outcome_alert_value.set_text(failure_message)
+                outcome_alert_card.set_visibility(True)
+                diagnostic_failure_value.set_text(failure_message)
+                diagnostic_failure_card.set_visibility(True)
+                _show_pa_event(
+                    _timeline_event("failed", "Grounding failed", failure_message)
                 )
                 ui.notify("Connected PA workflow failed.", type="negative")
             else:
                 _apply_pa_view(interaction, view)
                 notification_type = (
                     "positive"
-                    if view["activity_state"]
-                    in {
-                        "context served",
-                        "context understanding complete",
-                    }
+                    if str(view["activity_state"]) == "grounding complete"
                     else "warning"
                 )
-                ui.notify(view["activity_state"], type=notification_type)
+                ui.notify(str(view["activity_state"]), type=notification_type)
             finally:
                 action_state["busy"] = False
                 if action_state["pending_clarification"]:
                     requirement_input.props("disable")
-                    max_pa_turns_input.props("disable")
                 else:
                     requirement_input.props(remove="disable")
-                    max_pa_turns_input.props(remove="disable")
                 _update_start_enabled()
 
         def _update_reply_enabled() -> None:
@@ -1449,37 +1921,63 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             cancel_interaction_button.props("disable")
             activity_badge.set_text("resuming")
             activity_badge.props("color=indigo")
-            activity_message.set_text(
-                "ProductAgent is reassessing the same interaction with the exact user reply."
+            activity_message.set_text("Continuing the evidence investigation.")
+            timeline_badge.set_text("live")
+            timeline_badge.props("color=indigo outline")
+            recovered_label.set_visibility(False)
+
+            def _show_pa_event(event: dict[str, str]) -> None:
+                events = action_state["timeline"]
+                if not isinstance(events, list):
+                    events = []
+                    action_state["timeline"] = events
+                events.append(event)
+                _render_pa_timeline_events(timeline_container, events)
+
+            _show_pa_event(
+                _timeline_event("accepted", "Clarification submitted", reply)
             )
 
-            def _show_pa_turn(turn_number: int, turn_limit: int) -> None:
-                activity_badge.set_text(f"PA turn {turn_number} of {turn_limit}")
+            def _show_pa_stage(sentence: str) -> None:
+                activity_badge.set_text("grounding")
+                activity_badge.props("color=indigo")
+                activity_message.set_text(sentence)
 
             try:
                 interaction = await _submit_pa_ui_clarification(
                     runtime,
                     interaction,
                     reply,
-                    on_pa_turn=_show_pa_turn,
+                    on_pa_stage=_show_pa_stage,
+                    on_pa_event=_show_pa_event,
                 )
                 view = _pa_ui_view(interaction)
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failure_message = (
+                    f"Clarification failed: {type(exc).__name__}: {exc}"
+                )
                 activity_badge.set_text("failed")
                 activity_badge.props("color=red")
-                activity_message.set_text(
-                    f"Phase 3.4 failed: {type(exc).__name__}: {exc}"
+                timeline_badge.set_text("failed")
+                timeline_badge.props("color=red outline")
+                activity_message.set_text(failure_message)
+                outcome_alert_title.set_text("Grounding did not complete")
+                outcome_alert_value.set_text(failure_message)
+                outcome_alert_card.set_visibility(True)
+                diagnostic_failure_value.set_text(failure_message)
+                diagnostic_failure_card.set_visibility(True)
+                _show_pa_event(
+                    _timeline_event("failed", "Clarification failed", failure_message)
                 )
-                ui.notify("Phase 3.4 clarification failed.", type="negative")
+                ui.notify("Clarification failed.", type="negative")
             else:
                 _apply_pa_view(interaction, view)
-                ui.notify(view["activity_state"], type="positive")
+                ui.notify(str(view["activity_state"]), type="positive")
             finally:
                 action_state["busy"] = False
                 _update_reply_enabled()
                 if not action_state["pending_clarification"]:
                     requirement_input.props(remove="disable")
-                    max_pa_turns_input.props(remove="disable")
                 _update_start_enabled()
 
         def _cancel_clarification() -> None:
@@ -1499,286 +1997,36 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             finally:
                 action_state["busy"] = False
                 requirement_input.props(remove="disable")
-                max_pa_turns_input.props(remove="disable")
                 _update_start_enabled()
 
         requirement_input.on_value_change(lambda _: _update_start_enabled())
-        max_pa_turns_input.on_value_change(lambda _: _update_start_enabled())
         clarification_reply_input.on_value_change(lambda _: _update_reply_enabled())
         start_button.on_click(_start_pa_interaction)
         submit_reply_button.on_click(_submit_clarification)
         cancel_interaction_button.on_click(_cancel_clarification)
         _update_start_enabled()
 
-
-def _render_document_interpretation_diagnostic(
-    runtime: Spec2PrimitivesUIRuntime,
-) -> None:
-    """Render the non-authoritative Phase 4.1 document diagnostic."""
-    ready = (
-        runtime.ontology_config is not None
-        and runtime.model_config is not None
-        and runtime.document_vision_runtime is not None
-        and runtime.tbox is not None
-    )
-    try:
-        document_refs = list(approved_document_refs())
-    except (OSError, ValueError):
-        document_refs = []
-    ready = ready and bool(document_refs)
-    model = (
-        runtime.model_config.document_vlm.model
-        if runtime.model_config is not None
-        else "unconfigured"
-    )
-    with ui.card().classes("w-full border border-slate-200 shadow-sm"):
-        with ui.row().classes("w-full items-start justify-between gap-3"):
-            with ui.column().classes("gap-0"):
-                ui.label("Phase 4.1 Document Interpretation Diagnostic").classes(
-                    "text-lg font-semibold text-slate-900"
-                )
-                ui.label(
-                    "Overview → PA statements → provider action → late mapping → validator"
-                ).classes("text-xs text-slate-500")
-            readiness_badge = ui.badge("ready" if ready else "unavailable").props(
-                f"color={'green' if ready else 'amber'} outline"
+        try:
+            recovered_interaction = _latest_pa_ui_interaction(runtime.contexts_root)
+            recovered_view = (
+                _pa_ui_view(recovered_interaction)
+                if recovered_interaction is not None
+                else None
             )
-
-        ui.label(f"Configured VLM: {model}").classes("text-sm text-slate-700")
-        for source_status in runtime.document_source_status:
-            ui.label(
-                "Document cache: "
-                f"{source_status.get('context_ref')} · "
-                f"source={source_status.get('source_status')} · "
-                f"overview={source_status.get('overview_status')}"
-            ).classes("text-xs text-slate-600")
-        if not ready:
-            ui.label(
-                runtime.document_diagnostic_unavailable_reason
-                or "Authoritative ontology and OpenAI vision runtime are required."
-            ).classes("text-sm text-amber-700")
-
-        requirement_input = (
-            ui.input(
-                label="diagnostic product_requirement",
-                placeholder="assemble Medium Gear",
-            )
-            .props("outlined")
-            .classes("w-full")
-        )
-        document_input = (
-            ui.select(
-                document_refs,
-                value=document_refs[0] if document_refs else None,
-                label="approved document context_ref",
-            )
-            .props("outlined")
-            .classes("w-full")
-        )
-        run_button = ui.button(
-            "Interpret Approved Document",
-            icon="document_scanner",
-        ).props("disable")
-        result_value = ui.label("No document diagnostic has run.").classes(
-            "text-xs text-slate-500 whitespace-pre-wrap break-all"
-        )
-        action_state = {"busy": False}
-
-        def _update_enabled() -> None:
-            value = requirement_input.value
-            context_ref = document_input.value
-            _set_enabled(
-                run_button,
-                ready
-                and not action_state["busy"]
-                and isinstance(value, str)
-                and bool(value.strip())
-                and isinstance(context_ref, str),
-            )
-
-        async def _run() -> None:
-            value = requirement_input.value
-            context_ref = document_input.value
-            if (
-                not ready
-                or action_state["busy"]
-                or not isinstance(value, str)
-                or not value.strip()
-                or not isinstance(context_ref, str)
-            ):
-                return
-            action_state["busy"] = True
-            _set_enabled(run_button, False)
-            requirement_input.props("disable")
-            readiness_badge.set_text("running")
-            readiness_badge.props("color=indigo")
-            result_value.set_text("Preparing and interpreting the approved document...")
-            try:
-                result = await _run_document_diagnostic_ui(
-                    runtime,
-                    value,
-                    context_ref=context_ref,
-                )
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                readiness_badge.set_text("rejected")
-                readiness_badge.props("color=red")
-                result_value.set_text(f"Diagnostic failed: {type(exc).__name__}: {exc}")
-                ui.notify("Document interpretation rejected.", type="negative")
-            else:
-                status = result.get("status")
-                readiness_badge.set_text(str(status))
-                readiness_badge.props(f"color={'green' if status == 'accepted' else 'red'}")
-                result_value.set_text(_json_text(result))
-                ui.notify(
-                    f"Document interpretation {status}.",
-                    type="positive" if status == "accepted" else "negative",
-                )
-            finally:
-                action_state["busy"] = False
-                requirement_input.props(remove="disable")
-                _update_enabled()
-
-        requirement_input.on_value_change(lambda _: _update_enabled())
-        document_input.on_value_change(lambda _: _update_enabled())
-        run_button.on_click(_run)
-
-
-def _render_rgbd_segmentation_status(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Render read-only status for automatic supporting RGB-D processing."""
-    with ui.card().classes("w-full border border-slate-200 shadow-sm"):
-        with ui.row().classes("w-full items-start justify-between gap-3"):
-            with ui.column().classes("gap-0"):
-                ui.label("RGB-D Observation Processing").classes(
-                    "text-lg font-semibold text-slate-900"
-                )
-                ui.label(
-                    "Automatic capture, preprocessing, and minimal segmentation status"
-                ).classes("text-xs text-slate-500")
-            status_badge = ui.badge("idle").props("color=grey outline")
-
-        status_message = ui.label(
-            "Waiting for an observation request from the runtime."
-        ).classes("text-sm text-slate-600")
-        with ui.row().classes("w-full gap-6 flex-wrap"):
-            source_count = ui.label("Source candidates: 0").classes(
-                "text-sm text-slate-700"
-            )
-            assembly_count = ui.label("Assembly candidates: 0").classes(
-                "text-sm text-slate-700"
-            )
-        correspondence_status = ui.label("CAD correspondence: not_requested").classes(
-            "text-sm text-amber-700"
-        )
-        location_status = ui.label("Location: not_requested").classes(
-            "text-sm text-amber-700"
-        )
-        pose_status = ui.label("Pose: not_evaluated").classes(
-            "text-sm text-amber-700"
-        )
-        robot_frame_conversion_status = ui.label(
-            "Robot-frame conversion: not_evaluated"
-        ).classes("text-sm text-amber-700")
-
-        async def _refresh_status() -> None:
-            try:
-                record = await asyncio.to_thread(
-                    read_rgbd_segmentation_status,
-                    runtime.contexts_root,
-                )
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                record = {
-                    "status": "failed",
-                    "source_candidate_count": 0,
-                    "assembly_candidate_count": 0,
-                    "failure": {
-                        "message": f"Status unavailable: {type(exc).__name__}: {exc}"
-                    },
-                }
-            status = str(record.get("status", "failed"))
-            colors = {
-                "idle": "grey",
-                "running": "indigo",
-                "ready": "green",
-                "failed": "red",
-            }
-            status_badge.set_text(status)
-            status_badge.props(f"color={colors.get(status, 'red')}")
-            source_count.set_text(
-                f"Source candidates: {record.get('source_candidate_count', 0)}"
-            )
-            assembly_count.set_text(
-                f"Assembly candidates: {record.get('assembly_candidate_count', 0)}"
-            )
-            CAD_correspondence = record.get("CAD_correspondence", "not_evaluated")
-            location = record.get("location", "not_evaluated")
-            correspondence_status.set_text(
-                "CAD correspondence: "
-                + (
-                    "not_requested"
-                    if CAD_correspondence == "not_evaluated"
-                    else str(CAD_correspondence)
-                )
-            )
-            location_status.set_text(
-                "Location: "
-                + (
-                    "not_requested"
-                    if location == "not_evaluated"
-                    else str(location)
-                )
-            )
-            pose = record.get("pose", "not_evaluated")
-            pose_status.set_text(
-                "Pose: "
-                + ("not_requested" if pose == "not_evaluated" else str(pose))
-            )
-            robot_frame_conversion = record.get(
-                "robot_frame_conversion",
-                "not_evaluated",
-            )
-            robot_frame_conversion_status.set_text(
-                "Robot-frame conversion: "
-                + (
-                    "not_requested"
-                    if robot_frame_conversion == "not_evaluated"
-                    else str(robot_frame_conversion)
-                )
-            )
-            failure = record.get("failure")
-            if status == "idle":
-                message = "Waiting for an observation request from the runtime."
-            elif status == "running":
-                message = "Capturing and processing fresh RGB-D evidence automatically."
-            elif status == "ready":
-                message = (
-                    "Robot-frame conversion status is ready for later use."
-                    if robot_frame_conversion != "not_evaluated"
-                    else "CAD pose status is ready for later use."
-                    if pose != "not_evaluated"
-                    else "CAD-size association status is ready for later use."
-                    if CAD_correspondence != "not_evaluated"
-                    else "Minimal segmentation records are ready for later use."
-                )
-            elif isinstance(failure, dict) and isinstance(failure.get("message"), str):
-                message = failure["message"]
-            else:
-                message = "Automatic RGB-D processing failed closed."
-            status_message.set_text(message)
-            status_message.classes(
-                replace=(
-                    "text-sm text-red-700"
-                    if status == "failed"
-                    else "text-sm text-slate-600"
-                )
-            )
-
-        ui.timer(0.1, _refresh_status, once=True)
-        ui.timer(3.0, _refresh_status)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            recovered_interaction = None
+            recovered_view = None
+        if recovered_interaction is not None and recovered_view is not None:
+            requirement_input.value = recovered_interaction["product_requirement"]
+            _apply_pa_view(recovered_interaction, recovered_view)
+            if action_state["pending_clarification"]:
+                requirement_input.props("disable")
+            _update_start_enabled()
 
 
 def render(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Render the Spec2Primitives PA UI connected through Phase 3.5."""
-    with ui.column().classes("w-full max-w-6xl mx-auto gap-6 p-6"):
+    """Render the ICRA-demo-oriented Spec2Primitives grounding page."""
+    with ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-6"):
         with ui.row().classes("w-full items-start justify-between gap-4"):
             with ui.column().classes("gap-1"):
                 ui.label("Spec2Primitives").classes("text-3xl font-bold text-slate-900")
@@ -1790,46 +2038,5 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
                 "text-sm px-3 py-2"
             )
 
-        with ui.card().classes("w-full bg-indigo-50 border border-indigo-100 shadow-none"):
-            ui.label("Phase 2: PA Interaction UI").classes(
-                "text-base font-semibold text-indigo-900"
-            )
-            ui.label(
-                "The PA workspace exposes Phase 3.1 intake, Phase 3.2 requested "
-                "context serving, and the Phase 3.3 ontology-backed orchestration "
-                "boundary. Production grounding, planning, and execution "
-                "remain unavailable."
-            ).classes("text-sm text-indigo-800")
-
         _render_dual_gazebo(runtime.dual_gazebo)
         _render_pa_interaction(runtime)
-
-        _render_document_interpretation_diagnostic(runtime)
-        _render_rgbd_segmentation_status(runtime)
-
-        ui.label("Proposed Workflow").classes("text-xl font-semibold text-slate-900")
-
-        with ui.column().classes("w-full gap-2"):
-            for number, text in enumerate(_FLOW_STEPS, start=1):
-                _render_flow_step(number, text)
-                if number < len(_FLOW_STEPS):
-                    ui.icon("south").classes("self-center text-slate-400")
-
-        with ui.row().classes("w-full gap-4 items-stretch flex-wrap"):
-            with ui.card().classes(
-                "flex-1 min-w-72 bg-amber-50 border border-amber-200 shadow-none"
-            ):
-                ui.badge("rejected").props("color=amber outline")
-                ui.label("concrete feedback → RA revision").classes(
-                    "text-base font-semibold text-amber-900"
-                )
-            with ui.card().classes(
-                "flex-1 min-w-72 bg-emerald-50 border border-emerald-200 shadow-none"
-            ):
-                ui.badge("accepted").props("color=green outline")
-                ui.label("RobotAgent execution").classes("text-base font-semibold text-emerald-900")
-
-        ui.label(
-            "ProductAgent, ResourceAgent, and RobotAgent remain shared runtime "
-            "authorities outside the Spec2Primitives package."
-        ).classes("text-sm text-slate-500")

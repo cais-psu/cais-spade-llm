@@ -53,7 +53,7 @@ class PAOntologyConfig:
 
 
 class ProductContextGroundingRuntime(Protocol):
-    """Expose only controlled Phase 4 interpretation and assessment calls."""
+    """Expose the controlled native PA grounding operation."""
 
     def grounding_producer_descriptors(
         self,
@@ -61,7 +61,7 @@ class ProductContextGroundingRuntime(Protocol):
         """Return provider-owned capability descriptions."""
         ...
 
-    async def initial_product_context_decision(
+    async def ground_product_context(
         self,
         product_agent: ProductAgentContextRuntime,
         *,
@@ -70,37 +70,9 @@ class ProductContextGroundingRuntime(Protocol):
         abox: ABoxSnapshot,
         product_context: Mapping[str, object],
         max_pa_turns: int,
-    ) -> Mapping[str, object]:
-        """Create the first generalized grounding-session decision."""
-        ...
-
-    async def interpret_served_context(
-        self,
-        *,
-        producer: str,
-        interaction_root: Path,
-        tbox: TBoxSnapshot,
-        abox: ABoxSnapshot,
-        served_context: Mapping[str, object],
-        operation_number: int,
-    ) -> Mapping[str, object]:
-        """Interpret one served result without mutating the interaction ABox."""
-        ...
-
-    async def assess_product_context(  # noqa: PLR0913
-        self,
-        product_agent: ProductAgentContextRuntime,
-        *,
-        interaction_root: Path,
-        tbox: TBoxSnapshot,
-        abox: ABoxSnapshot,
-        abox_view: Mapping[str, object],
-        attempted_evidence: tuple[str, ...],
         clarification_history: tuple[Mapping[str, object], ...] = (),
-        turn_number: int,
-        max_pa_turns: int,
     ) -> Mapping[str, object]:
-        """Return one session update after newly accepted evidence."""
+        """Run native evidence investigation and deterministic grounding."""
         ...
 
 

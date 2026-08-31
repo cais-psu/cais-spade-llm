@@ -661,9 +661,9 @@ Internal PA retrieval remains deliberately simple and auditable:
 ```text
 PA sees requirement + ontology + available sources + retrieved records
         ↓
-PA returns one minimal semantic action
+PA returns one minimal semantic action through a prompt-local action handle
         ↓
-controller resolves the provider and exact source revision
+controller resolves the provider, exact catalog ref, and source revision
         ↓
 one approved source is retrieved and processed for that producer operation
         ↓
@@ -732,8 +732,20 @@ document, CAD, and RGB-D requests from the evolving goal and ABox state together
 with the approved source types. It does not retrieve the entire
 approved corpus by default.
 
+Approved catalog refs are intentionally visible evidence and may share lexical
+tokens with the requirement. The action schema itself exposes only prompt-local
+handles, but this implementation does not claim learned, graph-ranked, or
+lexically unbiased source discovery. Retrieval evaluation must therefore report
+catalog-label and distractor ablations separately from the constrained grounding
+result.
+
 For ICRA:
 
+- PA performs schema-constrained, evidence-backed ABox instance grounding under
+  the supplied PPR TBox. It does not discover or revise the ontology schema.
+  The proposal may contain multiple cited requirement-level features, while the
+  unique feature joined to the predefined process remains the sole execution
+  target used by resource assignment.
 - The immutable TBox supplies the exact `product`, `feature`, `process`,
   `resource`, `capability`, and `processExecution` vocabulary before the first
   PA source decision.
@@ -778,9 +790,11 @@ typed catalog separately and preserves every symbol exactly:
 
 ```turtle
 # PA interaction ABox
-ctx:specification_1 ppr:defines ctx:medium_gear_feature .
-ctx:medium_gear_feature a ppr:feature .
-process:assembly ppr:realizes ctx:medium_gear_feature .
+ctx:specification_1 ppr:defines ctx:feature_0001,
+                                  ctx:feature_0002 .
+ctx:feature_0001 a ppr:feature .
+ctx:feature_0002 a ppr:feature .
+process:assembly ppr:realizes ctx:feature_0001 .
 
 # Predefined Workcell ABox
 process:assembly a ppr:process .

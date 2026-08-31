@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ _DOCUMENT_KEYS = {
     "evidence_type",
     "repository_path",
     "source_url",
+    "source_sha256",
     "page_count",
 }
 _CAD_KEYS = {
@@ -30,8 +32,10 @@ _CAD_KEYS = {
     "evidence_type",
     "repository_path",
     "source_url",
+    "source_sha256",
     "units",
 }
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def approved_context_refs() -> tuple[str, ...]:
@@ -89,6 +93,7 @@ def approved_document_path(context_ref: str) -> Path:
         raise ValueError("Approved document source does not match its exact ref.")
     if not source_path.is_file():
         raise OSError("Approved document source is missing.")
+    _assert_approved_source_hash(source_path, str(source["source_sha256"]))
     return source_path
 
 
@@ -138,6 +143,7 @@ def approved_cad_path(context_ref: str) -> Path:
         raise ValueError("Approved CAD source does not match its exact ref.")
     if not source_path.is_file():
         raise OSError("Approved CAD source is missing.")
+    _assert_approved_source_hash(source_path, str(source["source_sha256"]))
     return source_path
 
 
@@ -219,6 +225,14 @@ def resolve_context_ref(request: dict[str, object]) -> dict[str, object]:
             "missing_source",
             "The approved source file is missing.",
         )
+    try:
+        _assert_approved_source_hash(source_path, str(source["source_sha256"]))
+    except (OSError, ValueError):
+        return _rejection(
+            context_ref,
+            "source_hash_mismatch",
+            "The approved source does not match its authority-pinned SHA-256.",
+        )
 
     if evidence_type == "document":
         if source_path.suffix.lower() != ".pdf":
@@ -260,10 +274,15 @@ def _load_sources() -> dict[str, dict[str, Any]]:
         context_ref = entry["context_ref"]
         repository_path = entry["repository_path"]
         source_url = entry["source_url"]
+        source_sha256 = entry["source_sha256"]
         if not all(
             isinstance(value, str) and value for value in (context_ref, repository_path, source_url)
         ):
             raise ValueError("Approved source strings must be non-empty.")
+        if not isinstance(source_sha256, str) or not _SHA256_PATTERN.fullmatch(
+            source_sha256
+        ):
+            raise ValueError("Approved source_sha256 must be one lowercase SHA-256.")
         if context_ref in sources:
             raise ValueError("Approved context_ref values must be unique.")
 
@@ -276,6 +295,12 @@ def _load_sources() -> dict[str, dict[str, Any]]:
 
         sources[context_ref] = entry
     return sources
+
+
+def _assert_approved_source_hash(source_path: Path, expected_sha256: str) -> None:
+    """Raise when one approved source differs from its authority digest."""
+    if hashlib.sha256(source_path.read_bytes()).hexdigest() != expected_sha256:
+        raise ValueError("Approved source SHA-256 does not match its inventory.")
 
 
 def _is_forbidden_ref(context_ref: str) -> bool:
@@ -313,6 +338,12 @@ def _serve_document(
             "malformed_source",
             "The approved PDF could not be read.",
         )
+    if source_sha256 != source["source_sha256"]:
+        return _rejection(
+            context_ref,
+            "source_hash_mismatch",
+            "The approved PDF changed while it was being served.",
+        )
 
     return {
         "served_context": {
@@ -340,6 +371,12 @@ def _serve_cad(
             context_ref,
             "malformed_source",
             "The approved STL could not be read.",
+        )
+    if evidence["source_sha256"] != source["source_sha256"]:
+        return _rejection(
+            context_ref,
+            "source_hash_mismatch",
+            "The approved STL changed while it was being served.",
         )
 
     return {

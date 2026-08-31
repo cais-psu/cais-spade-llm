@@ -1,54 +1,51 @@
-"""Run the first Spec2Primitives PA needed-context decision."""
+"""Start one native tool-using Spec2Primitives ProductAgent interaction."""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
 from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
     ProductContextGroundingRuntime,
-    compact_abox_view,
     validated_grounding_producer_descriptors,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v2,
+    persist_pa_context_grounding_completion_v3,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
     load_interaction_abox,
 )
-from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
-    approved_context_ref_evidence_types,
-    approved_context_refs,
-)
 
 logger = logging.getLogger(__name__)
 
 _PRODUCT_REQUIREMENT_PATH = Path("products/user_requirement/product_requirement.json")
 _FIRST_TURN_PATH = Path("interaction_record/turn_0001.json")
-_NEEDED_CONTEXT_KEYS = {
-    "context_ref",
-    "request_live_observation",
-    "clarification_question",
-}
 
 
 class ProductAgentContextRuntime(Protocol):
-    """Expose the one shared ProductAgent operation used by Phase 3.1."""
+    """Expose the shared ProductAgent's controlled structured-call boundary."""
 
     async def ask_llm_structured(
         self,
         prompt: str,
         *,
         response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[
+            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+        ]
+        | None = None,
+        max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        """Return one structured PA response."""
+        """Return one structured PA response after optional controlled tool use."""
         ...
 
 
@@ -60,163 +57,77 @@ async def start_pa_context_interaction(
     ontology_config: PAOntologyConfig | None = None,
     grounding_runtime: ProductContextGroundingRuntime | None = None,
 ) -> dict[str, object]:
-    """Record a product requirement and request PA's first context decision.
-
-    Args:
-        product_agent: Shared ProductAgent viewed through the narrow Phase 3.1
-            composition protocol.
-        interaction_root: Caller-owned `contexts/<interaction_identifier>/`
-            directory.
-        product_requirement: Exact user-supplied product requirement.
-        ontology_config: Injected schema-only TBox location and namespace.
-        grounding_runtime: Injected controlled Phase 4 producer boundary.
-
-    Returns:
-        The validated `needed_context` response or a structured failure.
-    """
+    """Record the requirement and run one native ProductAgent investigation."""
     if not isinstance(product_requirement, str) or not product_requirement.strip():
         return _failure(
             "invalid_product_requirement",
             "product_requirement must contain non-whitespace text.",
         )
-
     if ontology_config is None or grounding_runtime is None:
         return _failure(
             "grounding_unavailable",
-            "An authoritative TBox and controlled Phase 4 grounding runtime are "
-            "required before the PA interaction can start.",
+            "An authoritative TBox and controlled grounding runtime are required.",
         )
 
-    interaction_root = Path(interaction_root)
-    requirement_path = interaction_root / _PRODUCT_REQUIREMENT_PATH
-    turn_path = interaction_root / _FIRST_TURN_PATH
+    root = Path(interaction_root)
+    requirement_path = root / _PRODUCT_REQUIREMENT_PATH
+    turn_path = root / _FIRST_TURN_PATH
     if requirement_path.exists() or turn_path.exists():
         return _failure(
             "interaction_exists",
-            "Phase 3.1 records already exist for this interaction_root.",
+            "ProductAgent records already exist for this interaction_root.",
         )
-
     try:
         _write_json_exclusive(
             requirement_path,
             {"product_requirement": product_requirement},
         )
-    except FileExistsError:
-        return _failure(
-            "interaction_exists",
-            "Phase 3.1 records already exist for this interaction_root.",
-        )
-
-    try:
         tbox = ontology_config.load_tbox()
         validated_grounding_producer_descriptors(grounding_runtime)
-        abox = initialize_interaction_abox(
-            interaction_root,
-            product_requirement,
-            tbox,
-        )
-        context_refs = approved_context_refs()
-        context_ref_evidence_types = approved_context_ref_evidence_types()
+        abox = initialize_interaction_abox(root, product_requirement, tbox)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        logger.exception("Phase 3.1 ontology initialization failed.")
+        logger.exception("Spec2Primitives grounding initialization failed.")
         failure = _failure(
-            "ontology_initialization_failed",
-            f"Phase 4.0 initialization failed: {type(exc).__name__}: {exc}",
+            "grounding_initialization_failed",
+            f"Grounding initialization failed: {type(exc).__name__}: {exc}",
         )
-        _write_first_turn(
-            turn_path,
-            product_requirement,
-            None,
-            None,
-            failure,
-        )
+        _write_first_turn(turn_path, product_requirement, None, None, failure)
         return failure
 
-    initial_decision = getattr(grounding_runtime, "initial_product_context_decision", None)
+    product_context = build_product_context_view(
+        root,
+        abox,
+        attempted_evidence=(),
+        assessed_at_ns=time.time_ns(),
+    )
+    product_context_path = persist_product_context_view(root, product_context)
+    pa_input = {
+        "mode": "native_tool_grounding",
+        "product_context_ref": product_context_path.relative_to(root).as_posix(),
+    }
     try:
-        if callable(initial_decision):
-            product_context = build_product_context_view(
-                interaction_root,
-                abox,
-                attempted_evidence=(),
-                assessed_at_ns=time.time_ns(),
-            )
-            product_context_path = persist_product_context_view(
-                interaction_root,
-                product_context,
-            )
-            pa_input = {
-                "product_context_ref": str(
-                    product_context_path.relative_to(interaction_root)
-                ),
-                "product_context": product_context.to_record(),
-            }
-            assessment = await initial_decision(
-                product_agent,
-                interaction_root=interaction_root,
-                tbox=tbox,
-                abox=abox,
-                product_context=product_context.to_record(),
-                max_pa_turns=12,
-            )
-            if not isinstance(assessment, dict):
-                raise RuntimeError("Production Phase 4.3 returned an invalid result.")
-            if isinstance(assessment.get("needed_context"), dict):
-                pa_output = {"needed_context": assessment["needed_context"]}
-            elif (
-                assessment.get("needed_context") is None
-                and assessment.get("unresolved_semantic_need") is None
-                and isinstance(
-                    assessment.get("context understanding complete"), bool
-                )
-                and assessment.get("grounding_status")
-                in {"complete", "incomplete", "ontology_gap"}
-            ):
-                pa_output = {
-                    "needed_context": None,
-                    "context understanding complete": assessment[
-                        "context understanding complete"
-                    ],
-                    "grounding_status": assessment["grounding_status"],
-                }
-            else:
-                raise RuntimeError("Production Phase 4.3 returned no valid decision.")
-        else:
-            response_format = _needed_context_response_format(context_refs)
-            prompt = _needed_context_prompt(
-                product_requirement,
-                context_refs,
-                abox_view=compact_abox_view(abox),
-                context_ref_evidence_types=context_ref_evidence_types,
-            )
-            pa_input = {
-                "prompt": prompt,
-                "response_format": response_format,
-            }
-            pa_output = await product_agent.ask_llm_structured(
-                prompt,
-                response_format=response_format,
-            )
+        assessment = await grounding_runtime.ground_product_context(
+            product_agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context=product_context.to_record(),
+            max_pa_turns=12,
+        )
+        if not isinstance(assessment, Mapping):
+            raise RuntimeError("Native ProductAgent grounding returned an invalid result.")
+        pa_output = dict(assessment)
     except Exception as exc:
-        logger.exception("Phase 3.1 ProductAgent structured call failed.")
+        logger.exception("Native ProductAgent grounding failed.")
         failure = _failure(
             "pa_call_failed",
-            f"ProductAgent ask_llm_structured failed: {type(exc).__name__}: {exc}",
+            f"ProductAgent grounding failed: {type(exc).__name__}: {exc}",
             diagnostic=_pa_call_diagnostic(exc),
         )
         _write_first_turn(turn_path, product_requirement, pa_input, None, failure)
         return failure
 
-    terminal_status = (
-        pa_output.get("grounding_status")
-        if isinstance(pa_output, dict)
-        else None
-    )
-    validation_error = (
-        None
-        if terminal_status in {"complete", "incomplete", "ontology_gap"}
-        else _needed_context_validation_error(pa_output, context_refs)
-    )
+    validation_error = _native_output_validation_error(pa_output)
     if validation_error is not None:
         failure = _failure("invalid_pa_response", validation_error)
         _write_first_turn(
@@ -227,155 +138,61 @@ async def start_pa_context_interaction(
             failure,
         )
         return failure
+    _write_first_turn(turn_path, product_requirement, pa_input, pa_output, None)
 
-    _write_first_turn(
-        turn_path,
-        product_requirement,
-        pa_input,
-        pa_output,
-        None,
-    )
-    if terminal_status == "complete":
+    if pa_output["grounding_status"] == "complete":
         try:
-            fresh_abox = load_interaction_abox(interaction_root, tbox)
+            fresh_abox = load_interaction_abox(root, tbox)
             fresh_view = build_product_context_view(
-                interaction_root,
+                root,
                 fresh_abox,
-                attempted_evidence=(),
+                attempted_evidence=tuple(
+                    item
+                    for item in pa_output.get("tool_call_refs", [])
+                    if isinstance(item, str)
+                ),
                 assessed_at_ns=time.time_ns(),
             )
-            persist_product_context_view(interaction_root, fresh_view)
-            persist_pa_context_grounding_completion_v2(
-                interaction_root,
+            persist_product_context_view(root, fresh_view)
+            persist_pa_context_grounding_completion_v3(
+                root,
                 product_requirement=product_requirement,
                 completion_turn=1,
-                decision_ref=str(turn_path.relative_to(interaction_root)),
+                decision_ref=turn_path.relative_to(root).as_posix(),
                 product_context=fresh_view,
-                clarification_refs=(),
+                ontology_projection_ref=str(pa_output["ontology_projection_ref"]),
+                resource_selection_ref=str(pa_output["resource_selection_ref"]),
+                tool_call_refs=tuple(pa_output["tool_call_refs"]),
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            logger.exception("Phase 3.1 grounding completion failed.")
+            logger.exception("Native grounding completion failed.")
             return _failure(
                 "context_completion_failed",
-                f"PA grounding completion failed: {type(exc).__name__}: {exc}",
+                f"Grounding completion failed: {type(exc).__name__}: {exc}",
             )
     return pa_output
 
 
-def _needed_context_prompt(
-    product_requirement: str,
-    context_refs: tuple[str, ...],
-    *,
-    abox_view: dict[str, object],
-    context_ref_evidence_types: dict[str, str],
-) -> str:
-    pa_context = {
-        "product_requirement": product_requirement,
-        "approved_context_refs": list(context_refs),
-        "approved_context_ref_evidence_types": context_ref_evidence_types,
-        "request_live_observation_available": True,
-        "product_context": abox_view,
-        "permitted_request_shapes": {
-            "approved context_ref": {
-                "context_ref": "<one exact approved_context_ref>",
-                "request_live_observation": False,
-                "clarification_question": None,
-            },
-            "fresh live RGB-D observation": {
-                "context_ref": None,
-                "request_live_observation": True,
-                "clarification_question": None,
-            },
-            "user clarification": {
-                "context_ref": None,
-                "request_live_observation": False,
-                "clarification_question": "<one concise question>",
-            },
-        },
-    }
-    return (
-        "Make only the first Spec2Primitives needed_context decision. "
-        "No document, CAD, or observation evidence has been served. Treat user "
-        "expertise as unknown. Choose exactly one permitted evidence or clarification "
-        "request shape. Do not return context "
-        "understanding complete, grounding, an assembly plan, or primitive_steps.\n\n"
-        "PA input:\n"
-        f"{json.dumps(pa_context, indent=2, ensure_ascii=False)}"
-    )
-
-
-def _needed_context_response_format(
-    context_refs: tuple[str, ...],
-) -> dict[str, Any]:
-    return {
-        "name": "spec2primitives_needed_context",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["needed_context"],
-            "properties": {
-                "needed_context": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "context_ref",
-                        "request_live_observation",
-                        "clarification_question",
-                    ],
-                    "properties": {
-                        "context_ref": {
-                            "type": ["string", "null"],
-                            "enum": [None, *context_refs],
-                        },
-                        "request_live_observation": {"type": "boolean"},
-                        "clarification_question": {
-                            "type": ["string", "null"],
-                            "minLength": 1,
-                        },
-                    },
-                }
-            },
-        },
-    }
-
-
-def _needed_context_validation_error(
-    pa_output: object,
-    context_refs: tuple[str, ...],
-) -> str | None:
-    if not isinstance(pa_output, dict) or set(pa_output) != {"needed_context"}:
-        return "PA output must contain only needed_context."
-
-    needed_context = pa_output["needed_context"]
-    if not isinstance(needed_context, dict) or set(needed_context) != _NEEDED_CONTEXT_KEYS:
-        return "needed_context fields do not match the Phase 3.1 response shape."
-
-    context_ref = needed_context["context_ref"]
-    request_live_observation = needed_context["request_live_observation"]
-    clarification_question = needed_context["clarification_question"]
-
-    if context_ref is not None and not isinstance(context_ref, str):
-        return "context_ref must be null or an approved exact ref."
-    if isinstance(context_ref, str) and context_ref not in context_refs:
-        return "context_ref is not an approved exact ref."
-    if not isinstance(request_live_observation, bool):
-        return "request_live_observation must be a boolean."
-    if clarification_question is not None and (
-        not isinstance(clarification_question, str)
-        or not clarification_question.strip()
+def _native_output_validation_error(value: Mapping[str, object]) -> str | None:
+    status = value.get("grounding_status")
+    if status not in {"complete", "incomplete", "clarification_required"}:
+        return "Native PA output has an invalid grounding_status."
+    if status == "clarification_required" and not isinstance(
+        value.get("clarification_question"), str
     ):
-        return "clarification_question must be null or non-empty text."
-
-    active_values = sum(
-        (
-            context_ref is not None,
-            request_live_observation is True,
-            clarification_question is not None,
-        )
-    )
-    if active_values != 1:
-        return "needed_context must contain exactly one active decision."
+        return "Native PA clarification output is invalid."
+    if status == "incomplete" and not isinstance(value.get("insufficient_evidence"), str):
+        return "Native PA insufficient-evidence output is invalid."
+    if status == "complete":
+        if not isinstance(value.get("ontology_projection_ref"), str):
+            return "Native completion ontology projection is invalid."
+        if not isinstance(value.get("resource_selection_ref"), str):
+            return "Native completion resource selection is invalid."
+        tool_refs = value.get("tool_call_refs")
+        if not isinstance(tool_refs, list) or not all(
+            isinstance(item, str) for item in tool_refs
+        ):
+            return "Native completion tool-call references are invalid."
     return None
 
 
@@ -410,29 +227,26 @@ def _pa_call_diagnostic(error: Exception) -> dict[str, object]:
     cause = error
     while isinstance(cause.__cause__, Exception):
         cause = cause.__cause__
-
     body = getattr(cause, "body", None)
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         body = body["error"]
     body_message = body.get("message") if isinstance(body, dict) else None
-    message = body_message if isinstance(body_message, str) else getattr(cause, "message", None)
-    if not isinstance(message, str) or not message:
-        message = str(cause)
+    message = body_message if isinstance(body_message, str) else str(cause)
 
-    def _metadata(name: str) -> object:
+    def metadata(name: str) -> object:
         value = getattr(cause, name, None)
         if value is None and isinstance(body, dict):
             value = body.get(name)
         return value if isinstance(value, (int, str)) and not isinstance(value, bool) else None
 
     return {
-        "stage": "Phase 3.1 ProductAgent structured call",
+        "stage": "native ProductAgent grounding",
         "exception": type(cause).__name__,
-        "status_code": _metadata("status_code"),
-        "request_id": _metadata("request_id"),
-        "error_type": _metadata("type"),
-        "param": _metadata("param"),
-        "code": _metadata("code"),
+        "status_code": metadata("status_code"),
+        "request_id": metadata("request_id"),
+        "error_type": metadata("type"),
+        "param": metadata("param"),
+        "code": metadata("code"),
         "message": message[:2000],
     }
 
@@ -443,10 +257,7 @@ def _failure(
     *,
     diagnostic: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    failure: dict[str, object] = {
-        "reason": reason,
-        "message": message,
-    }
+    failure: dict[str, object] = {"reason": reason, "message": message}
     if diagnostic is not None:
         failure["diagnostic"] = diagnostic
     return {"failure": failure}

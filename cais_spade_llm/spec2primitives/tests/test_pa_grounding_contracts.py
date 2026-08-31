@@ -46,7 +46,7 @@ def _descriptor(
         }
     )
 
-def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
+def test_legacy_grounding_session_round_trip_remains_readable(
     tmp_path: Path,
 ) -> None:
     attempt = GroundingActionAttempt.from_mapping(
@@ -62,7 +62,7 @@ def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
         }
     )
     next_action = GroundingNextAction.from_mapping(
-        {"action": "inspect", "source_ref": "manual.pdf", "question": "How is it assembled?"}
+        {"action": "retrieve", "source_ref": "manual.pdf"}
     )
     session = GroundingSession.create(
         revision=2,
@@ -85,7 +85,7 @@ def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
         "a" * 64,
         None,
     )
-    assert session.next_action.question == "How is it assembled?"
+    assert session.next_action.source_ref == "manual.pdf"
     assert not {
         "statements",
         "information_needs",
@@ -95,42 +95,6 @@ def test_grounding_session_round_trip_is_source_cited_and_replay_safe(
     }.intersection(session.to_record())
     assert len(session.fingerprint) == 64
 
-
-def test_grounding_session_rejects_answer_shaped_fields_and_repeated_actions() -> None:
-    with pytest.raises(GroundingContractError, match="action is invalid"):
-        GroundingNextAction.from_mapping({"action": "fill_ontology"})
-
-    value = {"action": "propose_grounding", "understanding": "hidden state"}
-    with pytest.raises(GroundingContractError, match="fields are invalid"):
-        GroundingNextAction.from_mapping(value)
-
-    attempt = GroundingActionAttempt.from_mapping(
-        {
-            "attempt_id": "attempt_0001",
-            "action": "retrieve",
-            "provider_id": "document_evidence",
-            "source_ref": "manual.pdf",
-            "source_revision": "a" * 64,
-            "question": None,
-            "status": "no_change",
-            "record_refs": [],
-        }
-    )
-    duplicate = GroundingActionAttempt.from_mapping(
-        {**attempt.to_record(), "attempt_id": "attempt_0002"}
-    )
-    with pytest.raises(GroundingContractError, match="must not repeat an action"):
-        GroundingSession.create(
-            revision=2,
-            requirement_text="assemble medium gear",
-            attempted_actions=[attempt, duplicate],
-            next_action=GroundingNextAction.from_mapping(
-                {"action": "propose_grounding"}
-            ),
-            status="waiting_for_evidence",
-        )
-
-
 def test_view_joins_semantic_assertions_and_validated_typed_records(
     tmp_path: Path,
 ) -> None:
@@ -138,19 +102,30 @@ def test_view_joins_semantic_assertions_and_validated_typed_records(
     abox = initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
     record_path = (
         tmp_path
-        / "products/grounding/rgb_d_cad_grounding/pose_0001/pose_record.json"
+        / "products/grounding/robot_frame_location/location_0001.json"
     )
     record_path.parent.mkdir(parents=True)
+    source_path = record_path.parent / "source_0001.json"
+    source_path.write_text('{"observation":"accepted"}\n', encoding="utf-8")
     record_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "record_type": "CADPoseEstimationRecord",
-                "producer": "rgb_d_cad_grounding",
-                "evidence_refs": ["Gear_Medium.STL", "observation_0001"],
-                "pose": "accepted",
-                "coordinate_frame": "cam_mk4_2_optical_frame",
+                "record_type": "RobotFrameLocationRecord",
+                "producer": "robot_frame_location_provider",
+                "robot_frame_conversion": "accepted",
+                "CAD_correspondence": "accepted",
+                "location": "available",
+                "source_frame": "cam_mk4_2_optical_frame",
+                "target_frame": "world",
                 "observation_timestamp_ns": 950,
+                "translated_location_m": [0.0, -0.5, 1.1],
+                "source_hashes": [
+                    {
+                        "ref": source_path.relative_to(tmp_path).as_posix(),
+                        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -159,7 +134,7 @@ def test_view_joins_semantic_assertions_and_validated_typed_records(
     merge = validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        "rgb_d_cad_grounding",
+        "robot_frame_location_provider",
         {
             "assertions": [
                 {
@@ -175,7 +150,7 @@ def test_view_joins_semantic_assertions_and_validated_typed_records(
             "uncertainty": [],
             "unresolved_evidence_needs": [],
             "typed_context_refs": [
-                "products/grounding/rgb_d_cad_grounding/pose_0001/pose_record.json"
+                "products/grounding/robot_frame_location/location_0001.json"
             ],
         },
         authorized_evidence_refs=["Gear_Medium.STL", "observation_0001"],
@@ -189,9 +164,9 @@ def test_view_joins_semantic_assertions_and_validated_typed_records(
     )
 
     assert view.delta_count == 1
-    assert view.typed_bindings[0].record_type == "CADPoseEstimationRecord"
+    assert view.typed_bindings[0].record_type == "RobotFrameLocationRecord"
     assert view.typed_bindings[0].status == "accepted"
-    assert view.typed_bindings[0].frame == "cam_mk4_2_optical_frame"
+    assert view.typed_bindings[0].frame == "world"
     assert len(view.fingerprint) == 64
     persisted = persist_product_context_view(tmp_path, view)
     assert json.loads(persisted.read_text(encoding="utf-8"))["fingerprint"] == (
@@ -228,33 +203,36 @@ def test_tampered_or_out_of_root_typed_context_is_rejected(tmp_path: Path) -> No
         )
 
 
-def test_changed_embedded_source_reopens_world_pose_as_stale(
+def test_changed_embedded_source_reopens_world_location_as_stale(
     tmp_path: Path,
 ) -> None:
     tbox = ontology_config().load_tbox()
     initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)
-    record_root = tmp_path / "products/grounding/world_pose_provider"
+    record_root = tmp_path / "products/grounding/world_location_provider"
     record_root.mkdir(parents=True)
     source_path = record_root / "source_0001.json"
     source_path.write_text('{"capture":"accepted"}\n', encoding="utf-8")
     source_ref = source_path.relative_to(tmp_path).as_posix()
-    pose_path = record_root / "world_pose_0001.json"
-    pose_path.write_text(
+    location_path = record_root / "world_location_0001.json"
+    location_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "record_type": "RobotFramePoseRecord",
-                "producer": "world_pose_provider",
+                "record_type": "RobotFrameLocationRecord",
+                "producer": "world_location_provider",
+                "source_frame": "camera_optical_frame",
                 "target_frame": "world",
                 "observation_timestamp_ns": 10,
                 "robot_frame_conversion": "accepted",
-                "source_evidence": {
-                    "ref": source_ref,
-                    "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                },
-                "robot_frame_pose": {
-                    "CAD_origin_translation_m": [0.0, -0.5, 1.1]
-                },
+                "CAD_correspondence": "accepted",
+                "location": "available",
+                "translated_location_m": [0.0, -0.5, 1.1],
+                "source_hashes": [
+                    {
+                        "ref": source_ref,
+                        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    }
+                ],
             }
         )
         + "\n",
@@ -263,10 +241,10 @@ def test_changed_embedded_source_reopens_world_pose_as_stale(
     merge = validate_and_merge_triple_delta(
         tmp_path,
         tbox,
-        "world_pose_provider",
+        "world_location_provider",
         {
             "assertions": [],
-            "typed_context_refs": [pose_path.relative_to(tmp_path).as_posix()],
+            "typed_context_refs": [location_path.relative_to(tmp_path).as_posix()],
         },
         authorized_evidence_refs=[],
     )

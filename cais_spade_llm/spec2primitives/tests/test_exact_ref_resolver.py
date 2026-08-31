@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -63,7 +64,11 @@ def test_inventory_publishes_the_complete_current_catalog() -> None:
     assert tuple(sorted(path.name for path in CAD_ROOT.glob("*.STL"))) == (
         EXPECTED_CAD_REFS
     )
-    assert all("sha256" not in source for source in inventory["sources"])
+    for source in inventory["sources"]:
+        source_path = REPOSITORY_ROOT / source["repository_path"]
+        assert source["source_sha256"] == hashlib.sha256(
+            source_path.read_bytes()
+        ).hexdigest()
 
 
 def test_complete_document_ref_returns_all_ordered_pages() -> None:
@@ -114,12 +119,19 @@ def test_document_metadata_validates_without_serving_page_text(
     assert metadata["page_count"] == 6
     assert isinstance(metadata["source_sha256"], str)
     assert len(metadata["source_sha256"]) == 64
+    inventory = json.loads(
+        exact_ref_resolver._INVENTORY_PATH.read_text(encoding="utf-8")
+    )
+    assert metadata["source_sha256"] == inventory["sources"][0]["source_sha256"]
     assert exact_ref_resolver.approved_document_refs() == (
         "NIST_assembly_instructions.pdf",
     )
 
 
 def test_all_approved_cad_refs_return_bounded_geometry() -> None:
+    inventory = json.loads(
+        exact_ref_resolver._INVENTORY_PATH.read_text(encoding="utf-8")
+    )
     for context_ref in EXPECTED_CAD_REFS:
         result = exact_ref_resolver.resolve_context_ref(
             {"context_ref": context_ref}
@@ -138,7 +150,10 @@ def test_all_approved_cad_refs_return_bounded_geometry() -> None:
         evidence = served_context["CAD_evidence"]
         assert evidence["filename"] == context_ref
         assert evidence["units"] == "mm"
-        assert len(evidence["source_sha256"]) == 64
+        source = next(
+            item for item in inventory["sources"] if item["context_ref"] == context_ref
+        )
+        assert evidence["source_sha256"] == source["source_sha256"]
         assert evidence["triangle_count"] > 0
         assert set(evidence["bounds_mm"]) == {"minimum", "maximum", "size"}
         assert all(size > 0 for size in evidence["bounds_mm"]["size"])
@@ -188,12 +203,17 @@ def test_malformed_approved_stl_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    malformed = b"not a binary STL"
     cad_root = _use_temporary_inventory(
         monkeypatch,
         tmp_path,
-        _cad_source("Malformed.STL", "cad/Malformed.STL"),
+        _cad_source(
+            "Malformed.STL",
+            "cad/Malformed.STL",
+            source_sha256=hashlib.sha256(malformed).hexdigest(),
+        ),
     )
-    (cad_root / "Malformed.STL").write_bytes(b"not a binary STL")
+    (cad_root / "Malformed.STL").write_bytes(malformed)
 
     result = exact_ref_resolver.resolve_context_ref(
         {"context_ref": "Malformed.STL"}
@@ -201,6 +221,25 @@ def test_malformed_approved_stl_is_rejected(
 
     assert "served_context" not in result
     assert result["rejection"]["reason"] == "malformed_source"
+
+
+def test_authority_hash_mismatch_is_rejected_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cad_root = _use_temporary_inventory(
+        monkeypatch,
+        tmp_path,
+        _cad_source("Changed.STL", "cad/Changed.STL"),
+    )
+    (cad_root / "Changed.STL").write_bytes(b"changed after approval")
+
+    result = exact_ref_resolver.resolve_context_ref(
+        {"context_ref": "Changed.STL"}
+    )
+
+    assert "served_context" not in result
+    assert result["rejection"]["reason"] == "source_hash_mismatch"
 
 
 def test_inventory_cannot_point_outside_the_permitted_cad_directory(
@@ -221,13 +260,19 @@ def test_inventory_cannot_point_outside_the_permitted_cad_directory(
     assert result["rejection"]["reason"] == "forbidden_source"
 
 
-def _cad_source(context_ref: str, repository_path: str) -> dict[str, object]:
+def _cad_source(
+    context_ref: str,
+    repository_path: str,
+    *,
+    source_sha256: str = "0" * 64,
+) -> dict[str, object]:
     return {
         "context_ref": context_ref,
         "evidence_type": "CAD",
         "repository_path": repository_path,
         "source_url": "https://example.invalid/approved-source",
         "units": "mm",
+        "source_sha256": source_sha256,
     }
 
 

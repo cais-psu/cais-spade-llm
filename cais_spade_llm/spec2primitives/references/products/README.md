@@ -17,17 +17,18 @@ copied.
 
 `approved_sources.json` is the complete retrieval allowlist. It currently
 records `NIST_assembly_instructions.pdf` and the exact filenames of all 34 STL
-files under `ros2/cais_lab_robotics/cad_models/`, but the resolver and document
-pipeline accept every PDF registered with the same strict manifest contract.
+files under `ros2/cais_lab_robotics/cad_models/`, together with the expected
+SHA-256 of every source. The resolver and document pipeline accept every PDF
+registered with the same strict manifest contract.
 
 The local resolver serves each registered document's ordered pages, extracted
 text, and source SHA-256, or a bounded CAD geometry summary. It does not copy
 source files, return raw STL bytes, add sources automatically, or expose scene roles, configured
-poses, Gazebo state, or evaluator information. Historical hashes in the scene
-provenance below are not part of the Phase 1 inventory or resolver contract.
+poses, Gazebo state, or evaluator information. A source whose bytes differ from
+the authority-pinned inventory digest is unavailable.
 
 Manual lifecycle: place the PDF in this controlled directory, add its exact ref,
-repository path, source URL, and page count to `approved_sources.json`, prepare
+repository path, source URL, page count, and SHA-256 to `approved_sources.json`, prepare
 the generic cache, start the system, run generalized PA grounding, and create
 the late semantic projection only when PA understanding is sufficient. A
 changed PDF hash or changed model/schema configuration invalidates the prepared

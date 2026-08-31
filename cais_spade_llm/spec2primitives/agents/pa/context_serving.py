@@ -12,6 +12,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     ProductContextView,
 )
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
+    approved_context_ref_evidence_types,
     approved_context_refs,
     resolve_context_ref,
 )
@@ -76,6 +77,67 @@ def serve_pa_requested_context(
     )
 
 
+def retrieve_pa_evidence(
+    interaction_root: Path,
+    *,
+    product_requirement: str,
+    evidence_type: str,
+    context_ref: str | None,
+    retrieval_number: int,
+    live_observation_timeout_sec: float = 5.0,
+) -> dict[str, object]:
+    """Serve one controller-resolved native ``retrieve`` tool request."""
+    root = Path(interaction_root)
+    retrieval_path = (
+        root / "interaction_record" / f"retrieval_{retrieval_number:04d}.json"
+    )
+    if retrieval_path.exists():
+        return _failure(
+            "interaction_exists",
+            f"Native retrieval {retrieval_number:04d} already exists.",
+        )
+    if evidence_type in {"document", "CAD"}:
+        approved = approved_context_ref_evidence_types()
+        if context_ref is None or approved.get(context_ref) != evidence_type:
+            return _failure(
+                "unauthorized_evidence",
+                "The resolved static evidence is not currently approved.",
+            )
+        needed_context = {
+            "context_ref": context_ref,
+            "request_live_observation": False,
+            "clarification_question": None,
+        }
+        return _serve_static_context(
+            root,
+            retrieval_path,
+            product_requirement,
+            needed_context,
+            context_ref,
+            phase_label="native retrieve",
+            reuse_served_reference=True,
+        )
+    if evidence_type == "observation" and context_ref is None:
+        needed_context = {
+            "context_ref": None,
+            "request_live_observation": True,
+            "clarification_question": None,
+        }
+        return _serve_live_observation(
+            root,
+            retrieval_path,
+            product_requirement,
+            needed_context,
+            live_observation_timeout_sec,
+            observation_ref=f"observation_{retrieval_number:04d}",
+            phase_label="native retrieve",
+        )
+    return _failure(
+        "unauthorized_evidence",
+        "The resolved evidence type is not available to retrieve.",
+    )
+
+
 def _serve_pa_requested_context_turn(
     interaction_root: Path,
     *,
@@ -84,6 +146,7 @@ def _serve_pa_requested_context_turn(
     observation_ref: str,
     live_observation_timeout_sec: float,
     phase_label: str,
+    reuse_served_static_reference: bool = False,
 ) -> dict[str, object]:
     """Serve the exact request from one persisted PA turn."""
     retrieval_record_path = (
@@ -114,6 +177,7 @@ def _serve_pa_requested_context_turn(
             needed_context,
             context_ref,
             phase_label=phase_label,
+            reuse_served_reference=reuse_served_static_reference,
         )
     if needed_context["request_live_observation"] is True:
         return _serve_live_observation(
@@ -153,15 +217,26 @@ def _serve_static_context(
     context_ref: str,
     *,
     phase_label: str,
+    reuse_served_reference: bool,
 ) -> dict[str, object]:
     served_reference_path = interaction_root / _SERVED_REFERENCES_ROOT / f"{context_ref}.json"
+    context_request = {"context_ref": context_ref}
     if served_reference_path.exists():
+        if reuse_served_reference:
+            return _reuse_served_static_context(
+                served_reference_path,
+                retrieval_record_path,
+                product_requirement=product_requirement,
+                needed_context=needed_context,
+                context_request=context_request,
+                context_ref=context_ref,
+                phase_label=phase_label,
+            )
         return _failure(
             "interaction_exists",
             f"{phase_label} served reference already exists for {context_ref}.",
         )
 
-    context_request = {"context_ref": context_ref}
     try:
         result = resolve_context_ref(context_request)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -211,6 +286,16 @@ def _serve_static_context(
     try:
         _write_json_exclusive(served_reference_path, result)
     except FileExistsError:
+        if reuse_served_reference:
+            return _reuse_served_static_context(
+                served_reference_path,
+                retrieval_record_path,
+                product_requirement=product_requirement,
+                needed_context=needed_context,
+                context_request=context_request,
+                context_ref=context_ref,
+                phase_label=phase_label,
+            )
         return _failure(
             "interaction_exists",
             f"{phase_label} served reference already exists for {context_ref}.",
@@ -236,6 +321,68 @@ def _serve_static_context(
         needed_context=needed_context,
         context_request=context_request,
         served_context=served_context,
+        retrieval_error=None,
+        failure=None,
+        phase_label=phase_label,
+    )
+    return result if record_failure is None else record_failure
+
+
+def _reuse_served_static_context(
+    served_reference_path: Path,
+    retrieval_record_path: Path,
+    *,
+    product_requirement: str,
+    needed_context: dict[str, object],
+    context_request: dict[str, object],
+    context_ref: str,
+    phase_label: str,
+) -> dict[str, object]:
+    """Reuse one validated static source without resolving or overwriting it."""
+    try:
+        result = _read_json(served_reference_path)
+    except (OSError, TypeError, ValueError) as exc:
+        return _record_retrieval_failure(
+            retrieval_record_path,
+            product_requirement=product_requirement,
+            needed_context=needed_context,
+            context_request=context_request,
+            retrieval_error=_retrieval_error(
+                context_ref=context_ref,
+                observation_ref=None,
+                reason="invalid_served_reference",
+                message=(
+                    f"Stored served reference could not be read: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            ),
+            phase_label=phase_label,
+        )
+
+    validation_error = _static_result_validation_error(result, context_ref)
+    if validation_error is not None:
+        return _record_retrieval_failure(
+            retrieval_record_path,
+            product_requirement=product_requirement,
+            needed_context=needed_context,
+            context_request=context_request,
+            retrieval_error=_retrieval_error(
+                context_ref=context_ref,
+                observation_ref=None,
+                reason="invalid_served_reference",
+                message=f"Stored served reference is invalid: {validation_error}",
+            ),
+            phase_label=phase_label,
+        )
+    if not isinstance(result, dict) or not isinstance(result["served_context"], dict):
+        raise AssertionError("Validated served static context must be a mapping.")
+
+    record_failure = _write_retrieval_record_or_return_failure(
+        retrieval_record_path,
+        product_requirement=product_requirement,
+        needed_context=needed_context,
+        context_request=context_request,
+        served_context=result["served_context"],
         retrieval_error=None,
         failure=None,
         phase_label=phase_label,

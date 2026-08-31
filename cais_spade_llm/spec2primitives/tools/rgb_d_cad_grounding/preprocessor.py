@@ -146,16 +146,7 @@ def preprocess_served_geometry(
     delta = {
         "assertions": [],
         "uncertainty": [],
-        "unresolved_evidence_needs": [
-            {
-                "description": ("CAD correspondence has not been evaluated in Phase 4.2A."),
-                "evidence_refs": [evidence_ref],
-            },
-            {
-                "description": "Object pose has not been evaluated in Phase 4.2A.",
-                "evidence_refs": [evidence_ref],
-            },
-        ],
+        "unresolved_evidence_needs": [],
         "typed_context_refs": [record_ref],
     }
     return GeometryPreprocessingResult(

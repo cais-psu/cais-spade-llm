@@ -309,36 +309,12 @@ def test_status_reader_fails_closed_for_tampered_status(tmp_path: Path) -> None:
     assert status["pose"] == "not_evaluated"
 
 
-def test_ui_rgbd_card_is_status_only() -> None:
-    source = inspect.getsource(spec2primitives_ui._render_rgbd_segmentation_status)
+def test_demo_ui_omits_rgbd_status_card_but_keeps_status_tool() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
 
-    for required_term in (
-        "RGB-D Observation Processing",
-        "Source candidates",
-        "Assembly candidates",
-        "CAD correspondence: not_requested",
-        "Location: not_requested",
-        "Pose: not_evaluated",
-        "Robot-frame conversion: not_evaluated",
-        "read_rgbd_segmentation_status",
-    ):
-        assert required_term in source
-    for excluded_term in (
-        "ui.button",
-        "ui.select",
-        "ui.number",
-        "CAD selector",
-        "capture timeout",
-        "camera role",
-        "threshold",
-        "mask",
-        "artifact",
-        "candidate_center_m",
-        "dimension_error",
-        "context understanding complete",
-        "assembly ready",
-    ):
-        assert excluded_term.lower() not in source.lower()
+    assert "_render_rgbd_segmentation_status" not in source
+    assert "RGB-D Observation Processing" not in source
+    assert callable(read_rgbd_segmentation_status)
 
 
 def test_automatic_pipeline_has_no_operator_processing_parameters() -> None:

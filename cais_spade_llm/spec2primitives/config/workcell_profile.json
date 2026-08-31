@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "process": {
+    "symbol": "assembly",
+    "iri": "https://cais-spade-llm.local/process/assembly"
+  },
+  "resources": [
+    {
+      "symbol": "xarm6",
+      "iri": "https://cais-spade-llm.local/resource/xarm6",
+      "manifest_ref": "cais_spade_llm/initialization/resources/robot_xarm6.json"
+    },
+    {
+      "symbol": "ur5e",
+      "iri": "https://cais-spade-llm.local/resource/ur5e",
+      "manifest_ref": "cais_spade_llm/initialization/resources/robot_ur5e.json"
+    }
+  ]
+}

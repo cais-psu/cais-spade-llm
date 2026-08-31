@@ -50,15 +50,6 @@ _PROHIBITED_PA_PROPERTIES = frozenset(
     }
 )
 _PROHIBITED_PA_CLASSES = frozenset({"processExecution"})
-_PROCESS_NAMESPACE = "https://cais-spade-llm.local/process/"
-_RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
-_ASSEMBLY_PROCESS_IRI = f"{_PROCESS_NAMESPACE}assembly"
-_PREDEFINED_RESOURCE_IRIS = frozenset(
-    {
-        f"{_RESOURCE_NAMESPACE}xarm6",
-        f"{_RESOURCE_NAMESPACE}ur5e",
-    }
-)
 _TYPED_CONTEXT_PREFIX = "products/grounding/"
 _DELTA_KEYS = frozenset(
     {
@@ -244,6 +235,7 @@ def validate_and_merge_triple_delta(
     delta: TripleDelta | Mapping[str, object],
     *,
     authorized_evidence_refs: Iterable[str],
+    authorized_external_process_iris: Iterable[str] = (),
 ) -> MergeResult:
     """Validate and persist one evidence-backed delta without partial rejection.
 
@@ -255,6 +247,8 @@ def validate_and_merge_triple_delta(
         authorized_evidence_refs: Exact evidence refs permitted this turn. The
             caller constructs this trusted allowlist; it must never come from
             the proposed delta or its producing tool.
+        authorized_external_process_iris: Configured process subjects permitted
+            to assert ``realizes`` without belonging to the interaction namespace.
 
     Returns:
         A successful merge result. Invalid deltas raise instead of returning a
@@ -272,6 +266,10 @@ def validate_and_merge_triple_delta(
     if not _SAFE_IDENTIFIER.fullmatch(validated_producer):
         raise TripleDeltaError("producer must be a fixed non-path identifier.")
     authorized_refs = _validated_authorized_refs(authorized_evidence_refs)
+    authorized_processes = _validated_absolute_iris(
+        authorized_external_process_iris,
+        "authorized_external_process_iris",
+    )
     normalized_delta = _coerce_delta(delta)
     root = Path(interaction_root).resolve()
     abox, manifest, provenance = _load_persisted_abox(root, tbox)
@@ -290,6 +288,7 @@ def validate_and_merge_triple_delta(
             abox,
             tbox,
             authorized_refs,
+            authorized_processes,
         )
         candidate.add(triple)
         normalized_assertions.append(normalized_record)
@@ -313,14 +312,16 @@ def commit_host_resource_assignment(
     tbox: TBoxSnapshot,
     *,
     producer: str,
+    process_iri: str,
+    resource_iris: Iterable[str],
     assertions: Sequence[Mapping[str, object]],
     authorized_evidence_refs: Iterable[str],
 ) -> MergeResult:
-    """Persist one exact controller-authored process-execution assignment.
+    """Persist one exact system-authored process-execution assignment.
 
     This is deliberately separate from the untrusted generic delta boundary.
     The caller cannot use it to add arbitrary RDF: the four required assertions,
-    stable process, predefined resource, and controller-derived execution IRI are
+    configured process, configured resource, and system-derived execution IRI are
     validated here before the ordinary atomic persistence path is reused.
     """
     _validate_tbox_snapshot(tbox)
@@ -332,6 +333,13 @@ def commit_host_resource_assignment(
     if not _SAFE_IDENTIFIER.fullmatch(validated_producer):
         raise TripleDeltaError("producer must be a fixed non-path identifier.")
     authorized_refs = _validated_authorized_refs(authorized_evidence_refs)
+    configured_process_iri = _validated_absolute_iri(process_iri, "process_iri")
+    configured_resource_iris = _validated_absolute_iris(
+        resource_iris,
+        "resource_iris",
+    )
+    if not configured_resource_iris:
+        raise TripleDeltaError("resource_iris must not be empty.")
     if len(assertions) != 4:
         raise TripleDeltaError(
             "Host resource assignment requires exactly four assertions."
@@ -379,28 +387,35 @@ def commit_host_resource_assignment(
         for triple in triples
         if triple[0] == execution and triple[1] == ppr.runsOnResource
     ]
-    if len(resource_triples) != 1 or str(resource_triples[0][2]) not in (
-        _PREDEFINED_RESOURCE_IRIS
+    if (
+        len(resource_triples) != 1
+        or str(resource_triples[0][2]) not in configured_resource_iris
     ):
         raise TripleDeltaError(
-            "Host assignment must select exactly one predefined resource."
+            "System assignment must select exactly one configured resource."
         )
     expected = {
         (specification, ppr.hasProcessExecution, execution),
         (execution, RDF.type, ppr.processExecution),
-        (execution, ppr.runsProcess, URIRef(_ASSEMBLY_PROCESS_IRI)),
+        (execution, ppr.runsProcess, URIRef(configured_process_iri)),
         resource_triples[0],
     }
     if set(triples) != expected:
         raise TripleDeltaError(
-            "Host resource assignment does not match the exact execution pattern."
+            "System resource assignment does not match the exact execution pattern."
         )
 
     candidate = Graph()
     for prefix, namespace in abox.graph.namespaces():
         candidate.bind(prefix, namespace)
-    candidate.bind("process", Namespace(_PROCESS_NAMESPACE))
-    candidate.bind("resource", Namespace(_RESOURCE_NAMESPACE))
+    candidate.bind(
+        "process",
+        Namespace(configured_process_iri.rsplit("/", 1)[0] + "/"),
+    )
+    candidate.bind(
+        "resource",
+        Namespace(next(iter(configured_resource_iris)).rsplit("/", 1)[0] + "/"),
+    )
     for triple in abox.graph:
         candidate.add(triple)
     for triple in expected:
@@ -635,6 +650,24 @@ def _validated_authorized_refs(values: Iterable[str]) -> frozenset[str]:
     return frozenset(refs)
 
 
+def _validated_absolute_iris(
+    values: Iterable[str],
+    label: str,
+) -> frozenset[str]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+        raise TripleDeltaError(f"{label} must be an iterable of IRIs.")
+    iris = [_validated_absolute_iri(value, f"{label} entry") for value in values]
+    if len(iris) != len(set(iris)):
+        raise TripleDeltaError(f"{label} contains duplicates.")
+    return frozenset(iris)
+
+
+def _validated_absolute_iri(value: object, label: str) -> str:
+    iri = _require_nonempty_string(value, label, TripleDeltaError)
+    _require_absolute_iri(iri, label, TripleDeltaError)
+    return iri
+
+
 def _validate_delta_metadata(
     delta: TripleDelta,
 ) -> None:
@@ -656,6 +689,7 @@ def _validated_assertion(
     abox: ABoxSnapshot,
     tbox: TBoxSnapshot,
     authorized_refs: frozenset[str],
+    authorized_processes: frozenset[str],
 ) -> tuple[tuple[URIRef, URIRef, URIRef | Literal], dict[str, object]]:
     _raise_if_primitive_symbol(assertion.subject, TripleDeltaError)
     _raise_if_prohibited_property(assertion.predicate, TripleDeltaError)
@@ -663,7 +697,7 @@ def _validated_assertion(
     _require_absolute_iri(assertion.predicate, "assertion predicate", TripleDeltaError)
     ppr = Namespace(tbox.ppr_namespace)
     authorized_external_process = (
-        assertion.subject == _ASSEMBLY_PROCESS_IRI
+        assertion.subject in authorized_processes
         and assertion.predicate == str(ppr.realizes)
     )
     if not assertion.subject.startswith(abox.namespace) and not authorized_external_process:
@@ -810,8 +844,7 @@ def _validate_pa_abox_triple(  # noqa: C901, PLR0912
     if not isinstance(subject, URIRef):
         raise TripleDeltaError("ABox subjects must be IRIs.")
     if (
-        subject == URIRef(_ASSEMBLY_PROCESS_IRI)
-        and predicate == ppr.realizes
+        predicate == ppr.realizes
         and isinstance(object_node, URIRef)
         and str(object_node).startswith(namespace)
     ):
@@ -828,11 +861,11 @@ def _validate_pa_abox_triple(  # noqa: C901, PLR0912
             raise TripleDeltaError("ABox process execution link is invalid.")
         return
     if predicate == ppr.runsProcess:
-        if subject != execution or object_node != URIRef(_ASSEMBLY_PROCESS_IRI):
+        if subject != execution or not isinstance(object_node, URIRef):
             raise TripleDeltaError("ABox execution process is invalid.")
         return
     if predicate == ppr.runsOnResource:
-        if subject != execution or str(object_node) not in _PREDEFINED_RESOURCE_IRIS:
+        if subject != execution or not isinstance(object_node, URIRef):
             raise TripleDeltaError("ABox execution resource is invalid.")
         return
     _raise_if_prohibited_property(str(predicate), TripleDeltaError)
@@ -905,11 +938,10 @@ def _validate_semantic_bridge(
             )
         defined_features.add(defined_feature)
     for process, realized_feature in graph.subject_objects(ppr.realizes):
-        if process != URIRef(_ASSEMBLY_PROCESS_IRI) and not _instance_is_type(
-            graph,
-            process,
-            ppr.process,
-            tbox,
+        if not isinstance(process, URIRef):
+            raise TripleDeltaError("realizes subject must be an IRI.")
+        if str(process).startswith(str(specification).rsplit("/", 1)[0]) and not (
+            _instance_is_type(graph, process, ppr.process, tbox)
         ):
             raise TripleDeltaError("realizes subject must be typed as process.")
         if not isinstance(realized_feature, URIRef) or not _instance_is_type(
@@ -940,7 +972,7 @@ def _validate_process_execution(
     defined_features: set[URIRef],
     tbox: TBoxSnapshot,
 ) -> None:
-    """Validate the optional controller-authored current assignment."""
+    """Validate the optional system-authored current assignment."""
     ppr = Namespace(tbox.ppr_namespace)
     expected_execution = URIRef(
         f"{str(specification).rsplit('/', 1)[0]}/process_execution_0001"
@@ -960,22 +992,27 @@ def _validate_process_execution(
         raise TripleDeltaError("ABox must contain one current process execution.")
     if typed != {expected_execution}:
         raise TripleDeltaError("ABox process execution type is incomplete.")
-    if runs_process != [
-        (expected_execution, URIRef(_ASSEMBLY_PROCESS_IRI))
-    ]:
-        raise TripleDeltaError("ABox process execution must run assembly exactly once.")
+    if (
+        len(runs_process) != 1
+        or runs_process[0][0] != expected_execution
+        or not isinstance(runs_process[0][1], URIRef)
+    ):
+        raise TripleDeltaError(
+            "ABox process execution must run one configured process."
+        )
     if (
         len(runs_resource) != 1
         or runs_resource[0][0] != expected_execution
-        or str(runs_resource[0][1]) not in _PREDEFINED_RESOURCE_IRIS
+        or not isinstance(runs_resource[0][1], URIRef)
     ):
         raise TripleDeltaError(
-            "ABox process execution must run on one predefined resource."
+            "ABox process execution must run on one configured resource."
         )
-    realized = set(graph.objects(URIRef(_ASSEMBLY_PROCESS_IRI), ppr.realizes))
+    process_iri = runs_process[0][1]
+    realized = set(graph.objects(process_iri, ppr.realizes))
     if not realized or not realized.issubset(defined_features):
         raise TripleDeltaError(
-            "ABox assigned assembly must realize a feature of this specification."
+            "ABox assigned process must realize a feature of this specification."
         )
 
 

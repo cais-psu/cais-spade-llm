@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,13 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+    CameraToWorldCalibrationRuntime,
     ProductionProductContextGroundingRuntime,
 )
 from cais_spade_llm.spec2primitives.config import (
+    DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH,
     ModelRuntimeConfig,
+    load_camera_to_world_calibration_runtime,
     load_model_runtime_config,
 )
 from cais_spade_llm.spec2primitives.ontology import (
@@ -62,6 +66,8 @@ class Spec2PrimitivesUIRuntime:
     document_diagnostic_unavailable_reason: str | None = None
     document_source_status: tuple[dict[str, object], ...] = ()
     observation_capture_runtime: ObservationCaptureRuntime | None = None
+    camera_to_world_calibration_runtime: CameraToWorldCalibrationRuntime | None = None
+    camera_to_world_calibration_unavailable_reason: str | None = None
 
 
 class _UnavailableProductAgentRuntime:
@@ -72,8 +78,14 @@ class _UnavailableProductAgentRuntime:
         prompt: str,
         *,
         response_format: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[
+            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+        ]
+        | None = None,
+        max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        del prompt, response_format
+        del prompt, response_format, tools, tool_executor, max_tool_rounds
         raise RuntimeError("Spec2Primitives model configuration is unavailable.")
 
 
@@ -91,7 +103,27 @@ def create_spec2primitives_ui_runtime(
     vision_runtime: DocumentVisionRuntime | None = None
     tbox: TBoxSnapshot | None = None
     unavailable_reason: str | None = None
+    calibration_runtime: CameraToWorldCalibrationRuntime | None = None
+    calibration_unavailable_reason: str | None = None
     product_agent: ProductAgentContextRuntime = _UnavailableProductAgentRuntime()
+
+    calibration_path_override = os.environ.get(
+        "SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH"
+    )
+    calibration_path = (
+        Path(calibration_path_override)
+        if calibration_path_override
+        else DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH
+    )
+    try:
+        calibration_runtime = load_camera_to_world_calibration_runtime(
+            calibration_path
+        )
+    except (OSError, ValueError) as exc:
+        calibration_unavailable_reason = (
+            "Approved camera-to-world calibration manifest is invalid: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     try:
         model_config = load_model_runtime_config()
@@ -139,6 +171,10 @@ def create_spec2primitives_ui_runtime(
             tbox=tbox,
             document_config=model_config.document_vlm,
             document_vision_runtime=vision_runtime,
+            camera_to_world_calibration_runtime=calibration_runtime,
+            camera_to_world_calibration_unavailable_reason=(
+                calibration_unavailable_reason
+            ),
         )
 
     return Spec2PrimitivesUIRuntime(
@@ -153,6 +189,10 @@ def create_spec2primitives_ui_runtime(
         document_diagnostic_unavailable_reason=unavailable_reason,
         document_source_status=document_source_status,
         observation_capture_runtime=LiveGazeboObservationCaptureRuntime(),
+        camera_to_world_calibration_runtime=calibration_runtime,
+        camera_to_world_calibration_unavailable_reason=(
+            calibration_unavailable_reason
+        ),
     )
 
 
