@@ -8,12 +8,13 @@
 
 The end-to-end workflow in this document is proposed architecture. The current
 package implements the PA interaction boundary through Phase 3.5 and the pre-RA
-grounding runtime through Phase 4.4. Phase 4.4 replaces terminal
-`fill_ontology` with provisional `propose_grounding`, joins the accepted task
-ABox to a predefined Workcell ABox, derives a non-persisted world-pose need,
-routes that typed need through the approved evidence providers, performs
-manifest-backed coarse reach checks, and lets only the host commit the selected
-resource as a `processExecution` assignment. The exact `xarm6` and `ur5e`
+grounding runtime through Phase 4.4. PA uses one native `retrieve` tool and
+returns a direct ontology proposal. Phase 4.4 validates that proposal against a
+transient ABox, derives the active consumer's typed prerequisite closure, and
+returns any source-evidence gap to PA without committing semantic assertions.
+After the target-specific location chain passes, the system performs
+manifest-backed coarse reach checks and commits the selected resource as a
+`processExecution` assignment. The exact `xarm6` and `ur5e`
 identities remain pinned to their shared manifests; their broad
 `capableOf assembly` assertions do not encode reach or a primitive sequence. No
 Phase 5 RA adapter, primitive catalog, primitive composer, validator stack, or
@@ -34,8 +35,8 @@ The central research question is:
 The intentional research gap inside the representation is that broad
 `resource capableOf assembly` assertions do not establish which robot can reach
 the product now and encode no task-to-primitive decomposition. Phase 4.4 closes
-the first gap with hash-pinned pose evidence and manifest reach checks, then the
-host records one execution assignment. The selected RA's later typed catalog
+the first gap with hash-pinned location evidence and manifest reach checks, then
+the system records one execution assignment. The selected RA's later typed catalog
 exposes lower-level primitive interfaces without primitive-level `capableOf`
 assertions. The RA LLM must interpret the process meaning, outcome, grounded
 bindings, primitive descriptions, and fresh state to propose the missing
@@ -65,7 +66,7 @@ combination of:
 
 1. PA dynamically grounding an incomplete product requirement from only the
    relevant approved document, CAD, and RGB-D evidence, followed by an
-   evidence-backed host assignment of the task to one predefined resource.
+   evidence-backed system assignment of the task to one predefined resource.
 2. RA, where RA means RobotAgent, interpreting that required transition against
    fresh selected-resource state and the complete current semantic primitive
    catalog with partial local executable contracts, then agentically authoring
@@ -82,9 +83,9 @@ the fundamental contribution by themselves.
 The evidence-first manual pipeline is also supporting infrastructure for the
 composition paper, not a general document-understanding contribution. A
 generic cached overview is separated from generalized PA understanding and a
-late evidence-cited ontology/context proposal; the shared validator alone
-accepts assertions. Targeted whole-document vision is deferred until PA selects
-`inspect` with a focused question. This supports newly
+late evidence-cited ontology/context proposal; deterministic validation and its
+typed-evidence gate alone accept assertions. One document retrieval returns all
+ordered pages without a targeted inspection question. This supports newly
 registered specifications and manuals without product-purpose prompts or a
 hard-coded question such as where a particular gear is located.
 
@@ -113,10 +114,10 @@ The ontology split is:
 - The immutable TBox contains generic PPR classes, properties, restrictions,
   and the narrow `processExecution` assignment vocabulary.
 - PA proposes a per-interaction ABox only from the requirement and authorized,
-  hash-pinned evidence; the host accepts only individuals and relations that
+  hash-pinned evidence; the system accepts only individuals and relations that
   the current TBox can represent.
 - The predefined Workcell ABox records `xarm6` and `ur5e` as resources broadly
-  `capableOf assembly`. Only the host adds the selected `processExecution` after
+  `capableOf assembly`. Only the system adds the selected `processExecution` after
   typed evidence and manifest-backed reach validation.
 - The selected RA later supplies a separate versioned typed primitive-catalog
   snapshot. It pins exact symbols, fingerprint, and cardinality without
@@ -161,13 +162,15 @@ requirement + ontology
         ↓
 retrieve only currently relevant approved evidence
         ↓
-propose and validate a provisional semantic ABox
+validate a proposal against a transient semantic ABox
         ↓
-derive the unresolved resource-assignment output type
+derive the active consumer's typed prerequisite closure
         ↓
-resolve only that typed provider chain
+missing source evidence returns to PA retrieval ↺
         ↓
-host commits the evidence-backed processExecution assignment
+accepted target-specific location enables reach evaluation
+        ↓
+system commits the semantic ABox and processExecution assignment
 ```
 
 Provider-owned `GroundingProducerDescriptor` values declare exact IDs,
@@ -183,21 +186,22 @@ Derived provider state is keyed by the exact prerequisite record refs and
 SHA-256 values, not merely by record type. An unchanged ambiguous or rejected
 result runs once and exposes a new external evidence revision; a newer RGB-D or
 CAD binding invalidates only the downstream correspondence, pose, calibration
-use, and world-pose conversion. Hash-changed embedded evidence is represented as
+use, and robot-frame location conversion. Hash-changed embedded evidence is represented as
 stale and reopens the need. Manifest or authority failures remain terminal and
 do not masquerade as a reason to recapture the scene.
 
-For the current sole approved six-page NIST PDF, question-targeted document
-inspection supplies pages 1 through 6 together and in order. It uses neither
-page ranking nor RAG; large-document retrieval remains outside this scope.
+For the current sole approved six-page NIST PDF, one document retrieval supplies
+pages 1 through 6 together and in order. It uses neither a targeted question,
+page ranking, nor RAG; large-document retrieval remains outside this scope.
 
-The model never manages intermediate statements or information-need state.
-The host validates selected actions, exact replay keys, citations, hashes, and
-TBox signatures. After a provisional proposal, the host recomputes the
-non-persisted `ResourceAssignmentNeed` from accepted ABox and typed-record state.
-A repeated or invalid model action receives one repair and then becomes
-`incomplete`; a twice-invalid mapping becomes `ontology_gap`. Neither state
-causes an unchanged evidence retry or a manufactured assertion.
+The model never manages intermediate statements or information-need state. The
+system validates native tool calls, exact replay keys, citations, hashes, and
+TBox signatures. After a provisional proposal, it computes the non-persisted
+`ResourceAssignmentNeed` from the provisional graph and current typed records.
+Descriptor prerequisites determine which records are missing and which approved
+evidence handles can produce them. PA may retrieve again within the bounded
+investigation; invalid, unavailable, stale, ambiguous, or exhausted paths stop
+fail-closed without a manufactured assertion.
 
 The PA handoff is the validated post-assignment ontology projection,
 `ResourceSelectionRecord`, and minimum hash-pinned typed evidence. There is no
@@ -211,9 +215,20 @@ Product or scene gaps are deduplicated into one `MissingContextBatch` per round.
 
 Formal PA completion pins both the exact `ResourceSelectionRecord` and the
 `resource_grounding_host` assignment delta. The four execution assertions must
-all cite that same selection record, and its selected resource, world-pose hash,
+all cite that same selection record, and its selected resource, grounding-record hash,
 ordered reach verdicts, and final `runsOnResource` value must agree when the
 completion is reloaded.
+
+For `assemble medium gear`, PA may first retrieve the NIST manual and
+`Gear_Medium.STL` and propose the feature realized by `assembly`. Validation
+creates a provisional graph but writes no semantic assertion. The active coarse
+resource consumer declares `RobotFrameLocationRecord`; if observation-produced
+segmentation is absent, the descriptor closure reports that source-evidence gap
+to PA. After PA retrieves the approved live observation, target-cited CAD plus
+segmentation yields correspondence, correspondence plus calibration yields the
+required location, and only then can the system accept the semantic ABox and
+select a reachable resource. In the current evaluated scene this produces
+`xarm6`; the identifier is not a retrieval rule or an ontology entailment.
 
 PA may service one batch through several existing single-source audited
 operations, then returns one new versioned `CompositionContextBundle`. There is
@@ -236,17 +251,15 @@ during composition.
 PA
 ├── document evidence tool
 │   ├── registered PDF validation and content-addressed overview cache
-│   ├── generic ontology-neutral overview
-│   ├── minimal PA action plus host-owned action journal
-│   ├── late evidence-cited ontology/context proposal plus deterministic validation
-│   └── question-targeted full-document VLM evidence
+│   ├── complete ordered-page ontology-neutral overview
+│   └── native retrieve call with audited source identity and hashes
 │
 └── RGB-D/CAD grounding tool
     ├── RGB-D capture and preprocessing
     ├── minimal camera-local segmentation
     ├── one-CAD size association and camera-frame candidate center
-    ├── generalized camera-frame pose estimation
-    └── camera-to-robot frame conversion from injected calibration
+    ├── location conversion from injected calibration
+    └── optional pose estimation for orientation-sensitive consumers
 ```
 
 Only PA and RA are agents. The observation provider and the perception
@@ -343,24 +356,23 @@ PA loads the fixed TBox and initializes one interaction ABox
         ↓
 PA receives the exact requirement, TBox, available sources, and retrieved records
         ↓
-PA returns one minimal retrieve/inspect/propose/clarify/incomplete action
+PA optionally calls retrieve(evidence_id) zero or more times
         ↓
-the host resolves provider metadata and rejects exact replays
-        ↺ each provider action remains one auditable source operation
+PA returns a direct ontology proposal, clarification, or insufficient evidence
         ↓
-PA returns one provisional ontology proposal plus cited context summary
+deterministic validation creates a transient provisional ABox
         ↓
-deterministic validation commits the semantic ABox
+the unique defines/realizes join identifies the primary feature
         ↓
-the task/Workcell semantic join identifies broad assembly candidates
+the active consumer declares RobotFrameLocationRecord
         ↓
-missing world-frame product pose derives ResourceAssignmentNeed
+descriptor closure reports any missing source evidence to PA ↺
         ↓
-typed provider prerequisites obtain only required approved evidence
+accepted target-specific location gates semantic acceptance
         ↓
-manifest-backed reach selects one resource in fixed registry order
+manifest-backed reach selects one resource in configured profile order
         ↓
-host commits processExecution and completion pins the post-assignment ABox
+system commits the semantic ABox and processExecution assignment
         ↓
 future Phase 5 unicasts to the selected exact resource_jid
         ↓

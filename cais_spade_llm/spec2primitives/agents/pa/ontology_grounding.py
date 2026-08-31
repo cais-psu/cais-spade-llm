@@ -17,6 +17,7 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     ABoxSnapshot,
     MergeResult,
     validate_and_merge_triple_delta,
+    validate_triple_delta,
 )
 from cais_spade_llm.spec2primitives.ontology import (
     PredefinedWorkcellSnapshot,
@@ -107,6 +108,18 @@ class OntologyGroundingResult:
 
 
 @dataclass(frozen=True)
+class OntologyGroundingCandidate:
+    """Hold one valid but uncommitted PA ontology proposal."""
+
+    provisional_abox: ABoxSnapshot
+    proposal_path: Path
+    proposal_number: int
+    output: Mapping[str, object]
+    compiled_delta: Mapping[str, object]
+    proposal: OntologyGroundingProposal
+
+
+@dataclass(frozen=True)
 class OntologyGroundingInterruption:
     """Return a direct ProductAgent clarification or insufficiency result."""
 
@@ -114,7 +127,7 @@ class OntologyGroundingInterruption:
     message: str
 
 
-async def propose_and_validate_ontology_grounding(
+async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
     product_agent: ProductAgentContextRuntime,
     *,
     interaction_root: Path,
@@ -129,8 +142,9 @@ async def propose_and_validate_ontology_grounding(
     ],
     max_tool_rounds: int,
     required_output_projection: Mapping[str, object],
-) -> OntologyGroundingResult | OntologyGroundingInterruption:
-    """Let PA investigate with controlled tools, then validate its direct result."""
+    validation_gap: Mapping[str, object] | None = None,
+) -> OntologyGroundingCandidate | OntologyGroundingInterruption:
+    """Let PA investigate and return one valid, uncommitted semantic candidate."""
     root = Path(interaction_root).resolve()
     if abox.interaction_root != root or abox.tbox_fingerprint != tbox.fingerprint:
         raise OntologyGroundingError(
@@ -193,19 +207,28 @@ async def propose_and_validate_ontology_grounding(
             "supporting_feature_count": "zero_or_more",
         },
     }
+    if validation_gap is not None:
+        prompt_input["current_validation_gap"] = dict(validation_gap)
     base_prompt = (
         "Investigate the requirement using the controlled retrieve tool whenever "
         "additional approved evidence is useful. You may retrieve zero, one, or "
         "multiple catalog entries in any order. Catalog metadata is discovery-only; "
         "only evidence refs returned by retrieve may support assertions. After tool "
-        "use, return proposal fields directly, one clarification_question, or one "
-        "insufficient_evidence result. For a proposal, create one concise context "
-        "summary and "
-        "Ground the smallest set of distinct, evidence-supported requirement-level "
+        "use, return exactly one result containing proposal fields, one "
+        "clarification_question, or one insufficient_evidence result. The supplied "
+        "required_output_projection is mandatory and system-authorized: never ask "
+        "the user whether it should be satisfied or whether approved evidence should "
+        "be retrieved for it. Ask a clarification only for requirement meaning that "
+        "the approved evidence cannot resolve. For a "
+        "proposal, create one concise context summary. Ground the smallest set of "
+        "distinct, evidence-supported requirement-level "
         "features needed for current_grounding_goal. Choose the feature count from "
         "the evidence. Give every feature one concise grounded_meaning and direct "
-        "evidence_refs. Use the supplied property signatures and current individuals "
-        "to identify exactly one current execution target for the predefined process; "
+        "evidence_refs. Every proposed feature must have exactly one defines relation "
+        "from the initialized specification. Exactly one proposed feature must also "
+        "have one realizes relation from the predefined process. Use the supplied "
+        "property signatures and current individuals to identify that current "
+        "execution target; "
         "any other grounded features are supporting specification context. Give every "
         "relation its direct evidence_refs and cite only refs returned by retrieve "
         "or requirement_0001. Keep "
@@ -234,13 +257,20 @@ async def propose_and_validate_ontology_grounding(
     )
     proposal_number = _next_proposal_number(root)
     proposal_path = root / _PROPOSAL_ROOT / f"proposal_{proposal_number:04d}.json"
-    output = await product_agent.ask_llm_structured(
+    transport_output = await product_agent.ask_llm_structured(
         base_prompt,
         response_format=response_format,
         tools=tools,
         tool_executor=tool_executor,
         max_tool_rounds=max_tool_rounds,
     )
+    if (
+        not isinstance(transport_output, Mapping)
+        or set(transport_output) != {"result"}
+        or not isinstance(transport_output["result"], Mapping)
+    ):
+        raise OntologyGroundingError("ProductAgent grounding result wrapper is invalid.")
+    output = transport_output["result"]
     if isinstance(output, Mapping) and set(output) == {"clarification_question"}:
         message = output["clarification_question"]
         if not isinstance(message, str) or not message.strip():
@@ -269,10 +299,9 @@ async def propose_and_validate_ontology_grounding(
             proposal_number=proposal_number,
             abox=abox,
         )
-        merge = validate_and_merge_triple_delta(
+        validated_delta = validate_triple_delta(
             root,
             tbox,
-            _PRODUCER,
             delta,
             authorized_evidence_refs=sorted(authorized_evidence_refs),
             authorized_external_process_iris={workcell.process_iri},
@@ -292,19 +321,62 @@ async def propose_and_validate_ontology_grounding(
             f"OntologyGroundingProposal is invalid: {failure}"
         ) from exc
 
-    _write_proposal_record(
-        proposal_path,
+    return OntologyGroundingCandidate(
+        provisional_abox=validated_delta.abox,
+        proposal_path=proposal_path,
         proposal_number=proposal_number,
+        output=dict(output),
+        compiled_delta=dict(delta),
+        proposal=proposal,
+    )
+
+
+def commit_ontology_grounding_candidate(
+    candidate: OntologyGroundingCandidate,
+    *,
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    abox: ABoxSnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    authorized_evidence_refs: set[str],
+) -> OntologyGroundingResult:
+    """Revalidate and persist one evidence-ready ontology candidate."""
+    root = Path(interaction_root).resolve()
+    if (
+        abox.interaction_root != root
+        or candidate.provisional_abox.interaction_root != root
+        or abox.namespace != candidate.provisional_abox.namespace
+        or abox.product_requirement != candidate.provisional_abox.product_requirement
+        or abox.tbox_fingerprint != tbox.fingerprint
+        or candidate.provisional_abox.tbox_fingerprint != tbox.fingerprint
+        or candidate.proposal_path
+        != root / _PROPOSAL_ROOT / f"proposal_{candidate.proposal_number:04d}.json"
+        or candidate.proposal_path.exists()
+    ):
+        raise OntologyGroundingError(
+            "Ontology grounding candidate no longer matches this interaction."
+        )
+    merge = validate_and_merge_triple_delta(
+        root,
+        tbox,
+        _PRODUCER,
+        candidate.compiled_delta,
+        authorized_evidence_refs=sorted(authorized_evidence_refs),
+        authorized_external_process_iris={workcell.process_iri},
+    )
+    _write_proposal_record(
+        candidate.proposal_path,
+        proposal_number=candidate.proposal_number,
         specification_iri=abox.specification_iri,
-        output=output,
-        compiled_delta=delta,
+        output=candidate.output,
+        compiled_delta=candidate.compiled_delta,
         status="accepted",
         failure=None,
     )
     return OntologyGroundingResult(
         merge=merge,
-        proposal_path=proposal_path,
-        proposal=proposal,
+        proposal_path=candidate.proposal_path,
+        proposal=candidate.proposal,
     )
 
 
@@ -591,17 +663,37 @@ def _proposal_response_format(  # noqa: PLR0913
     object_properties: Sequence[str],
     datatype_properties: Sequence[str],
 ) -> dict[str, Any]:
-    subject_properties = {
-        "subject_kind": {
-            "type": "string",
-            "enum": ["specification", "new_individual", "existing_individual"],
+    # Nullable reference fields alone permit contradictory kind/reference
+    # combinations, so strict output enumerates only system-valid combinations.
+    subject_property_variants = (
+        {
+            "subject_kind": {"type": "string", "enum": ["specification"]},
+            "subject_individual_index": {"type": "null"},
+            "subject_iri": {"type": "null"},
         },
-        "subject_individual_index": {"type": ["integer", "null"], "minimum": 1},
-        "subject_iri": {
-            "type": ["string", "null"],
-            "enum": [None, *existing_iris],
+        {
+            "subject_kind": {"type": "string", "enum": ["new_individual"]},
+            "subject_individual_index": {"type": "integer", "minimum": 1},
+            "subject_iri": {"type": "null"},
         },
-    }
+        {
+            "subject_kind": {"type": "string", "enum": ["existing_individual"]},
+            "subject_individual_index": {"type": "null"},
+            "subject_iri": {"type": "string", "enum": list(existing_iris)},
+        },
+    )
+    object_property_variants = (
+        {
+            "object_kind": {"type": "string", "enum": ["new_individual"]},
+            "object_individual_index": {"type": "integer", "minimum": 1},
+            "object_iri": {"type": "null"},
+        },
+        {
+            "object_kind": {"type": "string", "enum": ["existing_individual"]},
+            "object_individual_index": {"type": "null"},
+            "object_iri": {"type": "string", "enum": list(existing_iris)},
+        },
+    )
     individual = {
         "type": "object",
         "additionalProperties": False,
@@ -621,122 +713,131 @@ def _proposal_response_format(  # noqa: PLR0913
         },
     }
     relation = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": sorted(_RELATION_KEYS),
-        "properties": {
-            **subject_properties,
-            "predicate_iri": {
-                "type": "string",
-                "enum": list(object_properties) or ["no_object_property_available"],
-            },
-            "object_kind": {
-                "type": "string",
-                "enum": ["new_individual", "existing_individual"],
-            },
-            "object_individual_index": {
-                "type": ["integer", "null"],
-                "minimum": 1,
-            },
-            "object_iri": {
-                "type": ["string", "null"],
-                "enum": [None, *existing_iris],
-            },
-            "evidence_refs": {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
-            },
-        },
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": sorted(_RELATION_KEYS),
+                "properties": {
+                    **subject_properties,
+                    "predicate_iri": {
+                        "type": "string",
+                        "enum": list(object_properties)
+                        or ["no_object_property_available"],
+                    },
+                    **object_reference_properties,
+                    "evidence_refs": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "minItems": 1,
+                    },
+                },
+            }
+            for subject_properties in subject_property_variants
+            for object_reference_properties in object_property_variants
+        ]
     }
     literal = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": sorted(_LITERAL_KEYS),
-        "properties": {
-            **subject_properties,
-            "predicate_iri": {
-                "type": "string",
-                "enum": list(datatype_properties)
-                or ["no_datatype_property_available"],
-            },
-            "value": {
-                "anyOf": [
-                    {"type": "string"},
-                    {"type": "number"},
-                    {"type": "boolean"},
-                ]
-            },
-            "datatype": {"type": ["string", "null"]},
-            "language": {"type": ["string", "null"]},
-        },
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": sorted(_LITERAL_KEYS),
+                "properties": {
+                    **subject_properties,
+                    "predicate_iri": {
+                        "type": "string",
+                        "enum": list(datatype_properties)
+                        or ["no_datatype_property_available"],
+                    },
+                    "value": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "number"},
+                            {"type": "boolean"},
+                        ]
+                    },
+                    "datatype": {"type": ["string", "null"]},
+                    "language": {"type": ["string", "null"]},
+                },
+            }
+            for subject_properties in subject_property_variants
+        ]
     }
-    # The structured-output API rejects uniqueItems; _validated_proposal keeps
-    # uniqueness deterministic after parsing instead of weakening the contract.
+    # The structured-output API requires an object root, so the semantic union
+    # lives under result and is unwrapped before deterministic system validation.
+    # The API also rejects uniqueItems; _validated_proposal keeps uniqueness
+    # deterministic after parsing instead of weakening the contract.
     return {
         "name": "spec2primitives_grounding_result",
         "strict": True,
         "schema": {
             "type": "object",
-            "anyOf": [
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": sorted(_PROPOSAL_KEYS),
-                    "properties": {
-                        "individuals": {
-                            "type": "array",
-                            "items": individual,
-                            **({} if classes else {"maxItems": 0}),
+            "additionalProperties": False,
+            "required": ["result"],
+            "properties": {
+                "result": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": sorted(_PROPOSAL_KEYS),
+                            "properties": {
+                                "individuals": {
+                                    "type": "array",
+                                    "items": individual,
+                                    **({} if classes else {"maxItems": 0}),
+                                },
+                                "relations": {
+                                    "type": "array",
+                                    "items": relation,
+                                    **({} if object_properties else {"maxItems": 0}),
+                                },
+                                "literal_facts": {
+                                    "type": "array",
+                                    "items": literal,
+                                    **({} if datatype_properties else {"maxItems": 0}),
+                                },
+                                "context_summary": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                },
+                                "evidence_refs": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                },
+                                "missing_information": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                            },
                         },
-                        "relations": {
-                            "type": "array",
-                            "items": relation,
-                            **({} if object_properties else {"maxItems": 0}),
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["clarification_question"],
+                            "properties": {
+                                "clarification_question": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                }
+                            },
                         },
-                        "literal_facts": {
-                            "type": "array",
-                            "items": literal,
-                            **({} if datatype_properties else {"maxItems": 0}),
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["insufficient_evidence"],
+                            "properties": {
+                                "insufficient_evidence": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                }
+                            },
                         },
-                        "context_summary": {
-                            "type": "string",
-                            "minLength": 1,
-                        },
-                        "evidence_refs": {
-                            "type": "array",
-                            "items": {"type": "string", "minLength": 1},
-                            "minItems": 1,
-                        },
-                        "missing_information": {
-                            "type": "array",
-                            "items": {"type": "string", "minLength": 1},
-                        },
-                    },
+                    ],
                 },
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["clarification_question"],
-                    "properties": {
-                        "clarification_question": {
-                            "type": "string",
-                            "minLength": 1,
-                        }
-                    },
-                },
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["insufficient_evidence"],
-                    "properties": {
-                        "insufficient_evidence": {
-                            "type": "string",
-                            "minLength": 1,
-                        }
-                    },
-                },
-            ],
+            },
         },
     }
 

@@ -195,6 +195,31 @@ def test_shared_product_agent_bridge_wraps_async_retrieve_callback(
     assert len(scheduled) == 1
 
 
+def test_shared_product_agent_bridge_applies_configured_reasoning_effort(
+    monkeypatch: Any,
+) -> None:
+    created: list[Any] = []
+
+    class _SharedAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.args = args
+            self.kwargs = kwargs
+            self.reasoning_effort = "medium"
+            created.append(self)
+
+    monkeypatch.setattr(product_agent_runtime, "ProductAgent", _SharedAgent)
+
+    runtime = product_agent_runtime.create_product_agent_context_runtime(
+        model="gpt-5.4",
+        reasoning_effort="none",
+    )
+
+    assert runtime is not None
+    assert len(created) == 1
+    assert created[0].reasoning_effort == "none"
+    assert created[0].kwargs["model"] == "gpt-5.4"
+
+
 def test_completed_view_has_five_simple_stages_and_location(
     tmp_path: Path,
 ) -> None:

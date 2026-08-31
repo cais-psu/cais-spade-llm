@@ -19,10 +19,11 @@ specification.
 
 The dynamic PA-to-RA composition workflow in this document is the proposed
 ICRA architecture. The PA context adapter through Phase 3.5 and production
-pre-RA grounding through Phase 4.4 exist. Phase 4.4 adds provisional
-`propose_grounding`, a predefined Workcell with broad `capableOf assembly`
-assertions, ontology-derived world-pose retrieval, manifest-backed coarse reach,
-and a host-authored `processExecution` assignment. Phase 5 selected-RA handoff,
+pre-RA grounding through Phase 4.4 exist. Phase 4.4 adds a native controlled
+`retrieve` tool, transient ontology-proposal validation, descriptor-derived
+typed evidence gating, a predefined Workcell with broad `capableOf assembly`
+assertions, location-based coarse reach, and a system-authored
+`processExecution` assignment. Phase 5 selected-RA handoff,
 typed primitive-catalog loading, `PrimitiveProgramDraft` authoring, batched
 context exchange, validation, and execution are not implemented; no
 Phase 5--9 runtime behavior is claimed.
@@ -169,13 +170,13 @@ The symbolic side consists of more than OWL alone:
 - the evidence-backed interaction ABox records the grounded requested process,
   product facts, features, and required outcome for the current interaction;
 - the predefined Workcell ABox records `xarm6` and `ur5e` as broadly
-  `capableOf assembly`, while a host-authored execution individual records the
-  one resource selected using typed pose evidence and manifest reach;
+  `capableOf assembly`, while a system-authored execution individual records the
+  one resource selected using typed location evidence and manifest reach;
 - the RA-authoritative, versioned primitive catalog snapshot enumerates the
   complete callable composition surface for that resource and interaction in a
   typed record without primitive-level `capableOf` assertions or a
   task-specific decomposition;
-- typed context records retain poses, observations, calibration, tolerances,
+- typed context records retain locations, poses, observations, calibration, tolerances,
   resource state, and other values when the loaded TBox has no predicate for
   them; and
 - partial primitive contracts and deterministic validators check the candidate
@@ -214,7 +215,7 @@ formal model:
 The resulting closed loop is:
 
 ```text
-TBox + interaction ABox + predefined Workcell ABox + host assignment
+TBox + interaction ABox + predefined Workcell ABox + system assignment
         + selected-RA typed catalog + typed context refs + partial contracts
         ↓ bounded grounded projection
         ├─ PA neural decision → controlled evidence producer
@@ -582,17 +583,19 @@ PA understands the requirement and ontology together
         ↓
 PA retrieves only currently relevant approved evidence
         ↓
-PA proposes a provisional semantic ABox and cited context summary
+PA proposes a cited semantic ABox candidate
         ↓
-task/Workcell join identifies broad assembly candidates
+system validates it without committing it
         ↓
-host derives ResourceAssignmentNeed(RobotFramePoseRecord, world)
+the provisional graph activates a typed consumer requirement
         ↓
-typed prerequisites dynamically obtain only missing evidence
+descriptor closure returns missing source evidence to PA retrieval ↺
+        ↓
+accepted target-specific RobotFrameLocationRecord gates acceptance
         ↓
 manifest-backed coarse reach selects one exact resource_jid
         ↓
-host commits processExecution and the post-assignment projection
+system commits the semantic ABox, processExecution, and final projection
         ↓
 selected RA loads fresh state + complete current primitive catalog
         ↓
@@ -614,23 +617,23 @@ non-mutating validation and RA revision
 accepted candidate or fail-closed result
 ```
 
-- PA returns only one `retrieve`, `inspect`, `propose_grounding`, `ask_user`, or
-  `incomplete` action. The host records attempted provider/source revisions and
-  resolved metadata in `GroundingSession`.
-  `ProductContextView` exposes only the final validated ABox and versioned
-  `TypedContextBinding` records; it is not PA's reasoning state.
+- PA may make zero or more native `retrieve(evidence_id)` calls and then returns
+  a direct ontology proposal, clarification, or insufficient-evidence result.
+  The system records tool-call IDs, resolved evidence, source revisions, hashes,
+  and failures. `ProductContextView` exposes only the final accepted ABox and
+  versioned `TypedContextBinding` records; it is not PA's reasoning state.
 - The official TBox defines valid meaning and types; it does not choose a
   document, sensor, CAD, or tool. `GroundingProducerDescriptor` records map a
   missing semantic or typed output to an authorized producer and evidence
   policy. PA may dynamically select approved document, exact approved CAD,
   RGB-D, calibration, or an existing record.
-- `propose_grounding` may commit the semantic task ABox without completing the
-  interaction. The host recomputes, but never persists, a
-  `ResourceAssignmentNeed` only when the semantic join has candidates and no
-  accepted same-interaction world-frame pose. A valid current pose prevents a
-  repeated observation; no candidates means no camera request.
+- A syntactically valid proposal does not commit the semantic task ABox. The
+  system derives a non-persisted `ResourceAssignmentNeed` from the provisional
+  graph, expands its typed prerequisite closure, and returns any source-evidence
+  gap to PA. A valid current target-specific location prevents unnecessary
+  retrieval; a consumer without a physical input activates no camera need.
 - PA resolves only currently blocking task-level and assignment evidence before
-  the host records `processExecution`. `context understanding complete` means
+  the system records `processExecution`. Grounding completion means
   only that Phase 5's current post-assignment consumer inputs are satisfied. It
   is not a claim that later primitive bindings or execution context are complete.
 - RA retrieves the complete selected-RA-authoritative primitive-only catalog
@@ -650,7 +653,7 @@ accepted candidate or fail-closed result
 - Binders and validators may detect and categorize missing inputs, but may never
   create, reorder, bind, or repair primitive steps. Only RA authors structural
   drafts, fully bound candidates, and revisions.
-- PA readiness means that the grounded task, resource evidence, and host-authored
+- PA readiness means that the grounded task, resource evidence, and system-authored
   assignment are accepted. There is no separate task-transition contract. RA
   readiness means that one unchanged candidate is fully bound and accepted by
   every applicable declared-contract and resource-owned check. Neither agent
@@ -661,18 +664,21 @@ Internal PA retrieval remains deliberately simple and auditable:
 ```text
 PA sees requirement + ontology + available sources + retrieved records
         ↓
-PA returns one minimal semantic action through a prompt-local action handle
+PA optionally calls prompt-local retrieve(evidence_id) handles
         ↓
-controller resolves the provider, exact catalog ref, and source revision
+system resolves each exact catalog ref and source revision
         ↓
-one approved source is retrieved and processed for that producer operation
+approved sources are retrieved and returned in the same PA conversation
         ↓
-validate, fingerprint, persist the typed record, and re-evaluate
+PA returns a direct proposal; system validates a transient candidate
+        ↓
+typed descriptor gap returns to PA retrieval, or acceptance continues
 ```
 
-One-source-at-a-time is an internal producer audit boundary, not the PA-to-RA
-message contract. A single `MissingContextBatch` may cause PA to run several
-such producer operations before returning a `CompositionContextBundle`. A
+Each tool call is an internal evidence audit boundary, not a fixed PA decision
+stage or PA-to-RA message contract. A single future `MissingContextBatch` may
+cause PA to run several producer operations before returning a
+`CompositionContextBundle`. A
 primitive never consumes or requests raw PDF, STL, RGB, depth, or calibration
 payloads. OWL supports semantic matching, while a bounded SHACL or equivalent
 check may detect that an already identified input is absent; neither mechanism
@@ -684,7 +690,7 @@ The ICRA paper uses a lightweight PPR ontology as the architecturally required
 formal backbone joining the product specification to primitive composition. It
 is the authoritative semantic interface through which PA and RA share grounded
 product facts, requested-process meaning, broad Workcell capabilities, and the
-host-selected process execution. Hash-pinned typed records carry provenance,
+system-selected process execution. Hash-pinned typed records carry provenance,
 numeric state, detailed resource configuration, and primitive bindings that the
 loaded vocabulary does not express. Removing the ontology would change the
 proposed semantic join and assignment boundary rather than merely remove an
@@ -701,27 +707,27 @@ persist exact product_requirement
         ↓
 load fixed TBox and initialize the interaction ABox
         ↓
-collect inference-free previews and create a host-owned GroundingSession
+expose inference-free approved evidence metadata and retrieve
         ↓
-PA selects one minimal action from the current sources and records
+PA retrieves any relevant approved source in any order
         ↓
-serve one relevant approved source and run the controlled producer
+return compact typed evidence into the same conversation
         ↓
-validate and persist its typed evidence record
+PA creates one evidence-cited ontology/context proposal
         ↓
-append the host-owned action attempt to GroundingSession
+validate it against a transient provisional ABox
         ↓
-create one evidence-cited provisional ontology/context proposal and validate it
+derive ResourceAssignmentNeed(RobotFrameLocationRecord, required frame)
         ↓
-join accepted task facts to the predefined Workcell ABox
+expand and evaluate declared typed provider prerequisites
         ↓
-derive missing RobotFramePoseRecord(world) from assignment requirements
+missing source evidence returns to PA retrieval ↺
         ↓
-resolve only the declared typed provider prerequisites
+accept target-specific correspondence, calibration, and location
         ↓
-evaluate manifest-backed coarse reach in fixed registry order
+commit the semantic ABox and evaluate manifest-backed coarse reach
         ↓
-host commits processExecution and the post-assignment completion
+system commits processExecution and the post-assignment completion
         ↓
 future selected-RA handoff
 ```
@@ -733,8 +739,8 @@ with the approved source types. It does not retrieve the entire
 approved corpus by default.
 
 Approved catalog refs are intentionally visible evidence and may share lexical
-tokens with the requirement. The action schema itself exposes only prompt-local
-handles, but this implementation does not claim learned, graph-ranked, or
+tokens with the requirement. The native tool exposes only prompt-local handles,
+but this implementation does not claim learned, graph-ranked, or
 lexically unbiased source discovery. Retrieval evaluation must therefore report
 catalog-label and distractor ablations separately from the constrained grounding
 result.
@@ -755,7 +761,7 @@ For ICRA:
 - The TBox contains generic classes, properties, and restrictions. PA-created
   requested-process, product, feature, and grounded-outcome individuals belong
   to the interaction ABox. The predefined Workcell ABox owns broad
-  `xarm6 capableOf assembly` and `ur5e capableOf assembly` facts. Only the host
+  `xarm6 capableOf assembly` and `ur5e capableOf assembly` facts. Only the system
   may add the selected `processExecution`; PA does not author resource or
   execution facts.
 - Document and scene tools are controlled evidence producers. They return
@@ -776,7 +782,7 @@ For ICRA:
   reasons from the requested process and outcome to a candidate sequence over
   the available lower-level interfaces.
 - A Spec2Primitives-owned read-only projection adapter dynamically joins only
-  the relevant PA and Workcell ABox assertions, the host assignment, every
+  the relevant PA and Workcell ABox assertions, the system assignment, every
   offering in the selected-resource typed catalog snapshot, authorized typed
   context refs, and their source fingerprints for the current RA turn. The RA
   LLM consumes this bounded projection plus the executable interface cards and
@@ -803,7 +809,7 @@ resource:xarm6 a ppr:resource ;
 resource:ur5e a ppr:resource ;
     ppr:capableOf process:assembly .
 
-# Host-authored selection after typed evidence and reach validation
+# System-authored selection after typed evidence and reach validation
 ctx:specification_1
     ppr:hasProcessExecution ctx:process_execution_0001 .
 ctx:process_execution_0001 a ppr:processExecution ;
@@ -820,7 +826,7 @@ hypothesis into evidence-backed PA facts.
 
 The remaining ontology boundaries are:
 
-- Poses, RGB-D data, calibration, tolerances, and other numeric payloads remain
+- Locations, poses, RGB-D data, calibration, tolerances, and other numeric payloads remain
   in the existing typed context records when the loaded TBox cannot express
   them.
 - CAD correspondence, observation association, and context-record links also
@@ -840,9 +846,9 @@ The remaining ontology boundaries are:
   product-level handoff decision, not a guarantee of composition or execution
   readiness.
 - The ontology join identifies only the predefined resources broadly capable of
-  `assembly`; it does not establish current reach. A deterministic host check
-  uses the accepted world-frame pose and pinned manifest limits, then selects
-  the first reachable candidate in registry order and records its exact
+  `assembly`; it does not establish current reach. A deterministic system check
+  uses the accepted target-specific location and pinned manifest limits, then
+  selects the first reachable candidate in configured profile order and records its exact
   `resource_jid`. This is coarse supporting allocation, not an optimal allocator
   or proof of IK, collision, grasp, or insertion feasibility. Recovery input
   already carries its assigned `resource_jid`; both paths later unicast to the
@@ -962,8 +968,8 @@ limited to transfer of the same composition mechanism.
 
 The predefined Workcell ABox deliberately provides only broad resource matches
 for the grounded high-level process. It does not entail which arm can reach the
-current product; Phase 4.4 makes that decision from typed pose evidence and
-pinned manifest limits, then the host records one selected execution. Neither
+current product; Phase 4.4 makes that decision from typed location evidence and
+pinned manifest limits, then the system records one selected execution. Neither
 the broad match nor the final assignment entails an ordered primitive
 realization. The semantic primitive interface cards supply callable behavior
 descriptions, and the evaluated hypothesis is that the RA LLM can bridge this

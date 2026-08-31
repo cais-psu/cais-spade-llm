@@ -1,7 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "product_agent_llm": {
-    "model": "gpt-5.4"
+    "model": "gpt-5.4",
+    "reasoning_effort": "none"
   },
   "document_vlm": {
     "provider": "openai",

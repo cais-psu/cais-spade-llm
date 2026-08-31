@@ -18,18 +18,22 @@ Phase 4.0 is wired into Phase 3 through package-local Python contracts and adds
 no ontology file to this directory. Retrieval, interpretation, ontology delta, and
 Phase 4.3-style decision records share an aligned operation number.
 
-Document handling uses separate strict contracts. `DocumentOverviewRecord`, owned by
-`tools/document_evidence/interpreter.py`, contains only a summary,
-surface-form observations, uncertainty, and exact page refs.
-`DocumentEvidenceRecord` has the same ontology-neutral evidence shape for a
-question-targeted inspection of every ordered page in the approved document.
-`OntologyGroundingProposal`,
-owned by `agents/pa/ontology_grounding.py`, is one late untrusted proposal built
-from the requirement, ontology, and retrieved typed records together. It has
-numbered new individuals, proposal-level evidence refs, one context summary,
-and missing information; `specification` is supplied separately and
-controller-owned. Only the existing triple-delta validator can accept compiled
-assertions.
+Document handling uses a strict `DocumentOverviewRecord` version 2 contract,
+owned by `tools/document_evidence/interpreter.py`. One retrieval contains every
+ordered page's extracted text, rendered-page hash, neutral visual observations,
+uncertainty, and exact page citations. New runs do not produce targeted
+`DocumentEvidenceRecord` values. Older overview and targeted-evidence records
+remain read-only recovery inputs where a loader still supports them.
+
+`OntologyGroundingProposal`, owned by
+`agents/pa/ontology_grounding.py`, is built from the requirement, ontology, and
+retrieved typed records together. New proposals use schema version 5 and carry
+per-individual and per-relation citations. Validation first produces a
+transient candidate and provisional ABox. It neither writes an accepted
+proposal nor merges RDF assertions at that boundary. Only after the active
+consumer's typed prerequisite chain passes does the system persist the accepted
+version-5 proposal and merge the compiled assertions. Versions 3 and 4 remain
+read-only recovery contracts.
 
 Phase 4.2A typed geometry records are owned by
 `tools/rgb_d_cad_grounding/preprocessor.py`. `CADMeshRecord` references complete
@@ -68,45 +72,44 @@ for a clear fit. `pose` is `accepted`, `ambiguous`, or `rejected`; qualified
 competing rotations remain in the typed record. The compact status may display
 the pose state but never exposes coordinates or transforms.
 
-The simple frame-conversion increment adds `CameraToRobotCalibrationRecord` and
-`RobotFramePoseRecord`, owned by
+The frame-conversion increment adds `CameraToRobotCalibrationRecord`,
+`RobotFrameLocationRecord`, and `RobotFramePoseRecord`, owned by
 `tools/rgb_d_cad_grounding/frame_conversion.py`. The calibration record binds
 one caller-approved rigid transform to exact source and target frames, a
-validity window, provenance, and a deterministic payload hash. The robot-frame
-record hashes both inputs and stores the composed translation, rotation matrix,
-quaternion, and transform only when the camera pose is accepted. Its
-`robot_frame_conversion` state is `accepted`, `ambiguous`, or `rejected`; the
-compact status exposes only that state.
+validity window, provenance, and a deterministic payload hash.
+`RobotFrameLocationRecord` version 1 hashes the accepted correspondence and
+calibration inputs and stores the translated candidate center for the current
+location-based resource consumer. `RobotFramePoseRecord` stores the composed
+translation and orientation only for an orientation-sensitive consumer. Pose
+records remain available, but they are not an active prerequisite for current
+coarse reachability.
 
 Implemented pre-RA grounding contracts in
 `agents/pa/grounding_contracts.py` cover:
 
-- `GroundingNextAction`, containing exactly one `retrieve`, `inspect`,
-  `propose_grounding`, `ask_user`, or `incomplete` action;
-- `GroundingActionAttempt`, host-owned and uniquely tracking the exact action,
-  provider, source, revision, question, result, and produced record refs;
-- `GroundingSession` schema version 2, containing only the requirement,
-  revision, prior attempts, resolved next-action metadata, status, and
-  fingerprint;
 - `GroundingProducerDescriptor`, describing one provider's accepted evidence,
   produced records, prerequisites, availability, and estimated cost;
 - `TypedContextBinding` and `ProductContextView`, joining compact ABox meaning
   with validated record refs, hashes, status, frames, validity, and source
   details;
-- `TypedGroundingContract` schema version 2, preserving one final cited context
-  summary, missing information, ontology projection, and hash-pinned records;
-- append-only `PAClarification` records plus `PAContextGroundingCompletion`
-  version 2, which pins the session, ontology, typed records, sources, and
-  clarification hashes.
+- `ResourceAssignmentNeed`, whose current coarse-reach consumer declares
+  `RobotFrameLocationRecord` and its required target frame;
+- `TypedGroundingContract` schema version 3, preserving the final cited context
+  summary, accepted ontology projection, and hash-pinned records; and
+- append-only native PA tool audits, `PAClarification` records, and
+  `PAContextGroundingCompletion` version 3.
 
-The PA authoring response is only one minimal semantic action. The host derives
-provider metadata, revisions, attempt IDs, hashes, status, and persistence.
-Final semantic content is authored once with the ontology proposal rather than
-copied through intermediate reasoning records.
+The active system expands `ResourceAssignmentNeed` through producer descriptor
+prerequisites and compares that closure with current, accepted, hash-valid
+typed bindings. Missing source-produced types are mapped to eligible approved
+evidence handles and returned to PA as prompt-only validation feedback. This
+feedback and the provisional candidate are not persisted contracts.
 
-Earlier PA draft, need, and completion formats are not loaded or migrated. New
-production interactions write only the generalized session and completion
-version 2.
+`GroundingNextAction`, `GroundingActionAttempt`, `GroundingSession` version 2,
+targeted document evidence, pose-linked `ResourceSelectionRecord` version 1,
+`TypedGroundingContract` version 2, and completion version 2 describe historical
+interactions only. Supported loaders may verify them for read-only recovery;
+new production runs do not write or migrate them.
 
 Planned downstream contracts cover:
 

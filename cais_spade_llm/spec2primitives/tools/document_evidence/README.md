@@ -4,10 +4,10 @@ Phase 4.1 implements this boundary for every PDF explicitly registered in
 `../../references/products/approved_sources.json`:
 
 ```text
-generic whole-document overview
-→ optional question-targeted whole-document inspection
-→ typed evidence record
-→ final ontology/context proposal
+PA calls retrieve for an approved document
+→ one complete ordered-page typed evidence record
+→ PA interprets it in the current requirement and ontology context
+→ transient ontology candidate enters the evidence gate
 ```
 
 Run `poetry run python -m
@@ -18,20 +18,21 @@ images, invokes the VLM once, and atomically caches a generic overview by
 source hash, full model configuration, and overview-schema version. The cache
 lives under `contexts/source_cache/` and is not committed.
 
-The overview contains only a summary, surface-form observations, uncertainty,
-and exact page refs. Its preparation request contains no question, user
-requirement, TBox, ABox, ontology vocabulary, entity keys, relations, or triple
-delta.
+The version-2 overview contains every ordered page's extracted text,
+rendered-page hash, neutral visual observations, uncertainty, and exact page
+refs. Its preparation request contains no question, user requirement, TBox,
+ABox, ontology vocabulary, entity keys, relations, or triple delta.
 
-PA may later choose `inspect` with a focused question. The controller supplies
-all cached pages exactly once and in document order. The current approved NIST
-PDF therefore supplies pages 1 through 6, including page 4, in one
-`DocumentEvidenceRecord`. `selected_pages` records the complete ordered
-range and citations outside that range are rejected.
+When PA retrieves the current approved NIST PDF, the system supplies pages 1
+through 6, including page 4, exactly once and in document order in one
+`DocumentOverviewRecord` version 2. New production retrieval does not ask a
+focused question or produce `DocumentEvidenceRecord`. Older records remain
+readable only where recovery validation explicitly supports them.
 
-The document tool never authors ontology facts. The final ontology call uses
-the requirement, authoritative ontology, and retrieved typed records together,
-then returns a TBox-valid proposal plus one cited context summary.
+The document tool never authors ontology facts. PA uses the requirement,
+authoritative ontology, and retrieved typed records together, then returns a
+cited TBox-constrained proposal. That proposal remains transient until every
+typed prerequisite activated by its provisional graph is accepted.
 
 No RAG, embeddings, vector database, independent-page ranking, or section
 retrieval is part of this boundary. Large-document retrieval remains future

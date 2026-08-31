@@ -5,6 +5,23 @@ covers the narrow dual Gazebo adapter, placeholder reply, NIST scene structure,
 launch pass-through, installed-world prerequisite, do-not-leak rule, and the
 no-`bridge.py`-import boundary.
 
+Current PA production-grounding coverage verifies the native `retrieve` tool,
+transient proposal validation, and the evidence-gated retry loop. Tests prove
+that an early proposal does not write accepted RDF, a descriptor-derived typed
+gap re-enters PA with the previous evidence state, and the proposal is committed
+only after its active consumer's prerequisite chain is accepted. They also
+cover CAD-first, observation-first, document-first, repeated live observation,
+unauthorized or stale evidence, target-feature-only CAD correspondence,
+ambiguous results, missing calibration, inconsistent frames, unreachable
+resources, emergency exhaustion, and synthetic descriptor routing without
+product or modality branches.
+The same suite verifies that a proposal omitting a required feature relation is
+not committed, receives deterministic correction feedback, and can be replaced
+by a valid proposal within the bounded PA investigation.
+It also verifies that PA cannot turn a required-record or approved-evidence
+choice into a user clarification while genuine requirement ambiguity remains
+eligible for clarification.
+
 Phase 1 tests cover the approved 35-source product inventory and exact-ref
 resolver under `../tools/`. Phase 1.1 tests cover fixture/replay RGB-D bundle
 validation, lossless storage, reloading, and the absence of live or agent
@@ -34,12 +51,11 @@ assertion-free document deltas, and the separate stage-oriented diagnostic.
 Production grounding tests reproduce the original `specification` entity-key
 output and prove it cannot mutate the ABox. They also check one schema for
 `assemble medium gear`, drilling, welding, and inspection; answer-leak prompt
-boundaries; cached first-call previews; deferred targeted VLM inspection;
-dynamic selection independent of registration order; synthetic providers;
-source-revision replay protection; new-evidence requirements; incomplete
-exhaustion and emergency ceilings; directly-supported-only late mapping;
-wrong-domain/range rejection; completion-v2 hashes; F5 zero-inference startup;
-and zero document-VLM calls on CAD/RGB-D paths. Phase 4.2A
+boundaries; native document, CAD, and observation retrieval; dynamic selection
+independent of registration order; synthetic providers; source-revision replay
+protection; evidence-gap retries and emergency ceilings; directly-supported-only
+late mapping; wrong-domain/range rejection; completion-v3 hashes; F5
+zero-inference startup; and zero document-VLM calls on CAD/RGB-D paths. Phase 4.2A
 tests cover exact approved CAD paths and hashes, complete binary STL loading,
 millimetre-to-metre conversion, analytic four-camera deprojection, RGB/pixel
 association, invalid-depth removal, calibration rejection, atomic typed records,
@@ -67,23 +83,24 @@ changing camera-frame poses without code changes, calibration and frame
 validation, observation-time validity, payload and input-hash tampering,
 ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
 no-overwrite behavior, and status-only UI output.
-Phase 4.3 contract tests cover strict `GroundingSession`, statement,
-information-need, action-attempt, decision, provider-capability, typed-contract,
-and completion-v2 validation. They also cover exact fixed symbols, PA-only
-authority, typed-binding status/frame/freshness validation, rejection of
-removed completion formats, and artifact tamper rejection. Production grounding tests
-cover document-only completion; dynamically discovered CAD, observation,
-segmentation, size-correspondence, and camera-frame-pose paths;
-unused-modality exclusion; and incomplete persistence without turning a system
-evidence gap into user clarification. The PA UI tests cover the turn control, live turn counter,
+Phase 4.3 contract tests cover provider capabilities, typed context bindings,
+typed-contract version 3, completion version 3, native tool audits, and
+read-only validation of supported historical session/action contracts. They
+also cover exact fixed symbols, PA-only authority, typed-binding
+status/frame/freshness validation, rejected obsolete formats, and artifact
+tamper rejection. Production grounding tests cover document-only semantic
+consumers; dynamically discovered CAD, observation, segmentation,
+size-correspondence, calibration, and robot-frame-location paths;
+unused-modality exclusion; and derived incomplete diagnostics without turning a
+system evidence gap into user clarification. The PA UI tests cover the turn control, live turn counter,
 compact served-context summaries, full audit records, configured production
 grounding, fail-closed unconfigured state, read-only ontology assertions,
-source records, typed bindings, session decisions, complete/waiting/incomplete
+source records, typed bindings, native tool audits, complete/waiting/incomplete
 states, and rejection of an unbacked completion turn.
 Phase 3.4 tests cover same-interaction answers, repeated questions, new evidence
 after a reply, exact history, cancellation, interruption recovery, and rejection
 of system-evidence clarification. Phase 3.5 tests cover referenced completion
-version 2, document and typed-geometry paths, UI readiness, and session,
+versions 2 and 3, document and typed-geometry paths, UI readiness, and session,
 ontology, contract, clarification, source, and typed-record tampering.
 
 Later phases will add focused tests for the Phase 5 task handoff,

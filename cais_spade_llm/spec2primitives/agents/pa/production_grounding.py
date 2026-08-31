@@ -21,9 +21,11 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
+    OntologyGroundingCandidate,
     OntologyGroundingError,
     OntologyGroundingInterruption,
-    OntologyGroundingResult,
+    OntologyGroundingProposal,
+    commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -31,6 +33,7 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    ResourceAssignmentNeed,
     RobotFrameLocationEvidenceError,
     commit_resource_assignment,
     derive_resource_assignment_need,
@@ -105,6 +108,47 @@ class _EvidenceHandle:
             "display_name": self.display_name,
             "availability": "available",
         }
+
+
+@dataclass(frozen=True)
+class _GroundingGap:
+    """Describe one descriptor-derived readiness gap for the next PA round."""
+
+    required_record_type: str
+    missing_record_types: tuple[str, ...]
+    eligible_evidence_ids: tuple[str, ...]
+    target_evidence_revision_required: bool = False
+    provider_failure: str | None = None
+
+    def to_prompt_projection(self) -> dict[str, object]:
+        """Return the prompt-only projection exposed to PA."""
+        return {
+            "required_record_type": self.required_record_type,
+            "missing_record_types": list(self.missing_record_types),
+            "eligible_evidence_ids": list(self.eligible_evidence_ids),
+            "target_evidence_revision_required": (
+                self.target_evidence_revision_required
+            ),
+            "provider_failure": self.provider_failure,
+        }
+
+    def incomplete_message(self) -> str:
+        """Return one generic diagnostic derived from the typed gap."""
+        missing = ", ".join(self.missing_record_types) or self.required_record_type
+        detail = f" Required grounding records remain unavailable: {missing}."
+        if self.provider_failure:
+            detail += f" Provider result: {self.provider_failure}"
+        return detail.strip()
+
+
+@dataclass(frozen=True)
+class _PreparedGrounding:
+    """Hold accepted physical context before semantic ABox commit."""
+
+    abox: ABoxSnapshot
+    view: ProductContextView
+    need: ResourceAssignmentNeed
+    location_binding: TypedContextBinding
 
 
 class _NativeEvidenceInvestigation:
@@ -405,7 +449,7 @@ class ProductionProductContextGroundingRuntime:
         max_pa_turns: int,
         clarification_history: tuple[Mapping[str, object], ...] = (),
     ) -> Mapping[str, object]:
-        """Run one native PA investigation and deterministic completion pass."""
+        """Run one evidence-gated PA investigation and deterministic completion."""
         del product_context
         self._validate_authorities(tbox)
         if abox.tbox_fingerprint != tbox.fingerprint:
@@ -419,63 +463,176 @@ class ProductionProductContextGroundingRuntime:
             requirement=abox.product_requirement,
             handles=handles,
         )
-        catalog = [handle.discovery_record() for handle in handles]
-        catalog.extend(investigation.prior_evidence)
+        clarification_evidence: list[Mapping[str, object]] = []
         for index, clarification in enumerate(clarification_history, start=1):
             reply = clarification.get("reply")
             if isinstance(reply, str) and reply:
                 evidence_ref = f"clarification_{index:04d}"
                 investigation.authorized_evidence_refs.add(evidence_ref)
-                catalog.append({
+                clarification_evidence.append({
                     "evidence_type": "user_clarification",
                     "evidence_ref": evidence_ref,
                     "reply": reply,
                 })
-        try:
-            outcome = await propose_and_validate_ontology_grounding(
-                product_agent,
-                interaction_root=interaction_root,
+        validation_feedback: Mapping[str, object] | None = None
+        evidence_gap: _GroundingGap | None = None
+        target_frame = _configured_target_frame(self._workcell)
+        for pa_round in range(1, max_pa_turns + 1):
+            catalog = _current_evidence_catalog(handles, investigation)
+            catalog.extend(clarification_evidence)
+            try:
+                outcome = await propose_and_validate_ontology_grounding(
+                    product_agent,
+                    interaction_root=interaction_root,
+                    tbox=tbox,
+                    abox=investigation.abox,
+                    workcell=self._workcell,
+                    evidence_catalog=catalog,
+                    authorized_evidence_refs=investigation.authorized_evidence_refs,
+                    tools=[_retrieve_tool(handles)],
+                    tool_executor=investigation.execute,
+                    max_tool_rounds=min(
+                        max_pa_turns - pa_round + 1,
+                        _MAX_TOOL_ROUNDS,
+                    ),
+                    required_output_projection={
+                        "record_type": "RobotFrameLocationRecord",
+                        "target_frame": target_frame,
+                        "purpose": "deterministic coarse resource reachability",
+                    },
+                    validation_gap=(
+                        None
+                        if validation_feedback is None
+                        else validation_feedback
+                    ),
+                )
+            except OntologyGroundingError as exc:
+                if pa_round < max_pa_turns:
+                    validation_feedback = {
+                        "kind": "ontology_proposal_validation_error",
+                        "message": str(exc),
+                        "expected_revision": (
+                            "Return a corrected proposal that satisfies every supplied "
+                            "ontology invariant. Do not invent or silently add an "
+                            "unsupported assertion."
+                        ),
+                    }
+                    evidence_gap = None
+                    continue
+                raise ProductionGroundingError(str(exc)) from exc
+            if isinstance(outcome, OntologyGroundingInterruption):
+                if (
+                    outcome.kind == "clarification_question"
+                    and _clarification_requests_system_choice(
+                        outcome.message,
+                        required_record_type="RobotFrameLocationRecord",
+                        handles=handles,
+                    )
+                ):
+                    if pa_round < max_pa_turns:
+                        validation_feedback = {
+                            "kind": "system_owned_grounding_choice",
+                            "message": (
+                                "A user clarification cannot decide whether a supplied "
+                                "required output should be satisfied or which approved "
+                                "evidence category should be used."
+                            ),
+                            "expected_revision": (
+                                "Use any relevant approved retrieve handle and return a "
+                                "proposal, or return insufficient_evidence if the "
+                                "required output cannot be supported."
+                            ),
+                        }
+                        continue
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": (
+                            "PA repeatedly delegated a system-owned grounding choice "
+                            "to the user."
+                        ),
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
+                if (
+                    outcome.kind == "insufficient_evidence"
+                    and evidence_gap is not None
+                    and _has_unattempted_evidence(evidence_gap, investigation)
+                    and pa_round < max_pa_turns
+                ):
+                    continue
+                key = outcome.kind
+                return {
+                    "grounding_status": (
+                        "clarification_required"
+                        if key == "clarification_question"
+                        else "incomplete"
+                    ),
+                    key: outcome.message,
+                    "tool_call_refs": list(investigation.tool_call_refs),
+                }
+
+            prepared = await self._prepare_required_context(
+                root=investigation.root,
                 tbox=tbox,
-                abox=abox,
-                workcell=self._workcell,
-                evidence_catalog=catalog,
-                authorized_evidence_refs=investigation.authorized_evidence_refs,
-                tools=[_retrieve_tool(handles)],
-                tool_executor=investigation.execute,
-                max_tool_rounds=min(max_pa_turns, _MAX_TOOL_ROUNDS),
-                required_output_projection={
-                    "record_type": "RobotFrameLocationRecord",
-                    "target_frame": _configured_target_frame(self._workcell),
-                    "purpose": "deterministic coarse resource reachability",
-                },
+                abox=investigation.abox,
+                candidate=outcome,
+                handles=handles,
+                attempted_evidence=tuple(investigation.retrieved_handle_ids),
             )
-        except OntologyGroundingError as exc:
-            raise ProductionGroundingError(str(exc)) from exc
-        if isinstance(outcome, OntologyGroundingInterruption):
-            key = outcome.kind
+            if isinstance(prepared, _GroundingGap):
+                evidence_gap = prepared
+                validation_feedback = prepared.to_prompt_projection()
+                if (
+                    not prepared.eligible_evidence_ids
+                    and not prepared.target_evidence_revision_required
+                ):
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": prepared.incomplete_message(),
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
+                continue
+
+            investigation.abox = prepared.abox
+            accepted = commit_ontology_grounding_candidate(
+                outcome,
+                interaction_root=investigation.root,
+                tbox=tbox,
+                abox=investigation.abox,
+                workcell=self._workcell,
+                authorized_evidence_refs=investigation.authorized_evidence_refs,
+            )
+            investigation.abox = accepted.merge.abox
+            accepted_view = build_product_context_view(
+                investigation.root,
+                investigation.abox,
+                attempted_evidence=tuple(investigation.retrieved_handle_ids),
+                assessed_at_ns=time.time_ns(),
+            )
+            persist_product_context_view(investigation.root, accepted_view)
+            completion = await self._complete_resource_assignment(
+                root=investigation.root,
+                tbox=tbox,
+                abox=investigation.abox,
+                view=accepted_view,
+                location_binding=prepared.location_binding,
+            )
             return {
-                "grounding_status": "clarification_required" if key == "clarification_question" else "incomplete",
-                key: outcome.message,
+                **completion,
+                "ontology_projection_ref": accepted.proposal_path.relative_to(
+                    investigation.root
+                ).as_posix(),
                 "tool_call_refs": list(investigation.tool_call_refs),
             }
-        investigation.abox = outcome.merge.abox
-        view = build_product_context_view(
-            investigation.root,
-            investigation.abox,
-            attempted_evidence=tuple(investigation.retrieved_handle_ids),
-            assessed_at_ns=time.time_ns(),
-        )
-        persist_product_context_view(investigation.root, view)
-        completion = await self._complete_resource_grounding(
-            root=investigation.root,
-            tbox=tbox,
-            abox=investigation.abox,
-            view=view,
-            proposal=outcome,
+
+        final_gap = evidence_gap or _GroundingGap(
+            required_record_type="RobotFrameLocationRecord",
+            missing_record_types=("RobotFrameLocationRecord",),
+            eligible_evidence_ids=(),
+            provider_failure="The bounded PA investigation was exhausted.",
         )
         return {
-            **completion,
-            "ontology_projection_ref": outcome.proposal_path.relative_to(investigation.root).as_posix(),
+            "grounding_status": "incomplete",
+            "insufficient_evidence": final_gap.incomplete_message(),
             "tool_call_refs": list(investigation.tool_call_refs),
         }
 
@@ -525,34 +682,70 @@ class ProductionProductContextGroundingRuntime:
             delta["typed_context_refs"] = refs
         return delta
 
-    async def _complete_resource_grounding(
+    async def _prepare_required_context(
         self,
         *,
         root: Path,
         tbox: TBoxSnapshot,
         abox: ABoxSnapshot,
-        view: ProductContextView,
-        proposal: OntologyGroundingResult,
-    ) -> Mapping[str, object]:
-        """Run only the prerequisite closure needed for coarse resource selection."""
-        need = derive_resource_assignment_need(abox, self._workcell)
+        candidate: OntologyGroundingCandidate,
+        handles: Sequence[_EvidenceHandle],
+        attempted_evidence: Sequence[str],
+    ) -> _PreparedGrounding | _GroundingGap:
+        """Resolve the required physical context before semantic ABox commit."""
+        need = derive_resource_assignment_need(
+            candidate.provisional_abox,
+            self._workcell,
+        )
         if need is None:
-            return {"grounding_status": "incomplete", "insufficient_evidence": "No resource-assignment semantic join was derived."}
+            return _GroundingGap(
+                required_record_type="RobotFrameLocationRecord",
+                missing_record_types=("ResourceAssignmentNeed",),
+                eligible_evidence_ids=(),
+                provider_failure="No resource-assignment semantic join was derived.",
+            )
         try:
-            _required_record_plan(self._descriptors, need.required_record_type)
+            required_plan = _required_record_plan(
+                self._descriptors,
+                need.required_record_type,
+            )
         except ProductionGroundingError as exc:
-            return {
-                "grounding_status": "incomplete",
-                "insufficient_evidence": str(exc),
-            }
-        cad_bindings = _proposal_cad_bindings(root, view, proposal)
+            return _GroundingGap(
+                required_record_type=need.required_record_type,
+                missing_record_types=(need.required_record_type,),
+                eligible_evidence_ids=(),
+                provider_failure=str(exc),
+            )
+        view = build_product_context_view(
+            root,
+            abox,
+            attempted_evidence=attempted_evidence,
+            assessed_at_ns=time.time_ns(),
+        )
+        ready_binding = _target_required_binding(view, candidate.proposal, need)
+        if ready_binding is not None:
+            return _PreparedGrounding(
+                abox=abox,
+                view=view,
+                need=need,
+                location_binding=ready_binding,
+            )
+        cad_bindings = _proposal_cad_bindings(root, view, candidate.proposal)
         segmentation = _newest_binding(view, "RGBDSegmentationRecord")
         if not cad_bindings or segmentation is None:
-            return {
-                "grounding_status": "incomplete",
-                "insufficient_evidence": "Coarse resource grounding needs compatible retrieved CAD and live observation evidence.",
-            }
-        accepted_correspondence: TypedContextBinding | None = None
+            return _grounding_gap(
+                required_record_type=need.required_record_type,
+                required_plan=required_plan,
+                descriptors=self._descriptors,
+                handles=handles,
+                view=view,
+                target_cad_bindings=cad_bindings,
+                target_evidence_revision_required=(
+                    not cad_bindings
+                    and _newest_binding(view, "CADMeshRecord") is not None
+                ),
+            )
+        accepted_correspondences: list[TypedContextBinding] = []
         current_abox = abox
         for cad in cad_bindings:
             result = await asyncio.to_thread(
@@ -568,13 +761,26 @@ class ProductionProductContextGroundingRuntime:
                 prerequisite_bindings=(cad, segmentation),
             )
             if result.CAD_correspondence == "accepted":
-                accepted_correspondence = binding
-                break
-        if accepted_correspondence is None:
-            return {
-                "grounding_status": "incomplete",
-                "insufficient_evidence": "Retrieved CAD and observation evidence did not yield one accepted correspondence.",
-            }
+                accepted_correspondences.append(binding)
+        if len(accepted_correspondences) != 1:
+            current_view = build_product_context_view(
+                root,
+                current_abox,
+                attempted_evidence=attempted_evidence,
+                assessed_at_ns=time.time_ns(),
+            )
+            return _grounding_gap(
+                required_record_type=need.required_record_type,
+                required_plan=required_plan,
+                descriptors=self._descriptors,
+                handles=handles,
+                view=current_view,
+                target_cad_bindings=cad_bindings,
+                provider_failure=(
+                    "Physical correspondence did not identify exactly one target."
+                ),
+            )
+        accepted_correspondence = accepted_correspondences[0]
         correspondence_record = _read_json(root / accepted_correspondence.record_ref)
         selected = correspondence_record.get("selected_candidate")
         source_frame = selected.get("frame") if isinstance(selected, Mapping) else None
@@ -582,10 +788,15 @@ class ProductionProductContextGroundingRuntime:
             raise ProductionGroundingError("Accepted correspondence has no source frame.")
         calibration_runtime = self._camera_to_world_calibration_runtime
         if calibration_runtime is None:
-            return {
-                "grounding_status": "incomplete",
-                "insufficient_evidence": self._camera_to_world_calibration_unavailable_reason or "No approved camera calibration is available.",
-            }
+            return _GroundingGap(
+                required_record_type=need.required_record_type,
+                missing_record_types=("CameraToRobotCalibrationRecord",),
+                eligible_evidence_ids=(),
+                provider_failure=(
+                    self._camera_to_world_calibration_unavailable_reason
+                    or "No approved camera calibration is available."
+                ),
+            )
         try:
             calibration = await asyncio.to_thread(
                 calibration_runtime.materialize_camera_to_world_calibration,
@@ -612,17 +823,53 @@ class ProductionProductContextGroundingRuntime:
                 status="accepted",
                 prerequisite_bindings=(accepted_correspondence, calibration_binding),
             )
-            selection = select_predefined_resource(
-                interaction_root=root,
-                tbox=tbox,
-                registry=self._registry,
-                workcell=self._workcell,
-                need=need,
-                grounding_record_path=root / location_binding.record_ref,
-                selection_number=_next_number(root, "products/grounding/resource_selection/selection_*"),
-            )
         except (CameraToRobotCalibrationError, RobotFrameConversionError, RobotFrameLocationEvidenceError) as exc:
-            return {"grounding_status": "incomplete", "insufficient_evidence": str(exc)}
+            return _GroundingGap(
+                required_record_type=need.required_record_type,
+                missing_record_types=(need.required_record_type,),
+                eligible_evidence_ids=(),
+                provider_failure=str(exc),
+            )
+        final_view = build_product_context_view(
+            root,
+            current_abox,
+            attempted_evidence=attempted_evidence,
+            assessed_at_ns=time.time_ns(),
+        )
+        return _PreparedGrounding(
+            abox=current_abox,
+            view=final_view,
+            need=need,
+            location_binding=location_binding,
+        )
+
+    async def _complete_resource_assignment(
+        self,
+        *,
+        root: Path,
+        tbox: TBoxSnapshot,
+        abox: ABoxSnapshot,
+        view: ProductContextView,
+        location_binding: TypedContextBinding,
+    ) -> Mapping[str, object]:
+        """Select and commit a resource after semantic and physical grounding."""
+        need = derive_resource_assignment_need(abox, self._workcell)
+        if need is None:
+            raise ProductionGroundingError(
+                "Committed ontology did not preserve the resource-assignment need."
+            )
+        selection = select_predefined_resource(
+            interaction_root=root,
+            tbox=tbox,
+            registry=self._registry,
+            workcell=self._workcell,
+            need=need,
+            grounding_record_path=root / location_binding.record_ref,
+            selection_number=_next_number(
+                root,
+                "products/grounding/resource_selection/selection_*",
+            ),
+        )
         if selection.selected_resource_iri is None:
             return {
                 "grounding_status": "incomplete",
@@ -672,16 +919,36 @@ def _producer_descriptors(*, calibration_available: bool) -> tuple[GroundingProd
         }),
         GroundingProducerDescriptor.from_mapping({
             "provider_id": _GEOMETRY_PRODUCER,
-            "description": "Measure approved CAD and RGB-D evidence.",
-            "accepted_evidence_types": ["CAD", "observation", "existing_record"],
+            "description": "Measure approved CAD evidence.",
+            "accepted_evidence_types": ["CAD"],
+            "produced_record_types": ["CADMeshRecord"],
+            "prerequisites": {"CADMeshRecord": []},
+            "availability": True,
+            "estimated_cost": 2,
+        }),
+        GroundingProducerDescriptor.from_mapping({
+            "provider_id": _GEOMETRY_PRODUCER,
+            "description": "Measure approved live observation evidence.",
+            "accepted_evidence_types": ["observation"],
             "produced_record_types": [
-                "CADMeshRecord", "ColoredPointCloudSetRecord", "RGBDSegmentationRecord",
-                "CADSizeCorrespondenceRecord", "CADPoseEstimationRecord", "RobotFrameLocationRecord",
+                "ColoredPointCloudSetRecord", "RGBDSegmentationRecord",
             ],
             "prerequisites": {
-                "CADMeshRecord": [],
                 "ColoredPointCloudSetRecord": [],
                 "RGBDSegmentationRecord": ["ColoredPointCloudSetRecord"],
+            },
+            "availability": True,
+            "estimated_cost": 2,
+        }),
+        GroundingProducerDescriptor.from_mapping({
+            "provider_id": _GEOMETRY_PRODUCER,
+            "description": "Derive physical context from accepted typed records.",
+            "accepted_evidence_types": ["existing_record"],
+            "produced_record_types": [
+                "CADSizeCorrespondenceRecord", "CADPoseEstimationRecord",
+                "RobotFrameLocationRecord",
+            ],
+            "prerequisites": {
                 "CADSizeCorrespondenceRecord": ["CADMeshRecord", "RGBDSegmentationRecord"],
                 "CADPoseEstimationRecord": ["CADSizeCorrespondenceRecord"],
                 "RobotFrameLocationRecord": ["CADSizeCorrespondenceRecord", "CameraToRobotCalibrationRecord"],
@@ -864,9 +1131,11 @@ def _compact_retrieval_result(
 def _proposal_cad_bindings(
     root: Path,
     view: ProductContextView,
-    proposal: OntologyGroundingResult,
+    proposal: OntologyGroundingProposal,
 ) -> tuple[TypedContextBinding, ...]:
-    cited = set(proposal.proposal.evidence_refs)
+    cited = _proposal_target_evidence_refs(proposal)
+    if not cited:
+        return ()
     candidates: list[TypedContextBinding] = []
     for binding in view.typed_bindings:
         if binding.record_type != "CADMeshRecord" or binding.status != "accepted":
@@ -874,11 +1143,64 @@ def _proposal_cad_bindings(
         record = _read_json(root / binding.record_ref)
         source = record.get("source")
         context_ref = source.get("context_ref") if isinstance(source, Mapping) else None
-        if context_ref in cited:
+        binding_refs = {binding.record_ref, *binding.evidence_refs}
+        if isinstance(context_ref, str):
+            binding_refs.add(context_ref)
+        if cited.intersection(binding_refs):
             candidates.append(binding)
-    if candidates:
-        return tuple(candidates)
-    return tuple(binding for binding in view.typed_bindings if binding.record_type == "CADMeshRecord" and binding.status == "accepted")
+    return tuple(candidates)
+
+
+def _proposal_target_evidence_refs(
+    proposal: OntologyGroundingProposal,
+) -> frozenset[str]:
+    """Return citations attached to the unique process-realized feature."""
+    realized_indices = {
+        relation.get("object_individual_index")
+        for relation in proposal.relations
+        if relation.get("predicate_iri", "").endswith("realizes")
+    }
+    if len(realized_indices) != 1:
+        return ()
+    realized_index = next(iter(realized_indices))
+    target = next(
+        (
+            individual
+            for individual in proposal.individuals
+            if individual.get("individual_index") == realized_index
+        ),
+        None,
+    )
+    if not isinstance(target, Mapping):
+        return frozenset()
+    refs = target.get("evidence_refs", ())
+    return frozenset(ref for ref in refs if isinstance(ref, str) and ref)
+
+
+def _target_required_binding(
+    view: ProductContextView,
+    proposal: OntologyGroundingProposal,
+    need: ResourceAssignmentNeed,
+) -> TypedContextBinding | None:
+    """Return the newest accepted required record tied to the primary target."""
+    target_refs = _proposal_target_evidence_refs(proposal)
+    candidates = [
+        binding
+        for binding in view.typed_bindings
+        if binding.record_type == need.required_record_type
+        and binding.status == "accepted"
+        and binding.frame == need.target_frame
+        and target_refs.intersection(binding.evidence_refs)
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            -1 if item.observed_at_ns is None else item.observed_at_ns,
+            item.record_ref,
+        ),
+    )
 
 
 def _newest_binding(view: ProductContextView, record_type: str) -> TypedContextBinding | None:
@@ -918,7 +1240,7 @@ def _required_record_plan(
     required_record_type: str,
 ) -> tuple[str, ...]:
     """Return a descriptor-derived prerequisite closure in dependency order."""
-    providers = {output: descriptor for descriptor in descriptors if descriptor.availability for output in descriptor.produced_record_types}
+    providers = _provider_by_output(descriptors)
     ordered: list[str] = []
     visiting: set[str] = set()
 
@@ -938,6 +1260,160 @@ def _required_record_plan(
 
     visit(required_record_type)
     return tuple(ordered)
+
+
+def _provider_by_output(
+    descriptors: Sequence[GroundingProducerDescriptor],
+) -> dict[str, GroundingProducerDescriptor]:
+    """Return one unambiguous available descriptor for every output symbol."""
+    providers: dict[str, GroundingProducerDescriptor] = {}
+    for descriptor in descriptors:
+        if not descriptor.availability:
+            continue
+        for output in descriptor.produced_record_types:
+            if output in providers:
+                raise ProductionGroundingError(
+                    f"Multiple available providers produce {output}."
+                )
+            providers[output] = descriptor
+    return providers
+
+
+def _grounding_gap(
+    *,
+    required_record_type: str,
+    required_plan: Sequence[str],
+    descriptors: Sequence[GroundingProducerDescriptor],
+    handles: Sequence[_EvidenceHandle],
+    view: ProductContextView,
+    target_cad_bindings: Sequence[TypedContextBinding],
+    target_evidence_revision_required: bool = False,
+    provider_failure: str | None = None,
+) -> _GroundingGap:
+    """Build one generic gap from required records and accepted bindings."""
+    accepted = {
+        binding.record_type
+        for binding in view.typed_bindings
+        if binding.status == "accepted"
+    }
+    if not target_cad_bindings:
+        accepted.discard("CADMeshRecord")
+    missing = tuple(record for record in required_plan if record not in accepted)
+    raw_types = _raw_evidence_types_for_gap(
+        descriptors,
+        missing,
+    )
+    eligible_ids = tuple(
+        handle.evidence_id
+        for handle in handles
+        if handle.evidence_type in raw_types
+    )
+    return _GroundingGap(
+        required_record_type=required_record_type,
+        missing_record_types=missing or (required_record_type,),
+        eligible_evidence_ids=eligible_ids,
+        target_evidence_revision_required=target_evidence_revision_required,
+        provider_failure=provider_failure,
+    )
+
+
+def _raw_evidence_types_for_gap(
+    descriptors: Sequence[GroundingProducerDescriptor],
+    missing_record_types: Sequence[str],
+) -> frozenset[str]:
+    """Resolve raw evidence types capable of reopening a missing record chain."""
+    providers = _provider_by_output(descriptors)
+    raw_types = {"document", "CAD", "observation"}
+    missing = set(missing_record_types)
+    resolved: set[str] = set()
+
+    def collect(record_type: str, *, include_satisfied_inputs: bool) -> None:
+        descriptor = providers.get(record_type)
+        if descriptor is None:
+            return
+        resolved.update(raw_types.intersection(descriptor.accepted_evidence_types))
+        prerequisites = descriptor.prerequisites_for(record_type)
+        unresolved_prerequisites = [
+            prerequisite for prerequisite in prerequisites if prerequisite in missing
+        ]
+        for prerequisite in (
+            prerequisites
+            if include_satisfied_inputs and not unresolved_prerequisites
+            else unresolved_prerequisites
+        ):
+            collect(prerequisite, include_satisfied_inputs=include_satisfied_inputs)
+
+    for record_type in missing_record_types:
+        collect(record_type, include_satisfied_inputs=False)
+    if not resolved:
+        for record_type in missing_record_types:
+            collect(record_type, include_satisfied_inputs=True)
+    return frozenset(resolved)
+
+
+def _current_evidence_catalog(
+    handles: Sequence[_EvidenceHandle],
+    investigation: _NativeEvidenceInvestigation,
+) -> list[Mapping[str, object]]:
+    """Return discovery metadata plus evidence retrieved in prior PA rounds."""
+    catalog: list[Mapping[str, object]] = [
+        handle.discovery_record() for handle in handles
+    ]
+    seen_record_refs: set[tuple[str, ...]] = set()
+    for item in (
+        *investigation.prior_evidence,
+        *(
+            {"retrieval_state": "already_retrieved", **dict(result)}
+            for result in investigation.retrieved_results.values()
+        ),
+    ):
+        refs = item.get("record_refs")
+        key = tuple(str(ref) for ref in refs) if isinstance(refs, list) else ()
+        if key and key in seen_record_refs:
+            continue
+        if key:
+            seen_record_refs.add(key)
+        catalog.append(dict(item))
+    return catalog
+
+
+def _has_unattempted_evidence(
+    gap: _GroundingGap,
+    investigation: _NativeEvidenceInvestigation,
+) -> bool:
+    """Return whether an eligible source can still change current evidence state."""
+    for evidence_id in gap.eligible_evidence_ids:
+        handle = investigation.handles.get(evidence_id)
+        if handle is None:
+            continue
+        if handle.evidence_type == "observation":
+            return True
+        if evidence_id not in investigation.retrieved_handle_ids:
+            return True
+    return gap.target_evidence_revision_required
+
+
+def _clarification_requests_system_choice(
+    message: str,
+    *,
+    required_record_type: str,
+    handles: Sequence[_EvidenceHandle],
+) -> bool:
+    """Reject clarification about system-owned output or evidence selection."""
+    normalized = message.casefold()
+    if required_record_type.casefold() in normalized:
+        return True
+    words = {
+        token.strip(".,:;!?()[]{}\"'")
+        for token in normalized.split()
+    }
+    system_terms = {
+        _RETRIEVE_TOOL_NAME.casefold(),
+        "evidence_id",
+        *(handle.evidence_id.casefold() for handle in handles),
+        *(handle.evidence_type.casefold() for handle in handles),
+    }
+    return bool(words.intersection(system_terms))
 
 
 def _configured_target_frame(workcell: Any) -> str:

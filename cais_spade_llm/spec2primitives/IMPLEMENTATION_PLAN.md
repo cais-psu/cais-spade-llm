@@ -12,9 +12,12 @@ blank UI requirement input
 → PA optionally calls retrieve(evidence_id) multiple times
 → return typed evidence into the same PA conversation
 → PA directly returns proposal, clarification, or insufficient evidence
-→ validate and commit the evidence-cited ABox delta
-→ derive observed 3D location when resource grounding requires it
+→ validate the evidence-cited proposal against a transient ABox
+→ derive the active consumer's typed prerequisite closure
+→ return any source-evidence gap to PA and allow more retrieval
+→ accept the proposal only after its required evidence chain is valid
 → evaluate configured resource candidates in profile order
+→ commit the semantic ABox and selected assignment
 → persist hash-pinned completion against the final ABox
 ```
 
@@ -39,6 +42,12 @@ a fresh revision.
 The shared ProductAgent is unchanged. The Spec2Primitives adapter supplies the
 controlled tools and bridges the shared synchronous callback to asynchronous
 evidence services with a bounded timeout.
+
+The loop is bounded by the existing emergency PA-turn ceiling. A candidate
+proposal and its provisional graph remain transient between rounds; retrieved
+evidence, citations, tool failures, and audit records remain available. The gap
+shown to PA is computed from consumer and provider descriptors, not from a
+fixed CAD/observation condition.
 
 ## Evidence records
 
@@ -89,6 +98,13 @@ system compiles each RDF assertion with only its own citations.
 This is schema-constrained, evidence-backed instance grounding under the input
 PPR TBox. It is not independent ontology-schema discovery.
 
+Proposal acceptance is evidence-gated. The unique `defines`/`realizes` join in
+the provisional graph identifies the primary feature and activates the current
+resource consumer. Only CAD cited by that feature can participate in its
+physical correspondence. Typed geometry remains outside RDF, but a required
+typed chain must be current, hash-valid, accepted, and unambiguous before the
+proposal is written as accepted or its assertions are merged.
+
 ## Resource grounding
 
 `config/workcell_profile.json` defines the process identity, ordered resource
@@ -102,6 +118,15 @@ closed. Coarse reach reads validated manifest geometry and selects the first
 reachable resource in profile order. `ResourceSelectionRecord` version 2 pins a
 generic grounding-record reference and hash. Version-1 pose-linked records are
 read-only recovery inputs.
+
+For `assemble medium gear`, a first proposal based on the manual and
+`Gear_Medium.STL` activates the consumer requirement for
+`RobotFrameLocationRecord`. If observation-produced segmentation is absent,
+the descriptor closure exposes that gap to PA without committing the feature
+assertions. PA may retrieve the live observation; the system derives
+correspondence and calibrated location, accepts the proposal, then evaluates
+the PPR `capableOf` candidates. In the current scene, `xarm6` is selected only
+after its configured reach contains that accepted target-specific location.
 
 ## Completion and UI
 

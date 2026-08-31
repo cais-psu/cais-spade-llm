@@ -18,12 +18,17 @@ investigation. The PA call receives:
 
 PA can retrieve zero or more approved documents, CAD files, or fresh live
 observations in any order. Tool results return to the same conversation as
-compact typed evidence. PA then directly returns one accepted proposal shape,
-a clarification question, or an insufficient-evidence explanation.
+compact typed evidence. PA then directly returns a proposal candidate, a
+clarification question, or an insufficient-evidence explanation.
 
 The model never supplies paths, provider IDs, hashes, frames, record types, or
 arbitrary source names. Tool calls are resolved and audited by the system. A
 malformed, unauthorized, stale, altered, or unavailable handle fails closed.
+
+Clarification is reserved for requirement meaning that approved evidence cannot
+resolve. The runtime rejects questions that delegate a supplied required output
+or approved evidence-category choice to the user, returns prompt-only feedback,
+and keeps the retry inside the bounded investigation.
 
 ## Evidence processing
 
@@ -38,9 +43,18 @@ point-cloud, and segmentation records. Compatible CAD and observation evidence
 automatically activates correspondence. Accepted correspondence and calibration
 yield `RobotFrameLocationRecord` for current coarse reachability.
 
+After a proposal, the runtime builds a provisional graph without merging it.
+That graph identifies the active consumer and its declared record requirement.
+Provider descriptors expand the requirement into a prerequisite closure, run
+any derivable providers, and map missing source-produced records back to the
+eligible evidence catalog. PA receives this prompt-only gap and may retrieve
+again. The same mechanism can use a future compatible provider without adding
+a product, filename, or modality branch.
+
 ## Ontology grounding
 
-`ontology_grounding.py` writes `OntologyGroundingProposal` v5. PA may ground
+`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v5
+candidate. PA may ground
 multiple evidence-supported feature individuals under the supplied PPR TBox.
 All features must be specification-defined and exactly one must participate in
 the configured process `realizes` join. That graph topology identifies the
@@ -51,6 +65,19 @@ validation remains the only ABox commit authority and rejects unsupported
 vocabulary, unsafe assertions, recipes, primitives, resources, process
 creation, literal facts, orphan features, duplicate indices, and invalid
 primary joins.
+
+If one PA proposal violates these invariants, the runtime preserves the
+rejected audit record and returns the exact deterministic validation failure as
+prompt-only feedback for a bounded correction round. It does not synthesize a
+missing `defines`, `realizes`, or other assertion on PA's behalf.
+
+Syntactic and semantic validity alone do not commit the candidate. When the
+provisional graph activates coarse resource selection, its
+`RobotFrameLocationRecord` requirement must be satisfied by an accepted,
+unambiguous chain for the primary feature. Correspondence uses only CAD cited
+by that feature. After the gate passes, the runtime persists the accepted v5
+proposal, merges its assertion-specific RDF delta, selects a reachable
+resource, and commits the assignment.
 
 `missing_information` contains relevant evidence-backed facts that remain
 unknown. It does not describe a typed fact merely omitted from RDF. Unknown

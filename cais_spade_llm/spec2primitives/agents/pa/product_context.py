@@ -142,6 +142,17 @@ class MergeResult:
     abox: ABoxSnapshot
 
 
+@dataclass(frozen=True)
+class ValidatedTripleDelta:
+    """Hold one side-effect-free validated delta and provisional ABox."""
+
+    abox: ABoxSnapshot
+    normalized_assertions: tuple[Mapping[str, object], ...]
+    uncertainty: tuple[object, ...]
+    unresolved_evidence_needs: tuple[object, ...]
+    typed_context_refs: tuple[str, ...]
+
+
 def initialize_interaction_abox(
     interaction_root: Path,
     product_requirement: str,
@@ -257,14 +268,46 @@ def validate_and_merge_triple_delta(
     Raises:
         OntologyContextError: If the producer, delta, ABox, or write is invalid.
     """
-    _validate_tbox_snapshot(tbox)
-    validated_producer = _require_nonempty_string(
-        producer,
-        "producer",
-        TripleDeltaError,
+    root = Path(interaction_root).resolve()
+    validated_producer = _validated_producer(producer)
+    validated = validate_triple_delta(
+        root,
+        tbox,
+        delta,
+        authorized_evidence_refs=authorized_evidence_refs,
+        authorized_external_process_iris=authorized_external_process_iris,
     )
-    if not _SAFE_IDENTIFIER.fullmatch(validated_producer):
-        raise TripleDeltaError("producer must be a fixed non-path identifier.")
+    abox, manifest, provenance = _load_persisted_abox(root, tbox)
+    if (
+        abox.delta_count != validated.abox.delta_count
+        or abox.accepted_assertion_count != validated.abox.accepted_assertion_count
+    ):
+        raise OntologyPersistenceError(
+            "ABox changed between delta validation and persistence."
+        )
+    return _persist_validated_delta(
+        abox,
+        validated.abox.graph,
+        manifest=manifest,
+        provenance=provenance,
+        producer=validated_producer,
+        normalized_assertions=validated.normalized_assertions,
+        uncertainty=validated.uncertainty,
+        unresolved_evidence_needs=validated.unresolved_evidence_needs,
+        typed_context_refs=validated.typed_context_refs,
+    )
+
+
+def validate_triple_delta(
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    delta: TripleDelta | Mapping[str, object],
+    *,
+    authorized_evidence_refs: Iterable[str],
+    authorized_external_process_iris: Iterable[str] = (),
+) -> ValidatedTripleDelta:
+    """Validate one delta and return its provisional ABox without writing it."""
+    _validate_tbox_snapshot(tbox)
     authorized_refs = _validated_authorized_refs(authorized_evidence_refs)
     authorized_processes = _validated_absolute_iris(
         authorized_external_process_iris,
@@ -272,9 +315,9 @@ def validate_and_merge_triple_delta(
     )
     normalized_delta = _coerce_delta(delta)
     root = Path(interaction_root).resolve()
-    abox, manifest, provenance = _load_persisted_abox(root, tbox)
-
+    abox, manifest, _provenance = _load_persisted_abox(root, tbox)
     _validate_delta_metadata(normalized_delta)
+
     candidate = Graph()
     for prefix, namespace in abox.graph.namespaces():
         candidate.bind(prefix, namespace)
@@ -294,17 +337,38 @@ def validate_and_merge_triple_delta(
         normalized_assertions.append(normalized_record)
 
     _validate_pa_abox_graph(candidate, manifest, tbox)
-    return _persist_validated_delta(
-        abox,
-        candidate,
-        manifest=manifest,
-        provenance=provenance,
-        producer=validated_producer,
-        normalized_assertions=normalized_assertions,
+    return ValidatedTripleDelta(
+        abox=ABoxSnapshot(
+            graph=candidate,
+            interaction_root=abox.interaction_root,
+            ontology_root=abox.ontology_root,
+            abox_path=abox.abox_path,
+            manifest_path=abox.manifest_path,
+            provenance_path=abox.provenance_path,
+            namespace=abox.namespace,
+            specification_iri=abox.specification_iri,
+            tbox_fingerprint=abox.tbox_fingerprint,
+            product_requirement=abox.product_requirement,
+            delta_count=abox.delta_count,
+            accepted_assertion_count=abox.accepted_assertion_count,
+        ),
+        normalized_assertions=tuple(normalized_assertions),
         uncertainty=normalized_delta.uncertainty,
         unresolved_evidence_needs=normalized_delta.unresolved_evidence_needs,
         typed_context_refs=normalized_delta.typed_context_refs,
     )
+
+
+def _validated_producer(producer: object) -> str:
+    """Return one validated fixed producer symbol."""
+    validated = _require_nonempty_string(
+        producer,
+        "producer",
+        TripleDeltaError,
+    )
+    if not _SAFE_IDENTIFIER.fullmatch(validated):
+        raise TripleDeltaError("producer must be a fixed non-path identifier.")
+    return validated
 
 
 def commit_host_resource_assignment(

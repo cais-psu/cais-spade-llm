@@ -15,6 +15,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
     OntologyGroundingInterruption,
+    commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -137,15 +138,16 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
                 }
             }
 
-        proposal = await propose_and_validate_ontology_grounding(
+        workcell = load_predefined_workcell(
+            tbox,
+            load_predefined_resource_registry(tbox),
+        )
+        candidate = await propose_and_validate_ontology_grounding(
             product_agent,
             interaction_root=root,
             tbox=tbox,
             abox=overview_merge.abox,
-            workcell=load_predefined_workcell(
-                tbox,
-                load_predefined_resource_registry(tbox),
-            ),
+            workcell=workcell,
             evidence_catalog=[
                 {
                     "retrieval_state": "already_retrieved",
@@ -169,10 +171,18 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
                 "purpose": "diagnostic schema projection only",
             },
         )
-        if isinstance(proposal, OntologyGroundingInterruption):
+        if isinstance(candidate, OntologyGroundingInterruption):
             raise OntologyGroundingError(
-                f"Document diagnostic did not return a proposal: {proposal.message}"
+                f"Document diagnostic did not return a proposal: {candidate.message}"
             )
+        proposal = commit_ontology_grounding_candidate(
+            candidate,
+            interaction_root=root,
+            tbox=tbox,
+            abox=overview_merge.abox,
+            workcell=workcell,
+            authorized_evidence_refs=set(evidence_refs),
+        )
         proposal_record = _read_mapping(
             proposal.proposal_path,
             "OntologyGroundingProposal",

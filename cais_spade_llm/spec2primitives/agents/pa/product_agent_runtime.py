@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
@@ -25,7 +25,7 @@ _TOOL_TIMEOUT_SEC = 30.0
 class _SharedProductAgentContextRuntime:
     """Expose only structured ProductAgent calls without its SPADE lifecycle."""
 
-    def __init__(self, *, model: str) -> None:
+    def __init__(self, *, model: str, reasoning_effort: str) -> None:
         self._product_agent = ProductAgent(
             _PRODUCT_AGENT_JID,
             "",
@@ -33,6 +33,9 @@ class _SharedProductAgentContextRuntime:
             instruction_override=_PRODUCT_AGENT_INSTRUCTIONS,
             model=model,
         )
+        # The shared ProductAgent uses Chat Completions, where GPT-5.4 function
+        # tools require reasoning effort "none" rather than a reasoning level.
+        self._product_agent.reasoning_effort = reasoning_effort
 
     async def ask_llm_structured(
         self,
@@ -78,6 +81,13 @@ class _SharedProductAgentContextRuntime:
         )
 
 
-def create_product_agent_context_runtime(*, model: str) -> ProductAgentContextRuntime:
+def create_product_agent_context_runtime(
+    *,
+    model: str,
+    reasoning_effort: str,
+) -> ProductAgentContextRuntime:
     """Create the read-only ProductAgent composition used by the PA UI."""
-    return _SharedProductAgentContextRuntime(model=model)
+    return _SharedProductAgentContextRuntime(
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )

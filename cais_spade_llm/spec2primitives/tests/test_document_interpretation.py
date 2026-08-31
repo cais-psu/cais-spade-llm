@@ -542,7 +542,7 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             assert tool_executor is not None
             assert max_tool_rounds == 1
             evidence_ref = f"{_TEST_DOCUMENT_REF}#page=4"
-            return {
+            proposal = {
                 "individuals": [
                     {
                         "individual_index": 1,
@@ -578,6 +578,7 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
                 "evidence_refs": [evidence_ref],
                 "missing_information": [],
             }
+            return {"result": proposal}
 
     result = asyncio.run(
         run_document_interpretation_diagnostic(

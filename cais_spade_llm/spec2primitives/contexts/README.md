@@ -13,12 +13,12 @@ contexts/<interaction_identifier>/
 │   ├── served_references/
 │   ├── grounding/
 │   │   ├── document_evidence/overview_<number>.json
-│   │   ├── document_evidence/evidence_<number>.json  # targeted fallback only
-│   │   ├── session/revision_<number>.json
+│   │   ├── document_evidence/evidence_<number>.json  # historical recovery only
+│   │   ├── session/revision_<number>.json            # historical recovery only
 │   │   ├── ontology_grounding/proposal_<number>.json
 │   │   ├── product_context/view_<number>.json
-│   │   ├── completion/typed_grounding_contract_v2.json
-│   │   ├── completion/pa_context_grounding_completion_v2.json
+│   │   ├── completion/typed_grounding_contract_v3.json
+│   │   ├── completion/pa_context_grounding_completion_v3.json
 │   │   └── <typed producer records>
 │   └── assembly_plan/                     # planned Phase 5
 ├── resources/                              # planned RA-owned context
@@ -44,13 +44,13 @@ and overview-schema version. F5 reads this index without inference. Interaction
 records snapshot the validated overview and never treat a cache file as an ABox
 assertion.
 
-The implemented `GroundingSession` is PA's append-only understanding state. It
-keeps cited statements, information needs, exact provider/source attempts,
-missing information, and the current decision. `ProductContextView` is rebuilt
-only as the final validated ABox and typed-record view; it is not the PA
-reasoning state. Phase 3.4 clarification answers or cancellation and the
-version 2 completion records are also append-only. Earlier completion formats
-are not loaded or migrated. Planned
+New runs keep native PA turns and tool audits rather than an active
+`GroundingSession`. A proposal candidate and its validation gap remain
+transient while source evidence and failures stay audited. `ProductContextView`
+is written only from the accepted ABox and typed-record view after the evidence
+gate passes; it is not PA reasoning state. Clarification answers or
+cancellation and version-3 completion records are append-only. Supported older
+session and completion records remain read-only recovery inputs. Planned
 `CompositionContextBundle` versions
 will preserve task, ABox, typed-binding, catalog, and selected-resource
 fingerprints. Each RA `PrimitiveProgramDraft`, deduplicated
@@ -115,16 +115,15 @@ calibration readiness and any exact actionable configuration failure.
 When a controlled caller supplies the matching approved extrinsic calibration,
 `calibration_<number>/calibration_record.json` stores its exact source and
 target frames, rigid transform, validity window, source details, and payload hash.
-The frame-conversion step then writes
-`robot_pose_<number>/robot_frame_pose_record.json` atomically. It checks the
-calibration against the originating observation timestamp. An available
-camera-frame centroid is converted to `world` even while yaw remains
-`pose: ambiguous`; that location-only result contains
-`CAD_centroid_translation_m` and no rotation or executable transform. Missing,
-invalid, stale, or selected-frame-missing calibration persists an `incomplete`
-grounding session, creates no world pose or resource assignment, and does not
-send PA back to document inspection. Rejected or location-ambiguous poses retain
-no robot-frame coordinates, and the status-only UI never exposes a transform.
+The active frame-conversion step writes a version-1
+`RobotFrameLocationRecord`, checking calibration against the originating
+observation timestamp and translating the accepted camera-frame centroid into
+the candidate resources' required frame. Missing, invalid, stale, or
+selected-frame-missing calibration leaves the typed prerequisite unsatisfied,
+so the provisional semantic proposal is not committed. A separate pose record
+is written only when an orientation-sensitive consumer requires one. Rejected
+or ambiguous locations retain no robot-frame coordinate, and the status-only UI
+never exposes a transform.
 
 Generated interaction directories are ignored by Git. Ground-truth evaluation
 is excluded from runtime context and belongs under `../evaluations/` so it

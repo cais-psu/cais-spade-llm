@@ -131,7 +131,8 @@ def create_spec2primitives_ui_runtime(
         unavailable_reason = f"Model configuration is invalid: {type(exc).__name__}: {exc}"
     else:
         product_agent = create_product_agent_context_runtime(
-            model=model_config.product_agent_llm.model
+            model=model_config.product_agent_llm.model,
+            reasoning_effort=model_config.product_agent_llm.reasoning_effort,
         )
     document_source_status = _document_startup_status(model_config)
 

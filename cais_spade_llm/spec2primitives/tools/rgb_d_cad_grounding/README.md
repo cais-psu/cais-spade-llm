@@ -1,4 +1,4 @@
-# Phase 4.2 preprocessing through simple camera-to-robot frame conversion
+# Phase 4.2 preprocessing through location and pose frame conversion
 
 `gazebo_observation_provider.py` implements the Phase 1.2 demand-driven live
 capture boundary. `capture_gazebo_observation(...)` creates request-owned ROS2
@@ -66,17 +66,18 @@ configured pose, detector response, or evaluator data.
 `frame_conversion.py` atomically records one injected
 `CameraToRobotCalibrationRecord` with exact source and target frames, validity,
 approved-source provenance, derived rotation representations, and a
-deterministic payload hash. It then revalidates the camera-pose provenance,
-checks the calibration at the originating observation timestamp, requires an
-exact caller-requested target frame, and composes
-`robot_from_CAD = robot_from_camera × camera_from_CAD`.
+deterministic payload hash. For current coarse resource grounding, it
+revalidates the accepted correspondence provenance, checks calibration at the
+originating observation timestamp, requires the declared target frame, and
+translates the observed candidate center into that frame.
 
-An accepted composition atomically persists one `RobotFramePoseRecord` with
-translation, rotation matrix, quaternion, complete transform, and both input
-hashes. An ambiguous or rejected camera pose preserves that state without any
-robot-frame coordinates. This path performs no robot selection, RA call,
-planning, or execution and reads no world, spawn, entity-state, detector, or
-evaluator input.
+An accepted location conversion atomically persists one
+`RobotFrameLocationRecord` version 1 with the translated 3D location and exact
+input hashes. A separate orientation-sensitive consumer may activate the
+retained `CADPoseEstimationRecord` and `RobotFramePoseRecord` path. Ambiguous or
+rejected inputs preserve their state without accepted robot-frame coordinates.
+These paths perform no robot selection, RA call, planning, or execution and
+read no world, spawn, entity-state, detector, or evaluator input.
 
 `diagnostic.py` exposes the injected `ObservationCaptureRuntime`, retains the
 controlled Phase 4.2A preprocessing diagnostic, and adds
@@ -90,9 +91,8 @@ deltas contain no RDF assertions. `run_cad_size_association_pipeline(...)`
 updates only the compact read-only status after a controlled caller supplies
 the required records. `run_cad_pose_estimation_pipeline(...)` similarly exposes
 only `CAD_correspondence`, `location`, and `pose` states.
-`run_robot_frame_pose_conversion_pipeline(...)` adds only the compact
-`robot_frame_conversion` state and never returns coordinates through the UI
-status boundary.
+The frame-conversion diagnostics expose only compact status and never return
+coordinates through the UI status boundary.
 
 The tools have no background stream, general identity recognition,
 cross-camera fusion, PA-loop connection, planning, or

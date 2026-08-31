@@ -21,7 +21,9 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
+    OntologyGroundingCandidate,
     OntologyGroundingResult,
+    commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -58,7 +60,7 @@ class _ProposalAgent:
     ) -> dict[str, Any]:
         del prompt, tools, tool_executor, max_tool_rounds
         assert response_format["name"] == "spec2primitives_grounding_result"
-        return {
+        proposal = {
             "individuals": [
                 {
                     "individual_index": 1,
@@ -96,6 +98,7 @@ class _ProposalAgent:
                 "The available evidence does not identify the destination shaft."
             ],
         }
+        return {"result": proposal}
 
 
 def test_completion_v3_pins_location_grounding_without_session(tmp_path: Path) -> None:
@@ -205,7 +208,7 @@ def persist_native_completion_fixture(
     initial_abox = initialize_interaction_abox(root, requirement, tbox)
     registry = load_predefined_resource_registry(tbox)
     workcell = load_predefined_workcell(tbox, registry)
-    proposal = asyncio.run(
+    candidate = asyncio.run(
         propose_and_validate_ontology_grounding(
             _ProposalAgent(),
             interaction_root=root,
@@ -222,6 +225,15 @@ def persist_native_completion_fixture(
                 "target_frame": "world",
             },
         )
+    )
+    assert isinstance(candidate, OntologyGroundingCandidate)
+    proposal = commit_ontology_grounding_candidate(
+        candidate,
+        interaction_root=root,
+        tbox=tbox,
+        abox=initial_abox,
+        workcell=workcell,
+        authorized_evidence_refs={"requirement_0001"},
     )
     assert isinstance(proposal, OntologyGroundingResult)
 

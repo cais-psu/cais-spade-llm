@@ -16,8 +16,9 @@ from cais_spade_llm.spec2primitives.config import (
 def test_default_model_configuration_uses_pinned_document_snapshot() -> None:
     config = load_model_runtime_config()
 
-    assert config.schema_version == 1
+    assert config.schema_version == 2
     assert config.product_agent_llm.model == "gpt-5.4"
+    assert config.product_agent_llm.reasoning_effort == "none"
     assert config.document_vlm.provider == "openai"
     assert config.document_vlm.model == "gpt-5.4-mini-2026-03-17"
     assert config.document_vlm.reasoning_effort == "low"
@@ -46,8 +47,11 @@ def test_models_can_be_changed_only_through_the_validated_config_file(
     "mutation",
     [
         lambda value: value.update({"extra": True}),
-        lambda value: value.__setitem__("schema_version", 2),
+        lambda value: value.__setitem__("schema_version", 3),
         lambda value: value["product_agent_llm"].__setitem__("unknown", True),
+        lambda value: value["product_agent_llm"].__setitem__(
+            "reasoning_effort", "low"
+        ),
         lambda value: value["document_vlm"].__setitem__("provider", "other"),
         lambda value: value["document_vlm"].__setitem__("reasoning_effort", "maximum"),
         lambda value: value["document_vlm"].__setitem__("image_detail", "original"),

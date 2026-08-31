@@ -12,9 +12,12 @@ requirement
 → PA sees the PPR projection and approved evidence catalog
 → PA optionally calls retrieve(evidence_id) zero or more times
 → PA returns a grounding proposal, clarification, or insufficient evidence
-→ deterministic validation commits accepted ABox assertions
-→ geometry services derive observed location when required
+→ deterministic validation creates a transient provisional ABox
+→ the provisional graph activates its typed downstream requirements
+→ missing prerequisites are reported to PA, which may retrieve again
+→ accepted typed evidence gates the semantic ABox commit
 → configured resources are checked in profile order
+→ the semantic ABox and selected assignment are committed
 → a hash-pinned completion record is written
 ```
 
@@ -33,6 +36,19 @@ approved CAD, and live observations in any order. The system validates the
 handle, processes the source, and returns compact typed evidence in the same PA
 conversation. Derived segmentation, correspondence, calibration, frame
 conversion, and resource checks are system operations, not PA tools.
+
+The proposal is not accepted merely because its RDF vocabulary is valid. The
+system first evaluates it against a provisional graph. If that graph activates
+a consumer whose declared typed input is unavailable, PA receives the derived
+record gap and the still-eligible evidence handles. It may call `retrieve`
+again in the same logical investigation. There is no fixed modality order or
+product-specific missing-evidence rule.
+
+The required-output projection is supplied by the system, not chosen by the
+user. PA may ask the user about genuinely ambiguous requirement meaning, but it
+may not ask whether a required record should be satisfied or whether an
+approved evidence category should be retrieved. Such a response receives
+internal correction feedback instead of becoming a UI clarification.
 
 After tool use, PA directly returns exactly one of:
 
@@ -71,6 +87,12 @@ plus approved calibration produces `RobotFrameLocationRecord` version 1. Coarse
 resource reach uses this translated 3D location. Full pose estimation remains
 available only for a future consumer that explicitly requires orientation.
 
+These physical records remain outside RDF because the PPR TBox does not model
+their numeric payloads. They nevertheless gate acceptance when the provisional
+graph activates a consumer that requires them. The CAD used in correspondence
+must be cited by the proposal's unique primary feature; unrelated retrieved CAD
+is never used as a fallback.
+
 `missing_information` means a relevant evidence-backed fact remains unknown.
 It must not repeat a fact already present in an accepted typed record merely
 because the current RDF projection has no property for it. Destination-shaft
@@ -92,6 +114,11 @@ multiple primary joins, recipes, primitives, resources, process creation,
 literal facts, and unsupported relations. Each accepted RDF assertion retains
 only its assertion-specific citations.
 
+A structurally invalid PA proposal is never repaired by inserting an assertion.
+The rejected output is audited and its deterministic validation message is
+returned to PA for a bounded correction round. Only a corrected proposal can
+enter the typed-evidence gate or be committed.
+
 ## Resource grounding
 
 `config/workcell_profile.json` is the authority for the process identity,
@@ -105,6 +132,18 @@ comes from the candidate manifests' `gripper_reach.frame`; inconsistent frames
 fail closed. Candidates are checked deterministically in validated profile
 order and the first coarsely reachable resource is recorded in
 `ResourceSelectionRecord` version 2.
+
+For example, for `assemble medium gear`, PA may first retrieve the assembly
+manual and `Gear_Medium.STL`, then propose the specification-defined feature
+realized by the assembly process. The proposal remains transient because coarse
+resource selection requires a `RobotFrameLocationRecord`. The descriptor
+closure identifies the missing observation-produced prerequisite, so PA can
+retrieve the approved live observation. The system then derives segmentation,
+target-specific correspondence, calibration, and location. Only after that
+chain is accepted does it commit the feature assertions, test the configured
+resources against the observed location, select (for the current scene)
+`xarm6`, and commit the assignment. A future direct-location provider could
+satisfy the same typed requirement without CAD or RGB-D-specific routing.
 
 ## UI
 

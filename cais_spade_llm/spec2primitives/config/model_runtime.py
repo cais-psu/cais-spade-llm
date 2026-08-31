@@ -11,7 +11,7 @@ from typing import Any
 DEFAULT_MODEL_RUNTIME_CONFIG_PATH = Path(__file__).with_name("model_runtime.json")
 
 _ROOT_KEYS = {"schema_version", "product_agent_llm", "document_vlm"}
-_PRODUCT_AGENT_KEYS = {"model"}
+_PRODUCT_AGENT_KEYS = {"model", "reasoning_effort"}
 _DOCUMENT_VLM_KEYS = {
     "provider",
     "model",
@@ -27,6 +27,7 @@ class ProductAgentModelConfig:
     """Select the shared ProductAgent LLM without changing its interface."""
 
     model: str
+    reasoning_effort: str
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,8 @@ def load_model_runtime_config(
         value = json.load(stream)
     if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
         raise ValueError("Model config fields are invalid.")
-    if value["schema_version"] != 1:
-        raise ValueError("Model config schema_version must be 1.")
+    if value["schema_version"] != 2:
+        raise ValueError("Model config schema_version must be 2.")
 
     product_agent = _required_mapping(
         value["product_agent_llm"],
@@ -84,6 +85,27 @@ def load_model_runtime_config(
         "document_vlm",
     )
     product_agent_model = _nonempty_string(product_agent["model"], "product_agent_llm.model")
+    product_agent_reasoning_effort = _nonempty_string(
+        product_agent["reasoning_effort"],
+        "product_agent_llm.reasoning_effort",
+    )
+    if product_agent_reasoning_effort not in {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    }:
+        raise ValueError("product_agent_llm.reasoning_effort is invalid.")
+    if (
+        product_agent_model.startswith("gpt-5.4")
+        and product_agent_reasoning_effort != "none"
+    ):
+        raise ValueError(
+            "product_agent_llm.reasoning_effort must be none for GPT-5.4 "
+            "function tools through Chat Completions."
+        )
     provider = _nonempty_string(document_vlm["provider"], "document_vlm.provider")
     if provider != "openai":
         raise ValueError("document_vlm.provider must be openai.")
@@ -109,8 +131,11 @@ def load_model_runtime_config(
         "document_vlm.timeout_seconds",
     )
     return ModelRuntimeConfig(
-        schema_version=1,
-        product_agent_llm=ProductAgentModelConfig(model=product_agent_model),
+        schema_version=2,
+        product_agent_llm=ProductAgentModelConfig(
+            model=product_agent_model,
+            reasoning_effort=product_agent_reasoning_effort,
+        ),
         document_vlm=DocumentVLMConfig(
             provider=provider,
             model=model,
