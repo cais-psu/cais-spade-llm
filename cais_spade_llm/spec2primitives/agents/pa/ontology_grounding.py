@@ -210,10 +210,14 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
     if validation_gap is not None:
         prompt_input["current_validation_gap"] = dict(validation_gap)
     base_prompt = (
-        "Investigate the requirement using the controlled retrieve tool whenever "
-        "additional approved evidence is useful. You may retrieve zero, one, or "
-        "multiple catalog entries in any order. Catalog metadata is discovery-only; "
-        "only evidence refs returned by retrieve may support assertions. After tool "
+        "Investigate the requirement using only the exact requirement and approved "
+        "evidence returned by the controlled retrieve tool. Before asking a user "
+        "clarification, retrieve and consider every approved catalog entry plausibly "
+        "relevant to that ambiguity. You may otherwise retrieve zero, one, or multiple "
+        "catalog entries in any order. Catalog metadata is discovery-only; only "
+        "evidence refs returned by retrieve may support assertions. Never use hidden "
+        "case knowledge, evaluator information, or an interpretation supplied by these "
+        "instructions. After tool "
         "use, return exactly one result containing proposal fields, one "
         "clarification_question, or one insufficient_evidence result. The supplied "
         "required_output_projection is mandatory and system-authorized: never ask "

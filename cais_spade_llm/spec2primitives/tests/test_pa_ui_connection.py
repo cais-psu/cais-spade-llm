@@ -283,6 +283,44 @@ def test_completed_view_recovers_from_persisted_native_records(
     )
 
 
+def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> None:
+    clarification = spec2primitives_ui._persisted_pa_timeline(
+        "assemble medium gear",
+        turns=[
+            {
+                "PA_output": {
+                    "grounding_status": "clarification_required",
+                    "clarification_question": "Which product variant is intended?",
+                }
+            }
+        ],
+        retrievals=[],
+        clarifications=[],
+        records={},
+        final_result=None,
+        terminal_failure=None,
+    )
+    incomplete = spec2primitives_ui._persisted_pa_timeline(
+        "assemble medium gear",
+        turns=[
+            {
+                "PA_output": {
+                    "grounding_status": "incomplete",
+                    "insufficient_evidence": "No approved evidence resolved the need.",
+                }
+            }
+        ],
+        retrievals=[],
+        clarifications=[],
+        records={},
+        final_result=None,
+        terminal_failure=None,
+    )
+
+    assert clarification[-1]["title"] == "Clarification requested"
+    assert incomplete[-1]["title"] == "Grounding incomplete"
+
+
 def test_calibration_readiness_uses_actionable_runtime_state() -> None:
     ready = SimpleNamespace(
         camera_to_world_calibration_runtime=object(),

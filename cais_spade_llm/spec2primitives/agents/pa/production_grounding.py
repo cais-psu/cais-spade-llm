@@ -463,17 +463,13 @@ class ProductionProductContextGroundingRuntime:
             requirement=abox.product_requirement,
             handles=handles,
         )
-        clarification_evidence: list[Mapping[str, object]] = []
-        for index, clarification in enumerate(clarification_history, start=1):
-            reply = clarification.get("reply")
-            if isinstance(reply, str) and reply:
-                evidence_ref = f"clarification_{index:04d}"
-                investigation.authorized_evidence_refs.add(evidence_ref)
-                clarification_evidence.append({
-                    "evidence_type": "user_clarification",
-                    "evidence_ref": evidence_ref,
-                    "reply": reply,
-                })
+        clarification_evidence = _answered_clarification_evidence(
+            investigation.root,
+            clarification_history,
+        )
+        investigation.authorized_evidence_refs.update(
+            str(item["evidence_ref"]) for item in clarification_evidence
+        )
         validation_feedback: Mapping[str, object] | None = None
         evidence_gap: _GroundingGap | None = None
         target_frame = _configured_target_frame(self._workcell)
@@ -549,6 +545,34 @@ class ProductionProductContextGroundingRuntime:
                         "insufficient_evidence": (
                             "PA repeatedly delegated a system-owned grounding choice "
                             "to the user."
+                        ),
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
+                if (
+                    outcome.kind == "clarification_question"
+                    and not investigation.retrieved_handle_ids
+                ):
+                    if pa_round < max_pa_turns:
+                        validation_feedback = {
+                            "kind": "evidence_first_clarification",
+                            "message": (
+                                "A user clarification is permitted only after relevant "
+                                "approved evidence has been retrieved and considered."
+                            ),
+                            "expected_revision": (
+                                "Use the controlled retrieve tool for approved evidence "
+                                "plausibly relevant to the ambiguity, then return a "
+                                "proposal, a remaining requirement-meaning clarification, "
+                                "or insufficient_evidence. Do not assume or supply an "
+                                "interpretation on the user's behalf."
+                            ),
+                        }
+                        continue
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": (
+                            "PA requested user clarification before retrieving and "
+                            "considering approved evidence."
                         ),
                         "tool_call_refs": list(investigation.tool_call_refs),
                     }
@@ -1414,6 +1438,44 @@ def _clarification_requests_system_choice(
         *(handle.evidence_type.casefold() for handle in handles),
     }
     return bool(words.intersection(system_terms))
+
+
+def _answered_clarification_evidence(
+    root: Path,
+    clarification_history: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Build evidence entries from exact persisted clarification records."""
+    evidence: list[Mapping[str, object]] = []
+    for clarification in clarification_history:
+        question_turn = clarification.get("question_turn")
+        reply = clarification.get("reply")
+        if (
+            not isinstance(question_turn, int)
+            or isinstance(question_turn, bool)
+            or question_turn < 1
+            or not isinstance(reply, str)
+            or not reply
+        ):
+            raise ProductionGroundingError(
+                "Answered clarification history is invalid."
+            )
+        evidence_ref = (
+            Path("interaction_record") / f"clarification_{question_turn:04d}.json"
+        ).as_posix()
+        clarification_path = root / evidence_ref
+        if (
+            not clarification_path.is_file()
+            or _read_json(clarification_path) != dict(clarification)
+        ):
+            raise ProductionGroundingError(
+                "Answered clarification record is unavailable or changed."
+            )
+        evidence.append({
+            "evidence_type": "user_clarification",
+            "evidence_ref": evidence_ref,
+            "reply": reply,
+        })
+    return evidence
 
 
 def _configured_target_frame(workcell: Any) -> str:

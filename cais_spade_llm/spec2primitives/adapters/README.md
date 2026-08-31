@@ -9,10 +9,11 @@ process forces `run_perception:=false` and launches `table_spec2primitives.world
 context runtime, validated package-local model configuration, the optional
 OpenAI document vision boundary, the request-scoped live observation capture
 boundary, and the Spec2Primitives `contexts/` root. The main PA loop, Phase 4.1
-document diagnostic, and Phase 4.2 geometry support remain independent. The UI
-does not invoke geometry processing: it only polls the compact Phase 4.2B1
-automatic segmentation status. A later authorized runtime caller may use the
-injected capture boundary to invoke the observation-only automatic pipeline.
+document evidence, and Phase 4.2 geometry providers are connected through the
+production grounding runtime. Standalone diagnostics remain independent. The
+UI does not expose geometry-processing controls; PA may invoke request-scoped
+live observation through the controlled `retrieve` boundary, while the UI
+polls only compact processing status.
 
 ProductAgent and future RobotAgent adapters belong under `../agents/pa/` and
 `../agents/ra/`, respectively. ProductAgent and RobotAgent remain shared,

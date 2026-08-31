@@ -781,6 +781,230 @@ def test_invalid_proposal_receives_bounded_feedback_before_commit(
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 3
 
 
+def test_clarification_requires_successful_approved_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    question = {"clarification_question": "Which product variant is intended?"}
+    agent = _SequencedProductAgent((question, _proposal("requirement_0001")))
+
+    async def prepare(**kwargs: object) -> _PreparedGrounding:
+        del kwargs
+        return _PreparedGrounding(
+            abox=abox,
+            view=SimpleNamespace(),
+            need=SimpleNamespace(),
+            location_binding=SimpleNamespace(record_ref="unused_location.json"),
+        )
+
+    async def complete(**kwargs: object) -> Mapping[str, object]:
+        del kwargs
+        return {
+            "grounding_status": "complete",
+            "resource_selection_ref": (
+                "products/grounding/resource_selection/test.json"
+            ),
+        }
+
+    monkeypatch.setattr(runtime, "_prepare_required_context", prepare)
+    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=2,
+        )
+    )
+
+    assert result["grounding_status"] == "complete"
+    assert len(agent.calls) == 2
+    revision_prompt = str(agent.calls[1]["prompt"])
+    assert "evidence_first_clarification" in revision_prompt
+    assert "Do not assume or supply an interpretation" in revision_prompt
+    assert "completed assembly" not in revision_prompt
+
+
+def test_clarification_after_successful_retrieval_is_returned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+
+    async def retrieve(
+        investigation: _NativeEvidenceInvestigation,
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        assert tool_name == "retrieve"
+        evidence_id = str(arguments["evidence_id"])
+        investigation.retrieved_handle_ids.append(evidence_id)
+        return {"evidence_refs": ["requirement_0001"], "record_refs": []}
+
+    monkeypatch.setattr(_NativeEvidenceInvestigation, "execute", retrieve)
+
+    class _RetrieveThenClarifyAgent(_ToolUsingProductAgent):
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[
+                [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+            ]
+            | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            assert tool_executor is not None
+            await tool_executor("retrieve", {"evidence_id": "evidence_0001"})
+            self.calls.append({
+                "prompt": prompt,
+                "response_format": response_format,
+                "tools": tools,
+                "max_tool_rounds": max_tool_rounds,
+            })
+            return {
+                "result": {
+                    "clarification_question": "Which product variant is intended?"
+                }
+            }
+
+    agent = _RetrieveThenClarifyAgent(retrieve_order=())
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=2,
+        )
+    )
+
+    assert result == {
+        "grounding_status": "clarification_required",
+        "clarification_question": "Which product variant is intended?",
+        "tool_call_refs": [],
+    }
+    assert "hidden case knowledge" in str(agent.calls[0]["prompt"])
+
+
+def test_premature_clarification_at_turn_limit_is_incomplete(tmp_path: Path) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    agent = _SequencedProductAgent(
+        ({"clarification_question": "Which product variant is intended?"},)
+    )
+
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=1,
+        )
+    )
+
+    assert result["grounding_status"] == "incomplete"
+    assert "clarification_question" not in result
+    assert result["insufficient_evidence"] == (
+        "PA requested user clarification before retrieving and considering approved "
+        "evidence."
+    )
+
+
+def test_answered_clarification_uses_persisted_record_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    clarification = {
+        "record_type": "PAClarification",
+        "question_turn": 3,
+        "reply": "Medium Gear",
+    }
+    clarification_path = root / "interaction_record/clarification_0003.json"
+    clarification_path.parent.mkdir(parents=True)
+    clarification_path.write_text(json.dumps(clarification), encoding="utf-8")
+    evidence_ref = "interaction_record/clarification_0003.json"
+    agent = _SequencedProductAgent((_proposal(evidence_ref),))
+
+    async def prepare(**kwargs: object) -> _PreparedGrounding:
+        del kwargs
+        return _PreparedGrounding(
+            abox=abox,
+            view=SimpleNamespace(),
+            need=SimpleNamespace(),
+            location_binding=SimpleNamespace(record_ref="unused_location.json"),
+        )
+
+    async def complete(**kwargs: object) -> Mapping[str, object]:
+        del kwargs
+        return {
+            "grounding_status": "complete",
+            "resource_selection_ref": (
+                "products/grounding/resource_selection/test.json"
+            ),
+        }
+
+    monkeypatch.setattr(runtime, "_prepare_required_context", prepare)
+    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=1,
+            clarification_history=(clarification,),
+        )
+    )
+
+    assert result["grounding_status"] == "complete"
+    prompt = str(agent.calls[0]["prompt"])
+    assert f'"evidence_ref": "{evidence_ref}"' in prompt
+    proposal = json.loads(
+        (
+            root / "products/grounding/ontology_grounding/proposal_0001.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert evidence_ref in proposal["output"]["evidence_refs"]
+
+
 def test_system_owned_evidence_question_is_not_user_clarification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

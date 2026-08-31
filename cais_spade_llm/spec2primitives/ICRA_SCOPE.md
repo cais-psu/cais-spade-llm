@@ -6,19 +6,26 @@
 
 ## Proposed-versus-implemented status
 
-The end-to-end workflow in this document is proposed architecture. The current
-package implements the PA interaction boundary through Phase 3.5 and the pre-RA
-grounding runtime through Phase 4.4. PA uses one native `retrieve` tool and
-returns a direct ontology proposal. Phase 4.4 validates that proposal against a
-transient ABox, derives the active consumer's typed prerequisite closure, and
-returns any source-evidence gap to PA without committing semantic assertions.
+The end-to-end workflow in this document is proposed architecture. **Phase 4 is
+implemented through Phase 4.4 under the current framework.** The package also
+implements the PA interaction boundary through Phase 3.5. PA uses one native
+`retrieve` tool and returns a direct ontology proposal. Phase 4.4 validates that
+proposal against a transient ABox, derives the active consumer's typed
+prerequisite closure, and returns any source-evidence gap to PA without
+committing semantic assertions.
 After the target-specific location chain passes, the system performs
 manifest-backed coarse reach checks and commits the selected resource as a
 `processExecution` assignment. The exact `xarm6` and `ur5e`
 identities remain pinned to their shared manifests; their broad
 `capableOf assembly` assertions do not encode reach or a primitive sequence. No
-Phase 5 RA adapter, primitive catalog, primitive composer, validator stack, or
-execution path is connected.
+live Phase 5 RA connection, primitive composer, validator stack, or execution
+path is connected. Phase 5.1 now implements only the contract-first assignment
+envelope and injected-runtime state/catalog snapshot boundary.
+
+Phase 4 completion is the implemented location-based pre-RA grounding and
+resource-assignment boundary. Cross-camera fusion, an active
+orientation-sensitive consumer, RA composition, robot-local validation,
+execution, and observed outcomes are not part of the completed Phase 4 claim.
 
 ## Fundamental research challenge
 
@@ -413,9 +420,10 @@ event.
 The initial scene-only milestone provided the isolated structure, research
 workflow, narrow no-hardware `gazebo_dual_spec2primitives` launcher, dedicated
 `table_spec2primitives.world`, and local placeholder chat. Later milestones added
-the narrow PA context boundary and standalone supporting perception records.
-The current production path ends at the Phase 4.4 resource assignment. It still
-has no RA behavior, primitive composition, insertion-physics validation, or
+the narrow PA context boundary, standalone supporting perception records, and
+the Phase 5.1 contract-first RA assignment/state/catalog boundary. The current
+live production path still ends at the Phase 4.4 resource assignment. It has no
+live RA connection, primitive composition, insertion-physics validation, or
 robot execution.
 
 The starting scene pre-installs the static NIST `Gear_Plate` and three

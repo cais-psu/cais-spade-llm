@@ -26,9 +26,16 @@ arbitrary source names. Tool calls are resolved and audited by the system. A
 malformed, unauthorized, stale, altered, or unavailable handle fails closed.
 
 Clarification is reserved for requirement meaning that approved evidence cannot
-resolve. The runtime rejects questions that delegate a supplied required output
-or approved evidence-category choice to the user, returns prompt-only feedback,
-and keeps the retry inside the bounded investigation.
+resolve after relevant approved evidence has been retrieved and considered. The
+runtime rejects premature clarification and questions that delegate a supplied
+required output or approved evidence-category choice to the user, returns
+prompt-only feedback, and keeps the retry inside the bounded investigation. It
+does not supply a requirement interpretation in that feedback.
+
+An answered clarification is evidence from its persisted append-only
+`interaction_record/clarification_<question_turn>.json` record. The native
+completion contract pins that exact record through `source_refs`; it does not
+create or accept a separate clarification alias.
 
 ## Evidence processing
 
@@ -91,6 +98,13 @@ New interactions write append-only native tool audits, direct PA turns,
 `PAContextGroundingCompletion` v3. Clarification resumes the same conversation
 context using the exact persisted question/reply history. Cancellation invokes
 no PA call.
+
+For fresh version-3 completions, `context_summary` is explicitly marked as the
+ProductAgent proposal narrative captured before deterministic typed grounding
+and resource assignment. Consumers, including the future RA adapter, must use
+the final hash-pinned typed records and `ResourceSelectionRecord` as the
+authoritative completion state. Existing unmarked version-3 records remain
+readable and are not migrated.
 
 Read-only validation remains for old ontology proposal v3/v4, document overview
 v1, pose-linked resource selection v1, and completion/session v2 records. New

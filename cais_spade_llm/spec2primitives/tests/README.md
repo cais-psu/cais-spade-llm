@@ -73,7 +73,7 @@ noise, duplicate-size ambiguity, no-match and zero-candidate rejection,
 image-boundary partial visibility, deterministic ranking, record hashes,
 tamper rejection, atomic cleanup, no-overwrite persistence, compact status, and
 the absence of coordinates or controls from the UI surface.
-The simple remaining Phase 4.2B2 pose tests cover known asymmetric camera-frame
+The implemented Phase 4.2B2 pose tests cover known asymmetric camera-frame
 translations and rotations, same-size shape-fit resolution, candidate and
 rotation ambiguity, zero-candidate rejection, complete provenance, tamper
 rejection, deterministic atomic persistence, no-overwrite behavior, compact
@@ -103,13 +103,22 @@ of system-evidence clarification. Phase 3.5 tests cover referenced completion
 versions 2 and 3, document and typed-geometry paths, UI readiness, and session,
 ontology, contract, clarification, source, and typed-record tampering.
 
-Later phases will add focused tests for the Phase 5 task handoff,
-cross-camera transformation, robot-frame grounding after resource
-selection, later agent adapters, validation feedback, revision behavior, and
-accepted candidate handoff. Composition coverage will exercise multiple catalog cardinalities
+Phase 5.1 tests cover the contract-first selected-RA handoff. They prove that
+the exact `assemble medium gear` assignment reaches `xarm6@localhost` before
+state retrieval, changed Phase 4 evidence blocks dispatch, a differently
+addressed RA rejects the envelope, and response JID/fingerprint mismatches fail
+closed. They also cover complete ordered catalogs, invalid or composite catalog
+entries, non-finite state, paired append-only revisions, unpaired-history
+rejection, failure-only assignment audits, and the absence of all Phase 5.2,
+validation, and execution artifacts.
+
+Later phases will add focused tests for live selected-RA delivery,
+`PrimitiveProgramDraft`, `MissingContextBatch`, `CompositionContextBundle`,
+validation feedback, revision behavior, and accepted candidate handoff.
+Composition coverage will exercise multiple catalog cardinalities
 without an eight-entry invariant, exact symbol membership, pinned catalog and
 bundle fingerprints, ownership routing, draft-derived batch aggregation and
 stable deduplication, replay rejection, stale versions, catalog changes,
 ambiguity, multiple productive PA/RA batch rounds, and fail-closed repeated or
-non-progressing requests. Until those phases are implemented, no test fixture
-or controlled double establishes a production RA composition path.
+non-progressing requests. The Phase 5.1 controlled double establishes only the
+assignment and snapshot contract, not a live or production RA composition path.

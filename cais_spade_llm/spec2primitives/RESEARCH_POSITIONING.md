@@ -18,15 +18,21 @@ specification.
 ## Proposed-versus-implemented status
 
 The dynamic PA-to-RA composition workflow in this document is the proposed
-ICRA architecture. The PA context adapter through Phase 3.5 and production
-pre-RA grounding through Phase 4.4 exist. Phase 4.4 adds a native controlled
-`retrieve` tool, transient ontology-proposal validation, descriptor-derived
-typed evidence gating, a predefined Workcell with broad `capableOf assembly`
-assertions, location-based coarse reach, and a system-authored
-`processExecution` assignment. Phase 5 selected-RA handoff,
-typed primitive-catalog loading, `PrimitiveProgramDraft` authoring, batched
-context exchange, validation, and execution are not implemented; no
-Phase 5--9 runtime behavior is claimed.
+ICRA architecture. The PA context adapter through Phase 3.5 exists, and **Phase
+4 is implemented through Phase 4.4 under the current framework**. Phase 4.4
+adds a native controlled `retrieve` tool, transient ontology-proposal
+validation, descriptor-derived typed evidence gating, a predefined Workcell
+with broad `capableOf assembly` assertions, location-based coarse reach, and a
+system-authored `processExecution` assignment. **Phase 5.1 now implements only
+the contract-first selected-RA assignment and state/catalog snapshot
+boundary.** Live SPADE delivery, `PrimitiveProgramDraft` authoring, batched
+context exchange, composition, validation, and execution remain unimplemented;
+no Phase 5.2--9 runtime behavior is claimed.
+
+The completed Phase 4 boundary is location-based pre-RA grounding and resource
+assignment. It does not include cross-camera fusion, activation of an
+orientation-sensitive consumer, RA composition, robot-local validation,
+execution, or observed outcomes.
 
 ## Abstraction level
 
@@ -729,7 +735,7 @@ commit the semantic ABox and evaluate manifest-backed coarse reach
         ↓
 system commits processExecution and the post-assignment completion
         ↓
-future selected-RA handoff
+Phase 5.1 assignment envelope + injected-runtime state/catalog snapshots
 ```
 
 One source per cycle is an auditable retrieval operation, not a limit of one
@@ -836,9 +842,10 @@ The remaining ontology boundaries are:
   currently identified blocking product-level ambiguity. If a later primitive
   contract exposes missing product or scene bindings, RA returns one
   `MissingContextBatch`; PA resumes the same controlled producer loop and
-  returns a versioned `CompositionContextBundle`. The robot-independent
-  assembly plan is revalidated or revised before RA binds and authors another
-  candidate. Robot-side gaps remain RA-owned.
+  returns a versioned `CompositionContextBundle`. The validated post-assignment
+  ontology projection and typed grounding state are revalidated or revised
+  before RA binds and authors another candidate. Robot-side gaps remain
+  RA-owned.
 - Composition readiness means RA can bind every required primitive input and
   pass every applicable candidate-schema, backward modeled-condition, forward
   resource-state/data-dependency, physical, and projected-outcome check over

@@ -44,8 +44,25 @@ from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
     ontology_config,
 )
 
+_PROPOSAL_CONTEXT_SUMMARY = (
+    "The RobotFrameLocationRecord is unavailable in the proposal-time context."
+)
+_SCOPED_CONTEXT_SUMMARY = (
+    "ProductAgent proposal summary (captured before deterministic typed grounding "
+    "and resource assignment):\n"
+    f"{_PROPOSAL_CONTEXT_SUMMARY}\n\n"
+    "Final typed context records and ResourceSelectionRecord are authoritative for "
+    "completion state."
+)
+
 
 class _ProposalAgent:
+    def __init__(
+        self,
+        evidence_refs: tuple[str, ...] = ("requirement_0001",),
+    ) -> None:
+        self.evidence_refs = evidence_refs
+
     async def ask_llm_structured(
         self,
         prompt: str,
@@ -66,7 +83,7 @@ class _ProposalAgent:
                     "individual_index": 1,
                     "class_iri": f"{PPR_NAMESPACE}feature",
                     "grounded_meaning": "The requested assembly feature.",
-                    "evidence_refs": ["requirement_0001"],
+                    "evidence_refs": list(self.evidence_refs),
                 }
             ],
             "relations": [
@@ -78,7 +95,7 @@ class _ProposalAgent:
                     "object_kind": "new_individual",
                     "object_individual_index": 1,
                     "object_iri": None,
-                    "evidence_refs": ["requirement_0001"],
+                    "evidence_refs": list(self.evidence_refs),
                 },
                 {
                     "subject_kind": "existing_individual",
@@ -88,12 +105,12 @@ class _ProposalAgent:
                     "object_kind": "new_individual",
                     "object_individual_index": 1,
                     "object_iri": None,
-                    "evidence_refs": ["requirement_0001"],
+                    "evidence_refs": list(self.evidence_refs),
                 },
             ],
             "literal_facts": [],
-            "context_summary": "The requirement identifies an assembly feature.",
-            "evidence_refs": ["requirement_0001"],
+            "context_summary": _PROPOSAL_CONTEXT_SUMMARY,
+            "evidence_refs": list(self.evidence_refs),
             "missing_information": [
                 "The available evidence does not identify the destination shaft."
             ],
@@ -112,6 +129,7 @@ def test_completion_v3_pins_location_grounding_without_session(tmp_path: Path) -
     assert len(record["typed_context_refs"]) == 1
     contract = _read_json(tmp_path / str(record["typed_grounding_contract_ref"]))
     assert contract["schema_version"] == 3
+    assert contract["context_summary"] == _SCOPED_CONTEXT_SUMMARY
     assert contract["context_evidence_refs"] == ["requirement_0001"]
     assert contract["missing_information"] == [
         "The available evidence does not identify the destination shaft."
@@ -121,6 +139,8 @@ def test_completion_v3_pins_location_grounding_without_session(tmp_path: Path) -
     assert _read_json(tmp_path / location_ref)["record_type"] == (
         "RobotFrameLocationRecord"
     )
+    proposal = _read_json(tmp_path / str(record["ontology_projection_ref"]))
+    assert proposal["output"]["context_summary"] == _PROPOSAL_CONTEXT_SUMMARY
     serialized = json.dumps(record)
     for forbidden in (
         "GroundingSession",
@@ -129,6 +149,69 @@ def test_completion_v3_pins_location_grounding_without_session(tmp_path: Path) -
         "RobotFramePoseRecord",
     ):
         assert forbidden not in serialized
+
+
+def test_completion_v3_loader_accepts_unmarked_existing_summary(
+    tmp_path: Path,
+) -> None:
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    contract_path = tmp_path / str(completion["typed_grounding_contract_ref"])
+    contract = _read_json(contract_path)
+    contract["context_summary"] = _PROPOSAL_CONTEXT_SUMMARY
+    contract["fingerprint"] = _fingerprint_without_fingerprint(contract)
+    _write_json(contract_path, contract)
+
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    existing_completion = _read_json(completion_path)
+    existing_completion["typed_grounding_contract_sha256"] = hashlib.sha256(
+        contract_path.read_bytes()
+    ).hexdigest()
+    existing_completion["typed_grounding_contract_fingerprint"] = contract[
+        "fingerprint"
+    ]
+    existing_completion["fingerprint"] = _fingerprint_without_fingerprint(
+        existing_completion
+    )
+    _write_json(completion_path, existing_completion)
+
+    loaded = load_pa_context_grounding_completion(tmp_path)
+
+    assert isinstance(loaded, PAContextGroundingCompletionV3)
+    assert _read_json(contract_path)["context_summary"] == _PROPOSAL_CONTEXT_SUMMARY
+
+
+def test_completion_v3_pins_answered_clarification_source(tmp_path: Path) -> None:
+    clarification_ref = "interaction_record/clarification_0001.json"
+    clarification_path = tmp_path / clarification_ref
+    _write_json(
+        clarification_path,
+        {
+            "schema_version": 1,
+            "record_type": "PAClarification",
+            "product_requirement": "assemble medium gear",
+            "question_turn": 1,
+            "question": "Which product variant is intended?",
+            "action": "answered",
+            "reply": "Medium Gear",
+            "recorded_at_ns": 1,
+            "fingerprint": "0" * 64,
+        },
+    )
+    completion = persist_native_completion_fixture(
+        tmp_path,
+        evidence_refs=("requirement_0001", clarification_ref),
+    ).to_record()
+
+    pinned = next(
+        item for item in completion["source_refs"] if item["ref"] == clarification_ref
+    )
+    assert pinned["sha256"] == hashlib.sha256(clarification_path.read_bytes()).hexdigest()
+
+    clarification = _read_json(clarification_path)
+    clarification["reply"] = "Small Gear"
+    _write_json(clarification_path, clarification)
+    with pytest.raises(GroundingContractError, match="source hash is invalid"):
+        load_pa_context_grounding_completion(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -197,6 +280,8 @@ def test_unsupported_completion_version_is_rejected(tmp_path: Path) -> None:
 
 def persist_native_completion_fixture(
     root: Path,
+    *,
+    evidence_refs: tuple[str, ...] = ("requirement_0001",),
 ) -> PAContextGroundingCompletionV3:
     """Create one complete native record chain for completion and UI tests."""
     requirement = "assemble medium gear"
@@ -210,13 +295,13 @@ def persist_native_completion_fixture(
     workcell = load_predefined_workcell(tbox, registry)
     candidate = asyncio.run(
         propose_and_validate_ontology_grounding(
-            _ProposalAgent(),
+            _ProposalAgent(evidence_refs),
             interaction_root=root,
             tbox=tbox,
             abox=initial_abox,
             workcell=workcell,
             evidence_catalog=[],
-            authorized_evidence_refs={"requirement_0001"},
+            authorized_evidence_refs=set(evidence_refs),
             tools=[],
             tool_executor=_unused_tool,
             max_tool_rounds=1,
@@ -233,7 +318,7 @@ def persist_native_completion_fixture(
         tbox=tbox,
         abox=initial_abox,
         workcell=workcell,
-        authorized_evidence_refs={"requirement_0001"},
+        authorized_evidence_refs=set(evidence_refs),
     )
     assert isinstance(proposal, OntologyGroundingResult)
 
@@ -349,6 +434,19 @@ def _write_location(root: Path) -> tuple[Path, str]:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _fingerprint_without_fingerprint(value: Mapping[str, object]) -> str:
+    payload = dict(value)
+    payload.pop("fingerprint", None)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_json(path: Path, value: object) -> None:

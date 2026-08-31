@@ -5,6 +5,20 @@ composition in industrial robotic assembly. The implemented ProductAgent (PA)
 boundary performs schema-constrained, evidence-backed instance grounding. It
 does not discover or change the PPR TBox.
 
+## Implementation status
+
+**Phase 4 is implemented through Phase 4.4 under the current framework.** This
+includes ontology context, document evidence, CAD/RGB-D grounding, typed
+grounding contracts, evidence-gated semantic acceptance, location-based coarse
+reach, and the selected `processExecution` assignment. Phase 5 selected-RA
+handoff was previously unimplemented. Phase 5.1 now provides the contract-first
+assignment envelope and injected-runtime state/catalog snapshots. Live SPADE
+delivery, primitive composition, robot-local validation, execution, and
+observed outcomes remain unimplemented.
+
+Phase 4 completion does not add cross-camera fusion or activate the available
+orientation-sensitive pose path for the current location-based consumer.
+
 ## Current PA workflow
 
 ```text

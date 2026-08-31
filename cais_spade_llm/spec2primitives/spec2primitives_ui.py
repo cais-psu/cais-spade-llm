@@ -794,10 +794,15 @@ def _persisted_pa_timeline(
         message = latest_output.get("insufficient_evidence") or latest_output.get(
             "clarification_question"
         )
+        title = (
+            "Clarification requested"
+            if latest_output.get("grounding_status") == "clarification_required"
+            else "Grounding incomplete"
+        )
         events.append(
             _timeline_event(
                 "waiting",
-                "Grounding incomplete",
+                title,
                 str(message or "More context is required."),
             )
         )

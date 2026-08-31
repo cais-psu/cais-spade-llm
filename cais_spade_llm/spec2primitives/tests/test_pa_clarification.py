@@ -118,6 +118,12 @@ def test_repeated_clarifications_use_append_only_turns(tmp_path: Path) -> None:
     assert (tmp_path / "interaction_record/clarification_0002.json").is_file()
     assert (tmp_path / "interaction_record/turn_0003.json").is_file()
     assert len(runtime.calls[-1]["clarification_history"]) == 2
+    assert _read_json(tmp_path / "interaction_record/turn_0003.json")["PA_input"][
+        "clarification_refs"
+    ] == [
+        "interaction_record/clarification_0001.json",
+        "interaction_record/clarification_0002.json",
+    ]
 
 
 def test_cancellation_is_terminal_without_product_agent_call(tmp_path: Path) -> None:

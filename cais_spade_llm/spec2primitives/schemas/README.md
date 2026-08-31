@@ -13,7 +13,9 @@ PA-owned writable interaction-ABox behavior lives in
 signatures; it does not require any particular relation for a requirement.
 The validator rejects wrong-domain/range relations and RA,
 primitive-offering, and `capableOf` assertions from the PA ABox.
-A future RA resource ABox remains separately owned; only the TBox is shared.
+The current framework adds no separate RA resource ABox. The selected RA's
+future primitive catalog remains a separately owned typed record; only the TBox
+is shared.
 Phase 4.0 is wired into Phase 3 through package-local Python contracts and adds
 no ontology file to this directory. Retrieval, interpretation, ontology delta, and
 Phase 4.3-style decision records share an aligned operation number.
@@ -63,7 +65,7 @@ without exposing coordinates, scores, masks, or thresholds. The record is not
 an ontology assertion, complete pose, context-completion assessment, or
 assembly-readiness claim.
 
-The simple remaining Phase 4.2B2 pose increment adds
+The implemented Phase 4.2B2 pose increment adds
 `CADPoseEstimationRecord`, owned by
 `tools/rgb_d_cad_grounding/pose_estimation.py`. It binds one validated size
 correspondence to ranked camera-frame registration hypotheses and stores a
@@ -99,6 +101,22 @@ Implemented pre-RA grounding contracts in
 - append-only native PA tool audits, `PAClarification` records, and
   `PAContextGroundingCompletion` version 3.
 
+`agents/ra/context_handoff.py` now covers the Phase 5.1 contracts:
+
+- `SelectedRAAssignmentEnvelope`, the minimum hash-pinned Phase 4 assignment
+  delivered to the exact selected RA;
+- `RobotStateSnapshot`, one fresh JSON state response correlated to that
+  assignment; and
+- `PrimitiveCatalogSnapshot`, the complete ordered primitive-only catalog
+  linked to the assignment, resource selection, and matching state record.
+
+Each catalog entry preserves its exact `primitive_symbol` and declares an
+operation description, ordered typed parameters and results, invocation
+binding, truthful limits, direct evidence, evaluator endpoints, and optional
+modeled conditions and effects. Omitted conditions or effects remain
+`unmodeled`. No fixed catalog cardinality, composite expansion, or
+`primitive_steps` is accepted at this boundary.
+
 The active system expands `ResourceAssignmentNeed` through producer descriptor
 prerequisites and compares that closure with current, accepted, hash-valid
 typed bindings. Missing source-produced types are mapped to eligible approved
@@ -113,19 +131,18 @@ new production runs do not write or migrate them.
 
 Planned downstream contracts cover:
 
-- robot-independent `TaskTransitionContract`
 - versioned `CompositionContextBundle` records with task, ABox, binding,
   selected-resource, and catalog fingerprints
-- a complete selected-RA-authoritative primitive-only catalog snapshot with
-  runtime-determined cardinality and exact symbols
 - RA-authored `PrimitiveProgramDraft`, deduplicated `MissingContextBatch`, PA
   batch response, and progress or no-progress decision records
 - fully bound `primitive_steps`, state checks, IK/collision/trajectory feedback,
   rejected candidate revision, and accepted candidate handoff
 
-The downstream names are planned boundaries, not current schema
-implementations. No RA resource ABox, task-transition contract, composition
-bundle, missing-context batch, or primitive candidate is produced by the
-current runtime.
+These downstream names remain planned boundaries. The current framework has no
+separate `TaskTransitionContract`: Phase 5.2 will consume the validated
+post-assignment ontology projection, `ResourceSelectionRecord`, Phase 5.1
+snapshots, and minimum hash-pinned typed evidence directly. Phase 5.1 produces
+no RA resource ABox, composition bundle, missing-context batch, or primitive
+candidate.
 
 Phase 0 intentionally defines no JSON, YAML, or Python schema.

@@ -1,9 +1,9 @@
 # Contexts
 
 Each interaction stores its runtime inputs, retrieved snapshots, messages,
-outputs, and validation evidence under its caller-owned root. Product-side PA
-and geometry paths exist today; the resource and composition paths labeled
-`planned` below are not produced by the current runtime:
+outputs, and validation evidence under its caller-owned root. Product-side PA,
+geometry, and Phase 5.1 assignment/state/catalog paths exist today. Later
+composition paths remain planned:
 
 ```text
 contexts/<interaction_identifier>/
@@ -20,18 +20,18 @@ contexts/<interaction_identifier>/
 │   │   ├── completion/typed_grounding_contract_v3.json
 │   │   ├── completion/pa_context_grounding_completion_v3.json
 │   │   └── <typed producer records>
-│   └── assembly_plan/                     # planned Phase 5
-├── resources/                              # planned RA-owned context
+├── resources/                              # Phase 5.1 RA-owned snapshots
 │   └── <exact_RA_identifier>/
 │       ├── robot_state/
 │       ├── primitive_catalog_snapshot/
-│       ├── primitive_program_drafts/
-│       ├── primitive_steps/
-│       └── validation/
-├── composition/                            # planned PA/RA exchange
-│   ├── context_bundles/
-│   ├── missing_context_batches/
-│   └── progress_decisions/
+│       ├── primitive_program_drafts/       # planned
+│       ├── primitive_steps/                # planned
+│       └── validation/                     # planned
+├── composition/
+│   ├── selected_ra_assignments/            # Phase 5.1
+│   ├── context_bundles/                    # planned
+│   ├── missing_context_batches/            # planned
+│   └── progress_decisions/                 # planned
 └── interaction_record/
     ├── clarification_<turn>.json
     └── context_completion_0001.json
@@ -55,11 +55,11 @@ session and completion records remain read-only recovery inputs. Planned
 will preserve task, ABox, typed-binding, catalog, and selected-resource
 fingerprints. Each RA `PrimitiveProgramDraft`, deduplicated
 `MissingContextBatch`, PA response, progress or no-progress decision, fully
-bound candidate, and validation trace will be append-only and reviewable. A
-catalog snapshot records the complete catalog returned by the selected RA and
-does not assume a fixed number of primitives. No RA resource subtree,
-composition bundle, missing-context batch, or primitive candidate is generated
-today.
+bound candidate, and validation trace will be append-only and reviewable. Phase
+5.1 already records the minimum selected-RA assignment and the complete catalog
+returned by its injected runtime without assuming a fixed number of primitives.
+It produces no composition bundle, missing-context batch, primitive draft,
+candidate, validation trace, or execution record.
 
 Product RGB-D observation bundles use an `observation_ref` and retain the
 existing `manifest.json`, lossless RGB PNG, and original metric `float32` depth
@@ -80,8 +80,8 @@ CAD-correspondence, camera-frame location, pose, and robot-frame conversion
 states plus failure information; it is not a context-completion or
 assembly-readiness record.
 
-When a controlled future caller supplies one exact preprocessed CAD record and
-one segmentation record, Phase 4.2B2A writes
+When a controlled caller supplies one exact preprocessed CAD record and one
+segmentation record, the implemented Phase 4.2B2A path writes
 `products/grounding/rgb_d_cad_grounding/correspondence_<number>/correspondence_record.json`
 atomically in that same interaction. It records deterministic size rankings and
 may preserve one candidate center in its camera optical frame. The status-only

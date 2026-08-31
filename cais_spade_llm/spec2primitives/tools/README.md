@@ -1,7 +1,7 @@
 # Tools
 
-Controlled retrieval, observation, and future perception components belong
-here. They are tools used by the Spec2Primitives workflow, not agents.
+Controlled retrieval, observation, and grounding components belong here. They
+are tools used by the Spec2Primitives workflow, not agents.
 
 - `exact_ref_resolver.py` serves approved product document and CAD evidence;
   approved CAD summaries include a source hash for later integrity checks.
@@ -34,5 +34,7 @@ calls the approved `retrieve` handle. The automatic observation entrypoint perfo
 capture → validation → preprocessing → segmentation only when called. The UI
 polls compact status and exposes no processing controls. CAD preprocessing stays
 separate; association is invoked only after one exact approved CAD record and
-the required typed records exist. Cross-camera transformation and RA-owned
-assessment still require later separately authorized work.
+the required typed records exist. Cross-camera fusion is outside the completed
+Phase 4 boundary because the active location-based path selects and converts
+one exact camera frame. RA-owned Phase 5 composition and validation require
+later separately authorized work.

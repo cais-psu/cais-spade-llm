@@ -3,6 +3,26 @@
 This file describes verified repository behavior. It is not an aspirational
 phase schedule.
 
+## Framework phase status
+
+**Phase 4 is implemented through Phase 4.4 under the current framework.** The
+implemented boundary includes Phase 4.0 ontology context, Phase 4.1 document
+evidence, Phase 4.2 CAD/RGB-D preprocessing, segmentation, correspondence,
+camera-frame pose estimation, and frame conversion, Phase 4.3 typed grounding
+contracts, and Phase 4.4 evidence-gated semantic acceptance and resource
+assignment.
+
+**Phase 5.1 is implemented as a contract-first assigned-RA activation and
+context-snapshot boundary.** It produces the minimum verified assignment
+envelope, invokes an injected selected-RA runtime, and persists fresh state and
+the complete returned primitive-only catalog. Live SPADE delivery remains
+Phase 5.1b.
+
+Phase 4 completion means the current location-based pre-RA consumer can reach a
+hash-pinned post-assignment completion. It does not claim cross-camera fusion,
+activation of an orientation-sensitive consumer, primitive composition, IK or
+collision validation, execution, or an observed assembly outcome.
+
 ## Implemented native PA grounding
 
 ```text
@@ -136,6 +156,13 @@ typed evidence, source authority, tool audits, resource selection, assignment
 delta, and final ABox. Existing version-2 completion/session records remain
 readable but are never produced or migrated.
 
+For fresh version-3 completions, `context_summary` is explicitly marked as the
+ProductAgent proposal narrative captured before deterministic typed grounding
+and resource assignment. The original narrative remains unchanged in the
+accepted `OntologyGroundingProposal`. Final hash-pinned typed records and
+`ResourceSelectionRecord` are authoritative for completion state. Existing
+unmarked version-3 records remain readable and are not migrated.
+
 A completed UI timeline contains exactly:
 
 1. `Requirement received`
@@ -149,11 +176,36 @@ diagnostics. Genuine proposal `missing_information` and document uncertainty
 appear under **Known non-blocking context limits**; historical unresolved
 markers do not. Completion does not claim execution readiness.
 
+## Implemented Phase 5.1 assigned-RA context handoff
+
+`activate_selected_ra_context(...)` loads and verifies one version-3
+`PAContextGroundingCompletion`, its version-2 `ResourceSelectionRecord`, and the
+exact `resource_grounding_host` assignment delta. It persists one immutable
+`SelectedRAAssignmentEnvelope` containing the requirement, semantic task IRIs,
+exact selected resource identity and execution mode, and pinned Phase 4 record
+refs, hashes, and fingerprints.
+
+The injected `RobotAgentCompositionRuntime` receives that envelope before it
+can return context. The receiver must confirm that the envelope targets its
+exact JID. The response must echo the same JID and assignment fingerprint and
+provide a non-empty JSON robot state plus the complete composition catalog.
+The host preserves catalog order and exact symbols, validates the typed
+primitive interface, and writes matching append-only `RobotStateSnapshot` and
+`PrimitiveCatalogSnapshot` revisions. Existing paired revisions are reloaded
+and revalidated before another RA request; malformed, changed, unpaired, or
+gapped histories fail closed.
+
+This is a contract-first runtime boundary, not a live shared-RobotAgent or
+SPADE connection. It sends no full ABox, typed evidence payload, raw RDF, or
+composition prompt and creates no primitive draft, missing-context batch,
+candidate, validation result, or execution command.
+
 ## Deliberately deferred
 
+- Phase 5.1b live exact-JID SPADE delivery to the shared RobotAgent;
 - future RA `MissingContextBatch → PA producers/clarification →
   CompositionContextBundle`;
-- primitive catalogs and composition;
+- `PrimitiveProgramDraft` authoring and primitive composition;
 - orientation-sensitive manipulation requirements;
 - IK, collision checking, execution, and outcome validation;
 - public API, `SystemBridge`, PPR TBox, or persisted-record migration.
@@ -161,3 +213,11 @@ markers do not. Completion does not claim execution readiness.
 Destination-shaft, attachment, and placement-order facts remain non-blocking
 when the current location-based resource consumer does not require them. A
 future authorized consumer may request them dynamically.
+
+The future RA binding preflight will examine only the required inputs declared
+by exact primitives selected in the RA-authored `PrimitiveProgramDraft`. An
+unbound product or scene input such as `target_feature` becomes a
+`MissingContextBatch` need only when that draft and primitive interface activate
+it; it is not a fixed PA slot or task workflow. Inputs absent from every
+selected primitive interface, grounded outcome requirement, and validator are
+`unmodeled` and must fail closed rather than being silently inferred.

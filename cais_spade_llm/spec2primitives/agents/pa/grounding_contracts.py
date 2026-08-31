@@ -59,6 +59,14 @@ _RESOURCE_SELECTION_PREFIX = (
 )
 _RESOURCE_SELECTION_RECORD_NAME = "resource_selection_record.json"
 _RESOURCE_SELECTION_POLICY = "first_reachable_in_predefined_registry_order"
+_NATIVE_CONTEXT_SUMMARY_PREFIX = (
+    "ProductAgent proposal summary (captured before deterministic typed grounding "
+    "and resource assignment):"
+)
+_NATIVE_CONTEXT_SUMMARY_SUFFIX = (
+    "Final typed context records and ResourceSelectionRecord are authoritative for "
+    "completion state."
+)
 _ASSEMBLY_PROCESS_IRI = "https://cais-spade-llm.local/process/assembly"
 _PREDEFINED_RESOURCES = (
     ("xarm6", "https://cais-spade-llm.local/resource/xarm6"),
@@ -1276,7 +1284,7 @@ def persist_pa_context_grounding_completion_v3(  # noqa: PLR0913
         "record_type": "TypedGroundingContract",
         "requirement_text": product_requirement,
         "ontology_projection_ref": ontology_projection_ref,
-        "context_summary": context_summary,
+        "context_summary": _scoped_native_context_summary(context_summary),
         "context_evidence_refs": list(context_evidence_refs),
         "missing_information": list(missing_information),
         "typed_record_refs": [dict(item) for item in typed_refs],
@@ -1316,6 +1324,15 @@ def persist_pa_context_grounding_completion_v3(  # noqa: PLR0913
     _write_json_mapping_exclusive(completion_path, payload)
     load_pa_context_grounding_completion(root)
     return completion_path
+
+
+def _scoped_native_context_summary(context_summary: str) -> str:
+    """Mark the PA narrative as preceding deterministic completion state."""
+    return (
+        f"{_NATIVE_CONTEXT_SUMMARY_PREFIX}\n"
+        f"{context_summary}\n\n"
+        f"{_NATIVE_CONTEXT_SUMMARY_SUFFIX}"
+    )
 
 
 def persist_pa_context_grounding_completion_v2(  # noqa: PLR0913
