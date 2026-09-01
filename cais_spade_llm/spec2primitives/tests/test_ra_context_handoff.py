@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Callable
 from copy import deepcopy
@@ -261,7 +262,7 @@ def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
 def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
     tmp_path: Path,
 ) -> None:
-    persist_native_completion_fixture(tmp_path)
+    completion = persist_native_completion_fixture(tmp_path).to_record()
     agent = _LiveRobotAgent()
     host = _LiveRobotAgentHost([agent])
     runtime = InProcessRobotAgentCompositionRuntime(host)
@@ -283,6 +284,24 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
     assert "The available evidence does not identify the destination shaft." in str(
         call["prompt"]
     )
+    composition_input = _composition_input_from_prompt(call["prompt"])
+    projection = composition_input["ontology_projection"]
+    final_view_path = sorted(
+        (tmp_path / "products/grounding/product_context").glob("view_*.json")
+    )[-1]
+    final_view = _read_json(final_view_path)
+    assert set(projection) == {"tbox_fingerprint", "abox_fingerprint", "assertions"}
+    assert projection["tbox_fingerprint"] == completion["tbox_fingerprint"]
+    assert projection["abox_fingerprint"] == completion["abox_fingerprint"]
+    assert projection["assertions"] == final_view["assertions"]
+    serialized_projection = json.dumps(projection, sort_keys=True)
+    for excluded_field in (
+        "typed_bindings",
+        "uncertainty",
+        "attempted_evidence",
+        "translated_location_m",
+    ):
+        assert excluded_field not in serialized_projection
     response_schema = call["response_format"]
     assert response_schema["schema"]["type"] == "object"
     assert response_schema["schema"]["properties"]["primitive_symbols"]["items"][
@@ -290,6 +309,44 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
     ] == (
         _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     )
+
+
+def test_phase_5_2_rejects_assignment_inconsistent_ontology_projection(
+    tmp_path: Path,
+) -> None:
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    final_view_path = sorted(
+        (tmp_path / "products/grounding/product_context").glob("view_*.json")
+    )[-1]
+    final_view = _read_json(final_view_path)
+    final_view["assertions"] = [
+        assertion
+        for assertion in final_view["assertions"]
+        if assertion["predicate"] != "http://PAonto.com#runsOnResource"
+    ]
+    final_view["abox_fingerprint"] = _fingerprint(final_view["assertions"])
+    final_view["fingerprint"] = _record_fingerprint(final_view)
+    _write_json(final_view_path, final_view)
+
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion["abox_fingerprint"] = final_view["abox_fingerprint"]
+    completion["fingerprint"] = _record_fingerprint(completion)
+    _write_json(completion_path, completion)
+
+    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    runtime = _StructuralDraftRuntime(
+        {
+            "draft_status": "proposed",
+            "primitive_symbols": ["detect_parts"],
+            "unsupported_reason": None,
+        }
+    )
+
+    with pytest.raises(PrimitiveDraftError, match="runsOnResource"):
+        asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+
+    assert runtime.calls == []
+    assert not (tmp_path / "composition/primitive_program_drafts").exists()
 
 
 def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
@@ -322,10 +379,48 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
         "move_pose",
         "detect_parts",
     ]
+    delivered_input = _composition_input_from_prompt(draft_runtime.calls[0]["prompt"])
+    composition_input = diagnostic["composition_input"]
+    assert composition_input == delivered_input
+    assert set(composition_input) == {
+        "task",
+        "selected_resource",
+        "ontology_projection",
+        "robot_state",
+        "primitive_catalog",
+        "grounded_context",
+    }
+    assert composition_input["robot_state"] == first_context.robot_state.robot_state
+    assert composition_input["primitive_catalog"] == list(
+        first_context.primitive_catalog.primitive_catalog
+    )
+    projection = composition_input["ontology_projection"]
+    assert isinstance(projection, dict)
+    assert projection["assertions"]
+    grounded_context = composition_input["grounded_context"]
+    assert isinstance(grounded_context, dict)
+    assert grounded_context["context_summary"]
+    assert grounded_context["known_context_limits"] == [
+        "The available evidence does not identify the destination shaft."
+    ]
+    assert all(
+        set(record) == {"record_type", "record_ref"}
+        for record in grounded_context["typed_records"]
+    )
+    serialized_input = json.dumps(composition_input, sort_keys=True)
+    for excluded_field in (
+        "raw_turtle",
+        "typed_bindings",
+        "attempted_evidence",
+        "parameter_bindings",
+    ):
+        assert excluded_field not in serialized_input
     serialized = json.dumps(first.to_record())
     assert "primitive_steps" not in serialized
     assert "typed_parameters" not in serialized
     assert "parameter_bindings" not in serialized
+    assert "composition_input" not in serialized
+    assert "ontology_projection" not in serialized
     assert phase_4_path.read_bytes() == phase_4_bytes
     assert first_context.robot_state_path.read_bytes() == state_bytes
     assert first_context.primitive_catalog_path.read_bytes() == catalog_bytes
@@ -339,6 +434,42 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     assert first.path.read_bytes() == json.dumps(
         first.to_record(), indent=2, sort_keys=True
     ).encode("utf-8") + b"\n"
+
+
+def test_phase_5_2_diagnostic_blocks_mismatched_draft_evidence_ref(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    context = asyncio.run(
+        activate_selected_ra_context(_AssignedContextRuntime(), tmp_path)
+    )
+    runtime = _StructuralDraftRuntime(
+        {
+            "draft_status": "proposed",
+            "primitive_symbols": ["detect_parts"],
+            "unsupported_reason": None,
+        }
+    )
+    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+    assignment_record = _read_json(context.assignment_path)
+    altered = draft.to_record()
+    altered["robot_state_ref"] = context.assignment_path.relative_to(tmp_path).as_posix()
+    altered["robot_state_sha256"] = hashlib.sha256(
+        context.assignment_path.read_bytes()
+    ).hexdigest()
+    altered["robot_state_fingerprint"] = assignment_record["fingerprint"]
+    altered["fingerprint"] = _record_fingerprint(altered)
+    _write_json(draft.path, altered)
+
+    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
+
+    assert diagnostic["status"] == "blocked"
+    assert diagnostic["draft"] is None
+    assert diagnostic["composition_input"] is None
+    assert diagnostic["failure"] == (
+        "PrimitiveProgramDraft robot_state_ref does not match its active context."
+    )
+    assert len(runtime.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -384,6 +515,7 @@ def test_phase_5_2_handles_unsupported_and_unknown_symbols(
     assert diagnostic["unsupported_reason"] == (
         "The catalog has no insertion behavior."
     )
+    assert isinstance(diagnostic["composition_input"], dict)
 
 
 def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
@@ -740,6 +872,8 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     catalog_record = _read_json(first.primitive_catalog_path)
     assert "typed_context_refs" not in assignment_record
     assert "ontology_projection_ref" not in assignment_record
+    assert "composition_input" not in assignment_record
+    assert "ontology_projection" not in assignment_record
     assert "assertions" not in assignment_record
     assert catalog_record["assignment_fingerprint"] == first.assignment.fingerprint
     assert (
@@ -1060,3 +1194,37 @@ def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _fingerprint(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_fingerprint(value: Mapping[str, object]) -> str:
+    payload = dict(value)
+    payload.pop("fingerprint", None)
+    return _fingerprint(payload)
+
+
+def _composition_input_from_prompt(value: object) -> dict[str, Any]:
+    marker = "\n\nCOMPOSITION_INPUT\n"
+    _prefix, separator, serialized = str(value).partition(marker)
+    assert separator == marker
+    composition_input = json.loads(serialized)
+    assert isinstance(composition_input, dict)
+    return composition_input

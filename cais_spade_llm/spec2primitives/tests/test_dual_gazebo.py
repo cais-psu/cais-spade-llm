@@ -285,6 +285,39 @@ def test_phase_5_2_action_state_is_fail_closed(
     )
 
 
+def test_phase_5_2_composition_evidence_summary_uses_exact_input_sections() -> None:
+    summary = spec2primitives_ui._phase_5_2_composition_evidence_summary(
+        {
+            "task": {"product_requirement": "assemble medium gear"},
+            "selected_resource": {"resource_jid": "xarm6@localhost"},
+            "ontology_projection": {
+                "tbox_fingerprint": "tbox-fingerprint",
+                "abox_fingerprint": "abox-fingerprint",
+                "assertions": [{"subject": "s"}, {"subject": "t"}],
+            },
+            "robot_state": {"controller_ready": True},
+            "primitive_catalog": [{"primitive_symbol": "detect_parts"}],
+            "grounded_context": {
+                "typed_records": [
+                    {
+                        "record_type": "RobotFrameLocationRecord",
+                        "record_ref": "products/grounding/location.json",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert summary == {
+        "assertion_count": 2,
+        "primitive_count": 1,
+        "typed_record_count": 1,
+        "tbox_fingerprint": "tbox-fingerprint",
+        "abox_fingerprint": "abox-fingerprint",
+    }
+    assert spec2primitives_ui._phase_5_2_waiting_view()["composition_input"] is None
+
+
 def test_phase_5_2_ui_authors_only_from_the_active_persisted_context() -> None:
     source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
 
@@ -295,6 +328,12 @@ def test_phase_5_2_ui_authors_only_from_the_active_persisted_context() -> None:
     assert 'current_diagnostic.status != "ready_for_draft"' in source
     assert "await author_primitive_program_draft(" in source
     assert "runtime.robot_agent_draft_runtime" in source
+    assert 'ui.label("RA composition evidence")' in source
+    assert '"COMPOSITION_INPUT delivered to RA"' in source
+    assert 'composition_input = diagnostic.get("composition_input")' in source
+    assert 'status in {"draft_authored", "unsupported"}' in source
+    assert 'elements["composition_evidence_card"].set_visibility(' in source
+    assert "json.dumps(\n            composition_input," in source
     assert (
         'phase_5_elements["create_draft_button"].on_click(_start_phase_5_2)'
         in source

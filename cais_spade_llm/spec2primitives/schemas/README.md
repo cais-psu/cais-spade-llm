@@ -123,6 +123,10 @@ an ordered list of exact catalog symbols, and an unsupported reason. The host
 derives structural step indexes and pins the record to the exact completion,
 assignment, robot-state snapshot, and primitive-catalog snapshot. It contains
 no parameter values, `primitive_steps`, feasibility claim, or execution request.
+Its transient model input includes the completion-consistent post-assignment
+ontology assertions with the matching TBox/ABox fingerprints after the host
+validates the exact task/resource chain. Those assertions are not copied into a
+new persisted schema or into the model-authored `PrimitiveProgramDraft`.
 
 The active system expands `ResourceAssignmentNeed` through producer descriptor
 prerequisites and compares that closure with current, accepted, hash-valid

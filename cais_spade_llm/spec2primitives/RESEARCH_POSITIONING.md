@@ -198,6 +198,15 @@ semantic or typed output need to authorized tools without hard-coding a PDF,
 CAD, RGB-D, calibration, or existing-record sequence. The TBox defines valid
 meaning; it does not decide which producer or source to use.
 
+SPARQL is an optional graph-access mechanism, not a requirement for every
+ontology consumer. The host may use fixed, validated graph extraction to
+materialize the bounded ontology projection; the selected RA consumes that
+projection rather than receiving unrestricted access to the complete graph.
+The ontology remains operationally consequential only when its accepted facts
+constrain resource assignment, context binding, composition, or outcome
+validation. If those facts are merely persisted and cannot affect a downstream
+decision, the ontology would be decorative rather than part of the method.
+
 The composite-function coverage gap and composition surface are established
 from complete RA-authoritative, versioned typed catalog snapshots whose
 cardinality is determined at runtime. Each attempt pins the snapshot fingerprint
@@ -506,6 +515,31 @@ a complete current catalog of semantic executable interfaces with typed inputs,
 outputs, truthful limits, partial local conditions and effects, and evaluator
 endpoints, but it does not expose a complete causal action model connecting the
 new product outcome to every required intermediate state.
+
+### Concrete minimal-contract assembly boundary
+
+The current assembly example deliberately keeps each primitive's local contract
+minimal. `grasp_part` requires `held_part = null` and establishes `held_part`
+from the part parameter. `release_part` requires `held_part != null` and clears
+`held_part`. `move_cartesian` has no modeled condition and updates
+`current_pose` from `x`, `y`, and `z`. `compute_pick_targets` and
+`compute_place_targets` expose typed `approach_pose` and `target_pose` results
+but no symbolic conditions or effects.
+
+Over exactly that represented surface, backward symbolic derivation can connect
+`grasp_part` to `release_part` through `held_part`. It cannot derive that either
+target-computation primitive or `move_cartesian` must occur, because no symbolic
+predicate connects their typed pose results or `current_pose` update to the
+custody contracts. The RA LLM is evaluated as the candidate composer that fills
+this unmodeled structural gap from the task and semantic primitive interfaces;
+deterministic checks still reject violations of the conditions and effects that
+are represented.
+
+This is not a claim that symbolic planning is bad or generally incapable of
+assembly composition. A separately engineered PDDL domain that adds the missing
+causal predicates and action relationships could derive the motion and target
+steps. The narrower claim is that an interface-only symbolic planner cannot
+derive them from these intentionally partial, truthful runtime contracts alone.
 
 Continuous feasibility alone is not this justification. IK, collision,
 visibility, motion, and other high-dimensional constraints can be integrated

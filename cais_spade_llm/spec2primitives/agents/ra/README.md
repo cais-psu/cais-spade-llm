@@ -59,8 +59,11 @@ validate a candidate, or execute anything.
 `author_primitive_program_draft(...)` requires the latest validated Phase 5.1
 pair and asks the same exact selected RobotAgent for only a structural sequence.
 The bounded input includes the requirement and task IRIs, selected resource,
-current state, complete catalog, grounded summary, known limits, and typed
-record identities. It excludes raw RDF and parameter bindings.
+the completion-consistent post-assignment ontology assertions and TBox/ABox
+fingerprints, current state, complete catalog, grounded summary, known limits,
+and typed-record identities. The host pushes that transient projection after
+validating its exact task/resource chain. It excludes raw RDF, unrelated
+`ProductContextView` fields, typed-record payloads, and parameter bindings.
 
 The RobotAgent may select and order only exact catalog symbols, may repeat a
 symbol, and may instead return an explicit unsupported result. The host derives
@@ -74,6 +77,13 @@ The 5.2 section in the temporary Phase 5 card enables **Create Primitive
 Draft** only when the latest captured pair has no draft. It displays the ordered
 symbols or unsupported reason and the full persisted `PrimitiveProgramDraft`.
 Refresh remains read-only.
+
+For the current authored or unsupported draft, the same card also reconstructs
+the exact transient `COMPOSITION_INPUT` from the draft's hash-pinned completion,
+assignment, robot-state, and primitive-catalog records. The read-only evidence
+panel summarizes its six input sections and exposes the complete JSON payload.
+It is input provenance, not private model reasoning, feasibility validation, or
+execution evidence, and the reconstructed payload is not persisted.
 
 ## Planned continuation
 

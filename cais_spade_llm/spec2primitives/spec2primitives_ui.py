@@ -1624,7 +1624,42 @@ def _phase_5_2_waiting_view(
         "primitive_symbols": [],
         "unsupported_reason": None,
         "draft": None,
+        "composition_input": None,
         "failure": None,
+    }
+
+
+def _phase_5_2_composition_evidence_summary(
+    composition_input: object,
+) -> dict[str, object]:
+    """Summarize the exact composition input without changing its contents."""
+    if not isinstance(composition_input, Mapping):
+        return {
+            "assertion_count": 0,
+            "primitive_count": 0,
+            "typed_record_count": 0,
+            "tbox_fingerprint": None,
+            "abox_fingerprint": None,
+        }
+    ontology_projection = composition_input.get("ontology_projection")
+    projection = (
+        ontology_projection if isinstance(ontology_projection, Mapping) else {}
+    )
+    assertions = projection.get("assertions")
+    primitive_catalog = composition_input.get("primitive_catalog")
+    grounded_context = composition_input.get("grounded_context")
+    grounded = grounded_context if isinstance(grounded_context, Mapping) else {}
+    typed_records = grounded.get("typed_records")
+    return {
+        "assertion_count": len(assertions) if isinstance(assertions, list) else 0,
+        "primitive_count": (
+            len(primitive_catalog) if isinstance(primitive_catalog, list) else 0
+        ),
+        "typed_record_count": (
+            len(typed_records) if isinstance(typed_records, list) else 0
+        ),
+        "tbox_fingerprint": projection.get("tbox_fingerprint"),
+        "abox_fingerprint": projection.get("abox_fingerprint"),
     }
 
 
@@ -1795,6 +1830,63 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
             )
             unsupported_reason_value.set_visibility(False)
 
+        with ui.card().classes(
+            "w-full border border-violet-200 bg-white shadow-none"
+        ) as composition_evidence_card:
+            ui.label("RA composition evidence").classes(
+                "text-sm font-semibold text-violet-900"
+            )
+            ui.label(
+                "Reconstructed from the current draft's hash-pinned inputs. "
+                "This is input provenance, not private model reasoning, feasibility "
+                "validation, or execution evidence."
+            ).classes("text-xs text-slate-600 whitespace-pre-wrap")
+            ui.label("Input sections").classes(
+                "text-xs font-semibold text-slate-500"
+            )
+            with ui.row().classes("w-full gap-1 flex-wrap"):
+                for section in (
+                    "task",
+                    "selected_resource",
+                    "ontology_projection",
+                    "robot_state",
+                    "primitive_catalog",
+                    "grounded_context",
+                ):
+                    ui.badge(section).props("color=violet outline")
+            with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                composition_assertion_count_value = ui.label(
+                    "Assertions: 0"
+                ).classes("text-xs font-semibold text-slate-800")
+                composition_primitive_count_value = ui.label(
+                    "Primitives: 0"
+                ).classes("text-xs font-semibold text-slate-800")
+                composition_typed_record_count_value = ui.label(
+                    "Typed-record identities: 0"
+                ).classes("text-xs font-semibold text-slate-800")
+            composition_tbox_fingerprint_value = ui.label("TBox: none").classes(
+                "text-xs text-slate-600 break-all"
+            )
+            composition_abox_fingerprint_value = ui.label("ABox: none").classes(
+                "text-xs text-slate-600 break-all"
+            )
+            ui.label(
+                "grounded_context contains typed-record identities only. Excluded: "
+                "raw RDF, typed-record payloads, unrelated ProductContextView fields, "
+                "parameter bindings, task tools, private model reasoning, feasibility "
+                "claims, and execution evidence."
+            ).classes("text-xs text-slate-500 whitespace-pre-wrap")
+            with ui.expansion(
+                "COMPOSITION_INPUT delivered to RA",
+                icon="fact_check",
+            ).classes(
+                "w-full border border-slate-200 bg-slate-50 rounded"
+            ) as composition_input_expansion:
+                composition_input_value = ui.code("", language="json").classes(
+                    "w-full text-xs overflow-x-auto"
+                )
+        composition_evidence_card.set_visibility(False)
+
         with ui.expansion("PrimitiveProgramDraft", icon="schema").classes(
             "w-full border border-slate-200 bg-white rounded"
         ) as draft_expansion:
@@ -1841,6 +1933,14 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
         "latest_draft_ref": latest_draft_ref_value,
         "draft_symbols": draft_symbols_container,
         "unsupported_reason": unsupported_reason_value,
+        "composition_evidence_card": composition_evidence_card,
+        "composition_assertion_count": composition_assertion_count_value,
+        "composition_primitive_count": composition_primitive_count_value,
+        "composition_typed_record_count": composition_typed_record_count_value,
+        "composition_tbox_fingerprint": composition_tbox_fingerprint_value,
+        "composition_abox_fingerprint": composition_abox_fingerprint_value,
+        "composition_input_expansion": composition_input_expansion,
+        "composition_input": composition_input_value,
         "draft_expansion": draft_expansion,
         "draft": draft_value,
         "draft_failure_card": draft_failure_card,
@@ -1982,6 +2082,41 @@ def _apply_phase_5_2_diagnostic(
         f"Unsupported: {unsupported_reason}" if unsupported_reason else ""
     )
     elements["unsupported_reason"].set_visibility(bool(unsupported_reason))
+
+    composition_input = diagnostic.get("composition_input")
+    has_composition_input = (
+        status in {"draft_authored", "unsupported"}
+        and isinstance(composition_input, Mapping)
+    )
+    evidence_summary = _phase_5_2_composition_evidence_summary(composition_input)
+    elements["composition_assertion_count"].set_text(
+        f"Assertions: {evidence_summary['assertion_count']}"
+    )
+    elements["composition_primitive_count"].set_text(
+        f"Primitives: {evidence_summary['primitive_count']}"
+    )
+    elements["composition_typed_record_count"].set_text(
+        f"Typed-record identities: {evidence_summary['typed_record_count']}"
+    )
+    elements["composition_tbox_fingerprint"].set_text(
+        f"TBox: {evidence_summary['tbox_fingerprint'] or 'none'}"
+    )
+    elements["composition_abox_fingerprint"].set_text(
+        f"ABox: {evidence_summary['abox_fingerprint'] or 'none'}"
+    )
+    elements["composition_input"].content = (
+        json.dumps(
+            composition_input,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        if has_composition_input
+        else ""
+    )
+    elements["composition_input"].update()
+    elements["composition_input_expansion"].set_visibility(has_composition_input)
+    elements["composition_evidence_card"].set_visibility(has_composition_input)
 
     draft = diagnostic.get("draft")
     has_draft = isinstance(draft, Mapping)

@@ -23,6 +23,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     ProductContextView,
     TypedContextBinding,
     TypedGroundingContract,
+    load_completed_product_context_view,
     load_pa_context_grounding_completion,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
@@ -61,6 +62,7 @@ __all__ = [
     "continue_pa_context_interaction",
     "commit_resource_assignment",
     "derive_resource_assignment_need",
+    "load_completed_product_context_view",
     "load_pa_context_grounding_completion",
     "serve_pa_requested_context",
     "select_predefined_resource",

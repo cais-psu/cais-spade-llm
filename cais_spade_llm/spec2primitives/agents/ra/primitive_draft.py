@@ -14,6 +14,8 @@ from typing import Protocol
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingContractError,
     PAContextGroundingCompletionV3,
+    ProductContextView,
+    load_completed_product_context_view,
     load_pa_context_grounding_completion,
 )
 from cais_spade_llm.spec2primitives.agents.ra.context_handoff import (
@@ -28,6 +30,16 @@ _DRAFT_DIRECTORY = Path("composition/primitive_program_drafts")
 _DRAFT_PREFIX = "draft_"
 _DRAFT_SUFFIX = ".json"
 _MODEL_OUTPUT_KEYS = {"draft_status", "primitive_symbols", "unsupported_reason"}
+_PPR_DEFINES = "http://PAonto.com#defines"
+_PPR_FEATURE = "http://PAonto.com#feature"
+_PPR_HAS_PROCESS_EXECUTION = "http://PAonto.com#hasProcessExecution"
+_PPR_PROCESS_EXECUTION = "http://PAonto.com#processExecution"
+_PPR_REALIZES = "http://PAonto.com#realizes"
+_PPR_RUNS_ON_RESOURCE = "http://PAonto.com#runsOnResource"
+_PPR_RUNS_PROCESS = "http://PAonto.com#runsProcess"
+_PPR_SPECIFICATION = "http://PAonto.com#specification"
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+_RDF_VALUE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#value"
 _RECORD_KEYS = {
     "schema_version",
     "record_type",
@@ -92,6 +104,7 @@ class Phase52Diagnostic:
     primitive_symbols: tuple[str, ...] = ()
     unsupported_reason: str | None = None
     draft: Mapping[str, object] | None = None
+    composition_input: Mapping[str, object] | None = None
     failure: str | None = None
 
     def to_view(self) -> dict[str, object]:
@@ -104,6 +117,11 @@ class Phase52Diagnostic:
             "primitive_symbols": list(self.primitive_symbols),
             "unsupported_reason": self.unsupported_reason,
             "draft": deepcopy(dict(self.draft)) if self.draft is not None else None,
+            "composition_input": (
+                deepcopy(dict(self.composition_input))
+                if self.composition_input is not None
+                else None
+            ),
             "failure": self.failure,
         }
 
@@ -220,12 +238,22 @@ def read_phase_5_2_diagnostic(interaction_root: Path) -> Phase52Diagnostic:
         )
     draft = matching[0]
     record = draft.to_record()
+    draft_ref = draft.path.relative_to(root).as_posix()
+    try:
+        composition_input = _composition_input_for_draft(root, context, draft)
+    except (GroundingContractError, PrimitiveDraftError, OSError) as exc:
+        return Phase52Diagnostic(
+            status="blocked",
+            message="PrimitiveProgramDraft composition evidence failed validation.",
+            draft_count=len(drafts),
+            latest_draft_ref=draft_ref,
+            failure=str(exc),
+        )
     symbols = tuple(
         str(step["primitive_symbol"])
         for step in record["structural_steps"]
         if isinstance(step, Mapping)
     )
-    draft_ref = draft.path.relative_to(root).as_posix()
     if record["draft_status"] == "unsupported":
         return Phase52Diagnostic(
             status="unsupported",
@@ -234,6 +262,7 @@ def read_phase_5_2_diagnostic(interaction_root: Path) -> Phase52Diagnostic:
             latest_draft_ref=draft_ref,
             unsupported_reason=str(record["unsupported_reason"]),
             draft=record,
+            composition_input=composition_input,
         )
     return Phase52Diagnostic(
         status="draft_authored",
@@ -242,7 +271,30 @@ def read_phase_5_2_diagnostic(interaction_root: Path) -> Phase52Diagnostic:
         latest_draft_ref=draft_ref,
         primitive_symbols=symbols,
         draft=record,
+        composition_input=composition_input,
     )
+
+
+def _composition_input_for_draft(
+    root: Path,
+    context: SelectedRAContextSnapshot,
+    draft: PrimitiveProgramDraft,
+) -> dict[str, object]:
+    """Reconstruct the exact input from the records pinned by one draft."""
+    completion, completion_path = _load_completion(root)
+    expected_refs = {
+        "pa_completion_ref": completion_path,
+        "assignment_ref": context.assignment_path,
+        "robot_state_ref": context.robot_state_path,
+        "primitive_catalog_ref": context.primitive_catalog_path,
+    }
+    for ref_field, path in expected_refs.items():
+        expected_ref = path.relative_to(root).as_posix()
+        if draft.record.get(ref_field) != expected_ref:
+            raise PrimitiveDraftError(
+                f"PrimitiveProgramDraft {ref_field} does not match its active context."
+            )
+    return _composition_input(root, context, completion)
 
 
 def _composition_input(
@@ -252,6 +304,15 @@ def _composition_input(
 ) -> dict[str, object]:
     assignment = context.assignment
     completion_record = completion.to_record()
+    try:
+        product_context = load_completed_product_context_view(root)
+    except GroundingContractError as exc:
+        raise PrimitiveDraftError(str(exc)) from exc
+    ontology_projection = _validated_ontology_projection(
+        product_context,
+        assignment,
+        completion_record,
+    )
     contract_path = _resolve_ref(root, str(completion_record["typed_grounding_contract_ref"]))
     contract = _read_json_mapping(contract_path, "TypedGroundingContract")
     typed_records = []
@@ -275,6 +336,7 @@ def _composition_input(
             "resource_jid": assignment.selected_resource_jid,
             "execution_mode": assignment.selected_execution_mode,
         },
+        "ontology_projection": ontology_projection,
         "robot_state": deepcopy(dict(context.robot_state.robot_state)),
         "primitive_catalog": [
             deepcopy(dict(entry))
@@ -286,6 +348,185 @@ def _composition_input(
             "typed_records": typed_records,
         },
     }
+
+
+def _validated_ontology_projection(
+    product_context: ProductContextView,
+    assignment: SelectedRAAssignmentEnvelope,
+    completion: Mapping[str, object],
+) -> dict[str, object]:
+    """Return accepted assertions after proving they express the selected assignment."""
+    if (
+        product_context.product_requirement != assignment.product_requirement
+        or product_context.tbox_fingerprint != completion.get("tbox_fingerprint")
+        or product_context.abox_fingerprint != completion.get("abox_fingerprint")
+    ):
+        raise PrimitiveDraftError(
+            "Completed ontology projection does not match the selected assignment authority."
+        )
+
+    assertions = tuple(product_context.assertions)
+    _validate_projection_assertions(assertions)
+    _require_iri_relation(
+        assertions,
+        subject=assignment.specification_iri,
+        predicate=_RDF_TYPE,
+        expected_object=_PPR_SPECIFICATION,
+        label="specification type",
+    )
+    _require_literal_relation(
+        assertions,
+        subject=assignment.specification_iri,
+        predicate=_RDF_VALUE,
+        expected_object=assignment.product_requirement,
+        label="specification value",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=assignment.specification_iri,
+        predicate=_PPR_DEFINES,
+        expected_object=assignment.feature_iri,
+        label="defines",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=assignment.feature_iri,
+        predicate=_RDF_TYPE,
+        expected_object=_PPR_FEATURE,
+        label="feature type",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=assignment.process_iri,
+        predicate=_PPR_REALIZES,
+        expected_object=assignment.feature_iri,
+        label="realizes",
+    )
+    execution_iri = _single_iri_object(
+        assertions,
+        subject=assignment.specification_iri,
+        predicate=_PPR_HAS_PROCESS_EXECUTION,
+        label="hasProcessExecution",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=execution_iri,
+        predicate=_RDF_TYPE,
+        expected_object=_PPR_PROCESS_EXECUTION,
+        label="processExecution type",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=execution_iri,
+        predicate=_PPR_RUNS_PROCESS,
+        expected_object=assignment.process_iri,
+        label="runsProcess",
+    )
+    _require_iri_relation(
+        assertions,
+        subject=execution_iri,
+        predicate=_PPR_RUNS_ON_RESOURCE,
+        expected_object=assignment.selected_resource_iri,
+        label="runsOnResource",
+    )
+    return {
+        "tbox_fingerprint": product_context.tbox_fingerprint,
+        "abox_fingerprint": product_context.abox_fingerprint,
+        "assertions": [deepcopy(dict(assertion)) for assertion in assertions],
+    }
+
+
+def _validate_projection_assertions(assertions: tuple[Mapping[str, object], ...]) -> None:
+    if not assertions:
+        raise PrimitiveDraftError("Completed ontology projection has no assertions.")
+    seen: set[str] = set()
+    for assertion in assertions:
+        if set(assertion) != {"subject", "predicate", "object"}:
+            raise PrimitiveDraftError("Completed ontology projection assertion is invalid.")
+        subject = assertion.get("subject")
+        predicate = assertion.get("predicate")
+        object_value = assertion.get("object")
+        if (
+            not isinstance(subject, str)
+            or not subject
+            or not isinstance(predicate, str)
+            or not predicate
+            or not isinstance(object_value, Mapping)
+            or not isinstance(object_value.get("kind"), str)
+            or not isinstance(object_value.get("value"), str)
+            or not object_value.get("value")
+        ):
+            raise PrimitiveDraftError("Completed ontology projection assertion is invalid.")
+        encoded = json.dumps(assertion, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if encoded in seen:
+            raise PrimitiveDraftError("Completed ontology projection contains a duplicate assertion.")
+        seen.add(encoded)
+
+
+def _require_iri_relation(
+    assertions: tuple[Mapping[str, object], ...],
+    *,
+    subject: str,
+    predicate: str,
+    expected_object: str,
+    label: str,
+) -> None:
+    objects = _iri_objects(assertions, subject=subject, predicate=predicate)
+    if objects != [expected_object]:
+        raise PrimitiveDraftError(
+            f"Completed ontology projection {label} does not match the selected assignment."
+        )
+
+
+def _require_literal_relation(
+    assertions: tuple[Mapping[str, object], ...],
+    *,
+    subject: str,
+    predicate: str,
+    expected_object: str,
+    label: str,
+) -> None:
+    objects = [
+        str(assertion["object"]["value"])
+        for assertion in assertions
+        if assertion["subject"] == subject
+        and assertion["predicate"] == predicate
+        and assertion["object"]["kind"] == "literal"
+    ]
+    if objects != [expected_object]:
+        raise PrimitiveDraftError(
+            f"Completed ontology projection {label} does not match the selected assignment."
+        )
+
+
+def _single_iri_object(
+    assertions: tuple[Mapping[str, object], ...],
+    *,
+    subject: str,
+    predicate: str,
+    label: str,
+) -> str:
+    objects = _iri_objects(assertions, subject=subject, predicate=predicate)
+    if len(objects) != 1:
+        raise PrimitiveDraftError(
+            f"Completed ontology projection {label} must identify exactly one processExecution."
+        )
+    return objects[0]
+
+
+def _iri_objects(
+    assertions: tuple[Mapping[str, object], ...],
+    *,
+    subject: str,
+    predicate: str,
+) -> list[str]:
+    return [
+        str(assertion["object"]["value"])
+        for assertion in assertions
+        if assertion["subject"] == subject
+        and assertion["predicate"] == predicate
+        and assertion["object"]["kind"] == "iri"
+    ]
 
 
 def _composition_prompt(composition_input: Mapping[str, object]) -> str:

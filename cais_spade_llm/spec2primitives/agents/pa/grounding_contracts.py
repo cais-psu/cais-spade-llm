@@ -1513,6 +1513,19 @@ def load_pa_context_grounding_completion(
     return _load_pa_context_grounding_completion_v2(root, completion_value)
 
 
+def load_completed_product_context_view(
+    interaction_root: Path,
+) -> ProductContextView:
+    """Load the exact final ProductContextView pinned by current PA completion."""
+    root = Path(interaction_root).resolve()
+    completion = load_pa_context_grounding_completion(root)
+    if not isinstance(completion, PAContextGroundingCompletionV3):
+        raise GroundingContractError(
+            "Completed ProductContextView retrieval requires PAContextGroundingCompletion version 3."
+        )
+    return _latest_product_context_view(root)
+
+
 def _load_pa_context_grounding_completion_v3(
     root: Path,
     value: Mapping[str, object],

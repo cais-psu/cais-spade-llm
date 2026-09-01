@@ -249,9 +249,13 @@ reuses the same exact-agent adapter for structural authoring.
 
 `author_primitive_program_draft(...)` reloads the validated Phase 4 assignment
 and latest Phase 5.1 pair, then builds a bounded composition input containing
-the task IRIs and requirement, selected resource, current robot state, complete
-primitive catalog, grounded context summary, known limits, and typed-record
-identities. It does not send raw RDF or bind primitive parameters.
+the task IRIs and requirement, selected resource, completion-consistent
+post-assignment ontology assertions and TBox/ABox fingerprints, current robot
+state, complete primitive catalog, grounded context summary, known limits, and
+typed-record identities. Before contacting the RA, the host validates the exact
+`defines`, `realizes`, `hasProcessExecution`, `runsProcess`, and `runsOnResource`
+chain. It does not send raw RDF, unrelated `ProductContextView` fields, typed
+record payloads, or bound primitive parameters.
 
 The exact selected RobotAgent receives a strict response contract. It may return
 `proposed` with a non-empty ordered sequence of exact catalog symbols, including
@@ -265,6 +269,15 @@ append-only filename. `read_phase_5_2_diagnostic(...)` exposes
 `blocked` without contacting the RobotAgent. Restarting Phase 5.1 appends a new
 state/catalog pair and makes that new pair eligible for one new structural
 draft; earlier records remain unchanged.
+
+For the current authored or unsupported draft, the Phase 5.2 UI reconstructs
+the exact transient `COMPOSITION_INPUT` from the draft's validated hash-pinned
+inputs. It shows the task, selected resource, `ontology_projection`,
+`robot_state`, `primitive_catalog`, and `grounded_context`, with counts and full
+TBox/ABox fingerprints plus an expandable exact JSON view. The panel explicitly
+distinguishes this input provenance from private model reasoning, feasibility
+validation, and execution evidence. No prompt or additional evidence record is
+persisted.
 
 ## Deliberately deferred
 
