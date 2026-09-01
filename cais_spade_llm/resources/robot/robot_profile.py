@@ -461,7 +461,11 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
                 if current_pose is not None:
                     current_pose_captured_at = time.time()
                     pose_feedback_ready = True
-    if current_pose is None and getattr(agent, "_recovery_pose_ref", None) is None:
+    if (
+        current_pose is None
+        and getattr(agent, "_recovery_pose_ref", None) is None
+        and getattr(agent, "context_only", False) is not True
+    ):
         position = getattr(agent, "_position", None)
         if isinstance(position, dict) and {"x", "y", "z"} <= set(position.keys()):
             try:

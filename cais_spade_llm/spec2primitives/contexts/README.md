@@ -2,8 +2,8 @@
 
 Each interaction stores its runtime inputs, retrieved snapshots, messages,
 outputs, and validation evidence under its caller-owned root. Product-side PA,
-geometry, and Phase 5.1 assignment/state/catalog paths exist today. Later
-composition paths remain planned:
+geometry, Phase 5.1 assignment/state/catalog, and Phase 5.2A structural-draft
+paths exist today. Later composition paths remain planned:
 
 ```text
 contexts/<interaction_identifier>/
@@ -24,11 +24,11 @@ contexts/<interaction_identifier>/
 │   └── <exact_RA_identifier>/
 │       ├── robot_state/
 │       ├── primitive_catalog_snapshot/
-│       ├── primitive_program_drafts/       # planned
 │       ├── primitive_steps/                # planned
 │       └── validation/                     # planned
 ├── composition/
 │   ├── selected_ra_assignments/            # Phase 5.1
+│   ├── primitive_program_drafts/            # Phase 5.2A
 │   ├── context_bundles/                    # planned
 │   ├── missing_context_batches/            # planned
 │   └── progress_decisions/                 # planned
@@ -53,13 +53,13 @@ cancellation and version-3 completion records are append-only. Supported older
 session and completion records remain read-only recovery inputs. Planned
 `CompositionContextBundle` versions
 will preserve task, ABox, typed-binding, catalog, and selected-resource
-fingerprints. Each RA `PrimitiveProgramDraft`, deduplicated
-`MissingContextBatch`, PA response, progress or no-progress decision, fully
-bound candidate, and validation trace will be append-only and reviewable. Phase
-5.1 already records the minimum selected-RA assignment and the complete catalog
-returned by its injected runtime without assuming a fixed number of primitives.
-It produces no composition bundle, missing-context batch, primitive draft,
-candidate, validation trace, or execution record.
+fingerprints. Each deduplicated `MissingContextBatch`, PA response, progress or
+no-progress decision, fully bound candidate, and validation trace will be
+append-only and reviewable. Phase 5.1 records the minimum selected-RA assignment
+and the complete catalog returned by its injected runtime without assuming a
+fixed number of primitives. Phase 5.2A appends one RA-authored structural
+`PrimitiveProgramDraft` per captured pair. It produces no composition bundle,
+missing-context batch, bound candidate, validation trace, or execution record.
 
 Product RGB-D observation bundles use an `observation_ref` and retain the
 existing `manifest.json`, lossless RGB PNG, and original metric `float32` depth

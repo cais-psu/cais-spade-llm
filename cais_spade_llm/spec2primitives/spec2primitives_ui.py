@@ -33,7 +33,14 @@ from cais_spade_llm.spec2primitives.agents.pa import (
     start_pa_context_interaction,
     submit_pa_clarification_reply,
 )
-from cais_spade_llm.spec2primitives.agents.ra import read_phase_5_1_diagnostic
+from cais_spade_llm.spec2primitives.agents.ra import (
+    PrimitiveDraftError,
+    RAContextHandoffError,
+    activate_selected_ra_context,
+    author_primitive_program_draft,
+    read_phase_5_1_diagnostic,
+    read_phase_5_2_diagnostic,
+)
 
 _TURTLE_PREFIX_PATTERN = re.compile(
     r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$"
@@ -514,18 +521,29 @@ def _final_result_limitations(
     product_context: Mapping[str, object],
     contract: Mapping[str, object],
 ) -> list[str]:
-    """Collect exact non-blocking limits for one validated completion."""
+    """Collect current proposal limits for one validated completion."""
     missing_information = contract.get("missing_information")
     values: list[object] = (
         list(missing_information) if isinstance(missing_information, list) else []
     )
-    uncertainty = product_context.get("uncertainty")
-    if isinstance(uncertainty, list):
-        values.extend(
-            item.get("description") if isinstance(item, Mapping) else item
-            for item in uncertainty
-        )
-    return _unique_text(values)
+    typed_bindings = product_context.get("typed_bindings")
+    accepted_record_symbols: set[str] = set()
+    if isinstance(typed_bindings, list):
+        for binding in typed_bindings:
+            if not isinstance(binding, Mapping) or binding.get("status") != "accepted":
+                continue
+            for field in ("output_symbol", "record_type"):
+                symbol = binding.get(field)
+                if isinstance(symbol, str) and symbol:
+                    accepted_record_symbols.add(symbol)
+
+    # The proposal is authored before deterministic typed grounding. An accepted
+    # final binding therefore supersedes any absence claim naming that exact record.
+    return [
+        value
+        for value in _unique_text(values)
+        if not any(symbol in value for symbol in accepted_record_symbols)
+    ]
 
 
 def _final_result_evidence(
@@ -984,6 +1002,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         terminal_failure=terminal_failure,
     )
     phase_5_1 = read_phase_5_1_diagnostic(interaction_root).to_view()
+    phase_5_2 = read_phase_5_2_diagnostic(interaction_root).to_view()
     return {
         "activity_state": activity_state,
         "activity_color": activity_color,
@@ -997,6 +1016,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         ),
         "pending_clarification_turn": str(pending_clarification_turn or ""),
         "phase_5_1": phase_5_1,
+        "phase_5_2": phase_5_2,
         "diagnostics": {
             "interaction_identifier": interaction_identifier,
             "interaction_path": str(interaction_root),
@@ -1567,8 +1587,74 @@ def _phase_5_1_status_color(status: str) -> str:
     }.get(status, "grey")
 
 
+def _phase_5_1_action_state(
+    status: str,
+    *,
+    activation_available: bool,
+    activation_busy: bool,
+) -> tuple[str, bool]:
+    """Return the Phase 5.1 action label and enabled state."""
+    if status == "waiting_for_ra":
+        label = "Retry Phase 5"
+    elif status == "context_captured":
+        label = "Restart Phase 5"
+    else:
+        label = "Start Phase 5"
+    enabled = (
+        activation_available
+        and not activation_busy
+        and status in {
+            "ready_for_assignment",
+            "waiting_for_ra",
+            "context_captured",
+        }
+    )
+    return label, enabled
+
+
+def _phase_5_2_waiting_view(
+    message: str = "Capture one valid Phase 5.1 RobotAgent context first.",
+) -> dict[str, object]:
+    """Return the empty read-only Phase 5.2 card state."""
+    return {
+        "status": "waiting_for_context",
+        "message": message,
+        "draft_count": 0,
+        "latest_draft_ref": None,
+        "primitive_symbols": [],
+        "unsupported_reason": None,
+        "draft": None,
+        "failure": None,
+    }
+
+
+def _phase_5_2_status_color(status: str) -> str:
+    """Return the diagnostic badge color for one exact Phase 5.2 status."""
+    return {
+        "ready_for_draft": "amber",
+        "draft_authored": "green",
+        "unsupported": "amber",
+        "blocked": "red",
+        "waiting_for_context": "grey",
+    }.get(status, "grey")
+
+
+def _phase_5_2_action_enabled(
+    status: str,
+    *,
+    authoring_available: bool,
+    authoring_busy: bool,
+) -> bool:
+    """Return whether the structural-draft authoring action is available."""
+    return (
+        authoring_available
+        and not authoring_busy
+        and status == "ready_for_draft"
+    )
+
+
 def _render_phase_5_diagnostics() -> dict[str, Any]:
-    """Render the temporary read-only RobotAgent diagnostics card."""
+    """Render the temporary RobotAgent activation and diagnostics card."""
     with ui.card().classes(
         "w-full border-2 border-violet-200 bg-violet-50 shadow-sm"
     ):
@@ -1578,11 +1664,13 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
                     "text-xl font-semibold text-slate-900"
                 )
                 ui.label(
-                    "Temporary read-only inspection while Phase 5 is implemented"
+                    "Operator activation and persisted inspection while Phase 5 is implemented"
                 ).classes("text-xs text-slate-500")
             with ui.row().classes("items-center gap-2 flex-wrap"):
-                ui.badge("temporary diagnostic").props("color=violet outline")
-                ui.badge("read-only").props("color=grey outline")
+                start_phase_5_button = ui.button(
+                    "Start Phase 5",
+                    icon="play_arrow",
+                ).props("flat disable")
                 refresh_button = ui.button("Refresh", icon="refresh").props(
                     "flat disable"
                 )
@@ -1674,8 +1762,61 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
             )
         failure_card.set_visibility(False)
 
+        ui.separator().classes("my-1 bg-violet-200")
+
+        with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+            ui.label("5.2 · RA-authored structural primitive draft").classes(
+                "text-sm font-semibold text-violet-900"
+            )
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                draft_status_badge = ui.badge("waiting_for_context").props(
+                    "color=grey outline"
+                )
+                create_draft_button = ui.button(
+                    "Create Primitive Draft",
+                    icon="account_tree",
+                ).props("flat disable")
+        draft_message_value = ui.label("").classes(
+            "text-sm text-slate-700 whitespace-pre-wrap break-words"
+        )
+
+        with ui.card().classes(
+            "w-full border border-slate-200 bg-white shadow-none"
+        ):
+            draft_count_value = ui.label("Drafts: 0").classes(
+                "text-sm font-semibold text-slate-900"
+            )
+            latest_draft_ref_value = ui.label("Latest draft: none").classes(
+                "text-xs text-slate-600 break-all"
+            )
+            draft_symbols_container = ui.row().classes("w-full gap-1 flex-wrap")
+            unsupported_reason_value = ui.label("").classes(
+                "text-xs text-amber-800 whitespace-pre-wrap break-words"
+            )
+            unsupported_reason_value.set_visibility(False)
+
+        with ui.expansion("PrimitiveProgramDraft", icon="schema").classes(
+            "w-full border border-slate-200 bg-white rounded"
+        ) as draft_expansion:
+            draft_value = ui.code("", language="json").classes(
+                "w-full text-xs overflow-x-auto"
+            )
+        draft_expansion.set_visibility(False)
+
+        with ui.card().classes(
+            "w-full border border-red-200 bg-red-50 shadow-none"
+        ) as draft_failure_card:
+            ui.label("Fail-closed draft diagnostic").classes(
+                "text-sm font-semibold text-red-900"
+            )
+            draft_failure_value = ui.label("").classes(
+                "text-xs text-red-800 whitespace-pre-wrap break-words"
+            )
+        draft_failure_card.set_visibility(False)
+
     return {
         "status_badge": status_badge,
+        "start_button": start_phase_5_button,
         "refresh_button": refresh_button,
         "message": message_value,
         "requirement": requirement_value,
@@ -1693,12 +1834,26 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
         "primitive_catalog": primitive_catalog_value,
         "failure_card": failure_card,
         "failure": failure_value,
+        "draft_status_badge": draft_status_badge,
+        "create_draft_button": create_draft_button,
+        "draft_message": draft_message_value,
+        "draft_count": draft_count_value,
+        "latest_draft_ref": latest_draft_ref_value,
+        "draft_symbols": draft_symbols_container,
+        "unsupported_reason": unsupported_reason_value,
+        "draft_expansion": draft_expansion,
+        "draft": draft_value,
+        "draft_failure_card": draft_failure_card,
+        "draft_failure": draft_failure_value,
     }
 
 
 def _apply_phase_5_1_diagnostic(
     elements: Mapping[str, Any],
     diagnostic: Mapping[str, object],
+    *,
+    activation_available: bool = False,
+    activation_busy: bool = False,
 ) -> None:
     """Apply one JSON-safe persisted Phase 5.1 diagnostic to the UI card."""
     status = str(diagnostic.get("status", "waiting_for_phase_4"))
@@ -1785,6 +1940,70 @@ def _apply_phase_5_1_diagnostic(
     failure = diagnostic.get("failure")
     elements["failure"].set_text(str(failure or ""))
     elements["failure_card"].set_visibility(bool(failure))
+    action_label, action_enabled = _phase_5_1_action_state(
+        status,
+        activation_available=activation_available,
+        activation_busy=activation_busy,
+    )
+    elements["start_button"].set_text(action_label)
+    _set_enabled(elements["start_button"], action_enabled)
+
+
+def _apply_phase_5_2_diagnostic(
+    elements: Mapping[str, Any],
+    diagnostic: Mapping[str, object],
+    *,
+    authoring_available: bool = False,
+    authoring_busy: bool = False,
+) -> None:
+    """Apply one JSON-safe persisted Phase 5.2 diagnostic to the UI card."""
+    status = str(diagnostic.get("status", "waiting_for_context"))
+    elements["draft_status_badge"].set_text(status)
+    elements["draft_status_badge"].props(
+        f"color={_phase_5_2_status_color(status)} outline"
+    )
+    elements["draft_message"].set_text(str(diagnostic.get("message", "")))
+    elements["draft_count"].set_text(
+        f"Drafts: {diagnostic.get('draft_count', 0)}"
+    )
+    elements["latest_draft_ref"].set_text(
+        f"Latest draft: {diagnostic.get('latest_draft_ref') or 'none'}"
+    )
+
+    primitive_symbols = diagnostic.get("primitive_symbols")
+    symbols = primitive_symbols if isinstance(primitive_symbols, list) else []
+    elements["draft_symbols"].clear()
+    with elements["draft_symbols"]:
+        for index, symbol in enumerate(symbols, start=1):
+            ui.badge(f"{index}. {symbol}").props("color=violet outline")
+
+    unsupported_reason = diagnostic.get("unsupported_reason")
+    elements["unsupported_reason"].set_text(
+        f"Unsupported: {unsupported_reason}" if unsupported_reason else ""
+    )
+    elements["unsupported_reason"].set_visibility(bool(unsupported_reason))
+
+    draft = diagnostic.get("draft")
+    has_draft = isinstance(draft, Mapping)
+    elements["draft"].content = (
+        json.dumps(draft, indent=2, ensure_ascii=False, allow_nan=False)
+        if has_draft
+        else ""
+    )
+    elements["draft"].update()
+    elements["draft_expansion"].set_visibility(has_draft)
+
+    failure = diagnostic.get("failure")
+    elements["draft_failure"].set_text(str(failure or ""))
+    elements["draft_failure_card"].set_visibility(bool(failure))
+    _set_enabled(
+        elements["create_draft_button"],
+        _phase_5_2_action_enabled(
+            status,
+            authoring_available=authoring_available,
+            authoring_busy=authoring_busy,
+        ),
+    )
 
 
 def _calibration_readiness(
@@ -1808,6 +2027,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
     runtime: Spec2PrimitivesUIRuntime,
 ) -> None:
     """Render the streamlined ProductAgent grounding interaction."""
+    phase_5_1_activation_available = runtime.robot_agent_context_runtime is not None
+    phase_5_2_authoring_available = runtime.robot_agent_draft_runtime is not None
     grounding_ready = (
         runtime.ontology_config is not None and runtime.grounding_runtime is not None
     )
@@ -1923,6 +2144,12 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         _apply_phase_5_1_diagnostic(
             phase_5_elements,
             _phase_5_1_waiting_view(),
+            activation_available=phase_5_1_activation_available,
+        )
+        _apply_phase_5_2_diagnostic(
+            phase_5_elements,
+            _phase_5_2_waiting_view(),
+            authoring_available=phase_5_2_authoring_available,
         )
 
         with ui.expansion("Developer diagnostics", icon="terminal", value=False).classes(
@@ -1971,7 +2198,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         action_state: dict[str, object] = {
             "busy": False,
             "pending_clarification": False,
+            "phase_5_1_activating": False,
             "phase_5_1_refreshing": False,
+            "phase_5_2_authoring": False,
             "interaction": None,
             "timeline": [],
         }
@@ -2036,6 +2265,17 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 phase_5_1
                 if isinstance(phase_5_1, Mapping)
                 else _phase_5_1_waiting_view(),
+                activation_available=phase_5_1_activation_available,
+                activation_busy=bool(action_state["phase_5_1_activating"]),
+            )
+            phase_5_2 = view.get("phase_5_2")
+            _apply_phase_5_2_diagnostic(
+                phase_5_elements,
+                phase_5_2
+                if isinstance(phase_5_2, Mapping)
+                else _phase_5_2_waiting_view(),
+                authoring_available=phase_5_2_authoring_available,
+                authoring_busy=bool(action_state["phase_5_2_authoring"]),
             )
             _set_enabled(phase_5_elements["refresh_button"], True)
 
@@ -2104,8 +2344,16 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             _apply_phase_5_1_diagnostic(
                 phase_5_elements,
                 _phase_5_1_waiting_view(
-                    "ProductAgent grounding is running; Phase 5.1 is read-only."
+                    "ProductAgent grounding is running; Phase 5.1 is unavailable."
                 ),
+                activation_available=phase_5_1_activation_available,
+            )
+            _apply_phase_5_2_diagnostic(
+                phase_5_elements,
+                _phase_5_2_waiting_view(
+                    "ProductAgent grounding is running; Phase 5.2 is unavailable."
+                ),
+                authoring_available=phase_5_2_authoring_available,
             )
             _set_enabled(phase_5_elements["refresh_button"], False)
             activity_strip.set_visibility(True)
@@ -2283,10 +2531,90 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 requirement_input.props(remove="disable")
                 _update_start_enabled()
 
+        async def _start_phase_5_1() -> None:
+            interaction = action_state["interaction"]
+            phase_5_runtime = runtime.robot_agent_context_runtime
+            if (
+                action_state["phase_5_1_activating"]
+                or action_state["phase_5_1_refreshing"]
+                or action_state["phase_5_2_authoring"]
+                or not isinstance(interaction, dict)
+                or phase_5_runtime is None
+            ):
+                return
+            interaction_root = interaction.get("interaction_root")
+            if not isinstance(interaction_root, Path):
+                return
+            current_diagnostic = read_phase_5_1_diagnostic(interaction_root)
+            if current_diagnostic.status not in {
+                "ready_for_assignment",
+                "waiting_for_ra",
+                "context_captured",
+            }:
+                _apply_phase_5_1_diagnostic(
+                    phase_5_elements,
+                    current_diagnostic.to_view(),
+                    activation_available=phase_5_1_activation_available,
+                )
+                return
+
+            action_state["phase_5_1_activating"] = True
+            _apply_phase_5_1_diagnostic(
+                phase_5_elements,
+                current_diagnostic.to_view(),
+                activation_available=phase_5_1_activation_available,
+                activation_busy=True,
+            )
+            phase_5_elements["message"].set_text(
+                "Starting or reusing only the exact RobotAgent selected by Phase 4."
+            )
+            _set_enabled(phase_5_elements["refresh_button"], False)
+            _apply_phase_5_2_diagnostic(
+                phase_5_elements,
+                read_phase_5_2_diagnostic(interaction_root).to_view(),
+                authoring_available=phase_5_2_authoring_available,
+                authoring_busy=True,
+            )
+            diagnostic_view = current_diagnostic.to_view()
+            try:
+                await activate_selected_ra_context(
+                    phase_5_runtime,
+                    interaction_root,
+                )
+            except (
+                OSError,
+                RAContextHandoffError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
+                diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
+                ui.notify("Phase 5.1 activation failed closed.", type="negative")
+            else:
+                diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
+                ui.notify("Phase 5.1 context captured.", type="positive")
+            finally:
+                action_state["phase_5_1_activating"] = False
+                _apply_phase_5_1_diagnostic(
+                    phase_5_elements,
+                    diagnostic_view,
+                    activation_available=phase_5_1_activation_available,
+                )
+                _apply_phase_5_2_diagnostic(
+                    phase_5_elements,
+                    read_phase_5_2_diagnostic(interaction_root).to_view(),
+                    authoring_available=phase_5_2_authoring_available,
+                )
+                _set_enabled(phase_5_elements["refresh_button"], True)
+
         async def _refresh_phase_5_1() -> None:
             interaction = action_state["interaction"]
-            if action_state["phase_5_1_refreshing"] or not isinstance(
-                interaction, dict
+            if (
+                action_state["phase_5_1_activating"]
+                or action_state["phase_5_1_refreshing"]
+                or action_state["phase_5_2_authoring"]
+                or not isinstance(interaction, dict)
             ):
                 return
             interaction_root = interaction.get("interaction_root")
@@ -2302,6 +2630,12 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 _apply_phase_5_1_diagnostic(
                     phase_5_elements,
                     diagnostic.to_view(),
+                    activation_available=phase_5_1_activation_available,
+                )
+                _apply_phase_5_2_diagnostic(
+                    phase_5_elements,
+                    read_phase_5_2_diagnostic(interaction_root).to_view(),
+                    authoring_available=phase_5_2_authoring_available,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 failure_view = _phase_5_1_waiting_view(
@@ -2312,9 +2646,99 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 _apply_phase_5_1_diagnostic(
                     phase_5_elements,
                     failure_view,
+                    activation_available=phase_5_1_activation_available,
+                )
+                _apply_phase_5_2_diagnostic(
+                    phase_5_elements,
+                    _phase_5_2_waiting_view(
+                        "Phase 5 persisted evidence could not be inspected."
+                    ),
+                    authoring_available=phase_5_2_authoring_available,
                 )
             finally:
                 action_state["phase_5_1_refreshing"] = False
+                _set_enabled(phase_5_elements["refresh_button"], True)
+
+        async def _start_phase_5_2() -> None:
+            interaction = action_state["interaction"]
+            draft_runtime = runtime.robot_agent_draft_runtime
+            if (
+                action_state["phase_5_1_activating"]
+                or action_state["phase_5_1_refreshing"]
+                or action_state["phase_5_2_authoring"]
+                or not isinstance(interaction, dict)
+                or draft_runtime is None
+            ):
+                return
+            interaction_root = interaction.get("interaction_root")
+            if not isinstance(interaction_root, Path):
+                return
+            current_diagnostic = read_phase_5_2_diagnostic(interaction_root)
+            if current_diagnostic.status != "ready_for_draft":
+                _apply_phase_5_2_diagnostic(
+                    phase_5_elements,
+                    current_diagnostic.to_view(),
+                    authoring_available=phase_5_2_authoring_available,
+                )
+                return
+
+            action_state["phase_5_2_authoring"] = True
+            _apply_phase_5_2_diagnostic(
+                phase_5_elements,
+                current_diagnostic.to_view(),
+                authoring_available=phase_5_2_authoring_available,
+                authoring_busy=True,
+            )
+            phase_5_elements["draft_message"].set_text(
+                "The exact selected RobotAgent is authoring an unbound structural sequence."
+            )
+            _apply_phase_5_1_diagnostic(
+                phase_5_elements,
+                read_phase_5_1_diagnostic(interaction_root).to_view(),
+                activation_available=phase_5_1_activation_available,
+                activation_busy=True,
+            )
+            _set_enabled(phase_5_elements["refresh_button"], False)
+            diagnostic_view = current_diagnostic.to_view()
+            try:
+                await author_primitive_program_draft(
+                    draft_runtime,
+                    interaction_root,
+                )
+            except (
+                OSError,
+                PrimitiveDraftError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                diagnostic_view = read_phase_5_2_diagnostic(
+                    interaction_root
+                ).to_view()
+                diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
+                ui.notify("Phase 5.2 draft failed closed.", type="negative")
+            else:
+                diagnostic_view = read_phase_5_2_diagnostic(
+                    interaction_root
+                ).to_view()
+                notification_type = (
+                    "positive"
+                    if diagnostic_view["status"] == "draft_authored"
+                    else "warning"
+                )
+                ui.notify(str(diagnostic_view["status"]), type=notification_type)
+            finally:
+                action_state["phase_5_2_authoring"] = False
+                _apply_phase_5_2_diagnostic(
+                    phase_5_elements,
+                    diagnostic_view,
+                    authoring_available=phase_5_2_authoring_available,
+                )
+                _apply_phase_5_1_diagnostic(
+                    phase_5_elements,
+                    read_phase_5_1_diagnostic(interaction_root).to_view(),
+                    activation_available=phase_5_1_activation_available,
+                )
                 _set_enabled(phase_5_elements["refresh_button"], True)
 
         requirement_input.on_value_change(lambda _: _update_start_enabled())
@@ -2322,6 +2746,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         start_button.on_click(_start_pa_interaction)
         submit_reply_button.on_click(_submit_clarification)
         cancel_interaction_button.on_click(_cancel_clarification)
+        phase_5_elements["start_button"].on_click(_start_phase_5_1)
+        phase_5_elements["create_draft_button"].on_click(_start_phase_5_2)
         phase_5_elements["refresh_button"].on_click(_refresh_phase_5_1)
         _update_start_enabled()
 

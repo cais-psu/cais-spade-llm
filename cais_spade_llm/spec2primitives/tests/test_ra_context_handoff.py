@@ -1,4 +1,4 @@
-"""Tests for the Phase 5.1 selected-RA assignment and context snapshots."""
+"""Tests for selected-RA context capture and structural primitive drafts."""
 
 from __future__ import annotations
 
@@ -11,15 +11,36 @@ from typing import Any
 
 import pytest
 
+from cais_spade_llm.spec2primitives.adapters import in_process_robot_agent
+from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
+from cais_spade_llm.spec2primitives.adapters.in_process_robot_agent import (
+    InProcessRobotAgentCompositionRuntime,
+)
 from cais_spade_llm.spec2primitives.agents.ra.context_handoff import (
     RAContextHandoffError,
     SelectedRAAssignmentEnvelope,
     activate_selected_ra_context,
     read_phase_5_1_diagnostic,
 )
+from cais_spade_llm.spec2primitives.agents.ra.primitive_draft import (
+    PrimitiveDraftError,
+    author_primitive_program_draft,
+    read_phase_5_2_diagnostic,
+)
 from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
     persist_native_completion_fixture,
 )
+
+_EXPECTED_XARM6_SYNTHESIS_SYMBOLS = [
+    "compute_pick_targets",
+    "compute_place_targets",
+    "detect_parts",
+    "grasp_part",
+    "move_cartesian",
+    "move_relative",
+    "move_to_named_pose",
+    "release_part",
+]
 
 
 class _AssignedContextRuntime:
@@ -59,6 +80,610 @@ class _AssignedContextRuntime:
         if self.transform is not None:
             self.transform(response)
         return response
+
+
+class _LiveRobotAgent:
+    def __init__(
+        self,
+        *,
+        jid: str = "xarm6@localhost",
+        execution_mode: str = "simulation",
+        alive: bool = True,
+        robot_state: dict[str, object] | None = None,
+        primitive_catalog: list[dict[str, object]] | None = None,
+        draft_response: dict[str, object] | None = None,
+    ) -> None:
+        self.jid = jid
+        self.execution_mode = execution_mode
+        self.alive = alive
+        self.robot_state = (
+            robot_state
+            if robot_state is not None
+            else {
+                "resource_jid": jid,
+                "current_state": "idle",
+                "controller_ready": False,
+            }
+        )
+        self.primitive_catalog = (
+            primitive_catalog
+            if primitive_catalog is not None
+            else _raw_live_catalog()
+        )
+        self.draft_response = draft_response or {
+            "draft_status": "proposed",
+            "primitive_symbols": ["compute_pick_targets", "grasp_part"],
+            "unsupported_reason": None,
+        }
+        self.draft_calls: list[dict[str, object]] = []
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def get_recovery_snapshot(self) -> dict[str, object]:
+        return deepcopy(self.robot_state)
+
+    def recovery_synthesis_primitive_catalog(self) -> list[dict[str, object]]:
+        return deepcopy(self.primitive_catalog)
+
+    async def ask_llm_structured(
+        self,
+        prompt: str,
+        *,
+        response_format: dict[str, object],
+        tools: list[dict[str, object]] | None = None,
+        max_tool_rounds: int = 3,
+        include_agent_instructions: bool = True,
+    ) -> dict[str, object]:
+        self.draft_calls.append(
+            {
+                "prompt": prompt,
+                "response_format": deepcopy(response_format),
+                "tools": tools,
+                "max_tool_rounds": max_tool_rounds,
+                "include_agent_instructions": include_agent_instructions,
+            }
+        )
+        return deepcopy(self.draft_response)
+
+
+class _StructuralDraftRuntime:
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    async def author_structural_draft(
+        self,
+        assignment: SelectedRAAssignmentEnvelope,
+        *,
+        prompt: str,
+        response_format: dict[str, object],
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "assignment": assignment,
+                "prompt": prompt,
+                "response_format": deepcopy(response_format),
+            }
+        )
+        return deepcopy(self.response)
+
+
+class _LiveRobotAgentHost:
+    def __init__(
+        self,
+        resource_agents: list[_LiveRobotAgent],
+        *,
+        system_running: bool = True,
+        gazebo_state: str = "stopped",
+        readiness: tuple[bool, str] = (True, ""),
+        startup_agent: _LiveRobotAgent | None = None,
+        startup_error: str | None = None,
+    ) -> None:
+        self.resource_agents = resource_agents
+        self.system_running = system_running
+        self.execution_mode = "simulation"
+        self.robot_env = "gazebo"
+        self.gazebo_state = gazebo_state
+        self.readiness = readiness
+        self.startup_agent = startup_agent
+        self.startup_error = startup_error
+        self.runtime_calls = 0
+        self.readiness_calls = 0
+        self.readiness_forces: list[bool] = []
+        self.start_calls = 0
+        self.full_system_start_calls = 0
+
+    def ros2_proc_status(self, name: str) -> str:
+        assert name == DUAL_GAZEBO_NAME
+        return self.gazebo_state
+
+    def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
+        self.readiness_calls += 1
+        self.readiness_forces.append(force)
+        return self.readiness
+
+    async def start_spec2primitives_robot_agent(
+        self,
+        resource_jid: str,
+        execution_mode: str,
+    ) -> _LiveRobotAgent | None:
+        self.start_calls += 1
+        assert resource_jid == "xarm6@localhost"
+        assert execution_mode == "simulation"
+        if self.startup_error is not None:
+            raise RuntimeError(self.startup_error)
+        return self.startup_agent
+
+    async def start_system(self) -> None:
+        self.full_system_start_calls += 1
+        raise AssertionError("Phase 5.1 must not start the full Agent System")
+
+    async def _run_on_agent_runtime(self, coroutine: Any) -> Any:
+        self.runtime_calls += 1
+        return await coroutine
+
+
+def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    raw_catalog = _raw_live_catalog()
+    agent = _LiveRobotAgent(primitive_catalog=raw_catalog)
+    host = _LiveRobotAgentHost([agent])
+    runtime = InProcessRobotAgentCompositionRuntime(host)
+
+    captured = asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert host.start_calls == 0
+    assert host.runtime_calls == 1
+    assert captured.robot_state.robot_state["controller_ready"] is False
+    assert [
+        entry["primitive_symbol"]
+        for entry in captured.primitive_catalog.primitive_catalog
+    ] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    detect_parts = next(
+        entry
+        for entry in captured.primitive_catalog.primitive_catalog
+        if entry["primitive_symbol"] == "detect_parts"
+    )
+    assert detect_parts["typed_parameters"] == (
+        [{"name": "part_name", "type": "string", "required": False}]
+    )
+    assert detect_parts["typed_results"] == [
+        {"name": "pose", "type": "object"}
+    ]
+    assert detect_parts["conditions"] == {"controller_ready": True}
+    assert detect_parts["effects"] == {"part_observed": True}
+    assert raw_catalog == _raw_live_catalog()
+
+
+def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    agent = _LiveRobotAgent()
+    host = _LiveRobotAgentHost([agent])
+    runtime = InProcessRobotAgentCompositionRuntime(host)
+    asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+
+    assert draft.path.name == "draft_0001.json"
+    assert draft.record["structural_steps"] == [
+        {"step_index": 1, "primitive_symbol": "compute_pick_targets"},
+        {"step_index": 2, "primitive_symbol": "grasp_part"},
+    ]
+    assert len(agent.draft_calls) == 1
+    call = agent.draft_calls[0]
+    assert call["tools"] is None
+    assert call["max_tool_rounds"] == 0
+    assert call["include_agent_instructions"] is False
+    assert "assemble medium gear" in str(call["prompt"])
+    assert "The available evidence does not identify the destination shaft." in str(
+        call["prompt"]
+    )
+    response_schema = call["response_format"]
+    assert response_schema["schema"]["type"] == "object"
+    assert response_schema["schema"]["properties"]["primitive_symbols"]["items"][
+        "enum"
+    ] == (
+        _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    )
+
+
+def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    context_runtime = _AssignedContextRuntime()
+    first_context = asyncio.run(activate_selected_ra_context(context_runtime, tmp_path))
+    phase_4_path = tmp_path / "interaction_record/context_completion_0001.json"
+    phase_4_bytes = phase_4_path.read_bytes()
+    state_bytes = first_context.robot_state_path.read_bytes()
+    catalog_bytes = first_context.primitive_catalog_path.read_bytes()
+    draft_runtime = _StructuralDraftRuntime(
+        {
+            "draft_status": "proposed",
+            "primitive_symbols": ["detect_parts", "move_pose", "detect_parts"],
+            "unsupported_reason": None,
+        }
+    )
+
+    first = asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
+    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
+
+    assert first.path.relative_to(tmp_path).as_posix() == (
+        "composition/primitive_program_drafts/draft_0001.json"
+    )
+    assert diagnostic["status"] == "draft_authored"
+    assert diagnostic["primitive_symbols"] == [
+        "detect_parts",
+        "move_pose",
+        "detect_parts",
+    ]
+    serialized = json.dumps(first.to_record())
+    assert "primitive_steps" not in serialized
+    assert "typed_parameters" not in serialized
+    assert "parameter_bindings" not in serialized
+    assert phase_4_path.read_bytes() == phase_4_bytes
+    assert first_context.robot_state_path.read_bytes() == state_bytes
+    assert first_context.primitive_catalog_path.read_bytes() == catalog_bytes
+    with pytest.raises(PrimitiveDraftError, match="already has"):
+        asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
+
+    asyncio.run(activate_selected_ra_context(context_runtime, tmp_path))
+    assert read_phase_5_2_diagnostic(tmp_path).status == "ready_for_draft"
+    second = asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
+    assert second.path.name == "draft_0002.json"
+    assert first.path.read_bytes() == json.dumps(
+        first.to_record(), indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_status"),
+    [
+        (
+            {
+                "draft_status": "unsupported",
+                "primitive_symbols": [],
+                "unsupported_reason": "The catalog has no insertion behavior.",
+            },
+            "unsupported",
+        ),
+        (
+            {
+                "draft_status": "proposed",
+                "primitive_symbols": ["invented_primitive"],
+                "unsupported_reason": None,
+            },
+            None,
+        ),
+    ],
+)
+def test_phase_5_2_handles_unsupported_and_unknown_symbols(
+    tmp_path: Path,
+    response: dict[str, object],
+    expected_status: str | None,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    runtime = _StructuralDraftRuntime(response)
+
+    if expected_status is None:
+        with pytest.raises(PrimitiveDraftError, match="unknown primitive"):
+            asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+        assert not (tmp_path / "composition/primitive_program_drafts").exists()
+        return
+
+    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
+    assert draft.record["structural_steps"] == []
+    assert diagnostic["status"] == expected_status
+    assert diagnostic["unsupported_reason"] == (
+        "The catalog has no insertion behavior."
+    )
+
+
+def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm import agent_creator
+
+    monkeypatch.setattr(agent_creator, "ROBOT_ENV", "gazebo")
+    monkeypatch.setattr(agent_creator, "_EXECUTION_MODE_OVERRIDE", "dry_run")
+    monkeypatch.setitem(agent_creator.ALLOWED_FUNCS, "xarm6", set())
+    agent = agent_creator.create_resource_agents(
+        ["cais_spade_llm/initialization/resources/robot_xarm6.json"],
+        "cais_spade_llm/initialization/cca.json",
+    )[0]
+
+    assert "pick_approach" in agent.executables
+    assert "execute_recovery_macro" in agent.executables
+    assert [
+        binding["scenario_id"] for binding in agent.failure_scenarios
+    ] == ["lg_slippage"]
+    assert [
+        entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()
+    ] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    assert agent.get_recovery_snapshot()["current_pose"] == {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "resource_path"),
+    [
+        (
+            "xarm6",
+            "cais_spade_llm/initialization/resources/robot_xarm6.json",
+        ),
+        (
+            "ur5e",
+            "cais_spade_llm/initialization/resources/robot_ur5e.json",
+        ),
+    ],
+)
+def test_context_only_robot_agent_has_no_tools_failures_or_controller(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    resource_name: str,
+    resource_path: str,
+) -> None:
+    from cais_spade_llm import agent_creator
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+
+    def _forbidden_controller(_agent: RobotAgent) -> object:
+        raise AssertionError("context-only RobotAgent constructed a controller")
+
+    monkeypatch.setattr(agent_creator, "ROBOT_ENV", "gazebo")
+    monkeypatch.setattr(agent_creator, "_EXECUTION_MODE_OVERRIDE", "simulation")
+    monkeypatch.setattr(RobotAgent, "_build_controller", _forbidden_controller)
+    monkeypatch.setitem(agent_creator.ALLOWED_FUNCS, resource_name, set())
+    caplog.set_level("INFO", logger=f"agent:{resource_name}")
+
+    agent = agent_creator.create_resource_agents(
+        [resource_path],
+        "cais_spade_llm/initialization/cca.json",
+        robot_context_only=True,
+    )[0]
+
+    assert agent.context_only is True
+    assert agent.execution_mode == "simulation"
+    assert agent.executables == {}
+    assert agent.function_info == []
+    assert agent.failure_scenarios == []
+    assert agent._controller is None
+    assert agent.enable_controller_prewarm is False
+    assert agent_creator.ALLOWED_FUNCS[resource_name] == set()
+    snapshot = agent.get_recovery_snapshot()
+    assert snapshot["function_names"] == []
+    assert snapshot["current_pose"] is None
+    assert snapshot["current_pose_captured_at"] is None
+    assert snapshot["controller_ready"] is False
+    assert snapshot["perception_ready"] is False
+    assert snapshot["tf_ready"] is False
+    assert snapshot["tcp_ready"] is False
+    synthesis_symbols = [
+        entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()
+    ]
+    assert synthesis_symbols
+    if resource_name == "xarm6":
+        assert synthesis_symbols == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == f"agent:{resource_name}"
+    ]
+    assert any("profile=context_only tools=[]" in message for message in messages)
+    assert not any("failure_scenarios" in message for message in messages)
+    assert not any("pick_approach" in message for message in messages)
+    assert not any("lg_slippage" in message for message in messages)
+
+
+def test_in_process_ra_adapter_starts_only_selected_robot_agent_from_gazebo(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    started_agent = _LiveRobotAgent()
+    host = _LiveRobotAgentHost(
+        [],
+        system_running=False,
+        gazebo_state="running",
+        startup_agent=started_agent,
+    )
+    runtime = InProcessRobotAgentCompositionRuntime(host)
+
+    captured = asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert host.start_calls == 1
+    assert host.full_system_start_calls == 0
+    assert host.readiness_calls == 1
+    assert host.readiness_forces == [True]
+    assert host.system_running is False
+    assert host.resource_agents == []
+    assert host.execution_mode == "simulation"
+    assert host.robot_env == "gazebo"
+    assert captured.robot_state.robot_state["resource_jid"] == "xarm6@localhost"
+    assert read_phase_5_1_diagnostic(tmp_path).status == "context_captured"
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    [
+        ("gazebo_stopped", "Dual Gazebo Environment is not running"),
+        ("startup_failed", "XMPP startup failed"),
+        ("agent_missing", "is not running"),
+    ],
+)
+def test_in_process_ra_adapter_startup_failures_preserve_phase_4(
+    tmp_path: Path,
+    variant: str,
+    message: str,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_bytes = completion_path.read_bytes()
+    host = _LiveRobotAgentHost(
+        [],
+        system_running=False,
+        gazebo_state="stopped" if variant == "gazebo_stopped" else "running",
+        startup_agent=None,
+        startup_error="XMPP startup failed" if variant == "startup_failed" else None,
+    )
+    runtime = InProcessRobotAgentCompositionRuntime(host)
+
+    with pytest.raises(RAContextHandoffError, match=message):
+        asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert completion_path.read_bytes() == completion_bytes
+    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    assert read_phase_5_1_diagnostic(tmp_path).status == "waiting_for_ra"
+    assert host.start_calls == (0 if variant == "gazebo_stopped" else 1)
+    assert host.full_system_start_calls == 0
+
+
+def test_in_process_ra_adapter_times_out_waiting_for_spec2primitives_gazebo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_bytes = completion_path.read_bytes()
+    host = _LiveRobotAgentHost(
+        [],
+        system_running=False,
+        gazebo_state="running",
+        readiness=(False, "Waiting for ROS services."),
+    )
+    monkeypatch.setattr(
+        in_process_robot_agent,
+        "_ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS",
+        0.0,
+    )
+    runtime = InProcessRobotAgentCompositionRuntime(host)
+
+    with pytest.raises(RAContextHandoffError, match="did not become ready"):
+        asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert host.start_calls == 0
+    assert completion_path.read_bytes() == completion_bytes
+    assert not (tmp_path / "resources/xarm6@localhost").exists()
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    [
+        ("different_jid", "is not running"),
+        ("offline", "is not running"),
+        ("duplicate", "is not unique"),
+        ("execution_mode", "execution_mode"),
+    ],
+)
+def test_in_process_ra_adapter_fails_closed_without_exact_compatible_live_agent(
+    tmp_path: Path,
+    variant: str,
+    message: str,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_bytes = completion_path.read_bytes()
+    if variant == "different_jid":
+        agents = [_LiveRobotAgent(jid="ur5e@localhost")]
+    elif variant == "offline":
+        agents = [_LiveRobotAgent(alive=False)]
+    elif variant == "duplicate":
+        agents = [_LiveRobotAgent(), _LiveRobotAgent()]
+    else:
+        agents = [_LiveRobotAgent(execution_mode="physical")]
+    runtime = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost(agents))
+
+    with pytest.raises(RAContextHandoffError, match=message):
+        asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert completion_path.read_bytes() == completion_bytes
+    assert (
+        tmp_path / "composition/selected_ra_assignments/assignment_0001.json"
+    ).is_file()
+    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    assert read_phase_5_1_diagnostic(tmp_path).status == "waiting_for_ra"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "composite",
+        "composite_expansion",
+        "hidden",
+        "untyped",
+        "duplicate",
+        "empty_catalog",
+        "empty_state",
+    ],
+)
+def test_in_process_ra_adapter_rejects_malformed_context(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    catalog = _raw_live_catalog()
+    if variant == "composite":
+        catalog[0]["primitive_steps"] = []
+    elif variant == "composite_expansion":
+        catalog[0]["composite_expansion"] = []
+    elif variant == "hidden":
+        catalog[0]["synthesis_hidden"] = True
+    elif variant == "untyped":
+        catalog[0]["params"] = {"part_name": {"description": "part"}}
+    elif variant == "duplicate":
+        duplicate = deepcopy(catalog[0])
+        catalog.insert(1, duplicate)
+    elif variant == "empty_catalog":
+        catalog = []
+    robot_state = {} if variant == "empty_state" else None
+    runtime = InProcessRobotAgentCompositionRuntime(
+        _LiveRobotAgentHost(
+            [
+                _LiveRobotAgent(
+                    robot_state=robot_state,
+                    primitive_catalog=catalog,
+                )
+            ]
+        )
+    )
+
+    with pytest.raises(RAContextHandoffError):
+        asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert not (tmp_path / "resources/xarm6@localhost").exists()
+
+
+def test_in_process_ra_adapter_retries_same_phase_4_assignment(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_bytes = completion_path.read_bytes()
+    agent = _LiveRobotAgent(alive=False)
+    runtime = InProcessRobotAgentCompositionRuntime(
+        _LiveRobotAgentHost([agent])
+    )
+
+    with pytest.raises(RAContextHandoffError, match="is not running"):
+        asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+    assignment_bytes = (
+        tmp_path / "composition/selected_ra_assignments/assignment_0001.json"
+    ).read_bytes()
+
+    agent.alive = True
+    captured = asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+
+    assert captured.assignment_path.read_bytes() == assignment_bytes
+    assert completion_path.read_bytes() == completion_bytes
+    assert read_phase_5_1_diagnostic(tmp_path).status == "context_captured"
 
 
 def test_phase_5_1_diagnostic_waits_for_phase_4_then_reports_selected_ra(
@@ -142,6 +767,48 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert diagnostic["catalog_fingerprint"] == (
         second.primitive_catalog.catalog_fingerprint
     )
+
+
+def test_phase_5_1_restart_preserves_legacy_catalog_and_exposes_latest_synthesis(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = tmp_path / "interaction_record/context_completion_0001.json"
+    completion_bytes = completion_path.read_bytes()
+
+    def _catalog(symbols: list[str]) -> list[dict[str, object]]:
+        template = _valid_catalog()[0]
+        return [
+            {
+                **deepcopy(template),
+                "primitive_symbol": symbol,
+                "invocation_binding": symbol,
+            }
+            for symbol in symbols
+        ]
+
+    legacy_runtime = _AssignedContextRuntime(
+        transform=lambda response: response.update(
+            {"primitive_catalog": _catalog([f"legacy_{index}" for index in range(16)])}
+        )
+    )
+    first = asyncio.run(activate_selected_ra_context(legacy_runtime, tmp_path))
+    first_catalog_bytes = first.primitive_catalog_path.read_bytes()
+    current_runtime = _AssignedContextRuntime(
+        transform=lambda response: response.update(
+            {"primitive_catalog": _catalog(_EXPECTED_XARM6_SYNTHESIS_SYMBOLS)}
+        )
+    )
+
+    second = asyncio.run(activate_selected_ra_context(current_runtime, tmp_path))
+    diagnostic = read_phase_5_1_diagnostic(tmp_path).to_view()
+
+    assert first.primitive_catalog_path.read_bytes() == first_catalog_bytes
+    assert first.primitive_catalog_path.name == "snapshot_0001.json"
+    assert second.primitive_catalog_path.name == "snapshot_0002.json"
+    assert completion_path.read_bytes() == completion_bytes
+    assert diagnostic["catalog_snapshot_count"] == 2
+    assert diagnostic["primitive_symbols"] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
 
 
 def test_changed_phase_4_selection_prevents_ra_dispatch(tmp_path: Path) -> None:
@@ -311,6 +978,81 @@ def _valid_catalog() -> list[dict[str, Any]]:
             "conditions": {},
             "effects": {"current_pose": {"pose_absolute_from_params": ["x", "y", "z"]}},
         },
+    ]
+
+
+def _raw_live_catalog() -> list[dict[str, object]]:
+    entries = {
+        "compute_pick_targets": {
+            "params": {"part_name": {"type": "string"}},
+            "required_params": ["part_name"],
+            "output_schema": {"target_pose": {"x": "number", "y": "number"}},
+            "primitive_kind": "pick",
+        },
+        "compute_place_targets": {
+            "params": {"part_name": {"type": "string"}},
+            "required_params": ["part_name"],
+            "output_schema": {"target_pose": {"x": "number", "y": "number"}},
+            "primitive_kind": "place",
+        },
+        "detect_parts": {
+            "params": {"part_name": {"type": "string"}},
+            "required_params": [],
+            "output_schema": {
+                "pose": {"x": "number", "y": "number", "z": "number"}
+            },
+            "primitive_kind": "observe",
+            "preconditions": {"controller_ready": True},
+            "effects": {"part_observed": True},
+        },
+        "grasp_part": {
+            "params": {"part_name": {"type": "string"}},
+            "required_params": ["part_name"],
+            "primitive_kind": "pick",
+        },
+        "move_cartesian": {
+            "params": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"},
+            },
+            "required_params": ["x", "y", "z"],
+            "primitive_kind": "motion",
+        },
+        "move_relative": {
+            "params": {
+                "dx": {"type": "number"},
+                "dy": {"type": "number"},
+                "dz": {"type": "number"},
+            },
+            "required_params": ["dx", "dy", "dz"],
+            "primitive_kind": "motion",
+        },
+        "move_to_named_pose": {
+            "params": {"pose_name": {"type": "string"}},
+            "required_params": ["pose_name"],
+            "primitive_kind": "home",
+        },
+        "release_part": {
+            "params": {"part_name": {"type": "string"}},
+            "required_params": [],
+            "primitive_kind": "release",
+        },
+    }
+    return [
+        {
+            "name": name,
+            "resource_type": "robot",
+            "description": f"Robot synthesis primitive {name}.",
+            "params": dict(entries[name].get("params") or {}),
+            "required_params": list(entries[name].get("required_params") or []),
+            "preconditions": dict(entries[name].get("preconditions") or {}),
+            "effects": dict(entries[name].get("effects") or {}),
+            "primitive_kind": entries[name]["primitive_kind"],
+            "output_schema": dict(entries[name].get("output_schema") or {}),
+            "semantic_summary": f"Robot synthesis primitive {name}.",
+        }
+        for name in _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     ]
 
 

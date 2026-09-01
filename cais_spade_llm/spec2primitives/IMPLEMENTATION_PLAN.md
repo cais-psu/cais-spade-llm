@@ -14,13 +14,22 @@ assignment.
 
 **Phase 5.1 is implemented as a contract-first assigned-RA activation and
 context-snapshot boundary.** It produces the minimum verified assignment
-envelope, invokes an injected selected-RA runtime, and persists fresh state and
-the complete returned primitive-only catalog. Live SPADE delivery remains
-Phase 5.1b.
+envelope, can start or reuse only the exact Phase 4-selected in-process
+RobotAgent from the UI, and persists fresh state and the complete returned
+recovery synthesis catalog. It does not start the full Agent System. Live SPADE
+message delivery remains Phase 5.1b.
+
+**Phase 5.2A is implemented as RA-authored structural composition.** From the
+latest validated Phase 5.1 state/catalog pair, the exact selected RobotAgent
+returns only an ordered sequence of existing catalog symbols or an explicit
+unsupported result. The host pins that response to its Phase 4 completion,
+assignment, state, and catalog and appends one immutable
+`PrimitiveProgramDraft` per context pair. Parameter binding, missing-context
+requests, feasibility validation, and execution remain later steps.
 
 Phase 4 completion means the current location-based pre-RA consumer can reach a
 hash-pinned post-assignment completion. It does not claim cross-camera fusion,
-activation of an orientation-sensitive consumer, primitive composition, IK or
+activation of an orientation-sensitive consumer, parameter binding, IK or
 collision validation, execution, or an observed assembly outcome.
 
 ## Implemented native PA grounding
@@ -172,9 +181,11 @@ A completed UI timeline contains exactly:
 5. `Grounding complete`
 
 The visible target state is location-based. Tool protocol details remain in
-diagnostics. Genuine proposal `missing_information` and document uncertainty
-appear under **Known non-blocking context limits**; historical unresolved
-markers do not. Completion does not claim execution readiness.
+diagnostics. Genuine proposal `missing_information` appears under **Known
+non-blocking context limits** unless an accepted final typed record supersedes
+it. Generic document uncertainty remains in its evidence record for audit;
+historical unresolved markers also do not appear. Completion does not claim
+execution readiness.
 
 The same page contains an always-visible temporary **Phase 5 · RobotAgent
 Diagnostics** card. Its current **5.1 · Assigned RA activation and context
@@ -182,11 +193,21 @@ snapshot** section reads the active interaction's validated Phase 4 completion,
 immutable assignment audit, and paired RA state/catalog revisions. It shows the
 exact selected JID and execution mode, snapshot refs and counts, catalog
 fingerprint, exact primitive symbols, and expandable raw `robot_state` and
-`primitive_catalog`. Refresh is read-only: it does not invoke
-`activate_selected_ra_context(...)`, contact an RA, or write an artifact. Later
-Phase 5 implementation steps may add their own diagnostics to this temporary
-card. After Phase 5 is implemented, the diagnostic surface is intended to be
-replaced by the operator-facing primitive composition card.
+`primitive_catalog`. **Start Phase 5** invokes
+`activate_selected_ra_context(...)` for the unchanged active Phase 4 result and
+reuses its exact live in-process RobotAgent. If the shared Agent System is
+stopped, the same action requires the running Spec2Primitives Dual Gazebo
+environment, waits for simulation readiness, and starts only the exact selected
+RobotAgent in a context-only Phase 4-selected simulation profile before
+capture. The standalone profile exposes no task tools or failure scenarios and
+constructs no controller, so it cannot wait for perception or motion services.
+An unavailable or mismatched agent or startup failure fails closed and leaves
+the same pinned assignment retryable. It never launches Gazebo, starts CCA or a
+ProductAgent, creates product-order tasks, or starts the second RobotAgent.
+Refresh remains read-only. Later Phase 5 implementation steps may add their own
+diagnostics to this temporary card. After Phase 5 is implemented, the diagnostic
+surface is intended to be replaced by the operator-facing primitive composition
+card.
 
 ## Implemented Phase 5.1 assigned-RA context handoff
 
@@ -212,17 +233,45 @@ gapped histories fail closed.
 `context_captured`, and `blocked`. It never repairs or extends the immutable
 history.
 
-This is a contract-first runtime boundary, not a live shared-RobotAgent or
-SPADE connection. It sends no full ABox, typed evidence payload, raw RDF, or
-composition prompt and creates no primitive draft, missing-context batch,
-candidate, validation result, or execution command.
+The UI composition root now supplies a Spec2Primitives-owned in-process adapter.
+It finds exactly the JID selected by Phase 4, requires that RobotAgent to be
+alive with the selected execution mode, and reads its authoritative recovery
+snapshot and composer-visible recovery synthesis catalog on the agent loop. If
+the selected RobotAgent is unavailable, the adapter can ask the shared runtime
+to start that one exact RobotAgent without CCA, ProductAgents, UserAgent, or the
+other RobotAgent. This is not a SPADE message connection. The Phase 5.1 read
+sends no full ABox, typed evidence payload, raw RDF, or composition prompt and
+creates no primitive draft, missing-context batch, candidate, validation
+result, or execution command. The separately invoked Phase 5.2A operation
+reuses the same exact-agent adapter for structural authoring.
+
+## Implemented Phase 5.2A structural primitive draft
+
+`author_primitive_program_draft(...)` reloads the validated Phase 4 assignment
+and latest Phase 5.1 pair, then builds a bounded composition input containing
+the task IRIs and requirement, selected resource, current robot state, complete
+primitive catalog, grounded context summary, known limits, and typed-record
+identities. It does not send raw RDF or bind primitive parameters.
+
+The exact selected RobotAgent receives a strict response contract. It may return
+`proposed` with a non-empty ordered sequence of exact catalog symbols, including
+intentional repetition, or `unsupported` with an explanation. Unknown symbols,
+extra fields, empty proposals, malformed responses, stale or altered evidence,
+and a second draft for the same context pair fail closed.
+
+The host derives `step_index`, provenance, hashes, fingerprints, and the
+append-only filename. `read_phase_5_2_diagnostic(...)` exposes
+`waiting_for_context`, `ready_for_draft`, `draft_authored`, `unsupported`, or
+`blocked` without contacting the RobotAgent. Restarting Phase 5.1 appends a new
+state/catalog pair and makes that new pair eligible for one new structural
+draft; earlier records remain unchanged.
 
 ## Deliberately deferred
 
-- Phase 5.1b live exact-JID SPADE delivery to the shared RobotAgent;
+- Phase 5.1b live exact-JID SPADE message delivery to the shared RobotAgent;
 - future RA `MissingContextBatch → PA producers/clarification →
   CompositionContextBundle`;
-- `PrimitiveProgramDraft` authoring and primitive composition;
+- deterministic parameter-binding preflight and fully bound `primitive_steps`;
 - orientation-sensitive manipulation requirements;
 - IK, collision checking, execution, and outcome validation;
 - public API, `SystemBridge`, PPR TBox, or persisted-record migration.

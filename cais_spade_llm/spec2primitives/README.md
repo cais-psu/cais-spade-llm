@@ -12,9 +12,11 @@ includes ontology context, document evidence, CAD/RGB-D grounding, typed
 grounding contracts, evidence-gated semantic acceptance, location-based coarse
 reach, and the selected `processExecution` assignment. Phase 5 selected-RA
 handoff was previously unimplemented. Phase 5.1 now provides the contract-first
-assignment envelope and injected-runtime state/catalog snapshots. Live SPADE
-delivery, primitive composition, robot-local validation, execution, and
-observed outcomes remain unimplemented.
+assignment envelope and injected-runtime state/catalog snapshots. Phase 5.2A
+now lets that exact selected RobotAgent author one immutable, unbound
+`PrimitiveProgramDraft` from the latest captured pair. Live SPADE delivery,
+parameter binding, robot-local validation, execution, and observed outcomes
+remain unimplemented.
 
 Phase 4 completion does not add cross-camera fusion or activate the available
 orientation-sensitive pose path for the current location-based consumer.
@@ -171,22 +173,36 @@ shows only:
 5. `Grounding complete`
 
 Tool IDs, hashes, provider mechanics, and failures remain in diagnostics. The
-final view shows the accepted location and selected resource. Proposal
-`missing_information` and document uncertainty appear under **Known
-non-blocking context limits**. Historical `unresolved_evidence_needs` are not
-copied into that summary. “Grounding complete” does not mean the assembly is
-ready to execute.
+final view shows the accepted location and selected resource. Genuine proposal
+`missing_information` appears under **Known non-blocking context limits** unless
+an accepted final typed record supersedes it. Generic document uncertainty
+remains in its evidence record for audit and is not copied into that summary.
+Historical `unresolved_evidence_needs` are also not copied. “Grounding complete”
+does not mean the assembly is ready to execute.
 
 Below the final grounding result, the temporary **Phase 5 · RobotAgent
-Diagnostics** card provides read-only implementation inspection. Its current
+Diagnostics** card provides operator activation and persisted inspection. Its current
 **5.1 · Assigned RA activation and context snapshot** section shows
 `xarm6@localhost` and its execution mode when selected, then paired state and
 catalog revision counts, exact primitive symbols, the catalog fingerprint, and
 expandable `robot_state` and full `primitive_catalog` after capture. A red
-fail-closed diagnostic identifies invalid or unpaired evidence. Refresh only
-rereads the active interaction; the UI has no RA activation or execution
-control. Later Phase 5 diagnostics can share this temporary card. After Phase 5
-is complete, it is intended to be replaced by the primitive composition card.
+fail-closed diagnostic identifies an unavailable exact RobotAgent or invalid or
+unpaired evidence. **Start Phase 5** consumes the unchanged active Phase 4
+completion and reads the exact selected live in-process RobotAgent. If that
+agent is not live and the full shared Agent System is stopped, the same action
+requires the Spec2Primitives Dual Gazebo environment, waits for simulation
+readiness, and starts only the exact Phase 4-selected RobotAgent in the selected
+context-only simulation profile. The context-only agent has no task tools,
+failure scenarios, or ROS controller and therefore does not wait for
+`/detect_all`, TF, or motion services. It never starts CCA, ProductAgents,
+UserAgent, a second RobotAgent, product orders, or `REQ_*` tasks; launches
+Gazebo; selects a fallback; or executes a primitive. **Retry Phase 5** reuses
+the same pinned assignment after a failed startup or contact. **Restart Phase
+5** preserves the same Phase 4 assignment and existing immutable evidence while
+appending a fresh paired state and synthesis-catalog snapshot. Refresh only
+rereads the active interaction. Later Phase 5 diagnostics can share this
+temporary card. After Phase 5 is complete, it is intended to be replaced by the
+primitive composition card.
 
 The existing application entry point remains:
 
@@ -209,11 +225,18 @@ post-prediction evaluator.
 
 ## Runtime boundary
 
-All Spec2Primitives implementation remains in this directory. Shared
-ProductAgent and RobotAgent implementations are read-only authorities reached
-through package-owned adapters. `SystemBridge` and the public UI/runtime API are
-unchanged. There is no current RA handoff, primitive composition, IK, collision
-checking, robot execution, or outcome validation.
+Shared ProductAgent and RobotAgent implementations remain read-only authorities
+reached through package-owned adapters. The public `SystemBridge` API is
+unchanged; its shared Gazebo process classification recognizes
+`gazebo_dual_spec2primitives` for core-service simulation readiness and hardware
+interlocks. Because this world intentionally launches with
+`run_perception:=false`, it does not queue the shared perception-dependent
+controller prewarm. The current RA handoff reuses an exact compatible live agent
+or starts only the exact Phase 4-selected context-only RobotAgent, then performs
+an in-process state/catalog read. The same exact-agent adapter can then request
+an ordered structural sequence of catalog symbols with no tools or execution.
+SPADE handoff, parameter binding, IK, collision checking, robot execution, and
+outcome validation remain unavailable.
 
 Important locations:
 

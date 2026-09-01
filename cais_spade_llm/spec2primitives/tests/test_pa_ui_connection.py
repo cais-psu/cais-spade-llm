@@ -265,6 +265,10 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert phase_5_1["assignment_ref"] is None
     assert phase_5_1["robot_state"] is None
     assert phase_5_1["primitive_catalog"] == []
+    phase_5_2 = view["phase_5_2"]
+    assert isinstance(phase_5_2, dict)
+    assert phase_5_2["status"] == "waiting_for_context"
+    assert phase_5_2["draft"] is None
     serialized = json.dumps(view)
     for removed_wording in (
         "Target grounded",
@@ -274,6 +278,77 @@ def test_completed_view_has_five_simple_stages_and_location(
         "ready to execute",
     ):
         assert removed_wording not in serialized
+
+
+def test_completed_limitations_hide_document_uncertainty() -> None:
+    document_notices = [
+        (
+            'The purchasing section refers to design files available from "LINK" '
+            "and an example file name, but the actual download link is not provided "
+            "in the extracted text."
+        ),
+        (
+            "One part of the text mentions testing procedures described in a "
+            'separate document marked "TBD," so the full testing procedure is not '
+            "included here."
+        ),
+        (
+            "Some part numbers and vendor details appear split across lines in the "
+            "extracted text, making a few entries hard to read cleanly."
+        ),
+        (
+            'The document uses both "course" and "coarse" in the context of thread '
+            "descriptions; the exact intended spelling is unclear from the page "
+            "images and text alone."
+        ),
+    ]
+    product_context = {
+        "typed_bindings": [],
+        "uncertainty": [
+            {"description": notice, "evidence_refs": ["document.pdf#page=1"]}
+            for notice in document_notices
+        ],
+    }
+    destination_gap = "The available evidence does not identify the destination shaft."
+
+    limitations = spec2primitives_ui._final_result_limitations(
+        product_context,
+        {"missing_information": [destination_gap]},
+    )
+
+    assert limitations == [destination_gap]
+    assert [
+        item["description"] for item in product_context["uncertainty"]
+    ] == document_notices
+
+
+def test_completed_limitations_hide_superseded_typed_record_claim() -> None:
+    stale_location_gap = (
+        "A RobotFrameLocationRecord in target_frame 'world' for the medium gear "
+        "is not derivable from the retrieved evidence."
+    )
+    destination_gap = "The available evidence does not identify the destination shaft."
+    product_context = {
+        "typed_bindings": [
+            {
+                "output_symbol": "RobotFrameLocationRecord",
+                "record_type": "RobotFrameLocationRecord",
+                "status": "accepted",
+            }
+        ],
+        "uncertainty": [],
+    }
+
+    limitations = spec2primitives_ui._final_result_limitations(
+        product_context,
+        {"missing_information": [stale_location_gap, destination_gap]},
+    )
+
+    assert limitations == [destination_gap]
+    assert spec2primitives_ui._final_result_limitations(
+        product_context,
+        {"missing_information": [stale_location_gap]},
+    ) == []
 
 
 def test_completed_view_recovers_from_persisted_native_records(

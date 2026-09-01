@@ -14,8 +14,8 @@ signatures; it does not require any particular relation for a requirement.
 The validator rejects wrong-domain/range relations and RA,
 primitive-offering, and `capableOf` assertions from the PA ABox.
 The current framework adds no separate RA resource ABox. The selected RA's
-future primitive catalog remains a separately owned typed record; only the TBox
-is shared.
+primitive catalog remains a separately owned typed record; only the TBox is
+shared.
 Phase 4.0 is wired into Phase 3 through package-local Python contracts and adds
 no ontology file to this directory. Retrieval, interpretation, ontology delta, and
 Phase 4.3-style decision records share an aligned operation number.
@@ -117,6 +117,13 @@ modeled conditions and effects. Omitted conditions or effects remain
 `unmodeled`. No fixed catalog cardinality, composite expansion, or
 `primitive_steps` is accepted at this boundary.
 
+`agents/ra/primitive_draft.py` owns the implemented Phase 5.2A
+`PrimitiveProgramDraft`. The model-authored portion contains only `draft_status`,
+an ordered list of exact catalog symbols, and an unsupported reason. The host
+derives structural step indexes and pins the record to the exact completion,
+assignment, robot-state snapshot, and primitive-catalog snapshot. It contains
+no parameter values, `primitive_steps`, feasibility claim, or execution request.
+
 The active system expands `ResourceAssignmentNeed` through producer descriptor
 prerequisites and compares that closure with current, accepted, hash-valid
 typed bindings. Missing source-produced types are mapped to eligible approved
@@ -133,16 +140,17 @@ Planned downstream contracts cover:
 
 - versioned `CompositionContextBundle` records with task, ABox, binding,
   selected-resource, and catalog fingerprints
-- RA-authored `PrimitiveProgramDraft`, deduplicated `MissingContextBatch`, PA
-  batch response, and progress or no-progress decision records
+- deduplicated `MissingContextBatch`, PA batch response, and progress or
+  no-progress decision records
 - fully bound `primitive_steps`, state checks, IK/collision/trajectory feedback,
   rejected candidate revision, and accepted candidate handoff
 
 These downstream names remain planned boundaries. The current framework has no
-separate `TaskTransitionContract`: Phase 5.2 will consume the validated
+separate `TaskTransitionContract`: Phase 5.2A consumes the validated
 post-assignment ontology projection, `ResourceSelectionRecord`, Phase 5.1
-snapshots, and minimum hash-pinned typed evidence directly. Phase 5.1 produces
-no RA resource ABox, composition bundle, missing-context batch, or primitive
-candidate.
+snapshots, and minimum hash-pinned typed evidence directly. Phase 5.2A produces
+only the unbound structural draft; it produces no RA resource ABox, composition
+bundle, missing-context batch, fully bound candidate, validation result, or
+execution command.
 
 Phase 0 intentionally defines no JSON, YAML, or Python schema.

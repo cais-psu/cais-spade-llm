@@ -11,7 +11,7 @@
             "module": "cais_spade_llm.ui_main",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/bin/python",
+            "python": "${workspaceFolder}/scripts/ros_python.sh",
             "env": {
                 "ROS_DOMAIN_ID": "42",
                 "CAIS_SPADE_LLM_MODEL": "gpt-5.4",
@@ -26,7 +26,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/bin/python",
+            "python": "${workspaceFolder}/scripts/ros_python.sh",
             "env": {
                 "ROS_DOMAIN_ID": "42",
                 "CAIS_SPADE_LLM_MODEL": "gpt-5.4",

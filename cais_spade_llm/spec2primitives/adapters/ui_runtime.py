@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DualGazeboRuntime
+from cais_spade_llm.spec2primitives.adapters.in_process_robot_agent import (
+    InProcessRobotAgentCompositionRuntime,
+)
 from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
     PAOntologyConfig,
     ProductContextGroundingRuntime,
@@ -19,6 +22,10 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     CameraToWorldCalibrationRuntime,
     ProductionProductContextGroundingRuntime,
+)
+from cais_spade_llm.spec2primitives.agents.ra import (
+    RobotAgentCompositionRuntime,
+    RobotAgentDraftRuntime,
 )
 from cais_spade_llm.spec2primitives.config import (
     DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH,
@@ -68,6 +75,8 @@ class Spec2PrimitivesUIRuntime:
     observation_capture_runtime: ObservationCaptureRuntime | None = None
     camera_to_world_calibration_runtime: CameraToWorldCalibrationRuntime | None = None
     camera_to_world_calibration_unavailable_reason: str | None = None
+    robot_agent_context_runtime: RobotAgentCompositionRuntime | None = None
+    robot_agent_draft_runtime: RobotAgentDraftRuntime | None = None
 
 
 class _UnavailableProductAgentRuntime:
@@ -178,6 +187,7 @@ def create_spec2primitives_ui_runtime(
             ),
         )
 
+    robot_agent_runtime = InProcessRobotAgentCompositionRuntime(dual_gazebo)
     return Spec2PrimitivesUIRuntime(
         dual_gazebo=dual_gazebo,
         product_agent=product_agent,
@@ -194,6 +204,8 @@ def create_spec2primitives_ui_runtime(
         camera_to_world_calibration_unavailable_reason=(
             calibration_unavailable_reason
         ),
+        robot_agent_context_runtime=robot_agent_runtime,
+        robot_agent_draft_runtime=robot_agent_runtime,
     )
 
 

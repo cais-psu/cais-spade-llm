@@ -452,17 +452,12 @@ def read_phase_5_1_diagnostic(interaction_root: Path) -> Phase51Diagnostic:
                 assignment_ref=assignment_ref,
                 **common,
             )
-        _next_snapshot_number(
+        latest = _load_latest_selected_ra_context(
             root,
             assignment=assignment,
             assignment_path=expected_assignment_path,
             selection=selection,
         )
-        latest_number = max(state_paths)
-        latest_state_path = state_paths[latest_number]
-        latest_catalog_path = catalog_paths[latest_number]
-        latest_state = _load_robot_state_snapshot(latest_state_path)
-        latest_catalog = _load_primitive_catalog_snapshot(latest_catalog_path)
         return Phase51Diagnostic(
             status="context_captured",
             message=(
@@ -471,12 +466,12 @@ def read_phase_5_1_diagnostic(interaction_root: Path) -> Phase51Diagnostic:
             ),
             assignment_ref=assignment_ref,
             state_snapshot_count=len(state_paths),
-            latest_state_ref=latest_state_path.relative_to(root).as_posix(),
+            latest_state_ref=latest.robot_state_path.relative_to(root).as_posix(),
             catalog_snapshot_count=len(catalog_paths),
-            latest_catalog_ref=latest_catalog_path.relative_to(root).as_posix(),
-            catalog_fingerprint=latest_catalog.catalog_fingerprint,
-            robot_state=latest_state.robot_state,
-            primitive_catalog=latest_catalog.primitive_catalog,
+            latest_catalog_ref=latest.primitive_catalog_path.relative_to(root).as_posix(),
+            catalog_fingerprint=latest.primitive_catalog.catalog_fingerprint,
+            robot_state=latest.robot_state.robot_state,
+            primitive_catalog=latest.primitive_catalog.primitive_catalog,
             **common,
         )
     except RAContextHandoffError as exc:
@@ -486,6 +481,81 @@ def read_phase_5_1_diagnostic(interaction_root: Path) -> Phase51Diagnostic:
             failure=str(exc),
             **common,
         )
+
+
+def load_selected_ra_context_snapshot(
+    interaction_root: Path,
+) -> SelectedRAContextSnapshot:
+    """Load the latest fully validated Phase 5.1 assignment/state/catalog set."""
+    root = Path(interaction_root).resolve()
+    assignment, selection = _build_assignment_envelope(root)
+    assignment_path = root.joinpath(*_ASSIGNMENT_ROOT, _ASSIGNMENT_NAME)
+    if not assignment_path.is_file():
+        raise RAContextHandoffError(
+            "Phase 5.2 requires one completed Phase 5.1 context capture."
+        )
+    persisted_assignment = _assignment_from_mapping(
+        _read_json_mapping(assignment_path, "SelectedRAAssignmentEnvelope")
+    )
+    if persisted_assignment != assignment:
+        raise RAContextHandoffError(
+            "Persisted SelectedRAAssignmentEnvelope does not match Phase 4."
+        )
+    return _load_latest_selected_ra_context(
+        root,
+        assignment=assignment,
+        assignment_path=assignment_path,
+        selection=selection,
+    )
+
+
+def _load_latest_selected_ra_context(
+    root: Path,
+    *,
+    assignment: SelectedRAAssignmentEnvelope,
+    assignment_path: Path,
+    selection: Mapping[str, object],
+) -> SelectedRAContextSnapshot:
+    """Load the latest pair after validating the complete append-only history."""
+    resource_root = root / "resources" / assignment.selected_resource_jid
+    state_paths = _numbered_snapshot_paths(resource_root / _ROBOT_STATE_DIRECTORY)
+    catalog_paths = _numbered_snapshot_paths(resource_root / _PRIMITIVE_CATALOG_DIRECTORY)
+    if set(state_paths) != set(catalog_paths):
+        raise RAContextHandoffError(
+            "Robot state and primitive catalog snapshot revisions are unpaired."
+        )
+    if not state_paths:
+        raise RAContextHandoffError(
+            "Phase 5.2 requires one completed Phase 5.1 context capture."
+        )
+    _next_snapshot_number(
+        root,
+        assignment=assignment,
+        assignment_path=assignment_path,
+        selection=selection,
+    )
+    latest_number = max(state_paths)
+    state_path = state_paths[latest_number]
+    catalog_path = catalog_paths[latest_number]
+    state = _load_robot_state_snapshot(state_path)
+    catalog = _load_primitive_catalog_snapshot(catalog_path)
+    _validate_snapshot_linkage(
+        root,
+        assignment=assignment,
+        assignment_path=assignment_path,
+        selection=selection,
+        state_path=state_path,
+        state=state,
+        catalog=catalog,
+    )
+    return SelectedRAContextSnapshot(
+        assignment=assignment,
+        assignment_path=assignment_path,
+        robot_state=state,
+        robot_state_path=state_path,
+        primitive_catalog=catalog,
+        primitive_catalog_path=catalog_path,
+    )
 
 
 def _build_assignment_envelope(

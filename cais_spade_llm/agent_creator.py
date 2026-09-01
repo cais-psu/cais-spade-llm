@@ -142,6 +142,8 @@ def create_resource_agents(
     resource_init_list: Iterable[str],
     cca_init_file: str,
     prewarmed_controllers: dict | None = None,
+    *,
+    robot_context_only: bool = False,
 ):
     """Build resource-oriented agents (printing, robot, etc.) from their manifest files.
 
@@ -149,6 +151,8 @@ def create_resource_agents(
         prewarmed_controllers: Optional dict mapping robot key (e.g. "ur5e", "xarm6")
             to a pre-initialized GazeboPickPlaceController that the RobotAgent can
             adopt instead of creating a new one.
+        robot_context_only: Build RobotAgents without task tools, failure
+            scenarios, or controllers for read-only context capture.
     """
     prewarmed = prewarmed_controllers or {}
     cca_config = utils.load_json_data(cca_init_file) or {}
@@ -167,7 +171,9 @@ def create_resource_agents(
             env_block = meta.get(ROBOT_ENV, {})
             fn_names = _fn_names(meta)
             raw_declared = meta.get("function_names", meta.get("functions", None))
-            if kind == "robot" and (
+            if kind == "robot" and robot_context_only:
+                fn_names = []
+            elif kind == "robot" and (
                 raw_declared is None
                 or (isinstance(raw_declared, str) and raw_declared.strip().lower() == "auto")
             ):
@@ -179,7 +185,8 @@ def create_resource_agents(
                     named_positions=env_block.get("named_positions", {}) or {},
                     controller_config=env_block.get("controller", {}) or {},
                 )
-            ALLOWED_FUNCS[name].update(fn_names)
+            if not (kind == "robot" and robot_context_only):
+                ALLOWED_FUNCS[name].update(fn_names)
 
             common = dict(
                 name=name,
@@ -194,7 +201,8 @@ def create_resource_agents(
             if kind == "printing":
                 agent = PrintingAgent(jid, pw, **common)
             elif kind == "robot":
-                if isinstance(meta.get("failure_scenarios"), list):
+                common["context_only"] = bool(robot_context_only)
+                if not robot_context_only and isinstance(meta.get("failure_scenarios"), list):
                     common["failure_scenarios"] = list(meta.get("failure_scenarios") or [])
                 common["execution_mode"] = (
                     _EXECUTION_MODE_OVERRIDE
@@ -206,9 +214,10 @@ def create_resource_agents(
                 common["named_positions"] = env_block.get("named_positions", {})
                 # Inject prewarmed controller if available for this robot.
                 robot_key = str(name or "").split("@", 1)[0].lower()
-                pw_ctrl = prewarmed.pop(robot_key, None)
-                if pw_ctrl is not None:
-                    common["prewarmed_controller"] = pw_ctrl
+                if not robot_context_only:
+                    pw_ctrl = prewarmed.pop(robot_key, None)
+                    if pw_ctrl is not None:
+                        common["prewarmed_controller"] = pw_ctrl
                 agent = RobotAgent(jid, pw, **common)
             else:
                 print(f"[WARN] Unknown resource type '{kind}' for {name} in {init_file}; skipped.")

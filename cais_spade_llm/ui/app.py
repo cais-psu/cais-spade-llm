@@ -382,6 +382,11 @@ def create_app() -> None:
         except Exception:
             log.exception("App shutdown: manual ur5e Function Execution cleanup failed")
 
+        try:
+            await bridge.shutdown_spec2primitives_robot_agent()
+        except Exception:
+            log.exception("App shutdown: Spec2Primitives RobotAgent cleanup failed")
+
         # 1b) Stop tracked ROS2 launch processes unless the operator is
         # preserving Gazebo for a debug session.
         if keep_gazebo_on_exit():

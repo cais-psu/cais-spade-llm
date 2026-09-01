@@ -53,8 +53,19 @@ class RobotAgent(ResourceAgent):
     _DEFAULT_PREWARM_TIMEOUT_S = 60.0
     _RESOURCE_PROFILE = ROBOT_PROFILE
 
-    def __init__(self, jid: str, password: str, *, name: str, **kw: Any) -> None:
+    def __init__(
+        self,
+        jid: str,
+        password: str,
+        *,
+        name: str,
+        context_only: bool = False,
+        **kw: Any,
+    ) -> None:
+        self.context_only = bool(context_only)
         raw_failure_scenarios = kw.pop("failure_scenarios", None)
+        if self.context_only:
+            raw_failure_scenarios = None
         self.failure_scenarios = self._normalize_failure_scenario_bindings(raw_failure_scenarios)
         self._triggered_failure_scenarios: set[str] = set()
 
@@ -77,18 +88,28 @@ class RobotAgent(ResourceAgent):
                 os.environ.get("ENABLE_ROBOT_AGENT_PREWARM", "0"),
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
+        if self.context_only:
+            self.enable_controller_prewarm = False
 
         # Pop before super().__init__ to avoid unexpected kwarg error.
         self._injected_controller = kw.pop("prewarmed_controller", None)
         requested_function_names = kw.pop("function_names", None)
-        resolved_function_names = self.resolve_registered_function_names(
-            static_capabilities=kw.get("static_capabilities") or {},
-            named_positions=self.named_positions,
-            controller_config=self.controller_config,
-            requested_names=requested_function_names,
-        )
+        if self.context_only:
+            resolved_function_names = []
+        else:
+            resolved_function_names = self.resolve_registered_function_names(
+                static_capabilities=kw.get("static_capabilities") or {},
+                named_positions=self.named_positions,
+                controller_config=self.controller_config,
+                requested_names=requested_function_names,
+            )
         kw["function_names"] = resolved_function_names
         super().__init__(jid, password, name=name, **kw)
+        if self.context_only:
+            # ResourceAgent registers its recovery executor by default. A
+            # context-only RobotAgent must expose no executable task surface.
+            self.executables.clear()
+            self._rebuild_tool_schemas()
 
         self.agent_name = name
         self._held_part: str | None = None
@@ -103,7 +124,12 @@ class RobotAgent(ResourceAgent):
         self._task_ctx: dict[str, Any] = {}
         # Use pre-initialized controller (from Gazebo prewarm) if available,
         # to avoid paying the ROS2 init cost again on first task.
-        if self._injected_controller is not None:
+        if self.context_only:
+            # Phase 5.1 reads logical state and catalog metadata only. Avoiding
+            # controller construction prevents ROS, perception, and motion waits.
+            self._controller = None
+            self._controller_prewarm_done = True
+        elif self._injected_controller is not None:
             self._controller = self._injected_controller
             self._controller_prewarm_done = True
             self.logger.info("[Robot] Using prewarmed controller for %s", name)
@@ -117,20 +143,27 @@ class RobotAgent(ResourceAgent):
         self._robot_motion_lock = threading.Lock()
         self._primitive_catalog_cache: list | None = None
 
-        self.logger.info(
-            ("RobotAgent '%s' initialized. mode=%s tools=%s failure_scenarios=%s"),
-            name,
-            self.execution_mode,
-            list(self.executables.keys()),
-            [
-                {
-                    "scenario_id": binding.get("scenario_id"),
-                    "mode": binding.get("mode"),
-                    "scope": binding.get("scope"),
-                }
-                for binding in self.failure_scenarios
-            ],
-        )
+        if self.context_only:
+            self.logger.info(
+                "RobotAgent '%s' initialized. mode=%s profile=context_only tools=[]",
+                name,
+                self.execution_mode,
+            )
+        else:
+            self.logger.info(
+                ("RobotAgent '%s' initialized. mode=%s tools=%s failure_scenarios=%s"),
+                name,
+                self.execution_mode,
+                list(self.executables.keys()),
+                [
+                    {
+                        "scenario_id": binding.get("scenario_id"),
+                        "mode": binding.get("mode"),
+                        "scope": binding.get("scope"),
+                    }
+                    for binding in self.failure_scenarios
+                ],
+            )
 
     @classmethod
     def resolve_registered_function_names(

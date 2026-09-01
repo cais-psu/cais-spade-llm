@@ -109,7 +109,7 @@ state retrieval, changed Phase 4 evidence blocks dispatch, a differently
 addressed RA rejects the envelope, and response JID/fingerprint mismatches fail
 closed. They also cover complete ordered catalogs, invalid or composite catalog
 entries, non-finite state, paired append-only revisions, unpaired-history
-rejection, failure-only assignment audits, and the absence of all Phase 5.2,
+rejection, failure-only assignment audits, and the absence of binding,
 validation, and execution artifacts.
 The read-only diagnostic coverage checks its transition from
 `waiting_for_phase_4` to `ready_for_assignment`, `waiting_for_ra`,
@@ -118,9 +118,16 @@ latest paired revision counts and refs; full ordered primitive symbols; current
 state; and catalog fingerprint. The PA UI test proves a valid Phase 4 completion
 surfaces the selected assignment without pretending that an RA response exists.
 
+Phase 5.2A tests prove that the exact selected RobotAgent receives a bounded
+structural-authoring request with no tools, returns only exact catalog symbols,
+and may repeat them or report unsupported. They cover one immutable
+`PrimitiveProgramDraft` per state/catalog pair, append-only revision after a
+Phase 5.1 restart, pinned evidence preservation, invented-symbol rejection, and
+the fail-closed UI action gate.
+
 Later phases will add focused tests for live selected-RA delivery,
-`PrimitiveProgramDraft`, `MissingContextBatch`, `CompositionContextBundle`,
-validation feedback, revision behavior, and accepted candidate handoff.
+`MissingContextBatch`, `CompositionContextBundle`, validation feedback, bound
+candidate revision behavior, and accepted candidate handoff.
 Composition coverage will exercise multiple catalog cardinalities
 without an eight-entry invariant, exact symbol membership, pinned catalog and
 bundle fingerprints, ownership routing, draft-derived batch aggregation and

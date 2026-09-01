@@ -531,7 +531,12 @@ class SystemBridge:
         ),
     }
     _HW_TCP_PORTS = {"xarm6": 502, "ur5e": 30004}
-    _BASE_GAZEBO_PROCESS_NAMES = {"gazebo_dual", "gazebo_xarm6", "gazebo_ur5e"}
+    _BASE_GAZEBO_PROCESS_NAMES = {
+        "gazebo_dual",
+        "gazebo_dual_spec2primitives",
+        "gazebo_xarm6",
+        "gazebo_ur5e",
+    }
     _BASE_HARDWARE_PROCESS_NAMES = {
         "hardware_xarm6_driver",
         "hardware_xarm6_moveit",
@@ -777,6 +782,7 @@ class SystemBridge:
     }
     _GAZEBO_WORKSPACE_LAUNCH_FILES = {
         "gazebo_dual": "dual_moveit_gazebo.launch.py",
+        "gazebo_dual_spec2primitives": "dual_moveit_gazebo.launch.py",
         "gazebo_dual_gazebo_only": "dual_moveit_gazebo.launch.py",
         "gazebo_dual_moveit_only": "dual_moveit_gazebo.launch.py",
         "gazebo_dual_passive": "xarm6_ur5e_gazebo.launch.py",
@@ -792,6 +798,10 @@ class SystemBridge:
         ),
         "realsense_camera": "realsense_camera.launch.py",
     }
+    _SPEC2PRIMITIVES_ROBOT_RESOURCES = {
+        "xarm6@localhost": _XARM6_RESOURCE,
+        "ur5e@localhost": _UR5E_RESOURCE,
+    }
 
     @classmethod
     def instance(cls) -> SystemBridge:
@@ -805,6 +815,8 @@ class SystemBridge:
         self.resource_agents: list = []
         self.product_agents: list = []
         self.cca = None
+        self._spec2primitives_robot_agent: Any | None = None
+        self._spec2primitives_robot_agent_lifecycle_lock = asyncio.Lock()
 
         # Embedded XMPP server process.
         self._xmpp_proc: subprocess.Popen | None = None
@@ -4650,6 +4662,186 @@ class SystemBridge:
                 pass
         self._unregister_ui_process("embedded_xmpp_server", proc)
 
+    def _get_spec2primitives_robot_agent_lifecycle_lock(self) -> asyncio.Lock:
+        """Return the lock owning the standalone Phase 5.1 RobotAgent."""
+        lock = getattr(
+            self,
+            "_spec2primitives_robot_agent_lifecycle_lock",
+            None,
+        )
+        if lock is None:
+            lock = asyncio.Lock()
+            self._spec2primitives_robot_agent_lifecycle_lock = lock
+        return lock
+
+    async def _stop_and_unregister_agent(self, agent: Any) -> None:
+        """Stop one standalone agent and release its local runtime resources."""
+        is_alive = getattr(agent, "is_alive", None)
+        if callable(is_alive) and is_alive() is True:
+            await agent.stop()
+        await self._teardown_and_unregister_agent(agent)
+
+    async def _dispose_spec2primitives_robot_agent(self) -> None:
+        """Dispose the standalone RobotAgent owned by Phase 5.1."""
+        agent = getattr(self, "_spec2primitives_robot_agent", None)
+        self._spec2primitives_robot_agent = None
+        if agent is None:
+            return
+        await self._run_on_agent_runtime(self._stop_and_unregister_agent(agent))
+
+    async def shutdown_spec2primitives_robot_agent(self) -> None:
+        """Stop the standalone Phase 5.1 RobotAgent during app shutdown."""
+        lifecycle_lock = self._get_spec2primitives_robot_agent_lifecycle_lock()
+        async with lifecycle_lock:
+            await self._dispose_spec2primitives_robot_agent()
+
+    async def start_spec2primitives_robot_agent(
+        self,
+        resource_jid: str,
+        execution_mode: str,
+    ) -> Any:
+        """Start or reuse only the exact RobotAgent selected by Phase 4.
+
+        This lifecycle intentionally omits CCA, ProductAgent, UserAgent, tool
+        catalogue generation, safety generation, and product kickoff.
+        """
+        selected_resource_jid = str(resource_jid or "").strip()
+        selected_execution_mode = str(execution_mode or "").strip().lower()
+        resource_path = self._SPEC2PRIMITIVES_ROBOT_RESOURCES.get(
+            selected_resource_jid
+        )
+        if resource_path is None:
+            raise RuntimeError(
+                f"No configured RobotAgent manifest matches {selected_resource_jid}."
+            )
+        if selected_execution_mode != "simulation":
+            raise RuntimeError(
+                "Spec2Primitives RobotAgent startup requires simulation mode."
+            )
+
+        lifecycle_lock = self._get_spec2primitives_robot_agent_lifecycle_lock()
+        async with lifecycle_lock:
+            if self.system_running or self._starting:
+                raise RuntimeError(
+                    "The shared Agent System is already running or starting."
+                )
+            if self._stopping:
+                raise RuntimeError("The shared Agent System is stopping.")
+            if tuple(getattr(self, "resource_agents", ()) or ()):
+                raise RuntimeError(
+                    "The stopped shared Agent System still owns ResourceAgents."
+                )
+
+            cached = getattr(self, "_spec2primitives_robot_agent", None)
+            if cached is not None:
+                cached_jid = str(getattr(cached, "jid", "") or "")
+                cached_mode = str(
+                    getattr(cached, "execution_mode", "") or ""
+                ).strip().lower()
+                cached_is_alive = getattr(cached, "is_alive", None)
+                if (
+                    cached_jid == selected_resource_jid
+                    and cached_mode == selected_execution_mode
+                    and getattr(cached, "context_only", False) is True
+                    and not dict(getattr(cached, "executables", {}) or {})
+                    and not list(getattr(cached, "failure_scenarios", []) or [])
+                    and getattr(cached, "_controller", None) is None
+                    and callable(cached_is_alive)
+                    and cached_is_alive() is True
+                ):
+                    return cached
+                # Phase 5.1 never executes motion, so replacing an earlier
+                # context-only agent is the safe exact-assignment handoff.
+                await self._dispose_spec2primitives_robot_agent()
+
+            self.execution_mode = selected_execution_mode
+            self.robot_env = "gazebo"
+            await self._ensure_xmpp_server()
+            agent_creator_module = self._agent_creator_cached
+            if agent_creator_module is None:
+                agent_creator_module = await asyncio.to_thread(
+                    self._import_agent_creator_module
+                )
+                self._agent_creator_cached = agent_creator_module
+
+            async def _create_and_start_agent() -> Any:
+                agents: list[Any] = []
+                try:
+                    self._configure_agent_creator_runtime(
+                        agent_creator_module,
+                        "gazebo",
+                        selected_execution_mode,
+                        "none",
+                    )
+                    # The shared factory reads only the CCA JID constructor field;
+                    # it does not instantiate or start a CCA on this path.
+                    agents = list(
+                        agent_creator_module.create_resource_agents(
+                            [str(resource_path)],
+                            str(_CCA_INIT),
+                            robot_context_only=True,
+                        )
+                    )
+                    if len(agents) != 1:
+                        raise RuntimeError(
+                            "Spec2Primitives startup did not create exactly one "
+                            "RobotAgent."
+                        )
+                    agent = agents[0]
+                    if str(getattr(agent, "jid", "") or "") != selected_resource_jid:
+                        raise RuntimeError(
+                            "Spec2Primitives startup created a different RobotAgent."
+                        )
+                    if (
+                        str(getattr(agent, "execution_mode", "") or "")
+                        .strip()
+                        .lower()
+                        != selected_execution_mode
+                    ):
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent execution mode changed "
+                            "during startup."
+                        )
+                    if getattr(agent, "context_only", False) is not True:
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent is not context-only."
+                        )
+                    if dict(getattr(agent, "executables", {}) or {}):
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent exposes task tools."
+                        )
+                    if list(getattr(agent, "failure_scenarios", []) or []):
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent exposes failure scenarios."
+                        )
+                    if getattr(agent, "_controller", None) is not None:
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent constructed a controller."
+                        )
+                    await agent.start(auto_register=True)
+                    is_alive = getattr(agent, "is_alive", None)
+                    if not callable(is_alive) or is_alive() is not True:
+                        raise RuntimeError(
+                            "Spec2Primitives RobotAgent did not become alive."
+                        )
+                    return agent
+                except Exception:
+                    for candidate in agents:
+                        try:
+                            await self._stop_and_unregister_agent(candidate)
+                        except Exception:
+                            log.exception(
+                                "Failed to clean up partial Spec2Primitives "
+                                "RobotAgent startup"
+                            )
+                    raise
+
+            selected_agent = await self._run_on_agent_runtime(
+                _create_and_start_agent()
+            )
+            self._spec2primitives_robot_agent = selected_agent
+            return selected_agent
+
     # ------------------------------------------------------------------
     # System lifecycle
     # ------------------------------------------------------------------
@@ -4672,11 +4864,18 @@ class SystemBridge:
 
         lifecycle_lock = self._get_ur5e_robot_function_agent_lifecycle_lock()
         xarm6_lifecycle_lock = self._get_xarm6_robot_function_agent_lifecycle_lock()
+        spec2primitives_lifecycle_lock = (
+            self._get_spec2primitives_robot_agent_lifecycle_lock()
+        )
         try:
-            if lifecycle_lock.locked() or xarm6_lifecycle_lock.locked():
+            if (
+                lifecycle_lock.locked()
+                or xarm6_lifecycle_lock.locked()
+                or spec2primitives_lifecycle_lock.locked()
+            ):
                 self.last_error = (
-                    "Cannot start the CAIS system while physical Function Execution readiness "
-                    "is active. Wait for the readiness check to finish."
+                    "Cannot start the CAIS system while standalone RobotAgent "
+                    "readiness is active. Wait for the readiness check to finish."
                 )
                 return
             preflight_lock = getattr(self, "_ur5e_robot_function_preflight_lock", None)
@@ -4688,15 +4887,19 @@ class SystemBridge:
                 return
             async with lifecycle_lock:
                 async with xarm6_lifecycle_lock:
-                    handoff_error = self._ur5e_robot_function_agent_handoff_error()
-                    if not handoff_error:
-                        handoff_error = self._xarm6_robot_function_agent_handoff_error()
-                    if handoff_error:
-                        self.last_error = handoff_error
-                        return
-                    await self._dispose_ur5e_robot_function_agent()
-                    await self._dispose_xarm6_robot_function_agent()
-                    await self._start_system_after_ur5e_handoff()
+                    async with spec2primitives_lifecycle_lock:
+                        handoff_error = self._ur5e_robot_function_agent_handoff_error()
+                        if not handoff_error:
+                            handoff_error = (
+                                self._xarm6_robot_function_agent_handoff_error()
+                            )
+                        if handoff_error:
+                            self.last_error = handoff_error
+                            return
+                        await self._dispose_ur5e_robot_function_agent()
+                        await self._dispose_xarm6_robot_function_agent()
+                        await self._dispose_spec2primitives_robot_agent()
+                        await self._start_system_after_ur5e_handoff()
         finally:
             execution_lock.release()
 
@@ -7565,7 +7768,10 @@ class SystemBridge:
             return result
 
         if force:
-            result = self._probe_sim_services(timeout_sec=6.0)
+            # `ros2 service list --spin-time 2.0` can take about six seconds on
+            # WSL after sourcing the workspace. Operator-triggered startup needs
+            # a bounded authoritative answer rather than a timeout at that edge.
+            result = self._probe_sim_services(timeout_sec=10.0)
             self._sim_ready_cache_ts = now
             self._sim_ready_cache = result
             return result

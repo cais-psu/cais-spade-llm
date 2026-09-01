@@ -396,6 +396,7 @@ def test_spec2primitives_navigation_and_route_pass_the_composed_runtime() -> Non
     assert "create_spec2primitives_ui_runtime" in app_source
     assert "spec2primitives_runtime = create_spec2primitives_ui_runtime(bridge)" in app_source
     assert "spec2primitives_ui.render(spec2primitives_runtime)" in app_source
+    assert "await bridge.shutdown_spec2primitives_robot_agent()" in app_source
 
 
 def test_reference_pdf_hash_is_recorded_content() -> None:

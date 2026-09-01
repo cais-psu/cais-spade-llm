@@ -129,9 +129,7 @@ def test_pa_ui_declares_the_streamlined_grounding_workspace() -> None:
 
     for exact_ui_term in (
         'label="product_requirement"',
-        'value="assemble medium gear"',
-        'ui.expansion("Run options"',
-        'label="Maximum PA turns"',
+        'value=""',
         '"Start ProductAgent"',
         'ui.label("ProductAgent Grounding")',
         'ui.label("ProductAgent")',
@@ -151,19 +149,14 @@ def test_pa_ui_declares_the_streamlined_grounding_workspace() -> None:
     assert 'requirement_input.on_value_change' in source
     assert '.props("outlined")' in source
     assert '.classes("w-full")' in source
-    assert 'max_pa_turns_input.on_value_change' in source
-    assert 'max_pa_turns_input.props("disable")' in source
-    assert 'max_pa_turns_input.props(remove="disable")' in source
+    assert 'requirement_input.props("disable")' in source
+    assert 'requirement_input.props(remove="disable")' in source
     assert 'start_button.on_click(_start_pa_interaction)' in source
     assert 'diagnostic_failure_card.set_visibility(False)' in source
     assert '"w-full border border-red-200 bg-red-50 shadow-none"' in source
-    assert (
-        "        cancel_interaction_button.on_click(_cancel_clarification)\n"
-        "        _update_start_enabled()"
-    ) in source
+    assert 'cancel_interaction_button.on_click(_cancel_clarification)' in source
     assert "start_pa_context_interaction(" in source
-    assert "serve_pa_requested_context," in source
-    assert "continue_pa_context_interaction," in source
+    assert "submit_pa_clarification_reply(" in source
     for removed_diagnostic in (
         "Detailed ProductAgent transcript",
         "Ordered interaction record",
@@ -219,6 +212,95 @@ def test_phase_2_top_controls_are_full_width_and_responsive() -> None:
     ) in render_source
 
 
+@pytest.mark.parametrize(
+    ("status", "available", "busy", "expected"),
+    [
+        ("ready_for_assignment", True, False, ("Start Phase 5", True)),
+        ("waiting_for_ra", True, False, ("Retry Phase 5", True)),
+        ("waiting_for_ra", True, True, ("Retry Phase 5", False)),
+        ("waiting_for_phase_4", True, False, ("Start Phase 5", False)),
+        ("blocked", True, False, ("Start Phase 5", False)),
+        ("context_captured", True, False, ("Restart Phase 5", True)),
+        ("context_captured", True, True, ("Restart Phase 5", False)),
+        ("ready_for_assignment", False, False, ("Start Phase 5", False)),
+    ],
+)
+def test_phase_5_1_action_state_is_fail_closed(
+    status: str,
+    available: bool,
+    busy: bool,
+    expected: tuple[str, bool],
+) -> None:
+    assert spec2primitives_ui._phase_5_1_action_state(
+        status,
+        activation_available=available,
+        activation_busy=busy,
+    ) == expected
+
+
+def test_phase_5_1_ui_activates_only_from_the_persisted_interaction() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
+
+    assert 'ui.button(\n                    "Start Phase 5"' in source
+    assert 'label = "Retry Phase 5"' in source
+    assert 'label = "Restart Phase 5"' in source
+    assert "async def _start_phase_5_1()" in source
+    assert "interaction_root = interaction.get(\"interaction_root\")" in source
+    assert (
+        '"Starting or reusing only the exact RobotAgent selected by Phase 4."'
+        in source
+    )
+    assert 'ui.badge("temporary diagnostic")' not in source
+    assert "await activate_selected_ra_context(" in source
+    assert '"context_captured",' in source
+    assert 'phase_5_elements["start_button"].on_click(_start_phase_5_1)' in source
+    assert "runtime.robot_agent_context_runtime" in source
+
+
+@pytest.mark.parametrize(
+    ("status", "available", "busy", "expected"),
+    [
+        ("ready_for_draft", True, False, True),
+        ("ready_for_draft", True, True, False),
+        ("ready_for_draft", False, False, False),
+        ("waiting_for_context", True, False, False),
+        ("draft_authored", True, False, False),
+        ("unsupported", True, False, False),
+        ("blocked", True, False, False),
+    ],
+)
+def test_phase_5_2_action_state_is_fail_closed(
+    status: str,
+    available: bool,
+    busy: bool,
+    expected: bool,
+) -> None:
+    assert (
+        spec2primitives_ui._phase_5_2_action_enabled(
+            status,
+            authoring_available=available,
+            authoring_busy=busy,
+        )
+        is expected
+    )
+
+
+def test_phase_5_2_ui_authors_only_from_the_active_persisted_context() -> None:
+    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
+
+    assert 'ui.label("5.2 · RA-authored structural primitive draft")' in source
+    assert '"Create Primitive Draft"' in source
+    assert "async def _start_phase_5_2()" in source
+    assert 'interaction_root = interaction.get("interaction_root")' in source
+    assert 'current_diagnostic.status != "ready_for_draft"' in source
+    assert "await author_primitive_program_draft(" in source
+    assert "runtime.robot_agent_draft_runtime" in source
+    assert (
+        'phase_5_elements["create_draft_button"].on_click(_start_phase_5_2)'
+        in source
+    )
+
+
 def test_phase_2_pa_start_requires_configured_grounding() -> None:
     source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
     module = ast.parse(source)
@@ -237,7 +319,7 @@ def test_phase_2_pa_start_requires_configured_grounding() -> None:
     assert "not grounding_ready\n                or action_state" in pa_source
 
 
-def test_phase_2_pa_ui_imports_only_the_authorized_phase_3_dependencies() -> None:
+def test_pa_ui_imports_only_authorized_spec2primitives_agent_boundaries() -> None:
     source_path = Path(spec2primitives_ui.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     imported_modules = {
@@ -258,7 +340,11 @@ def test_phase_2_pa_ui_imports_only_the_authorized_phase_3_dependencies() -> Non
     assert (
         "cais_spade_llm.spec2primitives.adapters.ui_runtime" in imported_modules
     )
-    assert not any(".agents.ra" in module for module in imported_modules)
+    assert "cais_spade_llm.spec2primitives.agents.ra" in imported_modules
+    assert not any(
+        module.startswith("cais_spade_llm.agents.")
+        for module in imported_modules
+    )
 
 
 def test_spec2primitives_does_not_import_bridge() -> None:

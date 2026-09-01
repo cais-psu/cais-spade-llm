@@ -1,9 +1,8 @@
 # RA
 
 RA means RobotAgent. This directory owns the implemented Phase 5.1
-contract-first assignment and context-snapshot boundary plus future
-Spec2Primitives RobotAgent connection, primitive composition, and robot-local
-validation work.
+contract-first assignment/context-snapshot boundary and Phase 5.2A structural
+primitive draft, plus future binding and robot-local validation work.
 
 ## Implemented Phase 5.1
 
@@ -13,6 +12,25 @@ selection, and assignment delta before persisting one
 requirement and semantic task it owns. An injected
 `RobotAgentCompositionRuntime` must confirm that assignment before returning
 fresh JSON state and its complete primitive-only composition catalog.
+
+The UI supplies an in-process Spec2Primitives adapter for this contract. The
+adapter requires exactly the JID and execution mode selected by Phase 4. It
+reuses that live agent when available. Otherwise, only when the full shared
+Agent System is stopped and the Spec2Primitives Dual Gazebo environment is
+running, it waits for simulation readiness and starts only the selected
+RobotAgent in a context-only simulation profile. That profile exposes no task
+tools or failure scenarios and constructs no ROS controller, so state capture
+cannot wait for perception or motion services. The adapter then reads the
+RobotAgent-owned logical state and composer-visible recovery synthesis catalog
+on the agent loop and converts that catalog without changing symbol order or
+names. It does not start CCA, ProductAgents, UserAgent, product orders, safety
+generation, tools generation, or another RobotAgent. If startup or contact
+fails, the assignment audit remains unchanged and the UI offers a retry of the
+same handoff.
+
+After a successful capture, **Restart Phase 5** dispatches the same immutable
+assignment again and appends the next paired state and synthesis-catalog
+snapshot revision. It does not overwrite the earlier capture or rerun Phase 4.
 
 The host validates exact JID and assignment correlation, preserves catalog
 order and symbols, and writes matching append-only `RobotStateSnapshot` and
@@ -31,17 +49,37 @@ fingerprint. Its refresh control only rereads persisted records. Later Phase 5
 diagnostics can be added to that temporary card without treating it as the
 final primitive composition UI.
 
-Phase 5.1 does not connect to a running SPADE RobotAgent, author primitives,
-load raw RDF, send the full ABox or typed context, plan motion, validate a
-candidate, or execute anything.
+The Start control starts or reuses only the exact selected RobotAgent but does
+not launch Gazebo, start the full Agent System, send a SPADE message, author
+primitives, load raw RDF, send the full ABox or typed context, plan motion,
+validate a candidate, or execute anything.
+
+## Implemented Phase 5.2A
+
+`author_primitive_program_draft(...)` requires the latest validated Phase 5.1
+pair and asks the same exact selected RobotAgent for only a structural sequence.
+The bounded input includes the requirement and task IRIs, selected resource,
+current state, complete catalog, grounded summary, known limits, and typed
+record identities. It excludes raw RDF and parameter bindings.
+
+The RobotAgent may select and order only exact catalog symbols, may repeat a
+symbol, and may instead return an explicit unsupported result. The host derives
+step indexes and all record identity fields, then writes one append-only
+`composition/primitive_program_drafts/draft_<number>.json` per state/catalog
+pair. A second draft for the same pair, an invented symbol, malformed output,
+or altered pinned evidence fails closed. The structured call exposes no task
+tools and cannot execute a primitive.
+
+The 5.2 section in the temporary Phase 5 card enables **Create Primitive
+Draft** only when the latest captured pair has no draft. It displays the ordered
+symbols or unsupported reason and the full persisted `PrimitiveProgramDraft`.
+Refresh remains read-only.
 
 ## Planned continuation
 
 Phase 5.1b will map the same narrow runtime contract to live exact-JID SPADE
-delivery. Phase 5.2 will build the bounded composition input and allow the
-selected RA to author a structural `PrimitiveProgramDraft`. A deterministic
-binding preflight may identify missing inputs but cannot create or repair
-primitive steps. RA-owned inputs remain local; product or scene inputs are
-deduplicated into a `MissingContextBatch` for PA. After receiving a versioned
-`CompositionContextBundle`, RA alone authors the fully bound `primitive_steps`
-candidate.
+message delivery. A deterministic binding preflight may identify missing inputs
+but cannot create or repair the structural draft. RA-owned inputs remain local;
+product or scene inputs are deduplicated into a `MissingContextBatch` for PA.
+After receiving a versioned `CompositionContextBundle`, RA alone authors the
+fully bound `primitive_steps` candidate.
