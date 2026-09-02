@@ -72,6 +72,7 @@ class ControlledVisionRuntime:
             output=self.output,
         )
 
+
 def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
     class ControlledResponses:
         def __init__(self) -> None:
@@ -334,9 +335,7 @@ def test_invalid_overview_is_removed_atomically_and_abox_is_unchanged(
         )
 
     assert not list((tmp_path / "source_cache").rglob("overview.json"))
-    manifest = _read_json(
-        interaction_root / "products/grounding/ontology/abox_manifest.json"
-    )
+    manifest = _read_json(interaction_root / "products/grounding/ontology/abox_manifest.json")
     assert manifest["delta_count"] == 0
     assert manifest["accepted_assertion_count"] == 0
 
@@ -396,10 +395,7 @@ def test_bad_request_diagnostic_is_sanitized_chained_and_persisted(
         )
 
     assert exc_info.value.__cause__ is api_error
-    trace_path = (
-        interaction_root
-        / "products/grounding/document_evidence/interpretation_0001.json"
-    )
+    trace_path = interaction_root / "products/grounding/document_evidence/interpretation_0001.json"
     trace_text = trace_path.read_text(encoding="utf-8")
     assert "req_document_controlled" in trace_text
     for forbidden in (
@@ -495,13 +491,11 @@ def test_prepare_command_supports_all_and_one_exact_context_ref(
         return 0
 
     monkeypatch.setattr(
-        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare."
-        "approved_document_refs",
+        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare.approved_document_refs",
         lambda: ("First.pdf", "Second.pdf"),
     )
     monkeypatch.setattr(
-        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare."
-        "prepare_documents",
+        "cais_spade_llm.spec2primitives.tools.document_evidence.prepare.prepare_documents",
         controlled_prepare,
     )
 
@@ -536,6 +530,12 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             tool_executor: Any = None,
             max_tool_rounds: int = 3,
         ) -> dict[str, Any]:
+            if response_format["name"] == "spec2primitives_target_feature_review":
+                assert "Semantic review input" in prompt
+                assert tools is None
+                assert tool_executor is None
+                assert max_tool_rounds == 1
+                return {"verdict": "complete", "gap": None}
             assert "initialized_specification_iri" in prompt
             assert response_format["name"] == "spec2primitives_grounding_result"
             assert tools == []
@@ -543,40 +543,26 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             assert max_tool_rounds == 1
             evidence_ref = f"{_TEST_DOCUMENT_REF}#page=4"
             proposal = {
-                "individuals": [
-                    {
-                        "individual_index": 1,
-                        "class_iri": "http://PAonto.com#feature",
-                        "grounded_meaning": "The requirement-level assembly target.",
-                        "evidence_refs": [evidence_ref],
-                    }
-                ],
-                "relations": [
-                    {
-                        "subject_kind": "specification",
-                        "subject_individual_index": None,
-                        "subject_iri": None,
-                        "predicate_iri": "http://PAonto.com#defines",
-                        "object_kind": "new_individual",
-                        "object_individual_index": 1,
-                        "object_iri": None,
+                "target_feature": {
+                    "required_process": {
+                        "process_iri": "https://cais-spade-llm.local/process/assembly",
                         "evidence_refs": [evidence_ref],
                     },
-                    {
-                        "subject_kind": "existing_individual",
-                        "subject_individual_index": None,
-                        "subject_iri": "https://cais-spade-llm.local/process/assembly",
-                        "predicate_iri": "http://PAonto.com#realizes",
-                        "object_kind": "new_individual",
-                        "object_individual_index": 1,
-                        "object_iri": None,
-                        "evidence_refs": [evidence_ref],
+                    "current_state": {
+                        "statement": {
+                            "text": "The Medium Gear is currently separate.",
+                            "evidence_refs": [evidence_ref],
+                        },
+                        "state_values": [],
                     },
-                ],
-                "literal_facts": [],
-                "context_summary": "The document describes the assembly context.",
-                "evidence_refs": [evidence_ref],
-                "missing_information": [],
+                    "desired_state": {
+                        "statement": {
+                            "text": "The Medium Gear is assembled as requested.",
+                            "evidence_refs": [evidence_ref],
+                        },
+                        "state_values": [],
+                    },
+                }
             }
             return {"result": proposal}
 
@@ -596,11 +582,10 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
     assert result["overview"]["status"] == "accepted"
     assert result["ontology_proposal"]["status"] == "accepted"
     proposal_record = _read_json(
-        tmp_path
-        / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
+        tmp_path / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
     )
-    assert proposal_record["schema_version"] == 5
-    assert len(result["accepted_assertions"]) == 3
+    assert proposal_record["schema_version"] == 8
+    assert len(result["accepted_assertions"]) == 7
     assert result["failure"] is None
 
 

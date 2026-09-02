@@ -12,6 +12,12 @@ from .context_handoff import (
     load_selected_ra_context_snapshot,
     read_phase_5_1_diagnostic,
 )
+from .feasibility_validation import (
+    PlanOnlyFeasibilityValidation,
+    RobotAgentFeasibilityError,
+    RobotAgentFeasibilityRuntime,
+    validate_provisional_allocation,
+)
 from .primitive_draft import (
     Phase52Diagnostic,
     PrimitiveDraftError,
@@ -24,12 +30,15 @@ from .primitive_draft import (
 __all__ = [
     "Phase51Diagnostic",
     "Phase52Diagnostic",
+    "PlanOnlyFeasibilityValidation",
     "PrimitiveCatalogSnapshot",
     "PrimitiveDraftError",
     "PrimitiveProgramDraft",
     "RAContextHandoffError",
     "RobotAgentCompositionRuntime",
     "RobotAgentDraftRuntime",
+    "RobotAgentFeasibilityError",
+    "RobotAgentFeasibilityRuntime",
     "RobotStateSnapshot",
     "SelectedRAAssignmentEnvelope",
     "SelectedRAContextSnapshot",
@@ -38,4 +47,5 @@ __all__ = [
     "load_selected_ra_context_snapshot",
     "read_phase_5_1_diagnostic",
     "read_phase_5_2_diagnostic",
+    "validate_provisional_allocation",
 ]

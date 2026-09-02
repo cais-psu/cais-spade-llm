@@ -74,6 +74,9 @@ three locations, and tightening three `Gear_Shaft` parts onto the remaining
 exposed M6 threads. The dedicated scene represents that completed installation
 as a static fixture and does not render the hidden fasteners.
 
-This scene-only milestone does not derive tolerances or claim that a source has
-been grounded. Later case work must record which exact source supports each
-grounded value and must obey the MUST do-not-leak boundary in `../../AGENTS.md`.
+The active PA may cite these registered sources when authoring either state
+statement or a typed state-value reference. Each included value must carry its
+own direct evidence refs. The corpus does not supply a predetermined target
+answer, pose, or tolerance. PA assigns neutral observations to feature states,
+and verifiers derive only the numeric geometry they need. All use must obey the
+MUST do-not-leak boundary in `../../AGENTS.md`.

@@ -20,13 +20,13 @@ from cais_spade_llm.spec2primitives.tools.observation_context import (
     ObservationContextError,
     read_observation_bundle,
 )
-from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation_provider import (
-    GazeboObservationProviderError,
-    capture_gazebo_observation,
-)
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.frame_conversion import (
     RobotFrameConversionError,
     transform_camera_pose_to_robot_frame,
+)
+from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation_provider import (
+    GazeboObservationProviderError,
+    capture_gazebo_observation,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.pose_estimation import (
     CADPoseEstimationError,
@@ -54,8 +54,7 @@ _STATUS_KEYS = {
     "schema_version",
     "record_type",
     "status",
-    "source_candidate_count",
-    "assembly_candidate_count",
+    "candidate_count",
     "identity",
     "CAD_correspondence",
     "location",
@@ -66,6 +65,10 @@ _STATUS_KEYS = {
 }
 _PRE_CONVERSION_STATUS_KEYS = _STATUS_KEYS - {"robot_frame_conversion"}
 _LEGACY_STATUS_KEYS = _PRE_CONVERSION_STATUS_KEYS - {"location"}
+_LEGACY_ROLE_STATUS_KEYS = (_STATUS_KEYS - {"candidate_count"}) | {
+    "source_candidate_count",
+    "assembly_candidate_count",
+}
 
 
 class ObservationCaptureRuntime(Protocol):
@@ -183,8 +186,7 @@ def run_automatic_rgbd_segmentation_pipeline(
         root,
         _status_record(
             "ready",
-            source_candidate_count=segmentation_result.source_candidate_count,
-            assembly_candidate_count=segmentation_result.assembly_candidate_count,
+            candidate_count=segmentation_result.candidate_count,
         ),
     )
     return result
@@ -206,6 +208,12 @@ def read_rgbd_segmentation_status(contexts_root: Path) -> dict[str, object]:
             },
         )
     if isinstance(record, dict):
+        if set(record) == _LEGACY_ROLE_STATUS_KEYS:
+            source_count = record.pop("source_candidate_count")
+            assembly_count = record.pop("assembly_candidate_count")
+            if isinstance(source_count, int) and isinstance(assembly_count, int):
+                record["candidate_count"] = source_count + assembly_count
+                record["schema_version"] = 2
         if set(record) == _LEGACY_STATUS_KEYS:
             record["location"] = "not_evaluated"
         if set(record) == _PRE_CONVERSION_STATUS_KEYS:
@@ -237,14 +245,12 @@ def run_cad_size_association_pipeline(
     except ValueError as exc:
         raise ValueError("interaction_root must be inside contexts_root.") from exc
     current_status = read_rgbd_segmentation_status(root)
-    source_count = int(current_status["source_candidate_count"])
-    assembly_count = int(current_status["assembly_candidate_count"])
+    candidate_count = int(current_status["candidate_count"])
     _write_latest_status(
         root,
         _status_record(
             "running",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence="running",
             location="running",
         ),
@@ -265,8 +271,7 @@ def run_cad_size_association_pipeline(
             root,
             _status_record(
                 "failed",
-                source_candidate_count=source_count,
-                assembly_candidate_count=assembly_count,
+                candidate_count=candidate_count,
                 CAD_correspondence="failed",
                 location="failed",
                 failure=failure,
@@ -286,8 +291,7 @@ def run_cad_size_association_pipeline(
         root,
         _status_record(
             "ready",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence=association.CAD_correspondence,
             location=association.location,
         ),
@@ -318,16 +322,14 @@ def run_cad_pose_estimation_pipeline(
     except ValueError as exc:
         raise ValueError("interaction_root must be inside contexts_root.") from exc
     current_status = read_rgbd_segmentation_status(root)
-    source_count = int(current_status["source_candidate_count"])
-    assembly_count = int(current_status["assembly_candidate_count"])
+    candidate_count = int(current_status["candidate_count"])
     CAD_correspondence = str(current_status["CAD_correspondence"])
     location = str(current_status["location"])
     _write_latest_status(
         root,
         _status_record(
             "running",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence=CAD_correspondence,
             location=location,
             pose="running",
@@ -348,8 +350,7 @@ def run_cad_pose_estimation_pipeline(
             root,
             _status_record(
                 "failed",
-                source_candidate_count=source_count,
-                assembly_candidate_count=assembly_count,
+                candidate_count=candidate_count,
                 CAD_correspondence=CAD_correspondence,
                 location=location,
                 pose="failed",
@@ -370,8 +371,7 @@ def run_cad_pose_estimation_pipeline(
         root,
         _status_record(
             "ready",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence=estimation.CAD_correspondence,
             location=estimation.location,
             pose=estimation.pose,
@@ -405,8 +405,7 @@ def run_robot_frame_pose_conversion_pipeline(
     except ValueError as exc:
         raise ValueError("interaction_root must be inside contexts_root.") from exc
     current_status = read_rgbd_segmentation_status(root)
-    source_count = int(current_status["source_candidate_count"])
-    assembly_count = int(current_status["assembly_candidate_count"])
+    candidate_count = int(current_status["candidate_count"])
     CAD_correspondence = str(current_status["CAD_correspondence"])
     location = str(current_status["location"])
     pose = str(current_status["pose"])
@@ -414,8 +413,7 @@ def run_robot_frame_pose_conversion_pipeline(
         root,
         _status_record(
             "running",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence=CAD_correspondence,
             location=location,
             pose=pose,
@@ -445,8 +443,7 @@ def run_robot_frame_pose_conversion_pipeline(
             root,
             _status_record(
                 "failed",
-                source_candidate_count=source_count,
-                assembly_candidate_count=assembly_count,
+                candidate_count=candidate_count,
                 CAD_correspondence=CAD_correspondence,
                 location=location,
                 pose=pose,
@@ -469,8 +466,7 @@ def run_robot_frame_pose_conversion_pipeline(
         root,
         _status_record(
             "ready",
-            source_candidate_count=source_count,
-            assembly_candidate_count=assembly_count,
+            candidate_count=candidate_count,
             CAD_correspondence=conversion.CAD_correspondence,
             location=conversion.location,
             pose=conversion.pose,
@@ -719,32 +715,18 @@ def _automatic_pipeline_result(
     segmentation_result: object,
     failure: object,
 ) -> dict[str, object]:
-    source_candidate_count = (
-        segmentation_result.source_candidate_count
-        if segmentation_result is not None
-        else 0
-    )
-    assembly_candidate_count = (
-        segmentation_result.assembly_candidate_count
-        if segmentation_result is not None
-        else 0
-    )
+    candidate_count = segmentation_result.candidate_count if segmentation_result is not None else 0
     return {
         "status": status,
         "observation_ref": _OBSERVATION_REF,
         "interaction_root": str(interaction_root),
         "preprocessing_record_path": (
-            str(preprocessing_result.record_path)
-            if preprocessing_result is not None
-            else None
+            str(preprocessing_result.record_path) if preprocessing_result is not None else None
         ),
         "segmentation_record_path": (
-            str(segmentation_result.record_path)
-            if segmentation_result is not None
-            else None
+            str(segmentation_result.record_path) if segmentation_result is not None else None
         ),
-        "source_candidate_count": source_candidate_count,
-        "assembly_candidate_count": assembly_candidate_count,
+        "candidate_count": candidate_count,
         "identity": "not_evaluated",
         "CAD_correspondence": "not_evaluated",
         "pose": "not_evaluated",
@@ -756,8 +738,7 @@ def _automatic_pipeline_result(
 def _status_record(
     status: str,
     *,
-    source_candidate_count: int = 0,
-    assembly_candidate_count: int = 0,
+    candidate_count: int = 0,
     CAD_correspondence: str = "not_evaluated",
     location: str = "not_evaluated",
     pose: str = "not_evaluated",
@@ -766,11 +747,10 @@ def _status_record(
     updated_at_ns: int | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_type": "RGBDSegmentationStatus",
         "status": status,
-        "source_candidate_count": source_candidate_count,
-        "assembly_candidate_count": assembly_candidate_count,
+        "candidate_count": candidate_count,
         "identity": "not_evaluated",
         "CAD_correspondence": CAD_correspondence,
         "location": location,
@@ -818,7 +798,7 @@ def _valid_status_record(value: object) -> bool:
         "failed",
     }
     if (
-        value["schema_version"] != 1
+        value["schema_version"] != 2
         or value["record_type"] != "RGBDSegmentationStatus"
         or not isinstance(status, str)
         or status not in {"idle", "running", "ready", "failed"}
@@ -833,8 +813,8 @@ def _valid_status_record(value: object) -> bool:
         or value["robot_frame_conversion"] not in robot_frame_conversion_states
     ):
         return False
-    counts = (value["source_candidate_count"], value["assembly_candidate_count"])
-    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+    count = value["candidate_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         return False
     updated_at_ns = value["updated_at_ns"]
     if isinstance(updated_at_ns, bool) or not isinstance(updated_at_ns, int) or updated_at_ns < 0:

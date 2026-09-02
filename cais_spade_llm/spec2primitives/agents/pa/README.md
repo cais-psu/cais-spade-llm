@@ -48,7 +48,16 @@ Document retrieval yields the complete ordered `DocumentOverviewRecord` v2.
 CAD retrieval yields `CADMeshRecord`. Observation retrieval yields typed RGB-D,
 point-cloud, and segmentation records. Compatible CAD and observation evidence
 automatically activates correspondence. Accepted correspondence and calibration
-yield `RobotFrameLocationRecord` for current coarse reachability.
+can support neutral location or pose derivation when a verifier requests it.
+During allocation, PA assigns approved candidates to both states and invokes
+`check_reachability`, which derives and evaluates both robot-frame locations.
+
+Before retrieval, `EvidencePresentationRecord` maps canonical sources to
+randomized opaque handles. CAD filenames, paths, URLs, canonical refs, and
+semantic camera roles are absent from PA projections. After semantic grounding,
+`AllocationPresentationRecord` pins one randomized capable-resource order and
+one shared neutral candidate pool. The same stored order drives the prompt,
+tool enums, and response schema; it is audit evidence, not selection priority.
 
 After a proposal, the runtime builds a provisional graph without merging it.
 That graph identifies the active consumer and its declared record requirement.
@@ -60,56 +69,81 @@ a product, filename, or modality branch.
 
 ## Ontology grounding
 
-`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v5
-candidate. PA may ground
-multiple evidence-supported feature individuals under the supplied PPR TBox.
-All features must be specification-defined and exactly one must participate in
-the configured process `realizes` join. That graph topology identifies the
-single resource-assignment target.
+`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v8
+candidate containing exactly one model-authored `target_feature`. This
+increment supports one requirement and one feature. The target contains:
 
-Individuals and relations carry their own evidence citations. Deterministic
-validation remains the only ABox commit authority and rejects unsupported
-vocabulary, unsafe assertions, recipes, primitives, resources, process
-creation, literal facts, orphan features, duplicate indices, and invalid
-primary joins.
+- one evidence-cited `required_process.process_iri` selected from the configured
+  process authority;
+- one complete evidence-cited `current_state.statement`;
+- one complete evidence-cited `desired_state.statement`; and
+- zero, one, or multiple `state_values` for each state, each with a unique PA-authored semantic
+  name, one accepted typed-record ref, one JSON Pointer, and direct evidence.
+
+PA chooses the process, statement text, state-value count and names, record
+refs, field paths, and citations from retrieved evidence. Deterministic code
+does not fill those semantic values. It validates process authority, citations,
+accepted bindings, exact record hashes, JSON Pointer resolution, nonempty
+resolved values, and unique names.
+
+The host generates `feature_0001`, `currentstate_0001`, and
+`desiredstate_0001` and compiles exactly seven assertions: all three types,
+`specification ppr:defines feature_0001`, the selected process
+`ppr:realizes feature_0001`, and the feature's `ppr:hascurrentstate` and
+`ppr:hasdesiredstate` links. Rich PA-authored state meaning remains in the
+accepted proposal while RDF records the explicit feature-state structure.
 
 If one PA proposal violates these invariants, the runtime preserves the
 rejected audit record and returns the exact deterministic validation failure as
 prompt-only feedback for a bounded correction round. It does not synthesize a
 missing `defines`, `realizes`, or other assertion on PA's behalf.
 
-Syntactic and semantic validity alone do not commit the candidate. When the
-provisional graph activates coarse resource selection, its
-`RobotFrameLocationRecord` requirement must be satisfied by an accepted,
-unambiguous chain for the primary feature. Correspondence uses only CAD cited
-by that feature. After the gate passes, the runtime persists the accepted v5
-proposal, merges its assertion-specific RDF delta, selects a reachable
-resource, and commits the assignment.
+Structural validity alone does not commit the candidate. A separate model call
+produces `TargetFeatureSemanticReview` v2, containing only `verdict` and `gap`.
+It checks whether the statement and included values adequately represent the
+requirement under the evidence retrieved so far. An incomplete review returns
+the concise gap to the bounded PA retrieval/revision loop; it is not persisted
+as accepted missing information and no private reasoning is stored.
 
-`missing_information` contains relevant evidence-backed facts that remain
-unknown. It does not describe a typed fact merely omitted from RDF. Unknown
-placement details remain non-blocking unless an authorized downstream consumer
-requires them.
+The accepted v8 proposal creates explicit `currentstate_0001` and
+`desiredstate_0001` individuals attached to `feature_0001`. The unresolved
+`processExecution` then activates a separate PA allocation call. PA chooses one
+opaque neutral evidence handle for each state and one capable resource, invokes
+`check_reachability`, and cites the resulting two-state evidence. The exact
+provisional RobotAgent performs plan-only endpoint IK/collision/path validation.
+Only its `accepted` verdict allows the runtime to commit the assignment;
+rejection returns evidence for another PA choice without host substitution.
+The PA may revise either evidence handle, the resource, or all three. Semantic
+feature/state assertions stay fixed during these physical-evidence revisions.
+
+`RobotFrameLocationRecord` version 2 is semantically neutral. Its current or
+desired meaning comes from the PA state assignment. The architecture does not
+use `TargetFeatureGeometryRecord`; verifier-required numeric geometry is
+derived on demand from the selected evidence and approved calibration.
 
 ## Completion and compatibility
 
 New interactions write append-only native tool audits, direct PA turns,
-`ResourceSelectionRecord` v2, `TypedGroundingContract` v3, and
-`PAContextGroundingCompletion` v3. Clarification resumes the same conversation
-context using the exact persisted question/reply history. Cancellation invokes
-no PA call.
+`EvidencePresentationRecord` v1, `AllocationPresentationRecord` v1,
+`ReachabilityCheckRecord` v2, `ResourceSelectionRecord` v4,
+`PlanOnlyFeasibilityValidationRecord` v2, `TargetFeatureSemanticReview` v2,
+`TypedGroundingContract` v6, and `PAContextGroundingCompletion` v6.
+Clarification resumes the same conversation context using the exact persisted
+question/reply history. Cancellation invokes no PA call.
 
-For fresh version-3 completions, `context_summary` is explicitly marked as the
-ProductAgent proposal narrative captured before deterministic typed grounding
-and resource assignment. Consumers, including the future RA adapter, must use
-the final hash-pinned typed records and `ResourceSelectionRecord` as the
-authoritative completion state. Existing unmarked version-3 records remain
-readable and are not migrated.
+The v6 contract and completion pin the selected process, both state IRIs, the
+accepted proposal, semantic review, nested evidence, both presentation records,
+registry/workcell snapshots, referenced typed records, reachability, exact
+RobotAgent endpoint-motion validation, resource selection, assignment delta,
+and final ABox.
+They do not copy `target_feature`; downstream consumers reconstruct it from the
+hash-verified accepted proposal.
 
-Read-only validation remains for old ontology proposal v3/v4, document overview
-v1, pose-linked resource selection v1, and completion/session v2 records. New
-runs never produce the old action protocol or migrate old interactions.
+Read-only validation remains for ontology proposal v3-v7, document overview
+v1, resource selection v1-v3, feasibility validation v1, and completion/session
+v2-v5 records. New Phase 5 handoff requires completion v6. New runs never
+produce or migrate the old records.
 
 This boundary performs schema-constrained, evidence-backed instance grounding.
-RA context requests, primitive composition, robot planning, and execution are
-not implemented here.
+Multi-feature requirements, primitive parameter binding, motion execution,
+post-process observation, and feature-state update are not implemented here.

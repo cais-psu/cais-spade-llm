@@ -88,9 +88,7 @@ class _UnavailableProductAgentRuntime:
         *,
         response_format: dict[str, Any],
         tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[
-            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
-        ]
+        tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
         | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
@@ -116,22 +114,17 @@ def create_spec2primitives_ui_runtime(
     calibration_unavailable_reason: str | None = None
     product_agent: ProductAgentContextRuntime = _UnavailableProductAgentRuntime()
 
-    calibration_path_override = os.environ.get(
-        "SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH"
-    )
+    calibration_path_override = os.environ.get("SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH")
     calibration_path = (
         Path(calibration_path_override)
         if calibration_path_override
         else DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH
     )
     try:
-        calibration_runtime = load_camera_to_world_calibration_runtime(
-            calibration_path
-        )
+        calibration_runtime = load_camera_to_world_calibration_runtime(calibration_path)
     except (OSError, ValueError) as exc:
         calibration_unavailable_reason = (
-            "Approved camera-to-world calibration manifest is invalid: "
-            f"{type(exc).__name__}: {exc}"
+            f"Approved camera-to-world calibration manifest is invalid: {type(exc).__name__}: {exc}"
         )
 
     try:
@@ -172,9 +165,9 @@ def create_spec2primitives_ui_runtime(
 
     if unavailable_reason is None and not os.environ.get("OPENAI_API_KEY"):
         unavailable_reason = (
-            "Set OPENAI_API_KEY to enable production grounding and the "
-            "OpenAI document diagnostic."
+            "Set OPENAI_API_KEY to enable production grounding and the OpenAI document diagnostic."
         )
+    robot_agent_runtime = InProcessRobotAgentCompositionRuntime(dual_gazebo)
     if unavailable_reason is None and model_config is not None and tbox is not None:
         vision_runtime = OpenAIDocumentVisionRuntime(model_config.document_vlm)
         grounding_runtime = ProductionProductContextGroundingRuntime(
@@ -182,12 +175,10 @@ def create_spec2primitives_ui_runtime(
             document_config=model_config.document_vlm,
             document_vision_runtime=vision_runtime,
             camera_to_world_calibration_runtime=calibration_runtime,
-            camera_to_world_calibration_unavailable_reason=(
-                calibration_unavailable_reason
-            ),
+            camera_to_world_calibration_unavailable_reason=(calibration_unavailable_reason),
+            robot_agent_feasibility_runtime=robot_agent_runtime,
         )
 
-    robot_agent_runtime = InProcessRobotAgentCompositionRuntime(dual_gazebo)
     return Spec2PrimitivesUIRuntime(
         dual_gazebo=dual_gazebo,
         product_agent=product_agent,
@@ -201,9 +192,7 @@ def create_spec2primitives_ui_runtime(
         document_source_status=document_source_status,
         observation_capture_runtime=LiveGazeboObservationCaptureRuntime(),
         camera_to_world_calibration_runtime=calibration_runtime,
-        camera_to_world_calibration_unavailable_reason=(
-            calibration_unavailable_reason
-        ),
+        camera_to_world_calibration_unavailable_reason=(calibration_unavailable_reason),
         robot_agent_context_runtime=robot_agent_runtime,
         robot_agent_draft_runtime=robot_agent_runtime,
     )

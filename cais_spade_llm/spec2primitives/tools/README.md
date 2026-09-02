@@ -22,11 +22,16 @@ are tools used by the Spec2Primitives workflow, not agents.
   clouds, compact candidate records, label masks, and deterministic
   `CADSizeCorrespondenceRecord`, `CADPoseEstimationRecord`,
   `CameraToRobotCalibrationRecord`, `RobotFrameLocationRecord`, and optional
-  `RobotFramePoseRecord` results. Pose
+  `RobotFramePoseRecord` results for neutral candidate geometry. Pose
   estimation compares only one exact caller-supplied CAD record, returns a
   complete camera-from-CAD transform only for a clear fit, and preserves
   candidate or rotation ambiguity. Frame conversion consumes only a separate
   caller-approved calibration record.
+
+The architecture has no `TargetFeatureGeometryRecord`. PA dynamically assigns
+approved neutral candidates to current and desired feature states. Numeric
+robot-frame locations are derived from the selected evidence only when a
+verifier requests them; no fixed retrieval order or camera role is prescribed.
 
 The live observation provider creates no background subscription. Its catalog
 entry reports availability only; it supplies an observation only after PA
@@ -37,4 +42,4 @@ separate; association is invoked only after one exact approved CAD record and
 the required typed records exist. Cross-camera fusion is outside the completed
 Phase 4 boundary because the active location-based path selects and converts
 one exact camera frame. RA-owned Phase 5 composition and validation require
-later separately authorized work.
+separately authorized work beyond the implemented structural draft.

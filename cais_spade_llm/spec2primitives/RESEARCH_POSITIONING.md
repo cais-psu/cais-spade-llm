@@ -21,18 +21,24 @@ The dynamic PA-to-RA composition workflow in this document is the proposed
 ICRA architecture. The PA context adapter through Phase 3.5 exists, and **Phase
 4 is implemented through Phase 4.4 under the current framework**. Phase 4.4
 adds a native controlled `retrieve` tool, transient ontology-proposal
-validation, descriptor-derived typed evidence gating, a predefined Workcell
-with broad `capableOf assembly` assertions, location-based coarse reach, and a
-system-authored `processExecution` assignment. **Phase 5.1 now implements only
-the contract-first selected-RA assignment and state/catalog snapshot
-boundary.** Live SPADE delivery, `PrimitiveProgramDraft` authoring, batched
-context exchange, composition, validation, and execution remain unimplemented;
-no Phase 5.2--9 runtime behavior is claimed.
+validation, descriptor-derived typed evidence gating, a configuration-derived
+Workcell with explicit per-resource process capabilities, PA-authored physical
+state-evidence and resource choices, two-state coarse reach, and exact-resource
+plan-only endpoint validation before a system-authored `processExecution`
+assignment. **Phase 5.1 now implements only the contract-first selected-RA
+assignment and state/catalog snapshot boundary, and Phase 5.2A implements
+RA-LLM-authored structural `PrimitiveProgramDraft`.** The composition input
+reconstructs the accepted PA `target_feature` and resolves its completion-pinned
+state values. Live SPADE delivery, batched context exchange, parameter binding,
+primitive-level validation, and execution remain unimplemented; no Phase
+5.2B--9 runtime behavior is claimed.
 
 The completed Phase 4 boundary is location-based pre-RA grounding and resource
-assignment. It does not include cross-camera fusion, activation of an
-orientation-sensitive consumer, RA composition, robot-local validation,
-execution, or observed outcomes.
+assignment. It includes PA-authored current and desired product states, a
+separate PA semantic review, and endpoint-motion validation, but not cross-camera
+fusion, grasp/contact/tolerance/insertion validation, activation of an
+orientation-sensitive consumer, parameter binding, primitive-level robot
+validation, execution, or observed outcomes.
 
 ## Abstraction level
 
@@ -41,9 +47,10 @@ The research spans the following abstraction chain:
 ```text
 product specification
         ↓
-grounded assembly requirements
+evidence-grounded target feature / desired product state
         ↓
-ontology-backed robot-independent task and selected-resource assignment
+ontology-backed robot-independent grounded product outcome/task
+        + selected-resource assignment
         outside the executable coverage of the
         predefined composite-function library
         ↓
@@ -67,6 +74,29 @@ The composition contribution occurs at a finer-grained execution abstraction
 than product-level assembly planning. It is not itself low-level robot control.
 Trajectory generation, force control, velocity commands, and joint commands
 remain below `primitive_steps`.
+
+The implemented nominal contract currently supports one requirement and one
+feature. PA authors a v8 `target_feature` with an evidence-cited authorized
+process, complete evidence-cited current- and desired-state statements, and
+zero, one, or multiple optional typed state-value references for each state. PA chooses the semantic text,
+process, value count and names, record refs, JSON Pointer paths, and citations
+from retrieved evidence. Deterministic code validates authority and lineage but
+does not author those values.
+
+The host generates `feature_0001`, `currentstate_0001`, and
+`desiredstate_0001` and compiles the exact seven feature/state/defines/realizes
+assertions. Rich authored state meaning remains in the
+accepted PA proposal. A separate `TargetFeatureSemanticReview` v2 accepts the
+meaning or returns a concise gap to bounded PA retrieval/revision without
+persisting private reasoning or accepted missing information.
+
+Assembly is the controlled example, not the contract's only possible process.
+The production profile currently contains only `assembly`, `xarm6`, and `ur5e`,
+so the deployment is an assembly case study and makes no runtime
+process-discovery claim. Future welding, painting, milling, and other configured
+cases can use the same target shape when their evidence, typed providers,
+primitive contracts, and validators exist; those cases are not currently
+implemented claims.
 
 ## Relationship to the prior RCIM work
 
@@ -100,6 +130,13 @@ boundary; no default approved calibration is configured in the current UI
 composition. They are not connected to RA composition or execution. A size-only
 correspondence still does not establish general identity, task completion,
 planning, or execution.
+
+The perception records expose neutral candidates without assigning a semantic
+source or target role. The architecture has no `TargetFeatureGeometryRecord`.
+PA dynamically chooses approved evidence and assigns candidates to
+`current_state` and `desired_state`; calibration and numeric robot-frame
+locations are derived only when reachability or another verifier needs them.
+No fixed evidence or resource order is prescribed.
 
 Spec2Primitives studies a composite-function coverage gap. It begins after an RA
 has been selected and no valid selection, ordering, and parameterization of its
@@ -449,7 +486,8 @@ appear identical.
 The operational method is:
 
 ```text
-versioned post-assignment task/resource ontology projection
+reconstructed evidence-grounded target_feature
+        + versioned post-assignment feature/resource ontology projection
         + fresh selected-RA state
         + complete pinned semantic primitive interfaces and partial contracts
         + grounded context refs
@@ -495,13 +533,15 @@ causally-critical requirement that the system claims to check.
 
 For example, `release_part` may guarantee that the gripper opens and custody is
 released. It does not by itself guarantee that the part is on the target or
-assembled. A separate task-outcome check requires the validated target-pose and
-process evidence before execution, and observation evidence confirms the
-realized result afterward. A projected-outcome check returns `unmodeled` and
-stops fail-closed when the requested constraint lies outside its represented
-coverage. If an intermediate requirement appears in no contract, invariant,
-primitive evaluator, physical check, or outcome check, the system cannot claim
-to have detected or validated its omission.
+assembled. A future separate task-outcome check must derive its required numeric
+geometry from PA-selected approved evidence and process constraints at validation
+time; it cannot consume a predetermined target-geometry answer. Observation
+evidence then confirms the realized result. That outcome-check contract is not
+implemented now. A projected-outcome check returns `unmodeled` and stops
+fail-closed when the requested constraint lies outside its represented coverage.
+If an intermediate requirement appears in no contract, invariant, primitive
+evaluator, physical check, or outcome check, the system cannot claim to have
+detected or validated its omission.
 
 ## Why an RA LLM composer is justified relative to symbolic planning
 
@@ -623,21 +663,24 @@ PA understands the requirement and ontology together
         ↓
 PA retrieves only currently relevant approved evidence
         ↓
-PA proposes a cited semantic ABox candidate
+PA authors one cited target_feature with current and desired states
         ↓
-system validates it without committing it
+host generates and validates its exact seven-assertion ABox projection
         ↓
-the provisional graph activates a typed consumer requirement
+separate PA semantic review accepts or returns a revision gap ↺
         ↓
-descriptor closure returns missing source evidence to PA retrieval ↺
+unresolved processExecution activates PA resource allocation
         ↓
-accepted target-specific RobotFrameLocationRecord gates acceptance
+PA chooses two state-evidence values and a provisional resource
         ↓
-manifest-backed coarse reach selects one exact resource_jid
+check_reachability derives locations and checks both feature states
         ↓
-system commits the semantic ABox, processExecution, and final projection
+exact selected RobotAgent performs plan-only endpoint IK/collision/path checks ↺
         ↓
-selected RA loads fresh state + complete current primitive catalog
+system commits exactly the accepted PA choice and v6 completion
+        ↓
+selected RA receives reconstructed target_feature + fresh state
+        + complete current primitive catalog
         ↓
 RA authors structural PrimitiveProgramDraft
         ↓
@@ -658,7 +701,7 @@ accepted candidate or fail-closed result
 ```
 
 - PA may make zero or more native `retrieve(evidence_id)` calls and then returns
-  a direct ontology proposal, clarification, or insufficient-evidence result.
+  a direct v8 two-state target-feature proposal, clarification, or insufficient-evidence result.
   The system records tool-call IDs, resolved evidence, source revisions, hashes,
   and failures. `ProductContextView` exposes only the final accepted ABox and
   versioned `TypedContextBinding` records; it is not PA's reasoning state.
@@ -667,11 +710,11 @@ accepted candidate or fail-closed result
   missing semantic or typed output to an authorized producer and evidence
   policy. PA may dynamically select approved document, exact approved CAD,
   RGB-D, calibration, or an existing record.
-- A syntactically valid proposal does not commit the semantic task ABox. The
-  system derives a non-persisted `ResourceAssignmentNeed` from the provisional
-  graph, expands its typed prerequisite closure, and returns any source-evidence
-  gap to PA. A valid current target-specific location prevents unnecessary
-  retrieval; a consumer without a physical input activates no camera need.
+- A structurally valid proposal and complete semantic review do not by
+  themselves commit a resource assignment. The grounded feature, both states,
+  required process, and unresolved `processExecution` activate PA allocation.
+  PA chooses the state evidence and resource supplied to the controlled
+  reachability verifier; the verifier never selects or substitutes a robot.
 - PA resolves only currently blocking task-level and assignment evidence before
   the system records `processExecution`. Grounding completion means
   only that Phase 5's current post-assignment consumer inputs are satisfied. It
@@ -693,8 +736,10 @@ accepted candidate or fail-closed result
 - Binders and validators may detect and categorize missing inputs, but may never
   create, reorder, bind, or repair primitive steps. Only RA authors structural
   drafts, fully bound candidates, and revisions.
-- PA readiness means that the grounded task, resource evidence, and system-authored
-  assignment are accepted. There is no separate task-transition contract. RA
+- PA readiness means that the target feature, both states, semantic review,
+  two-state reachability, exact RobotAgent validation, and assignment are
+  accepted and pinned by v6
+  completion. There is no separate task-transition contract. RA
   readiness means that one unchanged candidate is fully bound and accepted by
   every applicable declared-contract and resource-owned check. Neither agent
   certifies the next authority's work or the post-execution outcome.
@@ -753,24 +798,39 @@ PA retrieves any relevant approved source in any order
         ↓
 return compact typed evidence into the same conversation
         ↓
-PA creates one evidence-cited ontology/context proposal
+PA authors one evidence-cited target_feature proposal with both states
         ↓
-validate it against a transient provisional ABox
+host generates and validates feature/state types, state links, defines, and realizes
         ↓
-derive ResourceAssignmentNeed(RobotFrameLocationRecord, required frame)
+unresolved processExecution activates a free PA provisional resource choice
         ↓
-expand and evaluate declared typed provider prerequisites
+PA assigns approved neutral candidates to currentstate and desiredstate
         ↓
-missing source evidence returns to PA retrieval ↺
+check_reachability derives and evaluates both selected locations ↺
         ↓
-accept target-specific correspondence, calibration, and location
+separate PA semantic review accepts or returns a revision gap ↺
         ↓
-commit the semantic ABox and evaluate manifest-backed coarse reach
+send only the PA-chosen resource to its RobotAgent for plan-only validation
+        ↓
+rejection returns evidence to PA; acceptance commits the exact choice
         ↓
 system commits processExecution and the post-assignment completion
         ↓
 Phase 5.1 assignment envelope + injected-runtime state/catalog snapshots
+        ↓
+Phase 5.2A reconstructed target_feature + RA-authored structural draft
 ```
+
+`TypedGroundingContract` v6 and `PAContextGroundingCompletion` v6 pin the
+accepted v8 proposal, both states, semantic review, evidence and allocation
+presentations, registry and workcell snapshots, PA-authored state-evidence
+mapping, referenced typed records, reachability, endpoint-motion RobotAgent
+validation, resource selection, assignment delta, and final ABox without copying
+the target feature.
+Phase 5.2A reconstructs it from those authorities, resolves each
+referenced JSON Pointer into a bounded value projection, and presents no
+top-level `task` section. `PrimitiveProgramDraft` itself remains unchanged and
+does not persist the target semantics.
 
 One source per cycle is an auditable retrieval operation, not a limit of one
 source for the interaction. PA chooses the number and order of relevant
@@ -789,21 +849,22 @@ For ICRA:
 
 - PA performs schema-constrained, evidence-backed ABox instance grounding under
   the supplied PPR TBox. It does not discover or revise the ontology schema.
-  The proposal may contain multiple cited requirement-level features, while the
-  unique feature joined to the predefined process remains the sole execution
-  target used by resource assignment.
+  The active v8 proposal contains exactly one target feature. Multi-feature
+  requirements remain deferred.
 - The immutable TBox supplies the exact `product`, `feature`, `process`,
   `resource`, `capability`, and `processExecution` vocabulary before the first
   PA source decision.
 - One independent interaction ABox contains the exact requirement as an
-  explicitly unresolved request. Apart from that request, it accumulates only
-  evidence-backed factual assertions, each paired with persisted provenance.
-- The TBox contains generic classes, properties, and restrictions. PA-created
-  requested-process, product, feature, and grounded-outcome individuals belong
-  to the interaction ABox. The predefined Workcell ABox owns broad
-  `xarm6 capableOf assembly` and `ur5e capableOf assembly` facts. Only the system
-  may add the selected `processExecution`; PA does not author resource or
-  execution facts.
+  explicitly unresolved request. The host then adds only the generated
+  `feature_0001`, `currentstate_0001`, and `desiredstate_0001` projection and
+  the accepted PA allocation, each paired with persisted provenance.
+- The TBox contains generic classes, properties, and restrictions. PA selects
+  an authorized process and authors target semantics; the host creates the
+  feature individual and exact projection. Workcell-profile v2 supplies the
+  authorized process catalog, resource catalog, and explicit capability facts.
+  The production profile currently materializes `xarm6 capableOf assembly` and
+  `ur5e capableOf assembly`. Only the system may add the selected
+  `processExecution`; PA does not author resource or execution facts.
 - Document and scene tools are controlled evidence producers. They return
   typed evidence records; only the late ontology mapper may propose assertions,
   and the orchestrator validates every proposed ABox change.
@@ -811,11 +872,11 @@ For ICRA:
   to an authorized producer and evidence policy. Neither the TBox nor PA uses a
   product-specific slot template, fixed source count, fixed modality set, or
   fixed retrieval order.
-- PA-to-RA task records and resource-owned primitive contracts reference stable
+- PA-to-RA target-feature records and resource-owned primitive contracts reference stable
   ontology identities for auditable primitive-input binding. The complete
   primitive catalog remains a typed, versioned, selected-RA-owned record and no
   primitive receives `ppr:capableOf`.
-- The requested assembly process may be linked through `realizes` to its
+- The requested configured process may be linked through `realizes` to its
   grounded product outcome. It must not be linked to primitive offerings
   through `requires`, `precedes`, `capableOf`, or another task-to-primitive
   mapping. The missing mapping is intentional: the RA LLM
@@ -836,10 +897,8 @@ typed catalog separately and preserves every symbol exactly:
 
 ```turtle
 # PA interaction ABox
-ctx:specification_1 ppr:defines ctx:feature_0001,
-                                  ctx:feature_0002 .
+ctx:specification_1 ppr:defines ctx:feature_0001 .
 ctx:feature_0001 a ppr:feature .
-ctx:feature_0002 a ppr:feature .
 process:assembly ppr:realizes ctx:feature_0001 .
 
 # Predefined Workcell ABox
@@ -886,12 +945,14 @@ The remaining ontology boundaries are:
   the represented contract surface. PA handoff readiness is therefore a
   product-level handoff decision, not a guarantee of composition or execution
   readiness.
-- The ontology join identifies only the predefined resources broadly capable of
-  `assembly`; it does not establish current reach. A deterministic system check
-  uses the accepted target-specific location and pinned manifest limits, then
-  selects the first reachable candidate in configured profile order and records its exact
-  `resource_jid`. This is coarse supporting allocation, not an optimal allocator
-  or proof of IK, collision, grasp, or insertion feasibility. Recovery input
+- The ontology join identifies only the configured resources broadly capable of
+  the accepted feature's selected process; it does not choose among them. PA
+  freely proposes a resource and
+  the evidence assigned to both feature states. Deterministic workspace/distance
+  checks return reach evidence, and only the exact selected RobotAgent returns a
+  closed plan-only endpoint IK/collision/path verdict. These checks are
+  supporting evidence, not an optimal allocator or manufacturing execution.
+  Recovery input
   already carries its assigned `resource_jid`; both paths later unicast to the
   selected RA.
 - In the recovery transfer case, grounded ontology identifiers may describe the
@@ -905,8 +966,9 @@ parameterization of `primitive_steps` within a non-synthesizing
 validation-feedback revision loop. ICRA uses agent-requested,
 one-source-at-a-time exact-ref retrieval only inside auditable PA producer
 operations; cross-agent product/scene needs and PA responses are batched. RA
-additionally receives a bounded deterministic projection over the current task
-and selected-resource assignment. ICRA does not claim ontology design, SHACL
+additionally receives the reconstructed PA-authored `target_feature` plus a
+bounded deterministic projection over the current feature and selected-resource
+assignment. ICRA does not claim ontology design, SHACL
 completeness, learned or graph-ranked retrieval, GraphRAG, ontology-based
 composition, or execution graph updates as contributions.
 

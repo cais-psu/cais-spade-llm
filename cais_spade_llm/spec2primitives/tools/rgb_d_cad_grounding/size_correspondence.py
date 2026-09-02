@@ -67,8 +67,7 @@ _SEGMENTATION_RECORD_KEYS = {
     "observation_ref",
     "source_record",
     "parameters",
-    "source_candidate_count",
-    "assembly_candidate_count",
+    "candidate_count",
     "candidate_state",
     "cameras",
     "cross_camera_fusion",
@@ -77,8 +76,8 @@ _SEGMENTATION_RECORD_KEYS = {
     "pose",
 }
 _SEGMENTATION_CAMERA_KEYS = {
+    "observation_handle",
     "camera_id",
-    "role",
     "frame",
     "input_point_count",
     "source_point_cloud",
@@ -93,6 +92,7 @@ _SEGMENTATION_CAMERA_KEYS = {
     "pose",
 }
 _SEGMENTATION_CANDIDATE_KEYS = {
+    "candidate_handle",
     "candidate_id",
     "point_count",
     "pixel_bounds_uv",
@@ -157,9 +157,7 @@ def associate_segmented_candidate_by_size(
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        temporary_root = Path(
-            tempfile.mkdtemp(prefix=".correspondence-", dir=destination.parent)
-        )
+        temporary_root = Path(tempfile.mkdtemp(prefix=".correspondence-", dir=destination.parent))
     except OSError as exc:
         raise CADSizeAssociationError(
             "CAD size correspondence temporary directory could not be created."
@@ -167,11 +165,9 @@ def associate_segmented_candidate_by_size(
 
     try:
         ranked_candidates = _rank_candidates(candidate_inputs, cad_input.dimensions_m)
-        correspondence, location, selected, plausible = _association_decision(
-            ranked_candidates
-        )
+        correspondence, location, selected, plausible = _association_decision(ranked_candidates)
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "CADSizeCorrespondenceRecord",
             "producer": _PRODUCER,
             "correspondence_number": correspondence_number,
@@ -380,14 +376,12 @@ def _load_candidates(
     segmentation_number = record["segmentation_number"]
     _validate_positive_integer(segmentation_number, "segmentation_number")
     expected_record_ref = (
-        _GROUNDING_ROOT
-        / f"segmentation_{segmentation_number:04d}"
-        / "segmentation_record.json"
+        _GROUNDING_ROOT / f"segmentation_{segmentation_number:04d}" / "segmentation_record.json"
     )
     if relative != expected_record_ref:
         raise CADSizeAssociationError("Segmentation record path is invalid.")
     if (
-        record["schema_version"] != 1
+        record["schema_version"] != 2
         or record["record_type"] != "RGBDSegmentationRecord"
         or record["producer"] != _PRODUCER
         or record["cross_camera_fusion"] != "not_evaluated"
@@ -411,14 +405,11 @@ def _load_candidates(
             source_path,
         )
     except (OSError, TypeError, ValueError) as exc:
-        raise CADSizeAssociationError(
-            "Observation preprocessing record is invalid."
-        ) from exc
+        raise CADSizeAssociationError("Observation preprocessing record is invalid.") from exc
     if validated_source_path != source_path:
         raise CADSizeAssociationError("Segmentation source record path is invalid.")
     source_cameras = {
-        source_camera["camera_id"]: source_camera
-        for source_camera in validated_source["cameras"]
+        source_camera["camera_id"]: source_camera for source_camera in validated_source["cameras"]
     }
     operation_number = int(validated_source["operation_number"])
     cameras = record["cameras"]
@@ -426,36 +417,22 @@ def _load_candidates(
         raise CADSizeAssociationError("Segmentation camera records are invalid.")
 
     candidate_inputs = []
-    total_source = 0
-    total_assembly = 0
+    total_candidates = 0
     for camera_index, camera_id in enumerate(CAMERA_IDS):
         camera = cameras[camera_index]
-        expected_role = "assembly_target" if camera_id == "cam_assembly" else "source"
         camera_candidates = _load_camera_candidates(
             interaction_root,
             camera,
             camera_id=camera_id,
             camera_index=camera_index,
-            expected_role=expected_role,
             segmentation_number=segmentation_number,
             source_camera=source_cameras[camera_id],
             operation_number=operation_number,
         )
         candidate_inputs.extend(camera_candidates)
-        candidate_count = len(camera_candidates)
-        if expected_role == "source":
-            total_source += candidate_count
-        else:
-            total_assembly += candidate_count
-    if (
-        record["source_candidate_count"] != total_source
-        or record["assembly_candidate_count"] != total_assembly
-        or record["candidate_state"]
-        != (
-            "unresolved"
-            if total_source + total_assembly == 0
-            else "candidates_available"
-        )
+        total_candidates += len(camera_candidates)
+    if record["candidate_count"] != total_candidates or record["candidate_state"] != (
+        "unresolved" if total_candidates == 0 else "candidates_available"
     ):
         raise CADSizeAssociationError("Segmentation aggregate counts are invalid.")
     return path, record, candidate_inputs
@@ -467,7 +444,6 @@ def _load_camera_candidates(
     *,
     camera_id: str,
     camera_index: int,
-    expected_role: str,
     segmentation_number: int,
     source_camera: Mapping[str, object],
     operation_number: int,
@@ -475,8 +451,8 @@ def _load_camera_candidates(
     if not isinstance(camera, dict) or set(camera) != _SEGMENTATION_CAMERA_KEYS:
         raise CADSizeAssociationError("Segmentation camera fields are invalid.")
     if (
-        camera["camera_id"] != camera_id
-        or camera["role"] != expected_role
+        camera["observation_handle"] != f"view_{camera_index + 1:04d}"
+        or camera["camera_id"] != camera_id
         or not isinstance(camera["frame"], str)
         or not camera["frame"]
         or camera["identity"] != "not_evaluated"
@@ -519,9 +495,7 @@ def _load_camera_candidates(
     candidates = camera["candidates"]
     if not isinstance(candidates, list) or len(candidates) != candidate_count:
         raise CADSizeAssociationError("Segmentation candidates are invalid.")
-    expected_candidate_state = (
-        "unresolved" if candidate_count == 0 else "candidates_available"
-    )
+    expected_candidate_state = "unresolved" if candidate_count == 0 else "candidates_available"
     if camera["candidate_state"] != expected_candidate_state:
         raise CADSizeAssociationError("Segmentation candidate state is invalid.")
     point_labels = labels[pixels_uv[:, 1], pixels_uv[:, 0]]
@@ -558,7 +532,8 @@ def _load_candidate(
     if not isinstance(candidate, dict) or set(candidate) != _SEGMENTATION_CANDIDATE_KEYS:
         raise CADSizeAssociationError("Segmentation candidate fields are invalid.")
     if (
-        candidate["candidate_id"] != candidate_index
+        candidate["candidate_handle"] != f"candidate_{camera_index + 1:04d}_{candidate_index:04d}"
+        or candidate["candidate_id"] != candidate_index
         or candidate["identity"] != "not_evaluated"
         or candidate["CAD_correspondence"] != "not_evaluated"
         or candidate["pose"] != "not_evaluated"
@@ -580,10 +555,11 @@ def _load_candidate(
         candidate_pixels,
     )
     return {
+        "observation_handle": camera["observation_handle"],
         "camera_id": camera_id,
         "camera_order": camera_index,
-        "role": camera["role"],
         "frame": camera["frame"],
+        "candidate_handle": candidate["candidate_handle"],
         "candidate_id": candidate_index,
         "point_count": point_count,
         "points_m": candidate_points,
@@ -770,9 +746,7 @@ def _rank_candidates(
             dimensions = None
             errors = None
             score = None
-            measurement_status = (
-                "partial_visibility" if partial_visibility else "unreliable"
-            )
+            measurement_status = "partial_visibility" if partial_visibility else "unreliable"
             within_tolerance = False
             center = _float_list(np.median(points_m, axis=0))
         else:
@@ -786,10 +760,11 @@ def _rank_candidates(
             center = _float_list(center_array)
         ranked.append(
             {
+                "observation_handle": candidate["observation_handle"],
                 "camera_id": candidate["camera_id"],
                 "camera_order": candidate["camera_order"],
-                "role": candidate["role"],
                 "frame": candidate["frame"],
+                "candidate_handle": candidate["candidate_handle"],
                 "candidate_id": candidate["candidate_id"],
                 "point_count": candidate["point_count"],
                 "measurement_status": measurement_status,
@@ -803,9 +778,7 @@ def _rank_candidates(
     ranked.sort(
         key=lambda item: (
             item["mean_dimension_error"] is None,
-            math.inf
-            if item["mean_dimension_error"] is None
-            else item["mean_dimension_error"],
+            math.inf if item["mean_dimension_error"] is None else item["mean_dimension_error"],
             item["camera_order"],
             item["candidate_id"],
         )
@@ -853,9 +826,10 @@ def _association_decision(
         if second_score - best_score < _UNIQUENESS_MARGIN:
             return "ambiguous", "ambiguous", None, plausible
     selected = {
+        "observation_handle": best["observation_handle"],
         "camera_id": best["camera_id"],
-        "role": best["role"],
         "frame": best["frame"],
+        "candidate_handle": best["candidate_handle"],
         "candidate_id": best["candidate_id"],
         "candidate_center_m": best["candidate_center_m"],
         "observed_dimensions_m": best["observed_dimensions_m"],
@@ -943,12 +917,7 @@ def _integer_pixel(value: object, label: str) -> np.ndarray:
     ):
         raise CADSizeAssociationError(f"{label} must contain two integers.")
     result = np.asarray(value, dtype=np.int64)
-    if (
-        result[0] < 0
-        or result[0] >= IMAGE_WIDTH
-        or result[1] < 0
-        or result[1] >= IMAGE_HEIGHT
-    ):
+    if result[0] < 0 or result[0] >= IMAGE_WIDTH or result[1] < 0 or result[1] >= IMAGE_HEIGHT:
         raise CADSizeAssociationError(f"{label} is outside the image.")
     return result
 

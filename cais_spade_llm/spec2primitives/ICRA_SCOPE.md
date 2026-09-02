@@ -9,23 +9,28 @@
 The end-to-end workflow in this document is proposed architecture. **Phase 4 is
 implemented through Phase 4.4 under the current framework.** The package also
 implements the PA interaction boundary through Phase 3.5. PA uses one native
-`retrieve` tool and returns a direct ontology proposal. Phase 4.4 validates that
-proposal against a transient ABox, derives the active consumer's typed
-prerequisite closure, and returns any source-evidence gap to PA without
-committing semantic assertions.
-After the target-specific location chain passes, the system performs
-manifest-backed coarse reach checks and commits the selected resource as a
-`processExecution` assignment. The exact `xarm6` and `ur5e`
-identities remain pinned to their shared manifests; their broad
-`capableOf assembly` assertions do not encode reach or a primitive sequence. No
-live Phase 5 RA connection, primitive composer, validator stack, or execution
-path is connected. Phase 5.1 now implements only the contract-first assignment
-envelope and injected-runtime state/catalog snapshot boundary.
+`retrieve` tool and returns a direct ontology proposal. Phase 4.4 validates and
+commits one v8 PA-authored, evidence-grounded `target_feature` with explicit
+current and desired states; a separate structured PA semantic review must
+accept its adequacy. PA then chooses two opaque neutral evidence handles and a provisional
+resource through `check_reachability`. The exact selected RobotAgent performs
+plan-only endpoint validation, and only acceptance commits that resource as a
+`processExecution` assignment. The production profile configures only
+`assembly`, `xarm6`, and `ur5e`; this is an assembly case study, not runtime
+process discovery. Their identities and configured capabilities remain pinned
+to the workcell profile and manifests; broad `capableOf assembly` assertions
+do not encode reach or a primitive sequence. No
+live SPADE Phase 5 delivery or execution path is connected.
+Phase 5.1 implements the contract-first assignment envelope and injected-runtime
+state/catalog snapshot boundary. Phase 5.2A implements one RA-LLM-authored
+structural `PrimitiveProgramDraft` from a reconstructed target feature and exact
+catalog symbols.
 
 Phase 4 completion is the implemented location-based pre-RA grounding and
-resource-assignment boundary. Cross-camera fusion, an active
-orientation-sensitive consumer, RA composition, robot-local validation,
-execution, and observed outcomes are not part of the completed Phase 4 claim.
+resource-assignment boundary. Cross-camera fusion, an active orientation-sensitive
+consumer, grasp/contact/tolerance/insertion validation, parameter binding,
+primitive-level robot validation, execution, and observed outcomes are not part
+of the completed Phase 4 claim.
 
 ## Fundamental research challenge
 
@@ -55,9 +60,9 @@ The paper studies the transformation across abstraction levels:
 ```text
 product specification
         ↓
-grounded assembly requirements
+evidence-grounded target feature / desired product state
         ↓
-robot-independent assembly plan
+robot-independent grounded product outcome/task
         ↓
 robot-specific primitive_steps
         ↓
@@ -68,12 +73,33 @@ execution
 observation-backed realized outcome
 ```
 
+The implemented PA outcome contract is process-independent even though the
+current controlled case is assembly. For one requirement, PA authors one
+`target_feature` with an evidence-cited authorized process, complete
+evidence-cited current- and desired-state statements, and zero, one, or multiple
+optional typed state-value references for each state. PA chooses the text,
+process, value count and
+names, record refs, JSON Pointer paths, and citations from retrieved evidence;
+deterministic code validates them but does not fill their semantics. Later
+welding, painting, milling, or other processes may use the same shape when
+their evidence, providers, and primitive contracts exist; those process cases
+are not implemented claims.
+
+The host generates `feature_0001`, `currentstate_0001`, and
+`desiredstate_0001`; compiles their types; links both states to the feature;
+and adds specification `ppr:defines` plus selected process `ppr:realizes`.
+The rich state meaning stays in the accepted v8 proposal.
+`TargetFeatureSemanticReview` v2 checks semantic adequacy separately;
+an incomplete gap re-enters PA retrieval/revision and is not accepted missing
+information.
+
 The research contribution is not that PA and RA exchange messages. It is the
 combination of:
 
 1. PA dynamically grounding an incomplete product requirement from only the
    relevant approved document, CAD, and RGB-D evidence, followed by an
-   evidence-backed system assignment of the task to one predefined resource.
+   evidence-backed PA selection from the configured capable resources and
+   endpoint validation of that exact choice.
 2. RA, where RA means RobotAgent, interpreting that required transition against
    fresh selected-resource state and the complete current semantic primitive
    catalog with partial local executable contracts, then agentically authoring
@@ -120,12 +146,15 @@ The ontology split is:
 
 - The immutable TBox contains generic PPR classes, properties, restrictions,
   and the narrow `processExecution` assignment vocabulary.
-- PA proposes a per-interaction ABox only from the requirement and authorized,
-  hash-pinned evidence; the system accepts only individuals and relations that
-  the current TBox can represent.
-- The predefined Workcell ABox records `xarm6` and `ur5e` as resources broadly
-  `capableOf assembly`. Only the system adds the selected `processExecution` after
-  typed evidence and manifest-backed reach validation.
+- PA proposes one per-interaction target feature only from the requirement and
+  authorized, hash-pinned evidence. The host generates `feature_0001`,
+  `currentstate_0001`, and `desiredstate_0001` and compiles their exact
+  seven-assertion ABox projection under the current TBox.
+- The workcell-profile-derived ABox records the configured process and resource
+  individuals plus each resource's explicit process capabilities. The production
+  profile currently yields `xarm6` and `ur5e` broadly `capableOf assembly`.
+  Only the system adds the selected `processExecution` after PA-cited two-state
+  reach evidence and exact selected-RobotAgent plan-only validation.
 - The selected RA later supplies a separate versioned typed primitive-catalog
   snapshot. It pins exact symbols, fingerprint, and cardinality without
   publishing primitive implementations through `capableOf` assertions.
@@ -136,12 +165,13 @@ restrictions are not runtime context. The project-authoritative production TBox
 is `ontology/spec2primitives_ppr_tbox.owl`; it contains only the approved
 schema-only PPR view.
 
-Any proposed `realizes` assertion is accepted only when it cites authorized
-evidence, uses a correctly typed process and feature, and passes the property
-signature validation. No relation is required merely because the requirement
-names a process. A high-level process must not be linked to primitive offerings
+The PA-selected `required_process.process_iri` is accepted only when it cites
+authorized evidence and matches configured process authority. The host then
+compiles the correctly typed `realizes` assertion; PA does not freely author
+relations. A high-level process must not be linked to primitive offerings
 through `requires`, `precedes`, or another expected set or order. Broad
-resource-to-`assembly` capability supports semantic candidate discovery only. A
+resource-to-configured-process capability supports semantic candidate discovery
+only. A
 read-only runtime projection later joins the relevant task and Workcell
 assertions with the selected RA's typed primitive catalog. The RA-authored
 `primitive_steps` candidate, not an ontology entailment, creates the task-to-
@@ -169,15 +199,23 @@ requirement + ontology
         ↓
 retrieve only currently relevant approved evidence
         ↓
-validate a proposal against a transient semantic ABox
+PA authors one cited target_feature with current and desired states
         ↓
-derive the active consumer's typed prerequisite closure
+validate its exact seven-assertion projection without merging
         ↓
-missing source evidence returns to PA retrieval ↺
+separate PA semantic review accepts or returns a revision gap ↺
         ↓
-accepted target-specific location enables reach evaluation
+commit the accepted feature-state ABox
         ↓
-system commits the semantic ABox and processExecution assignment
+unresolved processExecution activates PA allocation
+        ↓
+PA assigns two state values and chooses a provisional resource
+        ↓
+check_reachability evaluates both state locations ↺
+        ↓
+exact selected RobotAgent validates plan-only endpoints ↺
+        ↓
+system commits only the accepted PA choice
 ```
 
 Provider-owned `GroundingProducerDescriptor` values declare exact IDs,
@@ -201,23 +239,30 @@ For the current sole approved six-page NIST PDF, one document retrieval supplies
 pages 1 through 6 together and in order. It uses neither a targeted question,
 page ranking, nor RAG; large-document retrieval remains outside this scope.
 
-The model never manages intermediate statements or information-need state. The
-system validates native tool calls, exact replay keys, citations, hashes, and
-TBox signatures. After a provisional proposal, it computes the non-persisted
-`ResourceAssignmentNeed` from the provisional graph and current typed records.
-Descriptor prerequisites determine which records are missing and which approved
-evidence handles can produce them. PA may retrieve again within the bounded
-investigation; invalid, unavailable, stale, ambiguous, or exhausted paths stop
-fail-closed without a manufactured assertion.
+The model never manages hidden host-authored information-need state. The system
+validates native tool calls, exact replay keys, citations, hashes, and TBox
+signatures. After grounding the feature and both states, unresolved
+`processExecution` activates PA allocation directly. PA supplies the resource
+and state-evidence choices to `check_reachability`; the tool derives only the
+numeric verifier inputs it needs and returns two-state evidence. Invalid,
+unavailable, stale, ambiguous, or exhausted paths stop fail-closed without a
+manufactured assertion.
 
-The PA handoff is the validated post-assignment ontology projection,
-`ResourceSelectionRecord`, and minimum hash-pinned typed evidence. There is no
-separate `TaskTransitionContract`. The selected RA then retrieves that bounded
-task/resource projection, fresh state, and its complete current primitive-only
-catalog. RA authors a structural
+The PA handoff is `PAContextGroundingCompletion` v6, which pins the accepted v8
+proposal, both feature states, semantic review, evidence and allocation
+presentation records, process and state-evidence choices, registry and workcell
+snapshots, two-state reachability, endpoint-motion RobotAgent validation, the
+post-assignment ontology projection, `ResourceSelectionRecord` v4, and referenced
+typed records without copying the target feature. There is no separate
+`TaskTransitionContract`. The
+selected RA then receives a reconstructed transient `target_feature`, bounded
+resolved state values, selected-resource projection, fresh state, and its
+complete current primitive-only catalog. The RA LLM authors a structural
 `PrimitiveProgramDraft`; a deterministic binding preflight gathers all currently
-unbound inputs without creating or repairing steps. Robot state, limits, IK,
-collision, grasp, release, trajectory, and execution gaps remain RA-owned.
+unbound inputs without creating or repairing steps. Robot state and later
+primitive-level feasibility remain RA-owned. Allocation performs only endpoint
+IK/collision/path validation through the exact selected RobotAgent and never
+executes motion.
 Product or scene gaps are deduplicated into one `MissingContextBatch` per round.
 
 Formal PA completion pins both the exact `ResourceSelectionRecord` and the
@@ -226,16 +271,14 @@ all cite that same selection record, and its selected resource, grounding-record
 ordered reach verdicts, and final `runsOnResource` value must agree when the
 completion is reloaded.
 
-For `assemble medium gear`, PA may first retrieve the NIST manual and
-`Gear_Medium.STL` and propose the feature realized by `assembly`. Validation
-creates a provisional graph but writes no semantic assertion. The active coarse
-resource consumer declares `RobotFrameLocationRecord`; if observation-produced
-segmentation is absent, the descriptor closure reports that source-evidence gap
-to PA. After PA retrieves the approved live observation, target-cited CAD plus
-segmentation yields correspondence, correspondence plus calibration yields the
-required location, and only then can the system accept the semantic ABox and
-select a reachable resource. In the current evaluated scene this produces
-`xarm6`; the identifier is not a retrieval rule or an ontology entailment.
+For `assemble medium gear`, PA may retrieve the NIST manual, approved CAD, and
+live RGB-D evidence; author current and desired feature states; and assign a
+neutral candidate to each state. It then freely proposes one capable resource
+and calls two-state reachability. The exact proposed RobotAgent validates both
+endpoints in plan-only mode. Rejection returns evidence to PA without an ABox
+assignment or host-selected replacement. Acceptance commits exactly the PA
+choice. `xarm6` is therefore a possible PA-authored outcome for the evaluated
+scene, not a registry-order default, retrieval rule, or ontology entailment.
 
 PA may service one batch through several existing single-source audited
 operations, then returns one new versioned `CompositionContextBundle`. There is
@@ -246,9 +289,11 @@ need, an identical request against unchanged context, or no new accepted result
 stops fail-closed. `context understanding complete` means readiness for Phase 5,
 not that every later primitive input is already available.
 
-Phase 4.4 candidate discovery is a semantic join over the predefined Workcell;
-coarse allocation is deterministic supporting infrastructure, not a claimed
-optimal allocator. Both nominal and recovery cases consume the selected exact
+Phase 4.4 candidate discovery is a semantic join over the pinned workcell-profile
+v2 and registry snapshots for the process selected from the authorized catalog.
+Distance/workspace and plan-only checks are deterministic evidence providers;
+PA remains the allocation authority and no optimality claim is made. Both
+nominal and recovery cases consume the selected exact
 `resource_jid` and use unicast; Spec2Primitives does not broadcast or reallocate
 during composition.
 
@@ -273,6 +318,13 @@ Only PA and RA are agents. The observation provider and the perception
 components shown above are controlled tools invoked within the Spec2Primitives
 workflow. Related vision algorithms are combined into the two tools instead of
 being modeled as additional agents.
+
+These tools expose uniformly segmented observations and neutral candidate
+handles. They do not label a source or target region. The architecture has no
+`TargetFeatureGeometryRecord`: PA assigns approved candidates to current and
+desired states, and numeric robot-frame locations are derived only when a
+verifier needs them. No fixed document, CAD, RGB-D, or resource order is
+prescribed.
 
 RGB-D capture, calibrated deprojection, support-plane removal, connected-region
 segmentation, mask persistence, one-CAD principal-size comparison,
@@ -365,25 +417,29 @@ PA receives the exact requirement, TBox, available sources, and retrieved record
         ↓
 PA optionally calls retrieve(evidence_id) zero or more times
         ↓
-PA returns a direct ontology proposal, clarification, or insufficient evidence
+PA authors one cited target_feature, clarification, or insufficient evidence
         ↓
 deterministic validation creates a transient provisional ABox
         ↓
-the unique defines/realizes join identifies the primary feature
+host generates feature_0001, both states, and seven transient assertions
         ↓
-the active consumer declares RobotFrameLocationRecord
+separate PA semantic review accepts or returns a revision gap ↺
         ↓
-descriptor closure reports any missing source evidence to PA ↺
+commit the accepted feature-state ABox
         ↓
-accepted target-specific location gates semantic acceptance
+unresolved processExecution activates PA allocation
         ↓
-manifest-backed reach selects one resource in configured profile order
+PA assigns approved neutral candidates to currentstate and desiredstate
         ↓
-system commits the semantic ABox and processExecution assignment
+check_reachability derives and checks both state locations ↺
         ↓
-future Phase 5 unicasts to the selected exact resource_jid
+exact selected RobotAgent validates endpoints in plan-only mode ↺
         ↓
-selected RA retrieves the current task/resource ontology projection
+system commits the exact accepted choice and v6 endpoint-motion completion
+        ↓
+Phase 5.1 activates the selected exact resource_jid through the current adapter
+        ↓
+selected RA receives reconstructed target_feature + resource projection
         + fresh state + complete current primitive-only catalog
         ↓
 RA LLM authors a structural PrimitiveProgramDraft
@@ -421,9 +477,10 @@ The initial scene-only milestone provided the isolated structure, research
 workflow, narrow no-hardware `gazebo_dual_spec2primitives` launcher, dedicated
 `table_spec2primitives.world`, and local placeholder chat. Later milestones added
 the narrow PA context boundary, standalone supporting perception records, and
-the Phase 5.1 contract-first RA assignment/state/catalog boundary. The current
-live production path still ends at the Phase 4.4 resource assignment. It has no
-live RA connection, primitive composition, insertion-physics validation, or
+the Phase 5.1 contract-first RA assignment/state/catalog boundary and Phase 5.2A
+structural draft. The current adapter can reuse or start the exact selected
+context-only RobotAgent and obtain one LLM-authored symbol sequence, but it has
+no live SPADE delivery, parameter binding, insertion-physics validation, or
 robot execution.
 
 The starting scene pre-installs the static NIST `Gear_Plate` and three

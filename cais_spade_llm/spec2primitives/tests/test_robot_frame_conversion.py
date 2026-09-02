@@ -46,9 +46,7 @@ def test_correspondence_center_becomes_location_without_pose_estimation(
     correspondence = _read_json(correspondence_path)
     selected = correspondence["selected_candidate"]
     robot_from_camera = np.eye(4)
-    robot_from_camera[:3, :3] = Rotation.from_euler(
-        "z", 30.0, degrees=True
-    ).as_matrix()
+    robot_from_camera[:3, :3] = Rotation.from_euler("z", 30.0, degrees=True).as_matrix()
     robot_from_camera[:3, 3] = [0.8, -0.2, 0.4]
     calibration = _calibration(tmp_path, robot_from_camera)
 
@@ -60,24 +58,23 @@ def test_correspondence_center_becomes_location_without_pose_estimation(
     )
 
     expected = (
-        robot_from_camera[:3, :3]
-        @ np.asarray(selected["candidate_center_m"], dtype=np.float64)
+        robot_from_camera[:3, :3] @ np.asarray(selected["candidate_center_m"], dtype=np.float64)
         + robot_from_camera[:3, 3]
     )
     np.testing.assert_allclose(result.translated_location_m, expected, atol=1e-12)
     assert result.record["robot_frame_conversion"] == "accepted"
     assert result.record["record_type"] == "RobotFrameLocationRecord"
-    assert result.record["schema_version"] == 1
+    assert result.record["schema_version"] == 2
+    assert result.record["candidate_reference"] == {
+        "observation_handle": selected["observation_handle"],
+        "candidate_handle": selected["candidate_handle"],
+    }
     assert result.record["CAD_correspondence"] == "accepted"
     assert result.record["location"] == "available"
     assert "pose" not in result.record
     assert "rotation_matrix" not in result.record
-    assert result.record["source_correspondence"]["sha256"] == _sha256(
-        correspondence_path
-    )
-    assert result.record["source_calibration"]["sha256"] == _sha256(
-        calibration.record_path
-    )
+    assert result.record["source_correspondence"]["sha256"] == _sha256(correspondence_path)
+    assert result.record["source_calibration"]["sha256"] == _sha256(calibration.record_path)
 
 
 def test_rotated_camera_transform_recovers_known_robot_frame_pose(
@@ -86,9 +83,7 @@ def test_rotated_camera_transform_recovers_known_robot_frame_pose(
 ) -> None:
     pose = _accepted_pose(tmp_path, monkeypatch)
     robot_from_camera = np.eye(4)
-    robot_from_camera[:3, :3] = Rotation.from_euler(
-        "z", 90.0, degrees=True
-    ).as_matrix()
+    robot_from_camera[:3, :3] = Rotation.from_euler("z", 90.0, degrees=True).as_matrix()
     robot_from_camera[:3, 3] = [1.0, 2.0, 3.0]
     calibration = _calibration(tmp_path, robot_from_camera)
 
@@ -131,15 +126,13 @@ def test_rotated_camera_transform_recovers_known_robot_frame_pose(
     )
     record = _read_json(result.record_path)
     assert record == result.record
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["record_type"] == "RobotFramePoseRecord"
     assert record["source_frame"] == _CAMERA_FRAME
     assert record["target_frame"] == _ROBOT_FRAME
     assert record["observation_timestamp_ns"] == _OBSERVATION_TIMESTAMP_NS
     assert record["source_pose"]["sha256"] == _sha256(pose.record_path)
-    assert record["source_calibration"]["sha256"] == _sha256(
-        calibration.record_path
-    )
+    assert record["source_calibration"]["sha256"] == _sha256(calibration.record_path)
 
 
 def test_different_dynamic_camera_poses_use_the_same_conversion_code(
@@ -358,9 +351,7 @@ def test_location_only_pose_converts_centroid_without_fabricating_rotation(
         correspondence_record_path=correspondence_path,
     )
     robot_from_camera = np.eye(4)
-    robot_from_camera[:3, :3] = Rotation.from_euler(
-        "z", 30.0, degrees=True
-    ).as_matrix()
+    robot_from_camera[:3, :3] = Rotation.from_euler("z", 30.0, degrees=True).as_matrix()
     robot_from_camera[:3, 3] = [0.8, -0.2, 0.4]
     ambiguous_calibration = _calibration(ambiguous_root, robot_from_camera)
     ambiguous_result = transform_camera_pose_to_robot_frame(
@@ -370,17 +361,12 @@ def test_location_only_pose_converts_centroid_without_fabricating_rotation(
         target_frame=_ROBOT_FRAME,
     )
 
-    expected_centroid_m = (
-        robot_from_camera[:3, :3] @ camera_centroid_m
-        + robot_from_camera[:3, 3]
-    )
+    expected_centroid_m = robot_from_camera[:3, :3] @ camera_centroid_m + robot_from_camera[:3, 3]
     assert ambiguous_result.location == "available"
     assert ambiguous_result.pose == "ambiguous"
     assert ambiguous_result.robot_frame_conversion == "accepted"
     assert ambiguous_result.robot_frame_pose is not None
-    assert set(ambiguous_result.robot_frame_pose) == {
-        "CAD_centroid_translation_m"
-    }
+    assert set(ambiguous_result.robot_frame_pose) == {"CAD_centroid_translation_m"}
     np.testing.assert_allclose(
         ambiguous_result.robot_frame_pose["CAD_centroid_translation_m"],
         expected_centroid_m,
@@ -579,9 +565,7 @@ def _calibration(
 
 
 def _assert_no_robot_pose_output(interaction_root: Path) -> None:
-    grounding_root = (
-        interaction_root / "products/grounding/rgb_d_cad_grounding"
-    )
+    grounding_root = interaction_root / "products/grounding/rgb_d_cad_grounding"
     assert not (grounding_root / "robot_pose_0001").exists()
     assert list(grounding_root.glob(".robot-pose-*")) == []
 

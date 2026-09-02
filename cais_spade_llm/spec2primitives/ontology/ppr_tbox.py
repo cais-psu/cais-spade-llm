@@ -19,6 +19,7 @@ _REQUIRED_CLASSES = (
     "specification",
     "product",
     "feature",
+    "state",
     "process",
     "processExecution",
     "resource",
@@ -27,6 +28,8 @@ _REQUIRED_CLASSES = (
 _REQUIRED_OBJECT_PROPERTIES = (
     "defines",
     "realizes",
+    "hascurrentstate",
+    "hasdesiredstate",
     "capableOf",
     "hasProcessExecution",
     "runsProcess",
@@ -126,6 +129,7 @@ def load_ppr_tbox(tbox_path: Path, *, ppr_namespace: str) -> TBoxSnapshot:
         classes=classes,
         object_properties=object_properties,
     )
+    _validate_feature_state_slice(graph, namespace)
     _validate_process_execution_slice(graph, namespace)
     _validate_schema_only_profile(
         graph,
@@ -208,15 +212,27 @@ def _validate_process_execution_slice(graph: Graph, namespace: str) -> None:
     for property_iri, profile in expected_profiles.items():
         expected_domain, expected_range, expected_functional = profile
         if set(graph.objects(property_iri, RDFS.domain)) != {expected_domain}:
-            raise TBoxProfileError(
-                f"TBox property has an invalid domain: {property_iri}"
-            )
+            raise TBoxProfileError(f"TBox property has an invalid domain: {property_iri}")
         if set(graph.objects(property_iri, RDFS.range)) != {expected_range}:
-            raise TBoxProfileError(
-                f"TBox property has an invalid range: {property_iri}"
-            )
+            raise TBoxProfileError(f"TBox property has an invalid range: {property_iri}")
         is_functional = (property_iri, RDF.type, OWL.FunctionalProperty) in graph
         if is_functional != expected_functional:
+            raise TBoxProfileError(
+                f"TBox property has an invalid functional profile: {property_iri}"
+            )
+
+
+def _validate_feature_state_slice(graph: Graph, namespace: str) -> None:
+    """Require exact feature-owned current and desired state properties."""
+    feature = URIRef(f"{namespace}feature")
+    state = URIRef(f"{namespace}state")
+    for symbol in ("hascurrentstate", "hasdesiredstate"):
+        property_iri = URIRef(f"{namespace}{symbol}")
+        if set(graph.objects(property_iri, RDFS.domain)) != {feature}:
+            raise TBoxProfileError(f"TBox property has an invalid domain: {property_iri}")
+        if set(graph.objects(property_iri, RDFS.range)) != {state}:
+            raise TBoxProfileError(f"TBox property has an invalid range: {property_iri}")
+        if (property_iri, RDF.type, OWL.FunctionalProperty) not in graph:
             raise TBoxProfileError(
                 f"TBox property has an invalid functional profile: {property_iri}"
             )

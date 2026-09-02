@@ -10,6 +10,7 @@
   <owl:Class rdf:about="#specification"/>
   <owl:Class rdf:about="#product"/>
   <owl:Class rdf:about="#feature"/>
+  <owl:Class rdf:about="#state"/>
   <owl:Class rdf:about="#process"/>
   <owl:Class rdf:about="#processExecution"/>
   <owl:Class rdf:about="#resource"/>
@@ -18,6 +19,18 @@
   <owl:ObjectProperty rdf:about="#defines"/>
   <owl:ObjectProperty rdf:about="#realizes"/>
   <owl:ObjectProperty rdf:about="#capableOf"/>
+
+  <owl:ObjectProperty rdf:about="#hascurrentstate">
+    <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+    <rdfs:domain rdf:resource="#feature"/>
+    <rdfs:range rdf:resource="#state"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#hasdesiredstate">
+    <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
+    <rdfs:domain rdf:resource="#feature"/>
+    <rdfs:range rdf:resource="#state"/>
+  </owl:ObjectProperty>
 
   <owl:ObjectProperty rdf:about="#hasProcessExecution">
     <rdfs:domain rdf:resource="#specification"/>

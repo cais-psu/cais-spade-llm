@@ -8,9 +8,16 @@ The starting case is:
 product requirement: assemble Medium Gear
 ```
 
-Phase 0 does not invent a case payload. A later phase will bind the case to
-reviewed references and schemas while preserving all supplied terms exactly.
-This is one development case, not a hard-coded evidence sequence, primitive
-catalog size, or expected `primitive_steps` recipe. The same planned PA/RA
-workflow must accept other grounded requirements and selected-resource catalog
-snapshots without source-code changes.
+The implemented PA binds this requirement to reviewed evidence by authoring one
+v8 `target_feature` with current and desired states. The host creates the feature
+and both state individuals; semantic review and v6 completion pin the accepted
+endpoint-motion allocation; and Phase 5.2A reconstructs it for the RA LLM. This
+is one development case, not a hard-coded evidence sequence, primitive catalog
+size, predetermined target answer, or expected `primitive_steps` recipe.
+
+The production workcell profile intentionally configures only `assembly`,
+`xarm6`, and `ur5e`, so this deployment is an assembly case study rather than a
+runtime process-discovery claim. The target-feature and allocation contracts are
+process-independent: additional configured processes and resources can use the
+same PA/RA handoff without source-code changes once truthful evidence,
+capabilities, and validators exist.

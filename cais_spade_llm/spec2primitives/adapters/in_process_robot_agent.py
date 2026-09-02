@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
+from inspect import isawaitable
 from typing import Any, Protocol
 
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
+from cais_spade_llm.spec2primitives.adapters.moveit_plan_only import (
+    MoveItPlanOnlyRuntime,
+)
 from cais_spade_llm.spec2primitives.agents.ra import (
     RAContextHandoffError,
     SelectedRAAssignmentEnvelope,
@@ -49,8 +53,15 @@ class InProcessRobotAgentHost(Protocol):
 class InProcessRobotAgentCompositionRuntime:
     """Adapt one exact live RobotAgent to the Phase 5.1 context contract."""
 
-    def __init__(self, host: InProcessRobotAgentHost) -> None:
+    def __init__(
+        self,
+        host: InProcessRobotAgentHost,
+        *,
+        moveit_plan_only_runtime: object | None = None,
+    ) -> None:
+        """Create the adapter with an injectable no-motion MoveIt boundary."""
         self._host = host
+        self._moveit_plan_only_runtime = moveit_plan_only_runtime or MoveItPlanOnlyRuntime()
 
     async def request_assigned_context(
         self,
@@ -93,9 +104,7 @@ class InProcessRobotAgentCompositionRuntime:
 
         response = await self._host._run_on_agent_runtime(_read_context())
         if not isinstance(response, Mapping):
-            raise RAContextHandoffError(
-                "Selected live RobotAgent context response is unavailable."
-            )
+            raise RAContextHandoffError("Selected live RobotAgent context response is unavailable.")
         return response
 
     async def author_structural_draft(
@@ -138,23 +147,177 @@ class InProcessRobotAgentCompositionRuntime:
             )
         return response
 
+    async def validate_plan_only_allocation(
+        self,
+        request: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Contact the exact provisional RobotAgent, then run no-motion MoveIt."""
+        resource_jid = _required_text(
+            request.get("resource_jid"),
+            "plan-only resource_jid",
+        )
+        execution_mode = _required_text(
+            request.get("execution_mode"),
+            "plan-only execution_mode",
+        )
+        process_symbol = _required_text(
+            request.get("process_symbol"),
+            "plan-only process_symbol",
+        )
+        process_iri = _required_text(
+            request.get("process_iri"),
+            "plan-only process_iri",
+        )
+        feature_iri = _required_text(
+            request.get("feature_iri"),
+            "plan-only feature_iri",
+        )
+        selected_agent = await self._selected_or_started_resource(
+            resource_jid,
+            execution_mode,
+        )
+        self._require_alive(selected_agent, resource_jid)
+        self._require_execution_mode_value(
+            selected_agent,
+            resource_jid=resource_jid,
+            execution_mode=execution_mode,
+        )
+
+        async def _robot_agent_precheck() -> Mapping[str, object]:
+            self._require_alive(selected_agent, resource_jid)
+            snapshot_reader = getattr(selected_agent, "get_recovery_snapshot", None)
+            feasibility_check = getattr(
+                selected_agent,
+                "check_recovery_physical_feasibility",
+                None,
+            )
+            if not callable(snapshot_reader) or not callable(feasibility_check):
+                raise RAContextHandoffError(
+                    "Selected RobotAgent does not expose physical validation."
+                )
+            snapshot = snapshot_reader()
+            if not isinstance(snapshot, Mapping):
+                raise RAContextHandoffError(
+                    "Selected RobotAgent returned an invalid validation snapshot."
+                )
+            endpoint_results: dict[str, Mapping[str, object]] = {}
+            for state_name in ("current_state", "desired_state"):
+                state = request.get(state_name)
+                translation = state.get("translation_m") if isinstance(state, Mapping) else None
+                state_iri = state.get("state_iri") if isinstance(state, Mapping) else None
+                evidence_handle = (
+                    state.get("evidence_handle") if isinstance(state, Mapping) else None
+                )
+                if (
+                    not isinstance(translation, Sequence)
+                    or isinstance(translation, (str, bytes))
+                    or len(translation) != 3
+                    or not isinstance(state_iri, str)
+                    or not state_iri
+                    or not isinstance(evidence_handle, str)
+                    or not evidence_handle
+                ):
+                    raise RAContextHandoffError(f"Plan-only {state_name} translation is invalid.")
+                pose = {
+                    axis: float(value)
+                    for axis, value in zip(("x", "y", "z"), translation, strict=True)
+                }
+                result = feasibility_check(
+                    part_context={
+                        "feature_iri": feature_iri,
+                        "process_symbol": process_symbol,
+                        "process_iri": process_iri,
+                        "state_name": state_name,
+                        "state_iri": state_iri,
+                        "state_evidence_handle": evidence_handle,
+                    },
+                    recovery_snapshot=deepcopy(dict(snapshot)),
+                    operation_kind=process_symbol,
+                    grounded_action={
+                        "task_kind": process_symbol,
+                        "process_iri": process_iri,
+                        "feature_iri": feature_iri,
+                        "state_iri": state_iri,
+                        "target": {"pose": pose},
+                    },
+                )
+                if not isinstance(result, Mapping):
+                    raise RAContextHandoffError(
+                        "Selected RobotAgent physical validation is invalid."
+                    )
+                allowed = result.get("allowed") is True
+                reason = str(result.get("reason") or "").strip()
+                endpoint_results[state_name] = {
+                    "status": "accepted" if allowed else "rejected",
+                    "message": reason
+                    or (
+                        "RobotAgent workspace precheck accepted the endpoint."
+                        if allowed
+                        else "RobotAgent workspace precheck rejected the endpoint."
+                    ),
+                    "error_code": None,
+                }
+            return endpoint_results
+
+        precheck = await self._host._run_on_agent_runtime(_robot_agent_precheck())
+        if not isinstance(precheck, Mapping):
+            raise RAContextHandoffError("Selected RobotAgent physical validation is unavailable.")
+        if any(
+            isinstance(precheck.get(state_name), Mapping)
+            and precheck[state_name].get("status") == "rejected"
+            for state_name in ("current_state", "desired_state")
+        ):
+            current_state = precheck["current_state"]
+            desired_state = precheck["desired_state"]
+            return {
+                "status": "rejected",
+                "current_state": dict(current_state),
+                "desired_state": dict(desired_state),
+                "feedback": " ".join(
+                    str(item.get("message") or "")
+                    for item in (current_state, desired_state)
+                    if item.get("status") == "rejected"
+                ),
+            }
+        validate = getattr(self._moveit_plan_only_runtime, "validate", None)
+        if not callable(validate):
+            raise RAContextHandoffError("MoveIt plan-only validation runtime is unavailable.")
+        response = validate(deepcopy(dict(request)))
+        if isawaitable(response):
+            response = await response
+        if not isinstance(response, Mapping):
+            raise RAContextHandoffError("MoveIt plan-only validation response is invalid.")
+        return deepcopy(dict(response))
+
     async def _selected_or_started_agent(
         self,
         assignment: SelectedRAAssignmentEnvelope,
     ) -> object:
-        selected_agent = self._selected_agent_or_none(
-            assignment.selected_resource_jid
+        selected_agent = await self._selected_or_started_resource(
+            assignment.selected_resource_jid,
+            assignment.selected_execution_mode,
         )
+        assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
+        return selected_agent
+
+    async def _selected_or_started_resource(
+        self,
+        resource_jid: str,
+        execution_mode: str,
+    ) -> object:
+        selected_agent = self._selected_agent_or_none(resource_jid)
         if selected_agent is not None:
-            self._require_execution_mode(selected_agent, assignment)
+            self._require_execution_mode_value(
+                selected_agent,
+                resource_jid=resource_jid,
+                execution_mode=execution_mode,
+            )
             if self._is_alive(selected_agent):
                 return selected_agent
 
         if bool(getattr(self._host, "system_running", False)):
-            raise RAContextHandoffError(
-                f"Selected RobotAgent {assignment.selected_resource_jid} is not running."
-            )
-        if assignment.selected_execution_mode != "simulation":
+            raise RAContextHandoffError(f"Selected RobotAgent {resource_jid} is not running.")
+        if execution_mode != "simulation":
             raise RAContextHandoffError(
                 "Spec2Primitives can start a context RobotAgent only for the "
                 "Phase 4 simulation execution mode."
@@ -173,35 +336,33 @@ class InProcessRobotAgentCompositionRuntime:
             )
 
         # Phase 4 remains the sole authority for the mode used to create agents.
-        self._host.execution_mode = assignment.selected_execution_mode
+        self._host.execution_mode = execution_mode
         self._host.robot_env = "gazebo"
         await self._wait_for_simulation_readiness()
         try:
-            selected_agent = (
-                await self._host.start_spec2primitives_robot_agent(
-                    assignment.selected_resource_jid,
-                    assignment.selected_execution_mode,
-                )
+            selected_agent = await self._host.start_spec2primitives_robot_agent(
+                resource_jid,
+                execution_mode,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise RAContextHandoffError(
-                f"Selected RobotAgent failed to start: {exc}"
-            ) from exc
+            raise RAContextHandoffError(f"Selected RobotAgent failed to start: {exc}") from exc
         if selected_agent is None:
-            raise RAContextHandoffError(
-                f"Selected RobotAgent {assignment.selected_resource_jid} is not running."
-            )
+            raise RAContextHandoffError(f"Selected RobotAgent {resource_jid} is not running.")
 
-        assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
-        self._require_alive(selected_agent, assignment.selected_resource_jid)
-        self._require_execution_mode(selected_agent, assignment)
+        if str(getattr(selected_agent, "jid", "")) != resource_jid:
+            raise RAContextHandoffError(
+                "Started RobotAgent does not match the PA provisional choice."
+            )
+        self._require_alive(selected_agent, resource_jid)
+        self._require_execution_mode_value(
+            selected_agent,
+            resource_jid=resource_jid,
+            execution_mode=execution_mode,
+        )
         return selected_agent
 
     async def _wait_for_simulation_readiness(self) -> None:
-        deadline = (
-            asyncio.get_running_loop().time()
-            + _ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS
-        )
+        deadline = asyncio.get_running_loop().time() + _ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS
         last_reason = "Simulation startup is not ready."
         while True:
             try:
@@ -233,9 +394,7 @@ class InProcessRobotAgentCompositionRuntime:
                     f"{_ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS:.0f} seconds: "
                     f"{last_reason}"
                 )
-            await asyncio.sleep(
-                min(_ROBOT_AGENT_STARTUP_POLL_SECONDS, remaining)
-            )
+            await asyncio.sleep(min(_ROBOT_AGENT_STARTUP_POLL_SECONDS, remaining))
 
     def _selected_agent_or_none(self, selected_resource_jid: str) -> object | None:
         matches = [
@@ -256,13 +415,26 @@ class InProcessRobotAgentCompositionRuntime:
         agent: object,
         assignment: SelectedRAAssignmentEnvelope,
     ) -> None:
-        execution_mode = _required_text(
+        InProcessRobotAgentCompositionRuntime._require_execution_mode_value(
+            agent,
+            resource_jid=assignment.selected_resource_jid,
+            execution_mode=assignment.selected_execution_mode,
+        )
+
+    @staticmethod
+    def _require_execution_mode_value(
+        agent: object,
+        *,
+        resource_jid: str,
+        execution_mode: str,
+    ) -> None:
+        agent_execution_mode = _required_text(
             getattr(agent, "execution_mode", None),
             "selected RobotAgent execution_mode",
         )
-        if execution_mode != assignment.selected_execution_mode:
+        if agent_execution_mode != execution_mode:
             raise RAContextHandoffError(
-                "Selected live RobotAgent execution_mode does not match Phase 4."
+                f"Selected live RobotAgent {resource_jid} execution_mode does not match."
             )
 
     @staticmethod
@@ -281,9 +453,7 @@ class InProcessRobotAgentCompositionRuntime:
 def _phase_5_1_primitive_catalog(value: object) -> list[dict[str, object]]:
     """Convert the RA-owned synthesis catalog without changing its symbols."""
     if not isinstance(value, list) or not value:
-        raise RAContextHandoffError(
-            "Selected live RobotAgent primitive catalog must be non-empty."
-        )
+        raise RAContextHandoffError("Selected live RobotAgent primitive catalog must be non-empty.")
 
     converted: list[dict[str, object]] = []
     symbols: set[str] = set()
@@ -293,17 +463,13 @@ def _phase_5_1_primitive_catalog(value: object) -> list[dict[str, object]]:
                 f"RobotAgent primitive catalog entry {index} must be an object."
             )
         if item.get("synthesis_hidden") is True:
-            raise RAContextHandoffError(
-                f"RobotAgent primitive catalog entry {index} is hidden."
-            )
+            raise RAContextHandoffError(f"RobotAgent primitive catalog entry {index} is hidden.")
         if (
             "primitive_steps" in item
             or "composite_expansion" in item
             or item.get("primitive_kind") == "composite"
         ):
-            raise RAContextHandoffError(
-                f"RobotAgent primitive catalog entry {index} is composite."
-            )
+            raise RAContextHandoffError(f"RobotAgent primitive catalog entry {index} is composite.")
 
         symbol = _required_text(
             item.get("name"),

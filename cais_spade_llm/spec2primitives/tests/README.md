@@ -6,7 +6,8 @@ launch pass-through, installed-world prerequisite, do-not-leak rule, and the
 no-`bridge.py`-import boundary.
 
 Current PA production-grounding coverage verifies the native `retrieve` tool,
-transient proposal validation, and the evidence-gated retry loop. Tests prove
+single `target_feature` proposal validation, the separate semantic-review pass,
+and the evidence-gated retry loop. Tests prove
 that an early proposal does not write accepted RDF, a descriptor-derived typed
 gap re-enters PA with the previous evidence state, and the proposal is committed
 only after its active consumer's prerequisite chain is accepted. They also
@@ -15,9 +16,12 @@ unauthorized or stale evidence, target-feature-only CAD correspondence,
 ambiguous results, missing calibration, inconsistent frames, unreachable
 resources, emergency exhaustion, and synthetic descriptor routing without
 product or modality branches.
-The same suite verifies that a proposal omitting a required feature relation is
-not committed, receives deterministic correction feedback, and can be replaced
-by a valid proposal within the bounded PA investigation.
+The same suite verifies zero, one, and multiple state values; multiple paths in
+one record; unchanged PA-authored text, names, refs, paths, and evidence; and
+rejection of empty statements, duplicate names, unsupported processes,
+unauthorized evidence, missing or unaccepted records, invalid JSON Pointers,
+empty resolved values, and changed hashes. It verifies that a shallow or
+evidence-omitting semantic review returns a revision gap before ontology commit.
 It also verifies that PA cannot turn a required-record or approved-evidence
 choice into a user clarification while genuine requirement ambiguity remains
 eligible for clarification.
@@ -54,15 +58,18 @@ output and prove it cannot mutate the ABox. They also check one schema for
 boundaries; native document, CAD, and observation retrieval; dynamic selection
 independent of registration order; synthetic providers; source-revision replay
 protection; evidence-gap retries and emergency ceilings; directly-supported-only
-late mapping; wrong-domain/range rejection; completion-v3 hashes; F5
+late mapping; wrong-domain/range rejection; completion-v6 proposal, review,
+opaque presentation, process and physical-state choices, two-state reachability,
+endpoint-motion RobotAgent validation, registry/workcell lineage, evidence, and
+typed-value hashes; F5
 zero-inference startup; and zero document-VLM calls on CAD/RGB-D paths. Phase 4.2A
 tests cover exact approved CAD paths and hashes, complete binary STL loading,
 millimetre-to-metre conversion, analytic four-camera deprojection, RGB/pixel
 association, invalid-depth removal, calibration rejection, atomic typed records,
 assertion-free delta merging, injected fresh capture, and controlled
 preprocessing failure. Phase 4.2B1 tests cover deterministic
-source-plane removal, loose depth-connected regions, assembly-plate retention,
-fixed camera roles and parameters, filtering, stable label masks and hashes,
+neutral support-plane recording, loose depth-connected regions, uniform
+candidate retention, fixed parameters, stable label masks and hashes,
 zero-candidate unresolved records, tamper rejection, atomic cleanup and
 no-overwrite behavior, automatic capture → preprocessing → segmentation,
 unique roots, compact status, and the absence of operator processing controls.
@@ -84,8 +91,11 @@ validation, observation-time validity, payload and input-hash tampering,
 ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
 no-overwrite behavior, and status-only UI output.
 Phase 4.3 contract tests cover provider capabilities, typed context bindings,
-typed-contract version 3, completion version 3, native tool audits, and
-read-only validation of supported historical session/action contracts. They
+`TargetFeatureSemanticReview` version 2, proposal version 8, typed-contract and
+completion version 6, both state IRIs, presentation lineage, nested evidence and
+referenced state-value hashes, two-state reachability, endpoint-motion RobotAgent
+validation, native tool audits, and read-only validation of supported historical
+proposal, selection, completion, envelope, and session/action contracts. They
 also cover exact fixed symbols, PA-only authority, typed-binding
 status/frame/freshness validation, rejected obsolete formats, and artifact
 tamper rejection. Production grounding tests cover document-only semantic
@@ -100,16 +110,20 @@ states, and rejection of an unbacked completion turn.
 Phase 3.4 tests cover same-interaction answers, repeated questions, new evidence
 after a reply, exact history, cancellation, interruption recovery, and rejection
 of system-evidence clarification. Phase 3.5 tests cover referenced completion
-versions 2 and 3, document and typed-geometry paths, UI readiness, and session,
+versions 2, 3, and 4, document and typed-geometry paths, UI readiness, and session,
 ontology, contract, clarification, source, and typed-record tampering.
 
-Phase 5.1 tests cover the contract-first selected-RA handoff. They prove that
-the exact `assemble medium gear` assignment reaches `xarm6@localhost` before
-state retrieval, changed Phase 4 evidence blocks dispatch, a differently
-addressed RA rejects the envelope, and response JID/fingerprint mismatches fail
-closed. They also cover complete ordered catalogs, invalid or composite catalog
-entries, non-finite state, paired append-only revisions, unpaired-history
-rejection, failure-only assignment audits, and the absence of binding,
+Phase 5.1 tests cover the contract-first selected-RA handoff. A controlled
+production-profile fixture proves that a PA-selected `xarm6@localhost` assignment
+reaches only that exact RobotAgent before state retrieval; this is fixture
+evidence, not a default-selection rule. Separate arbitrary-process/resource and
+reversed-presentation tests prove active code does not enumerate `assembly`,
+`xarm6`, or `ur5e` and presentation order cannot choose the committed resource.
+Changed Phase 4 evidence blocks dispatch, a differently addressed RA rejects the
+v3 envelope, and response JID/fingerprint mismatches fail closed. The tests also
+cover complete ordered catalogs, invalid or composite catalog entries,
+non-finite state, paired append-only revisions, unpaired-history rejection,
+failure-only assignment audits, and the absence of binding, primitive-level
 validation, and execution artifacts.
 The read-only diagnostic coverage checks its transition from
 `waiting_for_phase_4` to `ready_for_assignment`, `waiting_for_ra`,
@@ -119,11 +133,17 @@ state; and catalog fingerprint. The PA UI test proves a valid Phase 4 completion
 surfaces the selected assignment without pretending that an RA response exists.
 
 Phase 5.2A tests prove that the exact selected RobotAgent receives a bounded
-structural-authoring request with no tools, returns only exact catalog symbols,
-and may repeat them or report unsupported. They cover one immutable
+structural-authoring request with a reconstructed `target_feature`, no
+top-level `task`, and no tools; returns only exact catalog symbols; and may
+repeat them or report unsupported. They verify host-generated feature lookup,
+unchanged desired-state meaning/evidence, bounded resolved-value projections,
+and fail-closed behavior before the RA call for mismatched feature/process,
+unpinned or changed records, invalid paths, and empty values. They cover one immutable
 `PrimitiveProgramDraft` per state/catalog pair, append-only revision after a
 Phase 5.1 restart, pinned evidence preservation, invented-symbol rejection, and
-the fail-closed UI action gate.
+the fail-closed UI action gate. They also verify that the unchanged persisted
+draft does not copy the target feature and diagnostics reconstruct the same
+input from pinned records.
 
 Later phases will add focused tests for live selected-RA delivery,
 `MissingContextBatch`, `CompositionContextBundle`, validation feedback, bound
@@ -134,4 +154,9 @@ bundle fingerprints, ownership routing, draft-derived batch aggregation and
 stable deduplication, replay rejection, stale versions, catalog changes,
 ambiguity, multiple productive PA/RA batch rounds, and fail-closed repeated or
 non-progressing requests. The Phase 5.1 controlled double establishes only the
-assignment and snapshot contract, not a live or production RA composition path.
+assignment and snapshot contract, not live SPADE delivery. Predetermined target
+geometry records, cross-camera fusion, multi-feature grounding, parameter
+binding, grasp/contact/orientation/tolerance/insertion validation, execution,
+and observed state updates remain intentionally unimplemented. Endpoint reach,
+IK, collision-aware endpoint/path validation, and no-motion assignment commit
+are implemented and covered.

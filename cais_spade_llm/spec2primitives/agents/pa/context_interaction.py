@@ -16,7 +16,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v3,
+    persist_pa_context_grounding_completion_v6,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -39,9 +39,7 @@ class ProductAgentContextRuntime(Protocol):
         *,
         response_format: dict[str, Any],
         tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[
-            [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
-        ]
+        tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
         | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
@@ -147,15 +145,14 @@ async def start_pa_context_interaction(
                 root,
                 fresh_abox,
                 attempted_evidence=tuple(
-                    item
-                    for item in pa_output.get("tool_call_refs", [])
-                    if isinstance(item, str)
+                    item for item in pa_output.get("tool_call_refs", []) if isinstance(item, str)
                 ),
                 assessed_at_ns=time.time_ns(),
             )
             persist_product_context_view(root, fresh_view)
-            persist_pa_context_grounding_completion_v3(
+            persist_pa_context_grounding_completion_v6(
                 root,
+                tbox=tbox,
                 product_requirement=product_requirement,
                 completion_turn=1,
                 decision_ref=turn_path.relative_to(root).as_posix(),
@@ -189,9 +186,7 @@ def _native_output_validation_error(value: Mapping[str, object]) -> str | None:
         if not isinstance(value.get("resource_selection_ref"), str):
             return "Native completion resource selection is invalid."
         tool_refs = value.get("tool_call_refs")
-        if not isinstance(tool_refs, list) or not all(
-            isinstance(item, str) for item in tool_refs
-        ):
+        if not isinstance(tool_refs, list) or not all(isinstance(item, str) for item in tool_refs):
             return "Native completion tool-call references are invalid."
     return None
 

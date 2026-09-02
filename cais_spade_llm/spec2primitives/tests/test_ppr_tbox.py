@@ -30,6 +30,7 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
         PPR.specification,
         PPR.product,
         PPR.feature,
+        PPR.state,
         PPR.process,
         PPR.processExecution,
         PPR.resource,
@@ -38,6 +39,8 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
     expected_properties = {
         PPR.defines,
         PPR.realizes,
+        PPR.hascurrentstate,
+        PPR.hasdesiredstate,
         PPR.capableOf,
         PPR.hasProcessExecution,
         PPR.runsProcess,
@@ -45,29 +48,23 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
     }
 
     assert set(tbox.classes) == {str(value) for value in expected_classes}
-    assert set(tbox.object_properties) == {
-        str(value) for value in expected_properties
-    }
+    assert set(tbox.object_properties) == {str(value) for value in expected_properties}
     assert tbox.datatype_properties == frozenset()
     assert set(tbox.graph.objects(PPR.defines, RDFS.domain)) == {PPR.specification}
     assert set(tbox.graph.objects(PPR.defines, RDFS.range)) == {PPR.feature}
     assert set(tbox.graph.objects(PPR.realizes, RDFS.domain)) == {PPR.process}
     assert set(tbox.graph.objects(PPR.realizes, RDFS.range)) == {PPR.feature}
+    for property_iri in (PPR.hascurrentstate, PPR.hasdesiredstate):
+        assert set(tbox.graph.objects(property_iri, RDFS.domain)) == {PPR.feature}
+        assert set(tbox.graph.objects(property_iri, RDFS.range)) == {PPR.state}
+        assert (property_iri, RDF.type, OWL.FunctionalProperty) in tbox.graph
     assert set(tbox.graph.objects(PPR.capableOf, RDFS.domain)) == {PPR.resource}
     assert set(tbox.graph.objects(PPR.capableOf, RDFS.range)) == {PPR.process}
-    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.domain)) == {
-        PPR.specification
-    }
-    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.range)) == {
-        PPR.processExecution
-    }
-    assert set(tbox.graph.objects(PPR.runsProcess, RDFS.domain)) == {
-        PPR.processExecution
-    }
+    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.domain)) == {PPR.specification}
+    assert set(tbox.graph.objects(PPR.hasProcessExecution, RDFS.range)) == {PPR.processExecution}
+    assert set(tbox.graph.objects(PPR.runsProcess, RDFS.domain)) == {PPR.processExecution}
     assert set(tbox.graph.objects(PPR.runsProcess, RDFS.range)) == {PPR.process}
-    assert set(tbox.graph.objects(PPR.runsOnResource, RDFS.domain)) == {
-        PPR.processExecution
-    }
+    assert set(tbox.graph.objects(PPR.runsOnResource, RDFS.domain)) == {PPR.processExecution}
     assert set(tbox.graph.objects(PPR.runsOnResource, RDFS.range)) == {PPR.resource}
     assert (PPR.runsProcess, RDF.type, OWL.FunctionalProperty) in tbox.graph
     assert (PPR.runsOnResource, RDF.type, OWL.FunctionalProperty) in tbox.graph
@@ -84,6 +81,7 @@ def test_schema_only_tbox_loads_with_exact_required_vocabulary() -> None:
         PPR.specification,
         PPR.product,
         PPR.feature,
+        PPR.state,
         PPR.process,
         PPR.processExecution,
         PPR.resource,
@@ -92,6 +90,8 @@ def test_schema_only_tbox_loads_with_exact_required_vocabulary() -> None:
     required_properties = {
         PPR.defines,
         PPR.realizes,
+        PPR.hascurrentstate,
+        PPR.hasdesiredstate,
         PPR.capableOf,
         PPR.hasProcessExecution,
         PPR.runsProcess,
@@ -190,6 +190,7 @@ def test_malformed_tbox_is_rejected(tmp_path: Path) -> None:
         ("Class", "specification"),
         ("Class", "product"),
         ("Class", "feature"),
+        ("Class", "state"),
         ("Class", "process"),
         ("Class", "resource"),
         ("Class", "capability"),

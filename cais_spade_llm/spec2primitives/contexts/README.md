@@ -16,9 +16,9 @@ contexts/<interaction_identifier>/
 │   │   ├── document_evidence/evidence_<number>.json  # historical recovery only
 │   │   ├── session/revision_<number>.json            # historical recovery only
 │   │   ├── ontology_grounding/proposal_<number>.json
+│   │   ├── target_feature_review/review_<number>.json
 │   │   ├── product_context/view_<number>.json
-│   │   ├── completion/typed_grounding_contract_v3.json
-│   │   ├── completion/pa_context_grounding_completion_v3.json
+│   │   ├── completion/typed_grounding_contract_0001.json
 │   │   └── <typed producer records>
 ├── resources/                              # Phase 5.1 RA-owned snapshots
 │   └── <exact_RA_identifier>/
@@ -49,7 +49,13 @@ New runs keep native PA turns and tool audits rather than an active
 transient while source evidence and failures stay audited. `ProductContextView`
 is written only from the accepted ABox and typed-record view after the evidence
 gate passes; it is not PA reasoning state. Clarification answers or
-cancellation and version-3 completion records are append-only. Supported older
+cancellation, `TargetFeatureSemanticReview` v2, and version-6 completion records
+are append-only. The accepted v8 proposal owns the single PA-authored
+`target_feature`; the v6 contract and completion pin that proposal, its two
+states, review, evidence and allocation presentations, registry and workcell
+snapshots, PA-authored physical state mapping, reachability, endpoint-motion
+RobotAgent validation, resource selection, assignment, and final ABox without
+copying the target feature. Supported older
 session and completion records remain read-only recovery inputs. Planned
 `CompositionContextBundle` versions
 will preserve task, ABox, typed-binding, catalog, and selected-resource
@@ -60,6 +66,9 @@ and the complete catalog returned by its injected runtime without assuming a
 fixed number of primitives. Phase 5.2A appends one RA-authored structural
 `PrimitiveProgramDraft` per captured pair. It produces no composition bundle,
 missing-context batch, bound candidate, validation trace, or execution record.
+The draft also does not persist `target_feature`. The read-only Phase 5.2
+diagnostic reconstructs it from the hash-verified proposal and resolves its
+referenced state values from the pinned typed records.
 
 Product RGB-D observation bundles use an `observation_ref` and retain the
 existing `manifest.json`, lossless RGB PNG, and original metric `float32` depth
@@ -115,15 +124,19 @@ calibration readiness and any exact actionable configuration failure.
 When a controlled caller supplies the matching approved extrinsic calibration,
 `calibration_<number>/calibration_record.json` stores its exact source and
 target frames, rigid transform, validity window, source details, and payload hash.
-The active frame-conversion step writes a version-1
+The active frame-conversion step writes a neutral version-2
 `RobotFrameLocationRecord`, checking calibration against the originating
-observation timestamp and translating the accepted camera-frame centroid into
-the candidate resources' required frame. Missing, invalid, stale, or
-selected-frame-missing calibration leaves the typed prerequisite unsatisfied,
-so the provisional semantic proposal is not committed. A separate pose record
-is written only when an orientation-sensitive consumer requires one. Rejected
-or ambiguous locations retain no robot-frame coordinate, and the status-only UI
-never exposes a transform.
+observation timestamp and translating only the PA-selected candidate when a
+verifier requests it. PA's state assignment determines whether that record
+supports `current_state` or `desired_state`. Missing, invalid, stale, or
+selected-frame-missing calibration rejects that reachability check. A separate
+pose record is written only when an orientation-sensitive consumer requires
+one.
+
+`TargetFeatureGeometryRecord` is not part of the architecture. Document, CAD,
+RGB-D, calibration, and frame-conversion evidence remains typed and hash-pinned;
+numeric geometry is derived for the activated verifier rather than supplied as
+a predetermined target answer.
 
 Generated interaction directories are ignored by Git. Ground-truth evaluation
 is excluded from runtime context and belongs under `../evaluations/` so it

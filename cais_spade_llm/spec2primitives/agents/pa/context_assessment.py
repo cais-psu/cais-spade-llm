@@ -21,7 +21,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v3,
+    persist_pa_context_grounding_completion_v6,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -176,8 +176,10 @@ async def continue_pa_context_interaction(
     if turn_path.exists():
         existing = _read_json(turn_path)
         output = existing.get("PA_output") if isinstance(existing, Mapping) else None
-        return dict(output) if isinstance(output, Mapping) else _failure(
-            "invalid_interaction", "Existing ProductAgent turn is invalid."
+        return (
+            dict(output)
+            if isinstance(output, Mapping)
+            else _failure("invalid_interaction", "Existing ProductAgent turn is invalid.")
         )
 
     try:
@@ -244,8 +246,9 @@ async def continue_pa_context_interaction(
                 assessed_at_ns=time.time_ns(),
             )
             persist_product_context_view(root, fresh_view)
-            persist_pa_context_grounding_completion_v3(
+            persist_pa_context_grounding_completion_v6(
                 root,
+                tbox=tbox,
                 product_requirement=requirement,
                 completion_turn=next_turn,
                 decision_ref=turn_path.relative_to(root).as_posix(),
@@ -272,7 +275,10 @@ def _pending_clarification(root: Path) -> tuple[dict[str, object] | None, str | 
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, f"Latest ProductAgent turn could not be read: {exc}."
     output = turn.get("PA_output") if isinstance(turn, Mapping) else None
-    if not isinstance(output, Mapping) or output.get("grounding_status") != "clarification_required":
+    if (
+        not isinstance(output, Mapping)
+        or output.get("grounding_status") != "clarification_required"
+    ):
         return None, "The latest ProductAgent turn is not awaiting clarification."
     question = output.get("clarification_question")
     number = turn.get("turn")
@@ -368,7 +374,11 @@ def _retrieved_evidence_ids(root: Path) -> tuple[str, ...]:
             continue
         resolved = value.get("resolved_evidence") if isinstance(value, Mapping) else None
         evidence_id = resolved.get("evidence_id") if isinstance(resolved, Mapping) else None
-        if isinstance(evidence_id, str) and value.get("failure") is None and evidence_id not in evidence_ids:
+        if (
+            isinstance(evidence_id, str)
+            and value.get("failure") is None
+            and evidence_id not in evidence_ids
+        ):
             evidence_ids.append(evidence_id)
     return tuple(evidence_ids)
 
@@ -384,7 +394,9 @@ def _native_output_error(value: Mapping[str, object]) -> str | None:
     status = value.get("grounding_status")
     if status not in {"complete", "incomplete", "clarification_required"}:
         return "Native ProductAgent output has an invalid grounding_status."
-    if status == "clarification_required" and not isinstance(value.get("clarification_question"), str):
+    if status == "clarification_required" and not isinstance(
+        value.get("clarification_question"), str
+    ):
         return "Native clarification output is invalid."
     if status == "incomplete" and not isinstance(value.get("insufficient_evidence"), str):
         return "Native insufficient-evidence output is invalid."

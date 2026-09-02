@@ -66,17 +66,18 @@ configured pose, detector response, or evaluator data.
 `frame_conversion.py` atomically records one injected
 `CameraToRobotCalibrationRecord` with exact source and target frames, validity,
 approved-source provenance, derived rotation representations, and a
-deterministic payload hash. For current coarse resource grounding, it
-revalidates the accepted correspondence provenance, checks calibration at the
+deterministic payload hash. For allocation, it checks calibration at the
 originating observation timestamp, requires the declared target frame, and
-translates the observed candidate center into that frame.
+translates only the PA-selected neutral candidate into that frame.
 
 An accepted location conversion atomically persists one
-`RobotFrameLocationRecord` version 1 with the translated 3D location and exact
+`RobotFrameLocationRecord` version 2 with the translated 3D location and exact
 input hashes. A separate orientation-sensitive consumer may activate the
 retained `CADPoseEstimationRecord` and `RobotFramePoseRecord` path. Ambiguous or
 rejected inputs preserve their state without accepted robot-frame coordinates.
-These paths perform no robot selection, RA call, planning, or execution and
+`RobotFrameLocationRecord` and `RobotFramePoseRecord` have no embedded semantic
+source/target role. PA's feature-state assignment provides their meaning. These
+paths perform no robot selection, RA call, planning, or execution and
 read no world, spawn, entity-state, detector, or evaluator input.
 
 `diagnostic.py` exposes the injected `ObservationCaptureRuntime`, retains the
@@ -105,3 +106,10 @@ preprocessing, segmentation, size association, pose estimation, and frame
 conversion are
 supporting infrastructure, not the research contribution, and cannot authorize
 context completion.
+
+These components expose neutral candidates, not semantic source/target labels.
+The architecture has no `TargetFeatureGeometryRecord`. PA decides which
+approved evidence to retrieve and which candidate supports each feature state;
+the frame converter derives a location only after a verifier requests that
+selected handle. This README prescribes no document, RGB-D, CAD, camera, or
+resource order.

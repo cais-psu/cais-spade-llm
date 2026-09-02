@@ -15,7 +15,9 @@ UI does not expose geometry-processing controls; PA may invoke request-scoped
 live observation through the controlled `retrieve` boundary, while the UI
 polls only compact processing status.
 
-ProductAgent and future RobotAgent adapters belong under `../agents/pa/` and
-`../agents/ra/`, respectively. ProductAgent and RobotAgent remain shared,
-read-only runtime authorities. This directory retains only non-agent runtime
+ProductAgent and RobotAgent adapters belong under `../agents/pa/` and
+`../agents/ra/`, respectively. The current RA adapter supports the Phase 5.1
+state/catalog snapshot and Phase 5.2A structural-symbol request for only the
+exact selected RobotAgent. ProductAgent and RobotAgent remain shared, read-only
+implementation authorities. This directory retains only non-agent runtime
 composition, including the Gazebo and UI adapters.

@@ -96,7 +96,9 @@ def test_registry_detects_graph_and_manifest_changes(tmp_path: Path) -> None:
         profile=profile,
     )
 
-    registry.graph.add((URIRef(f"{RESOURCE_NAMESPACE}unexpected"), RDF.type, Namespace(PPR_NAMESPACE).resource))
+    registry.graph.add(
+        (URIRef(f"{RESOURCE_NAMESPACE}unexpected"), RDF.type, Namespace(PPR_NAMESPACE).resource)
+    )
     with pytest.raises(ResourceRegistryError, match="graph changed"):
         registry.assert_unchanged()
 
@@ -222,16 +224,19 @@ def _write_profile(
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
-                "process": {
-                    "symbol": "assembly",
-                    "iri": "https://cais-spade-llm.local/process/assembly",
-                },
+                "schema_version": 2,
+                "processes": [
+                    {
+                        "symbol": "assembly",
+                        "iri": "https://cais-spade-llm.local/process/assembly",
+                    }
+                ],
                 "resources": [
                     {
                         "symbol": symbol,
                         "iri": f"{RESOURCE_NAMESPACE}{symbol}",
                         "manifest_ref": path.relative_to(root).as_posix(),
+                        "capable_process_iris": ["https://cais-spade-llm.local/process/assembly"],
                     }
                     for symbol, path in manifest_paths.items()
                 ],

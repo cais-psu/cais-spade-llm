@@ -55,7 +55,9 @@ def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
     assert selected is not None
     assert selected["camera_id"] == "cam_mk3"
     assert selected["frame"] == "cam_mk3_optical_frame"
-    assert selected["candidate_id"] == 2
+    assert selected["observation_handle"] == "view_0001"
+    assert selected["candidate_handle"] == "candidate_0001_0003"
+    assert selected["candidate_id"] == 3
     np.testing.assert_allclose(
         selected["candidate_center_m"],
         [-0.04, -0.06, 0.8],
@@ -71,9 +73,7 @@ def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
     assert record["record_type"] == "CADSizeCorrespondenceRecord"
     assert record["CAD"]["context_ref"] == "Gear_Medium.STL"
     assert record["CAD"]["record"]["sha256"] == _sha256(cad_path)
-    assert record["segmentation"]["record"]["sha256"] == _sha256(
-        segmentation_path
-    )
+    assert record["segmentation"]["record"]["sha256"] == _sha256(segmentation_path)
     assert record["pose"] == "not_evaluated"
     assert record["cross_camera_fusion"] == "not_evaluated"
 
@@ -202,6 +202,7 @@ def test_candidate_touching_image_boundary_fails_closed_as_partial_visibility(
         candidate
         for candidate in result.record["ranked_candidates"]
         if candidate["camera_id"] == "cam_mk3"
+        and candidate["measurement_status"] == "partial_visibility"
     ]
     assert len(partial) == 1
     assert partial[0]["measurement_status"] == "partial_visibility"
@@ -405,19 +406,12 @@ def _add_size_candidates(
 ) -> None:
     grid_v, grid_u = np.ogrid[:IMAGE_HEIGHT, :IMAGE_WIDTH]
     default_centers = ((140, 180), (280, 180), (440, 180))
-    centers = (
-        ((0, 180),)
-        if clipped_candidate
-        else default_centers[: len(diameters_m)]
-    )
+    centers = ((0, 180),) if clipped_candidate else default_centers[: len(diameters_m)]
     for index, (diameter_m, (center_u, center_v)) in enumerate(
         zip(diameters_m, centers, strict=True)
     ):
         radius_px = round(diameter_m * _FOCAL_LENGTH_PX / (2.0 * _DEPTH_M))
-        mask = (
-            np.square(grid_u - center_u) + np.square(grid_v - center_v)
-            <= radius_px**2
-        )
+        mask = np.square(grid_u - center_u) + np.square(grid_v - center_v) <= radius_px**2
         depth_m[mask] = np.float32(_DEPTH_M)
         color = np.asarray([200 - index * 30, 20 + index * 40, 50], dtype=np.uint8)
         rgb[mask] = color

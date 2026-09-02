@@ -93,6 +93,7 @@ class _LiveRobotAgent:
         robot_state: dict[str, object] | None = None,
         primitive_catalog: list[dict[str, object]] | None = None,
         draft_response: dict[str, object] | None = None,
+        feasibility_allowed: bool = True,
     ) -> None:
         self.jid = jid
         self.execution_mode = execution_mode
@@ -107,9 +108,7 @@ class _LiveRobotAgent:
             }
         )
         self.primitive_catalog = (
-            primitive_catalog
-            if primitive_catalog is not None
-            else _raw_live_catalog()
+            primitive_catalog if primitive_catalog is not None else _raw_live_catalog()
         )
         self.draft_response = draft_response or {
             "draft_status": "proposed",
@@ -117,6 +116,8 @@ class _LiveRobotAgent:
             "unsupported_reason": None,
         }
         self.draft_calls: list[dict[str, object]] = []
+        self.feasibility_allowed = feasibility_allowed
+        self.feasibility_calls: list[dict[str, object]] = []
 
     def is_alive(self) -> bool:
         return self.alive
@@ -126,6 +127,27 @@ class _LiveRobotAgent:
 
     def recovery_synthesis_primitive_catalog(self) -> list[dict[str, object]]:
         return deepcopy(self.primitive_catalog)
+
+    def check_recovery_physical_feasibility(
+        self,
+        *,
+        part_context: dict[str, object],
+        recovery_snapshot: dict[str, object],
+        operation_kind: str,
+        grounded_action: dict[str, object],
+    ) -> dict[str, object]:
+        self.feasibility_calls.append(
+            {
+                "part_context": deepcopy(part_context),
+                "recovery_snapshot": deepcopy(recovery_snapshot),
+                "operation_kind": operation_kind,
+                "grounded_action": deepcopy(grounded_action),
+            }
+        )
+        return {
+            "allowed": self.feasibility_allowed,
+            "reason": ("workspace accepted" if self.feasibility_allowed else "workspace rejected"),
+        }
 
     async def ask_llm_structured(
         self,
@@ -225,6 +247,115 @@ class _LiveRobotAgentHost:
         return await coroutine
 
 
+class _PlanOnlyRuntime:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def validate(self, request: dict[str, object]) -> dict[str, object]:
+        self.requests.append(deepcopy(request))
+        endpoint = {
+            "status": "accepted",
+            "message": "collision-aware plan accepted",
+            "error_code": 1,
+        }
+        return {
+            "status": "accepted",
+            "current_state": dict(endpoint),
+            "desired_state": dict(endpoint),
+            "feedback": None,
+        }
+
+
+def _plan_only_request(resource_jid: str) -> dict[str, object]:
+    return {
+        "process_symbol": "assembly",
+        "process_iri": "https://cais-spade-llm.local/process/assembly",
+        "feature_iri": "https://example.local/feature_0001",
+        "resource_symbol": resource_jid.split("@", 1)[0],
+        "resource_iri": f"https://cais-spade-llm.local/resource/{resource_jid.split('@', 1)[0]}",
+        "resource_jid": resource_jid,
+        "execution_mode": "simulation",
+        "moveit_group": "selected_arm",
+        "end_effector_link": "selected_tool0",
+        "target_frame": "world",
+        "validation_scope": "endpoint_motion",
+        "checked_constraints": [
+            "positional_ik",
+            "collision_aware_endpoints",
+            "path_between_endpoints",
+        ],
+        "unvalidated_constraints": [
+            "grasping",
+            "end_effector_orientation",
+            "attached_object_geometry",
+            "assembly_tolerance",
+            "force_contact",
+            "insertion_constraints",
+        ],
+        "current_state": {
+            "state_iri": "https://example.local/currentstate_0001",
+            "evidence_handle": "neutral_candidate_0001",
+            "translation_m": [0.1, 0.2, 0.3],
+            "location_record_ref": "current.json",
+            "location_record_sha256": "0" * 64,
+        },
+        "desired_state": {
+            "state_iri": "https://example.local/desiredstate_0001",
+            "evidence_handle": "neutral_candidate_0002",
+            "translation_m": [0.4, 0.5, 0.6],
+            "location_record_ref": "desired.json",
+            "location_record_sha256": "1" * 64,
+        },
+        "mode": "plan_only",
+        "motion_executed": False,
+        "request_fingerprint": "2" * 64,
+    }
+
+
+def test_plan_only_adapter_contacts_only_the_pa_selected_robot_agent() -> None:
+    xarm6 = _LiveRobotAgent(jid="xarm6@localhost")
+    ur5e = _LiveRobotAgent(jid="ur5e@localhost")
+    host = _LiveRobotAgentHost([xarm6, ur5e])
+    moveit = _PlanOnlyRuntime()
+    runtime = InProcessRobotAgentCompositionRuntime(
+        host,
+        moveit_plan_only_runtime=moveit,
+    )
+
+    response = asyncio.run(
+        runtime.validate_plan_only_allocation(_plan_only_request("ur5e@localhost"))
+    )
+
+    assert response["status"] == "accepted"
+    assert xarm6.feasibility_calls == []
+    assert len(ur5e.feasibility_calls) == 2
+    assert [call["grounded_action"]["target"]["pose"] for call in ur5e.feasibility_calls] == [
+        {"x": 0.1, "y": 0.2, "z": 0.3},
+        {"x": 0.4, "y": 0.5, "z": 0.6},
+    ]
+    assert len(moveit.requests) == 1
+    assert moveit.requests[0]["resource_jid"] == "ur5e@localhost"
+    assert moveit.requests[0]["motion_executed"] is False
+
+
+def test_robot_agent_precheck_rejection_never_invokes_moveit() -> None:
+    selected = _LiveRobotAgent(feasibility_allowed=False)
+    moveit = _PlanOnlyRuntime()
+    runtime = InProcessRobotAgentCompositionRuntime(
+        _LiveRobotAgentHost([selected]),
+        moveit_plan_only_runtime=moveit,
+    )
+
+    response = asyncio.run(
+        runtime.validate_plan_only_allocation(_plan_only_request("xarm6@localhost"))
+    )
+
+    assert response["status"] == "rejected"
+    assert response["current_state"]["status"] == "rejected"
+    assert response["desired_state"]["status"] == "rejected"
+    assert moveit.requests == []
+
+
 def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
     tmp_path: Path,
 ) -> None:
@@ -240,8 +371,7 @@ def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
     assert host.runtime_calls == 1
     assert captured.robot_state.robot_state["controller_ready"] is False
     assert [
-        entry["primitive_symbol"]
-        for entry in captured.primitive_catalog.primitive_catalog
+        entry["primitive_symbol"] for entry in captured.primitive_catalog.primitive_catalog
     ] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     detect_parts = next(
         entry
@@ -251,9 +381,7 @@ def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
     assert detect_parts["typed_parameters"] == (
         [{"name": "part_name", "type": "string", "required": False}]
     )
-    assert detect_parts["typed_results"] == [
-        {"name": "pose", "type": "object"}
-    ]
+    assert detect_parts["typed_results"] == [{"name": "pose", "type": "object"}]
     assert detect_parts["conditions"] == {"controller_ready": True}
     assert detect_parts["effects"] == {"part_observed": True}
     assert raw_catalog == _raw_live_catalog()
@@ -281,14 +409,12 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
     assert call["max_tool_rounds"] == 0
     assert call["include_agent_instructions"] is False
     assert "assemble medium gear" in str(call["prompt"])
-    assert "The available evidence does not identify the destination shaft." in str(
-        call["prompt"]
-    )
+    assert "The medium gear is assembled as requested." in str(call["prompt"])
     composition_input = _composition_input_from_prompt(call["prompt"])
     projection = composition_input["ontology_projection"]
-    final_view_path = sorted(
-        (tmp_path / "products/grounding/product_context").glob("view_*.json")
-    )[-1]
+    final_view_path = sorted((tmp_path / "products/grounding/product_context").glob("view_*.json"))[
+        -1
+    ]
     final_view = _read_json(final_view_path)
     assert set(projection) == {"tbox_fingerprint", "abox_fingerprint", "assertions"}
     assert projection["tbox_fingerprint"] == completion["tbox_fingerprint"]
@@ -304,9 +430,7 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
         assert excluded_field not in serialized_projection
     response_schema = call["response_format"]
     assert response_schema["schema"]["type"] == "object"
-    assert response_schema["schema"]["properties"]["primitive_symbols"]["items"][
-        "enum"
-    ] == (
+    assert response_schema["schema"]["properties"]["primitive_symbols"]["items"]["enum"] == (
         _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     )
 
@@ -315,9 +439,9 @@ def test_phase_5_2_rejects_assignment_inconsistent_ontology_projection(
     tmp_path: Path,
 ) -> None:
     completion = persist_native_completion_fixture(tmp_path).to_record()
-    final_view_path = sorted(
-        (tmp_path / "products/grounding/product_context").glob("view_*.json")
-    )[-1]
+    final_view_path = sorted((tmp_path / "products/grounding/product_context").glob("view_*.json"))[
+        -1
+    ]
     final_view = _read_json(final_view_path)
     final_view["assertions"] = [
         assertion
@@ -383,7 +507,7 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     composition_input = diagnostic["composition_input"]
     assert composition_input == delivered_input
     assert set(composition_input) == {
-        "task",
+        "target_feature",
         "selected_resource",
         "ontology_projection",
         "robot_state",
@@ -399,13 +523,18 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     assert projection["assertions"]
     grounded_context = composition_input["grounded_context"]
     assert isinstance(grounded_context, dict)
-    assert grounded_context["context_summary"]
-    assert grounded_context["known_context_limits"] == [
-        "The available evidence does not identify the destination shaft."
-    ]
+    assert set(grounded_context) == {"typed_records"}
+    target_feature = composition_input["target_feature"]
+    assert target_feature["product_requirement"] == "assemble medium gear"
+    assert target_feature["desired_state"]["statement"]["text"] == (
+        "The medium gear is assembled as requested."
+    )
+    assert target_feature["current_state"]["state_values"] == []
+    assert target_feature["desired_state"]["state_values"] == []
+    assert target_feature["resolved_state_values"] == []
+    assert "task" not in composition_input
     assert all(
-        set(record) == {"record_type", "record_ref"}
-        for record in grounded_context["typed_records"]
+        set(record) == {"record_type", "record_ref"} for record in grounded_context["typed_records"]
     )
     serialized_input = json.dumps(composition_input, sort_keys=True)
     for excluded_field in (
@@ -431,18 +560,54 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     assert read_phase_5_2_diagnostic(tmp_path).status == "ready_for_draft"
     second = asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
     assert second.path.name == "draft_0002.json"
-    assert first.path.read_bytes() == json.dumps(
-        first.to_record(), indent=2, sort_keys=True
-    ).encode("utf-8") + b"\n"
+    assert (
+        first.path.read_bytes()
+        == json.dumps(first.to_record(), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    )
+
+
+def test_ra_receives_resolved_target_state_values_without_persisting_them(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(
+        tmp_path,
+        include_target_state_values=True,
+    )
+    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    runtime = _StructuralDraftRuntime(
+        {
+            "draft_status": "proposed",
+            "primitive_symbols": ["detect_parts", "move_pose"],
+            "unsupported_reason": None,
+        }
+    )
+
+    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
+
+    composition_input = _composition_input_from_prompt(runtime.calls[0]["prompt"])
+    assert "task" not in composition_input
+    target_feature = composition_input["target_feature"]
+    assert [item["name"] for item in target_feature["desired_state"]["state_values"]] == [
+        "specified_finish",
+        "specified_coating",
+    ]
+    resolved_by_name = {item["name"]: item for item in target_feature["resolved_state_values"]}
+    assert resolved_by_name["specified_finish"]["resolved_value"] == "matte"
+    assert resolved_by_name["specified_coating"]["resolved_value"] == "primer"
+    assert resolved_by_name["specified_finish"]["value_ref"]["field_path"] == ("/overview/summary")
+    assert resolved_by_name["specified_coating"]["value_ref"]["field_path"] == (
+        "/overview/observations/0"
+    )
+    serialized_draft = json.dumps(draft.to_record(), sort_keys=True)
+    assert "target_feature" not in serialized_draft
+    assert "specified_finish" not in serialized_draft
 
 
 def test_phase_5_2_diagnostic_blocks_mismatched_draft_evidence_ref(
     tmp_path: Path,
 ) -> None:
     persist_native_completion_fixture(tmp_path)
-    context = asyncio.run(
-        activate_selected_ra_context(_AssignedContextRuntime(), tmp_path)
-    )
+    context = asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
     runtime = _StructuralDraftRuntime(
         {
             "draft_status": "proposed",
@@ -454,9 +619,7 @@ def test_phase_5_2_diagnostic_blocks_mismatched_draft_evidence_ref(
     assignment_record = _read_json(context.assignment_path)
     altered = draft.to_record()
     altered["robot_state_ref"] = context.assignment_path.relative_to(tmp_path).as_posix()
-    altered["robot_state_sha256"] = hashlib.sha256(
-        context.assignment_path.read_bytes()
-    ).hexdigest()
+    altered["robot_state_sha256"] = hashlib.sha256(context.assignment_path.read_bytes()).hexdigest()
     altered["robot_state_fingerprint"] = assignment_record["fingerprint"]
     altered["fingerprint"] = _record_fingerprint(altered)
     _write_json(draft.path, altered)
@@ -512,9 +675,7 @@ def test_phase_5_2_handles_unsupported_and_unknown_symbols(
     diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
     assert draft.record["structural_steps"] == []
     assert diagnostic["status"] == expected_status
-    assert diagnostic["unsupported_reason"] == (
-        "The catalog has no insertion behavior."
-    )
+    assert diagnostic["unsupported_reason"] == ("The catalog has no insertion behavior.")
     assert isinstance(diagnostic["composition_input"], dict)
 
 
@@ -533,9 +694,7 @@ def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
 
     assert "pick_approach" in agent.executables
     assert "execute_recovery_macro" in agent.executables
-    assert [
-        binding["scenario_id"] for binding in agent.failure_scenarios
-    ] == ["lg_slippage"]
+    assert [binding["scenario_id"] for binding in agent.failure_scenarios] == ["lg_slippage"]
     assert [
         entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()
     ] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
@@ -599,16 +758,12 @@ def test_context_only_robot_agent_has_no_tools_failures_or_controller(
     assert snapshot["perception_ready"] is False
     assert snapshot["tf_ready"] is False
     assert snapshot["tcp_ready"] is False
-    synthesis_symbols = [
-        entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()
-    ]
+    synthesis_symbols = [entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()]
     assert synthesis_symbols
     if resource_name == "xarm6":
         assert synthesis_symbols == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     messages = [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == f"agent:{resource_name}"
+        record.getMessage() for record in caplog.records if record.name == f"agent:{resource_name}"
     ]
     assert any("profile=context_only tools=[]" in message for message in messages)
     assert not any("failure_scenarios" in message for message in messages)
@@ -672,7 +827,10 @@ def test_in_process_ra_adapter_startup_failures_preserve_phase_4(
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
 
     assert completion_path.read_bytes() == completion_bytes
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    resource_root = tmp_path / "resources/xarm6@localhost"
+    assert (resource_root / "validation").is_dir()
+    assert not (resource_root / "robot_state").exists()
+    assert not (resource_root / "primitive_catalog_snapshot").exists()
     assert read_phase_5_1_diagnostic(tmp_path).status == "waiting_for_ra"
     assert host.start_calls == (0 if variant == "gazebo_stopped" else 1)
     assert host.full_system_start_calls == 0
@@ -703,7 +861,7 @@ def test_in_process_ra_adapter_times_out_waiting_for_spec2primitives_gazebo(
 
     assert host.start_calls == 0
     assert completion_path.read_bytes() == completion_bytes
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -737,10 +895,8 @@ def test_in_process_ra_adapter_fails_closed_without_exact_compatible_live_agent(
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
 
     assert completion_path.read_bytes() == completion_bytes
-    assert (
-        tmp_path / "composition/selected_ra_assignments/assignment_0001.json"
-    ).is_file()
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    assert (tmp_path / "composition/selected_ra_assignments/assignment_0001.json").is_file()
+    _assert_no_ra_context_snapshots(tmp_path)
     assert read_phase_5_1_diagnostic(tmp_path).status == "waiting_for_ra"
 
 
@@ -790,7 +946,7 @@ def test_in_process_ra_adapter_rejects_malformed_context(
     with pytest.raises(RAContextHandoffError):
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
 
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
 
 
 def test_in_process_ra_adapter_retries_same_phase_4_assignment(
@@ -800,9 +956,7 @@ def test_in_process_ra_adapter_retries_same_phase_4_assignment(
     completion_path = tmp_path / "interaction_record/context_completion_0001.json"
     completion_bytes = completion_path.read_bytes()
     agent = _LiveRobotAgent(alive=False)
-    runtime = InProcessRobotAgentCompositionRuntime(
-        _LiveRobotAgentHost([agent])
-    )
+    runtime = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost([agent]))
 
     with pytest.raises(RAContextHandoffError, match="is not running"):
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
@@ -870,6 +1024,28 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
 
     assignment_record = _read_json(first.assignment_path)
     catalog_record = _read_json(first.primitive_catalog_path)
+    assert assignment_record["schema_version"] == 3
+    assert assignment_record["process_symbol"] == "assembly"
+    assert assignment_record["selected_resource_symbol"] == "xarm6"
+    assert assignment_record["allocation_label"] == (
+        "validated endpoint-motion allocation"
+    )
+    assert assignment_record["validation_scope"] == "endpoint_motion"
+    assert assignment_record["motion_executed"] is False
+    assert assignment_record["current_state_evidence"]["evidence_handle"]
+    assert assignment_record["desired_state_evidence"]["evidence_handle"]
+    assert assignment_record["registry_snapshot_ref"].endswith(
+        "resource_registry_snapshot_0001.json"
+    )
+    assert assignment_record["workcell_snapshot_ref"].endswith(
+        "predefined_workcell_snapshot_0001.json"
+    )
+    assert assignment_record["evidence_presentation_ref"].endswith(
+        "evidence_presentation_record.json"
+    )
+    assert assignment_record["allocation_presentation_ref"].endswith(
+        "allocation_presentation_record.json"
+    )
     assert "typed_context_refs" not in assignment_record
     assert "ontology_projection_ref" not in assignment_record
     assert "composition_input" not in assignment_record
@@ -884,7 +1060,13 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert not (tmp_path / "resources/xarm6@localhost/primitive_program_drafts").exists()
     assert not (tmp_path / "composition/missing_context_batches").exists()
     assert not (tmp_path / "resources/xarm6@localhost/primitive_steps").exists()
-    assert not (tmp_path / "resources/xarm6@localhost/validation").exists()
+    validation_records = list(
+        (tmp_path / "resources/xarm6@localhost/validation").glob(
+            "*/plan_only_feasibility_validation_record.json"
+        )
+    )
+    assert len(validation_records) == 1
+    assert _read_json(validation_records[0])["motion_executed"] is False
 
     diagnostic = read_phase_5_1_diagnostic(tmp_path).to_view()
     assert diagnostic["status"] == "context_captured"
@@ -898,9 +1080,7 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert diagnostic["robot_state"]["current_state"] == "idle"
     assert diagnostic["primitive_symbols"] == ["detect_parts", "move_pose"]
     assert diagnostic["primitive_count"] == 2
-    assert diagnostic["catalog_fingerprint"] == (
-        second.primitive_catalog.catalog_fingerprint
-    )
+    assert diagnostic["catalog_fingerprint"] == (second.primitive_catalog.catalog_fingerprint)
 
 
 def test_phase_5_1_restart_preserves_legacy_catalog_and_exposes_latest_synthesis(
@@ -963,6 +1143,49 @@ def test_changed_phase_4_selection_prevents_ra_dispatch(tmp_path: Path) -> None:
     assert not (tmp_path / "composition/selected_ra_assignments").exists()
 
 
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "process",
+        "state",
+        "reachability",
+        "validation",
+        "registry",
+        "workcell",
+        "evidence_presentation",
+        "allocation_presentation",
+    ],
+)
+def test_assignment_envelope_v3_rejects_altered_authority_lineage(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    context = asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    assignment = _read_json(context.assignment_path)
+    if variant == "process":
+        assignment["process_symbol"] = "altered_process"
+    elif variant == "state":
+        assignment["current_state_evidence"]["evidence_handle"] = "altered_evidence"
+    else:
+        fingerprint_field = {
+            "reachability": "reachability_check_fingerprint",
+            "validation": "robot_agent_validation_fingerprint",
+            "registry": "registry_snapshot_fingerprint",
+            "workcell": "workcell_snapshot_fingerprint",
+            "evidence_presentation": "evidence_presentation_fingerprint",
+            "allocation_presentation": "allocation_presentation_fingerprint",
+        }[variant]
+        assignment[fingerprint_field] = "0" * 64
+    assignment["fingerprint"] = _record_fingerprint(assignment)
+    _write_json(context.assignment_path, assignment)
+
+    diagnostic = read_phase_5_1_diagnostic(tmp_path)
+
+    assert diagnostic.status == "blocked"
+    assert diagnostic.failure
+
+
 def test_assignment_addressed_to_another_ra_is_rejected(tmp_path: Path) -> None:
     persist_native_completion_fixture(tmp_path)
     runtime = _AssignedContextRuntime(self_jid="ur5e@localhost")
@@ -972,7 +1195,7 @@ def test_assignment_addressed_to_another_ra_is_rejected(tmp_path: Path) -> None:
 
     assert runtime.assignments == []
     assert (tmp_path / "composition/selected_ra_assignments/assignment_0001.json").is_file()
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -998,7 +1221,7 @@ def test_response_must_match_assignment(
         asyncio.run(activate_selected_ra_context(runtime, tmp_path))
 
     assert len(runtime.assignments) == 1
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -1030,7 +1253,7 @@ def test_invalid_ra_context_is_not_persisted(tmp_path: Path, variant: str) -> No
 
     assert len(runtime.assignments) == 1
     assert (tmp_path / "composition/selected_ra_assignments/assignment_0001.json").is_file()
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
 
 
 def test_unpaired_snapshot_prevents_ra_dispatch(tmp_path: Path) -> None:
@@ -1059,12 +1282,10 @@ def test_runtime_failure_leaves_only_assignment_audit(tmp_path: Path) -> None:
 
     assert len(runtime.assignments) == 1
     assert (tmp_path / "composition/selected_ra_assignments/assignment_0001.json").is_file()
-    assert not (tmp_path / "resources/xarm6@localhost").exists()
+    _assert_no_ra_context_snapshots(tmp_path)
     diagnostic = read_phase_5_1_diagnostic(tmp_path)
     assert diagnostic.status == "waiting_for_ra"
-    assert diagnostic.assignment_ref == (
-        "composition/selected_ra_assignments/assignment_0001.json"
-    )
+    assert diagnostic.assignment_ref == ("composition/selected_ra_assignments/assignment_0001.json")
 
 
 def _valid_catalog() -> list[dict[str, Any]]:
@@ -1132,9 +1353,7 @@ def _raw_live_catalog() -> list[dict[str, object]]:
         "detect_parts": {
             "params": {"part_name": {"type": "string"}},
             "required_params": [],
-            "output_schema": {
-                "pose": {"x": "number", "y": "number", "z": "number"}
-            },
+            "output_schema": {"pose": {"x": "number", "y": "number", "z": "number"}},
             "primitive_kind": "observe",
             "preconditions": {"controller_ready": True},
             "effects": {"part_observed": True},
@@ -1202,6 +1421,14 @@ def _write_json(path: Path, value: object) -> None:
         json.dumps(value, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _assert_no_ra_context_snapshots(root: Path) -> None:
+    """Allow Phase 4 validation evidence but no Phase 5 RA context capture."""
+    resource_root = root / "resources/xarm6@localhost"
+    assert (resource_root / "validation").is_dir()
+    assert not (resource_root / "robot_state").exists()
+    assert not (resource_root / "primitive_catalog_snapshot").exists()
 
 
 def _fingerprint(value: object) -> str:

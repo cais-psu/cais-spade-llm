@@ -85,7 +85,7 @@ def test_manifest_materializes_exact_runtime_selected_world_transform(
 
     result = runtime.materialize_camera_to_world_calibration(
         interaction_root=interaction_root,
-        camera_pose_record_path=pose_path,
+        grounding_record_path=pose_path,
         source_frame=source_frame,
         target_frame="world",
         calibration_number=1,
@@ -126,7 +126,7 @@ def test_manifest_missing_selected_camera_fails_closed_without_output(
     ):
         runtime.materialize_camera_to_world_calibration(
             interaction_root=interaction_root,
-            camera_pose_record_path=pose_path,
+                grounding_record_path=pose_path,
             source_frame=_CAMERA_FRAME,
             target_frame="world",
             calibration_number=1,
@@ -261,7 +261,7 @@ def _write_camera_location_pose(
     path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "record_type": "CADPoseEstimationRecord",
                 "CAD_correspondence": "accepted",
                 "location": "available",

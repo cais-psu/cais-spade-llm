@@ -1,9 +1,11 @@
-"""Tests for ontology-driven predefined-resource grounding."""
+"""Tests for PA-driven two-state resource grounding."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,6 +13,13 @@ import pytest
 from rdflib import Namespace, URIRef
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.agents.pa import resource_grounding
+from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
+    AllocationEvidenceSource,
+    load_allocation_presentation,
+    load_or_create_allocation_presentation,
+    load_or_create_evidence_presentation,
+)
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     ABoxSnapshot,
     initialize_interaction_abox,
@@ -18,11 +27,18 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    ReachabilityCheckRecord,
     ResourceGroundingError,
     RobotFrameLocationEvidenceError,
+    candidate_resource_catalog,
     commit_resource_assignment,
-    derive_resource_assignment_need,
-    select_predefined_resource,
+    persist_pa_resource_selection,
+)
+from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    check_resource_reachability as _runtime_check_resource_reachability,
+)
+from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
+    validate_provisional_allocation,
 )
 from cais_spade_llm.spec2primitives.config import load_workcell_profile
 from cais_spade_llm.spec2primitives.ontology import (
@@ -42,352 +58,284 @@ RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
 EVIDENCE_REF = "products/user_requirement/product_requirement.json"
 
 
-def test_need_is_derived_only_after_the_exact_semantic_join(tmp_path: Path) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _manifest_paths = _authorities(tmp_path)
-    abox = initialize_interaction_abox(root, "assemble Medium Gear", tbox)
+class _CapturingFeasibilityRuntime:
+    def __init__(self) -> None:
+        self.requests: list[Mapping[str, object]] = []
 
-    assert derive_resource_assignment_need(abox, workcell) is None
+    async def validate_plan_only_allocation(
+        self,
+        request: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        self.requests.append(dict(request))
+        endpoint = {
+            "status": "accepted",
+            "message": "arbitrary-profile endpoint accepted",
+            "error_code": 1,
+        }
+        return {
+            "status": "accepted",
+            "current_state": dict(endpoint),
+            "desired_state": dict(endpoint),
+            "feedback": None,
+        }
 
-    abox = _merge_semantic_grounding(root, tbox, abox)
-    need = derive_resource_assignment_need(abox, workcell)
 
-    assert need is not None
-    assert need.specification_iri == abox.specification_iri
-    assert need.feature_iri == f"{abox.namespace}feature_0001"
-    assert need.process_iri == PROCESS_IRI
-    assert need.candidate_resource_iris == (
-        f"{RESOURCE_NAMESPACE}xarm6",
-        f"{RESOURCE_NAMESPACE}ur5e",
+def test_removed_need_and_automatic_selection_are_not_exported() -> None:
+    assert not hasattr(resource_grounding, "ResourceAssignmentNeed")
+    assert not hasattr(resource_grounding, "derive_resource_assignment_need")
+    assert not hasattr(resource_grounding, "select_predefined_resource")
+    assert "first_reachable_in_predefined_registry_order" not in Path(
+        resource_grounding.__file__
+    ).read_text(encoding="utf-8")
+
+
+def test_catalog_is_unordered_and_never_selects_a_resource(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    tbox_a, registry_a, workcell_a, _ = _authorities(first)
+    tbox_b, registry_b, workcell_b, _ = _authorities(
+        second,
+        resource_order=("ur5e", "xarm6"),
     )
-    assert need.required_record_type == "RobotFrameLocationRecord"
-    assert need.target_frame == "world"
+    abox_a = _grounded_abox(first / "interaction", tbox_a)
+    abox_b = _grounded_abox(second / "interaction", tbox_b)
+
+    catalog_a = candidate_resource_catalog(abox_a, registry_a, workcell_a)
+    catalog_b = candidate_resource_catalog(abox_b, registry_b, workcell_b)
+
+    assert catalog_a == catalog_b
+    assert set(catalog_a) == {"xarm6", "ur5e"}
+    assert all("selected" not in entry for entry in catalog_a.values())
 
 
-def test_need_uses_primary_join_and_ignores_defined_supporting_feature(
+def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "interaction"
-    tbox, _registry, workcell, _manifest_paths = _authorities(tmp_path)
-    abox = _merge_semantic_grounding(
+    tbox, registry, workcell = _arbitrary_authorities(tmp_path)
+    process_iri = "https://example.local/process/joining"
+    abox = _grounded_abox(
         root,
         tbox,
-        initialize_interaction_abox(root, "assemble supported features", tbox),
+        product_requirement="join the panel",
+        process_iri=process_iri,
     )
-    supporting_feature_iri = f"{abox.namespace}feature_0002"
-    supporting = validate_and_merge_triple_delta(
+    current_path = _write_world_location(root, "neutral_a", (0.0, 0.2, 1.1))
+    desired_path = _write_world_location(root, "neutral_b", (0.0, 0.5, 1.1))
+    presentation, handles = _allocation_presentation_for_locations(
         root,
-        tbox,
-        "ontology_grounding",
-        {
-            "assertions": [
-                _assertion(
-                    supporting_feature_iri,
-                    str(RDF.type),
-                    f"{PPR_NAMESPACE}feature",
-                ),
-                _assertion(
-                    abox.specification_iri,
-                    f"{PPR_NAMESPACE}defines",
-                    supporting_feature_iri,
-                ),
-            ]
-        },
-        authorized_evidence_refs={EVIDENCE_REF},
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        location_paths=(current_path, desired_path),
     )
+    catalog = candidate_resource_catalog(abox, registry, workcell)
 
-    need = derive_resource_assignment_need(supporting.abox, workcell)
-
-    assert need is not None
-    assert need.feature_iri == f"{abox.namespace}feature_0001"
-
-
-@pytest.mark.parametrize(
-    ("translation", "expected_symbol"),
-    [
-        ((0.0, 0.0, 1.1), "xarm6"),
-        ((0.0, -0.8, 1.1), "xarm6"),
-        ((0.0, 0.8, 1.1), "ur5e"),
-        ((2.0, 0.0, 1.1), None),
-    ],
-)
-def test_selection_uses_registry_order_and_only_coarse_manifest_geometry(
-    tmp_path: Path,
-    translation: tuple[float, float, float],
-    expected_symbol: str | None,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    abox = _grounded_abox(root, tbox)
-    need = derive_resource_assignment_need(abox, workcell)
-    assert need is not None
-    location_path = _write_world_location(root, translation)
-
-    selection = select_predefined_resource(
+    assert tuple(catalog) == ("alpha_bot", "beta_bot")
+    assert "gamma_bot" not in catalog
+    reachability = _runtime_check_resource_reachability(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
-        grounding_record_path=location_path,
+        resource_symbol="beta_bot",
+        allocation_presentation=presentation,
+        current_state_evidence_handle=handles[
+            _location_candidate_key(root, current_path)
+        ],
+        desired_state_evidence_handle=handles[
+            _location_candidate_key(root, desired_path)
+        ],
+        current_location_record_path=current_path,
+        desired_location_record_path=desired_path,
     )
-
-    assert selection.selected_resource_symbol == expected_symbol
-    assert selection.selected_resource_iri == (
-        None if expected_symbol is None else f"{RESOURCE_NAMESPACE}{expected_symbol}"
-    )
-    assert selection.selected_resource_jid == (
-        None if expected_symbol is None else f"{expected_symbol}@localhost"
-    )
-    assert [item.resource_symbol for item in selection.candidate_reach_evidence] == [
-        "xarm6",
-        "ur5e",
-    ]
-    assert selection.record_path == (
-        root
-        / "products/grounding/resource_selection/selection_0001"
-        / "resource_selection_record.json"
-    )
-    record_text = selection.record_path.read_text(encoding="utf-8")
-    for forbidden in (
-        "reachability",
-        "parts_tuning",
-        "password",
-        "controller",
-        "spawn",
-    ):
-        assert forbidden not in record_text
-    selection.assert_unchanged()
-
-
-def test_unrelated_manifest_details_cannot_change_the_reach_decision(
-    tmp_path: Path,
-) -> None:
-    decisions: list[tuple[str | None, tuple[bool, ...]]] = []
-    for index, hidden_value in enumerate(("first", "completely-different"), start=1):
-        case_root = tmp_path / f"case_{index}"
-        interaction_root = case_root / "interaction"
-        tbox, registry, workcell, manifest_paths = _authorities(
-            case_root,
-            hidden_value=hidden_value,
-        )
-        need = derive_resource_assignment_need(
-            _grounded_abox(interaction_root, tbox), workcell
-        )
-        assert need is not None
-        selection = select_predefined_resource(
-            interaction_root=interaction_root,
-            tbox=tbox,
-            registry=registry,
+    runtime = _CapturingFeasibilityRuntime()
+    validation = asyncio.run(
+        validate_provisional_allocation(
+            runtime,
+            interaction_root=root,
             workcell=workcell,
-            need=need,
-            grounding_record_path=_write_world_location(
-                interaction_root, (0.0, 0.0, 1.1)
-            ),
+            reachability=reachability,
         )
-        decisions.append(
-            (
-                selection.selected_resource_symbol,
-                tuple(item.reachable for item in selection.candidate_reach_evidence),
-            )
-        )
-
-    assert decisions == [("xarm6", (True, True)), ("xarm6", (True, True))]
-
-
-def test_default_selection_reads_the_registry_pinned_shared_manifests(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
-    registry = load_predefined_resource_registry(tbox)
-    workcell = load_predefined_workcell(tbox, registry)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-
-    selection = select_predefined_resource(
+    )
+    selection = persist_pa_resource_selection(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
-        grounding_record_path=_write_world_location(root, (0.0, 0.0, 1.1)),
+        reachability=reachability,
+        allocation_presentation=presentation,
+        robot_agent_validation_path=validation.record_path,
     )
-
-    assert selection.selected_resource_symbol == "xarm6"
-    assert selection.selected_resource_jid == "xarm6@localhost"
-    assert all(
-        candidate.execution_mode == "simulation"
-        for candidate in selection.candidate_reach_evidence
-    )
-
-
-@pytest.mark.parametrize(
-    ("record_update", "message"),
-    [
-        ({"target_frame": "camera"}, "exact RobotFrameLocationRecord"),
-        ({"robot_frame_conversion": "ambiguous"}, "accepted"),
-        ({"robot_frame_conversion": "stale"}, "accepted"),
-        ({"CAD_correspondence": "rejected"}, "CAD_correspondence"),
-        ({"location": "ambiguous"}, "location"),
-    ],
-)
-def test_selection_rejects_unusable_location_without_creating_a_record(
-    tmp_path: Path,
-    record_update: dict[str, object],
-    message: str,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-    location_path = _write_world_location(root, (0.0, 0.0, 1.1), **record_update)
-
-    with pytest.raises(RobotFrameLocationEvidenceError, match=message):
-        select_predefined_resource(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            need=need,
-            grounding_record_path=location_path,
-        )
-
-    assert not (root / "products/grounding/resource_selection").exists()
-
-
-@pytest.mark.parametrize(
-    "translated_location_m",
-    [
-        None,
-        [0.0, 0.0],
-        [0.0, -0.5, "invalid"],
-    ],
-)
-def test_location_record_rejects_missing_or_malformed_translation(
-    tmp_path: Path,
-    translated_location_m: object,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-    location_path = _write_world_location(
-        root,
-        (0.0, -0.5, 1.1),
-        translated_location_m=translated_location_m,
-    )
-
-    with pytest.raises(RobotFrameLocationEvidenceError):
-        select_predefined_resource(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            need=need,
-            grounding_record_path=location_path,
-        )
-
-    assert not (root / "products/grounding/resource_selection").exists()
-
-
-def test_selection_requires_an_intact_location_source_hash_chain(tmp_path: Path) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-    location_path = _write_world_location(root, (0.0, 0.0, 1.1))
-    location_record = json.loads(location_path.read_text(encoding="utf-8"))
-    source_ref = location_record["source_hashes"][0]["ref"]
-
-    location_record.pop("source_hashes")
-    location_path.write_text(json.dumps(location_record), encoding="utf-8")
-    with pytest.raises(RobotFrameLocationEvidenceError, match="hash reference"):
-        select_predefined_resource(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            need=need,
-            grounding_record_path=location_path,
-        )
-
-    location_path = _write_world_location(root, (0.0, 0.0, 1.1))
-    (root / source_ref).write_text("changed evidence", encoding="utf-8")
-    with pytest.raises(RobotFrameLocationEvidenceError, match="hash does not match"):
-        select_predefined_resource(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            need=need,
-            grounding_record_path=location_path,
-        )
-
-
-def test_manifest_errors_are_not_location_evidence_errors(tmp_path: Path) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-    manifest_paths["xarm6"].write_text("{}", encoding="utf-8")
-
-    with pytest.raises(ResourceGroundingError) as raised:
-        select_predefined_resource(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            need=need,
-            grounding_record_path=_write_world_location(root, (0.0, 0.0, 1.1)),
-        )
-
-    assert not isinstance(raised.value, RobotFrameLocationEvidenceError)
-
-
-def test_selection_detects_changed_location_and_manifest_sources(tmp_path: Path) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    need = derive_resource_assignment_need(_grounded_abox(root, tbox), workcell)
-    assert need is not None
-    location_path = _write_world_location(root, (0.0, 0.0, 1.1))
-    selection = select_predefined_resource(
+    committed = commit_resource_assignment(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
-        grounding_record_path=location_path,
+        selection=selection,
     )
 
-    location_record = json.loads(location_path.read_text(encoding="utf-8"))
-    location_record["observation_timestamp_ns"] = 12
-    location_path.write_text(json.dumps(location_record), encoding="utf-8")
-    with pytest.raises(ResourceGroundingError, match="location changed"):
-        selection.assert_unchanged()
+    assert len(runtime.requests) == 1
+    request = runtime.requests[0]
+    assert request["process_symbol"] == "joining"
+    assert request["process_iri"] == process_iri
+    assert request["feature_iri"].endswith("feature_0001")
+    assert request["resource_symbol"] == "beta_bot"
+    assert request["current_state"]["evidence_handle"]
+    assert request["desired_state"]["evidence_handle"]
+    serialized_request = json.dumps(request, sort_keys=True)
+    assert "assembly" not in serialized_request
+    assert "xarm6" not in serialized_request
+    assert "ur5e" not in serialized_request
+    assert selection.process_symbol == "joining"
+    assert selection.process_iri == process_iri
+    assert selection.candidate_resource_symbols == ("alpha_bot", "beta_bot")
+    assert (
+        URIRef(f"{abox.namespace}process_execution_0001"),
+        Namespace(PPR_NAMESPACE).runsOnResource,
+        URIRef("https://example.local/resource/beta_bot"),
+    ) in committed.abox.graph
 
-    location_record["observation_timestamp_ns"] = 11
-    location_path.write_text(json.dumps(location_record), encoding="utf-8")
-    manifest_paths["xarm6"].write_text("{}", encoding="utf-8")
-    with pytest.raises(ResourceGroundingError, match="authority changed"):
-        selection.assert_unchanged()
+
+@pytest.mark.parametrize(
+    ("resource_symbol", "current", "desired", "expected_status"),
+    [
+        ("xarm6", (0.0, -0.7, 1.1), (0.0, -0.2, 1.1), "accepted"),
+        ("ur5e", (0.0, 0.2, 1.1), (0.0, 0.8, 1.1), "accepted"),
+        ("xarm6", (0.0, -0.7, 1.1), (0.0, 0.8, 1.1), "rejected"),
+    ],
+)
+def test_reachability_checks_both_states_for_the_explicit_pa_resource(
+    tmp_path: Path,
+    resource_symbol: str,
+    current: tuple[float, float, float],
+    desired: tuple[float, float, float],
+    expected_status: str,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    current_path = _write_world_location(root, "current", current)
+    desired_path = _write_world_location(root, "desired", desired)
+
+    check = check_resource_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol=resource_symbol,
+        current_location_record_path=current_path,
+        desired_location_record_path=desired_path,
+    )
+
+    assert check.resource_symbol == resource_symbol
+    assert check.status == expected_status
+    assert check.current_state.state_name == "current_state"
+    assert check.desired_state.state_name == "desired_state"
+    assert check.current_state.location_record_ref != (check.desired_state.location_record_ref)
+    assert check.current_state.distance_from_reach_origin_m >= 0.0
+    assert check.desired_state.distance_from_reach_origin_m >= 0.0
+    assert "selected_resource" not in check.to_record()
+    check.assert_unchanged()
 
 
-def test_system_commit_adds_only_the_derived_execution_assignment(
+def test_reversing_registry_order_cannot_override_the_pa_choice(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
+    tbox, registry, workcell, _ = _authorities(
+        tmp_path,
+        resource_order=("ur5e", "xarm6"),
+    )
+    _grounded_abox(root, tbox)
+
+    check = check_resource_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol="ur5e",
+        current_location_record_path=_write_world_location(root, "current", (0.0, 0.2, 1.1)),
+        desired_location_record_path=_write_world_location(root, "desired", (0.0, 0.8, 1.1)),
+    )
+
+    assert check.status == "accepted"
+    assert check.resource_symbol == "ur5e"
+    assert check.resource_jid == "ur5e@localhost"
+
+
+def test_neutral_location_requires_an_intact_hash_chain(tmp_path: Path) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    current = _write_world_location(root, "current", (0.0, -0.7, 1.1))
+    desired = _write_world_location(root, "desired", (0.0, -0.2, 1.1))
+    record = json.loads(current.read_text(encoding="utf-8"))
+    record.pop("source_evidence")
+    current.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(RobotFrameLocationEvidenceError, match="hash references"):
+        check_resource_reachability(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            resource_symbol="xarm6",
+            current_location_record_path=current,
+            desired_location_record_path=desired,
+        )
+
+
+def test_rejected_robot_agent_validation_does_not_commit_or_substitute(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
     before = _grounded_abox(root, tbox)
-    need = derive_resource_assignment_need(before, workcell)
-    assert need is not None
-    selection = select_predefined_resource(
+    check = _accepted_check(root, tbox, registry, workcell, "xarm6")
+    validation_path = _write_validation(root, check, status="rejected")
+
+    selection = persist_pa_resource_selection(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
-        grounding_record_path=_write_world_location(root, (0.0, 0.0, 1.1)),
+        reachability=check,
+        allocation_presentation=load_allocation_presentation(root),
+        robot_agent_validation_path=validation_path,
+    )
+
+    assert selection.provisional_resource_symbol == "xarm6"
+    assert selection.robot_agent_validation_status == "rejected"
+    assert selection.selected_resource_symbol is None
+    assert selection.selected_resource_iri is None
+    with pytest.raises(ResourceGroundingError, match="accepted PA choice"):
+        commit_resource_assignment(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            selection=selection,
+        )
+    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
+
+
+def test_accepted_validation_commits_exactly_one_assignment_without_motion(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    before = _grounded_abox(root, tbox)
+    check = _accepted_check(root, tbox, registry, workcell, "ur5e")
+    validation_path = _write_validation(root, check, status="accepted")
+    selection = persist_pa_resource_selection(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        reachability=check,
+        allocation_presentation=load_allocation_presentation(root),
+        robot_agent_validation_path=validation_path,
     )
 
     result = commit_resource_assignment(
@@ -395,123 +343,265 @@ def test_system_commit_adds_only_the_derived_execution_assignment(
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
         selection=selection,
     )
 
     ppr = Namespace(PPR_NAMESPACE)
     execution = URIRef(f"{before.namespace}process_execution_0001")
-    expected = {
+    assert set(result.abox.graph) - set(before.graph) == {
         (URIRef(before.specification_iri), ppr.hasProcessExecution, execution),
         (execution, RDF.type, ppr.processExecution),
         (execution, ppr.runsProcess, URIRef(PROCESS_IRI)),
         (
             execution,
             ppr.runsOnResource,
-            URIRef(f"{RESOURCE_NAMESPACE}xarm6"),
+            URIRef(f"{RESOURCE_NAMESPACE}ur5e"),
         ),
     }
-    assert result.accepted is True
+    selection_record = selection.to_record()
+    assert selection_record["authority"] == "ProductAgent"
+    assert selection_record["current_state_iri"].endswith("currentstate_0001")
+    assert selection_record["desired_state_iri"].endswith("desiredstate_0001")
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    assert validation["mode"] == "plan_only"
+    assert validation["motion_executed"] is False
     assert result.assertion_count == 4
-    assert set(result.abox.graph) - set(before.graph) == expected
-    assert derive_resource_assignment_need(result.abox, workcell) is None
-    assert set(workcell.graph) == set(load_predefined_workcell(tbox, registry).graph)
-    assert not any(
-        "@localhost" in str(node)
-        for triple in result.abox.graph
-        for node in triple
-    )
-    assert load_interaction_abox(root, tbox).graph.isomorphic(result.abox.graph)
 
 
-def test_configured_process_identity_reaches_the_final_abox(tmp_path: Path) -> None:
-    custom_process_iri = "https://cais-spade-llm.local/process/configured_process"
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _manifest_paths = _authorities(
-        tmp_path,
-        process_symbol="configured_process",
-        process_iri=custom_process_iri,
-    )
-    abox = _grounded_abox(root, tbox, process_iri=custom_process_iri)
-    need = derive_resource_assignment_need(abox, workcell)
-    assert need is not None
-    selection = select_predefined_resource(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        need=need,
-        grounding_record_path=_write_world_location(root, (0.0, 0.0, 1.1)),
-    )
-
-    result = commit_resource_assignment(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        need=need,
-        selection=selection,
-    )
-
-    ppr = Namespace(PPR_NAMESPACE)
-    execution = URIRef(f"{abox.namespace}process_execution_0001")
-    assert (execution, ppr.runsProcess, URIRef(custom_process_iri)) in result.abox.graph
-    assert load_interaction_abox(root, tbox).graph.isomorphic(result.abox.graph)
-
-
-def test_no_reachable_resource_and_tampered_selection_cannot_commit(
+def test_selection_requires_accepted_reachability_and_unchanged_records(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    before = _grounded_abox(root, tbox)
-    need = derive_resource_assignment_need(before, workcell)
-    assert need is not None
-    selection = select_predefined_resource(
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    current_path = _write_world_location(root, "current", (0.0, -0.7, 1.1))
+    desired_path = _write_world_location(root, "desired", (0.0, 0.8, 1.1))
+    check = check_resource_reachability(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        need=need,
-        grounding_record_path=_write_world_location(root, (2.0, 0.0, 1.1)),
+        resource_symbol="xarm6",
+        current_location_record_path=current_path,
+        desired_location_record_path=desired_path,
     )
+    validation_path = _write_validation(root, check, status="rejected")
 
-    with pytest.raises(ResourceGroundingError, match="No predefined resource"):
-        commit_resource_assignment(
+    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
+        persist_pa_resource_selection(
             interaction_root=root,
             tbox=tbox,
             registry=registry,
             workcell=workcell,
-            need=need,
-            selection=selection,
+            reachability=check,
+            allocation_presentation=load_allocation_presentation(root),
+            robot_agent_validation_path=validation_path,
         )
-    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
 
+    presentation, handles = _allocation_presentation_for_locations(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        location_paths=(current_path, desired_path),
+    )
+    desired_handle = handles[_location_candidate_key(root, desired_path)]
+    accepted = _runtime_check_resource_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol="ur5e",
+        allocation_presentation=presentation,
+        current_state_evidence_handle=desired_handle,
+        desired_state_evidence_handle=desired_handle,
+        current_location_record_path=desired_path,
+        desired_location_record_path=desired_path,
+        check_number=2,
+    )
+    accepted.record_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ResourceGroundingError, match="changed"):
+        accepted.assert_unchanged()
+
+
+def test_forged_accepted_selection_cannot_change_the_provisional_resource(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    check = _accepted_check(root, tbox, registry, workcell, "xarm6")
+    selection = persist_pa_resource_selection(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        reachability=check,
+        allocation_presentation=load_allocation_presentation(root),
+        robot_agent_validation_path=_write_validation(root, check, status="accepted"),
+    )
     forged = replace(
         selection,
-        selected_resource_symbol="xarm6",
-        selected_resource_iri=f"{RESOURCE_NAMESPACE}xarm6",
-        selected_resource_jid="xarm6@localhost",
-        selected_execution_mode="simulation",
+        selected_resource_symbol="ur5e",
+        selected_resource_iri=f"{RESOURCE_NAMESPACE}ur5e",
+        selected_resource_jid="ur5e@localhost",
     )
-    with pytest.raises(ResourceGroundingError, match="decision changed"):
+
+    with pytest.raises(ResourceGroundingError, match="changed"):
         commit_resource_assignment(
             interaction_root=root,
             tbox=tbox,
             registry=registry,
             workcell=workcell,
-            need=need,
             selection=forged,
         )
-    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
+
+
+def check_resource_reachability(  # noqa: PLR0913
+    *,
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    resource_symbol: str,
+    current_location_record_path: Path,
+    desired_location_record_path: Path,
+    check_number: int = 1,
+) -> ReachabilityCheckRecord:
+    """Exercise the v2 checker with a pinned neutral presentation fixture."""
+    presentation, handles = _allocation_presentation_for_locations(
+        interaction_root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        location_paths=(current_location_record_path, desired_location_record_path),
+    )
+    current_key = _location_candidate_key(interaction_root, current_location_record_path)
+    desired_key = _location_candidate_key(interaction_root, desired_location_record_path)
+    return _runtime_check_resource_reachability(
+        interaction_root=interaction_root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol=resource_symbol,
+        allocation_presentation=presentation,
+        current_state_evidence_handle=handles[current_key],
+        desired_state_evidence_handle=handles[desired_key],
+        current_location_record_path=current_location_record_path,
+        desired_location_record_path=desired_location_record_path,
+        check_number=check_number,
+    )
+
+
+def _allocation_presentation_for_locations(  # noqa: PLR0913
+    root: Path,
+    *,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    location_paths: tuple[Path, ...],
+):
+    interaction_root = Path(root).resolve()
+    abox = load_interaction_abox(interaction_root, tbox)
+    evidence_presentation = load_or_create_evidence_presentation(
+        interaction_root,
+        sources=((None, "observation", "fresh_on_call"),),
+        explicit_order=("__live_observation__",),
+    )
+    sources: list[AllocationEvidenceSource] = []
+    for path in dict.fromkeys(location_paths):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record_ref = path.resolve().relative_to(interaction_root).as_posix()
+        source_frame = str(record.get("source_frame") or "neutral_frame")
+        candidate_reference = record.get("candidate_reference")
+        observation_handle = (
+            candidate_reference.get("observation_handle")
+            if isinstance(candidate_reference, Mapping)
+            else None
+        )
+        candidate_handle = (
+            candidate_reference.get("candidate_handle")
+            if isinstance(candidate_reference, Mapping)
+            else None
+        )
+        sources.append(
+            AllocationEvidenceSource(
+                canonical_key=f"{record_ref}#/translated_location_m",
+                record_type="RobotFrameLocationRecord",
+                record_ref=record_ref,
+                record_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                field_path="/translated_location_m",
+                observation_handle=(
+                    str(observation_handle) if observation_handle is not None else None
+                ),
+                candidate_handle=(
+                    str(candidate_handle) if candidate_handle is not None else None
+                ),
+                source_frame=source_frame,
+                neutral_projection={"location_record_available": True},
+            )
+        )
+    catalog = candidate_resource_catalog(abox, registry, workcell)
+    process_symbol, process_iri = workcell.processes[0]
+    presentation = load_or_create_allocation_presentation(
+        interaction_root,
+        evidence_presentation=evidence_presentation,
+        process_symbol=process_symbol,
+        process_iri=process_iri,
+        feature_iri=f"{abox.namespace}feature_0001",
+        current_state_iri=f"{abox.namespace}currentstate_0001",
+        desired_state_iri=f"{abox.namespace}desiredstate_0001",
+        resources=tuple(
+            (symbol, str(entry["resource_iri"]), str(entry["resource_jid"]))
+            for symbol, entry in catalog.items()
+        ),
+        evidence_sources=tuple(sources),
+        explicit_resource_order=tuple(catalog),
+        explicit_candidate_order=tuple(source.canonical_key for source in sources),
+    )
+    handles = {
+        entry.canonical_key: entry.pa_handle for entry in presentation.evidence_entries
+    }
+    return presentation, handles
+
+
+def _location_candidate_key(root: Path, path: Path) -> str:
+    record_ref = path.resolve().relative_to(Path(root).resolve()).as_posix()
+    return f"{record_ref}#/translated_location_m"
+
+
+def _accepted_check(
+    root: Path,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    resource_symbol: str,
+    *,
+    check_number: int = 1,
+    current_name: str = "current",
+    desired_name: str = "desired",
+):
+    locations = {
+        "xarm6": ((0.0, -0.7, 1.1), (0.0, -0.2, 1.1)),
+        "ur5e": ((0.0, 0.2, 1.1), (0.0, 0.8, 1.1)),
+    }
+    current, desired = locations[resource_symbol]
+    return check_resource_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol=resource_symbol,
+        current_location_record_path=_write_world_location(root, current_name, current),
+        desired_location_record_path=_write_world_location(root, desired_name, desired),
+        check_number=check_number,
+    )
 
 
 def _authorities(
     root: Path,
     *,
-    hidden_value: str = "ignored",
-    process_symbol: str = "assembly",
-    process_iri: str = PROCESS_IRI,
+    resource_order: tuple[str, str] = ("xarm6", "ur5e"),
 ) -> tuple[
     TBoxSnapshot,
     ResourceRegistrySnapshot,
@@ -529,28 +619,27 @@ def _authorities(
         "xarm6",
         origin_y=-0.5,
         workspace_y=(-1.0, 0.1),
-        hidden_value=hidden_value,
     )
     _write_manifest(
         manifest_paths["ur5e"],
         "ur5e",
         origin_y=0.5,
         workspace_y=(-0.35, 1.1),
-        hidden_value=hidden_value,
     )
     profile_path = root / "workcell_profile.json"
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
-                "process": {"symbol": process_symbol, "iri": process_iri},
+                "schema_version": 2,
+                "processes": [{"symbol": "assembly", "iri": PROCESS_IRI}],
                 "resources": [
                     {
                         "symbol": symbol,
                         "iri": f"{RESOURCE_NAMESPACE}{symbol}",
-                        "manifest_ref": path.relative_to(root).as_posix(),
+                        "manifest_ref": manifest_paths[symbol].relative_to(root).as_posix(),
+                        "capable_process_iris": [PROCESS_IRI],
                     }
-                    for symbol, path in manifest_paths.items()
+                    for symbol in resource_order
                 ],
             }
         ),
@@ -567,13 +656,68 @@ def _authorities(
     )
 
 
+def _arbitrary_authorities(
+    root: Path,
+) -> tuple[TBoxSnapshot, ResourceRegistrySnapshot, PredefinedWorkcellSnapshot]:
+    process_iris = {
+        "joining": "https://example.local/process/joining",
+        "inspection": "https://example.local/process/inspection",
+    }
+    resource_profiles = (
+        ("alpha_bot", -0.4, (-0.9, 0.2), (process_iris["joining"],)),
+        (
+            "beta_bot",
+            0.3,
+            (-0.2, 0.9),
+            (process_iris["joining"], process_iris["inspection"]),
+        ),
+        ("gamma_bot", 0.8, (0.3, 1.3), (process_iris["inspection"],)),
+    )
+    manifest_root = root / "arbitrary_manifests"
+    manifest_root.mkdir(parents=True)
+    resources: list[dict[str, object]] = []
+    for symbol, origin_y, workspace_y, capabilities in resource_profiles:
+        manifest_path = manifest_root / f"{symbol}.json"
+        _write_manifest(
+            manifest_path,
+            symbol,
+            origin_y=origin_y,
+            workspace_y=workspace_y,
+        )
+        resources.append(
+            {
+                "symbol": symbol,
+                "iri": f"https://example.local/resource/{symbol}",
+                "manifest_ref": manifest_path.relative_to(root).as_posix(),
+                "capable_process_iris": list(capabilities),
+            }
+        )
+    profile_path = root / "arbitrary_workcell_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "processes": [
+                    {"symbol": symbol, "iri": process_iri}
+                    for symbol, process_iri in process_iris.items()
+                ],
+                "resources": resources,
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = load_workcell_profile(profile_path, repository_root=root)
+    tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
+    registry = load_predefined_resource_registry(tbox, profile=profile)
+    return tbox, registry, load_predefined_workcell(tbox, registry, profile=profile)
+
+
 def _write_manifest(
     path: Path,
     symbol: str,
     *,
     origin_y: float,
     workspace_y: tuple[float, float],
-    hidden_value: str,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -581,7 +725,7 @@ def _write_manifest(
                 symbol: {
                     "type": "robot",
                     "jid": f"{symbol}@localhost",
-                    "password": hidden_value,
+                    "password": "ignored",
                     "execution_mode": "simulation",
                     "gazebo": {
                         "static_capabilities": {
@@ -605,10 +749,14 @@ def _write_manifest(
                                 "z_max_m": 1.5,
                                 "tolerance_m": 0.01,
                             },
-                            "reachability": [hidden_value],
                         },
-                        "controller": {"parts_tuning": hidden_value},
-                        "spawn": hidden_value,
+                        "controller": {
+                            "move_group": {
+                                "group_name": f"{symbol}_manipulator",
+                                "tcp_link": f"{symbol}_tcp",
+                                "frame_id": "world",
+                            }
+                        },
                     },
                 }
             }
@@ -621,21 +769,14 @@ def _grounded_abox(
     root: Path,
     tbox: TBoxSnapshot,
     *,
+    product_requirement: str = "assemble Medium Gear",
     process_iri: str = PROCESS_IRI,
 ) -> ABoxSnapshot:
-    abox = initialize_interaction_abox(root, "assemble Medium Gear", tbox)
-    return _merge_semantic_grounding(root, tbox, abox, process_iri=process_iri)
-
-
-def _merge_semantic_grounding(
-    root: Path,
-    tbox: TBoxSnapshot,
-    abox: ABoxSnapshot,
-    *,
-    process_iri: str = PROCESS_IRI,
-) -> ABoxSnapshot:
+    abox = initialize_interaction_abox(root, product_requirement, tbox)
     ppr = Namespace(PPR_NAMESPACE)
     feature_iri = f"{abox.namespace}feature_0001"
+    current_state_iri = f"{abox.namespace}currentstate_0001"
+    desired_state_iri = f"{abox.namespace}desiredstate_0001"
     result = validate_and_merge_triple_delta(
         root,
         tbox,
@@ -645,6 +786,18 @@ def _merge_semantic_grounding(
                 _assertion(feature_iri, str(RDF.type), str(ppr.feature)),
                 _assertion(abox.specification_iri, str(ppr.defines), feature_iri),
                 _assertion(process_iri, str(ppr.realizes), feature_iri),
+                _assertion(current_state_iri, str(RDF.type), str(ppr.state)),
+                _assertion(desired_state_iri, str(RDF.type), str(ppr.state)),
+                _assertion(
+                    feature_iri,
+                    str(ppr.hascurrentstate),
+                    current_state_iri,
+                ),
+                _assertion(
+                    feature_iri,
+                    str(ppr.hasdesiredstate),
+                    desired_state_iri,
+                ),
             ]
         },
         authorized_evidence_refs={EVIDENCE_REF},
@@ -664,32 +817,117 @@ def _assertion(subject: str, predicate: str, object_iri: str) -> dict[str, objec
 
 def _write_world_location(
     root: Path,
+    name: str,
     translation: tuple[float, float, float],
-    **updates: object,
 ) -> Path:
-    destination = root / "products/grounding/synthetic_world_location"
+    destination = root / "products/grounding/synthetic_world_location" / name
     destination.mkdir(parents=True, exist_ok=True)
     source_path = destination / "source_evidence.json"
     source_path.write_text('{"source":"synthetic"}', encoding="utf-8")
     source_ref = source_path.relative_to(root).as_posix()
-    record: dict[str, object] = {
-        "schema_version": 1,
+    record = {
+        "schema_version": 2,
         "record_type": "RobotFrameLocationRecord",
         "producer": "synthetic_world_location_provider",
+        "method": "neutral_fixture",
         "robot_frame_conversion": "accepted",
-        "CAD_correspondence": "accepted",
         "location": "available",
         "target_frame": "world",
         "observation_timestamp_ns": 11,
         "translated_location_m": list(translation),
-        "source_hashes": [
-            {
-                "ref": source_ref,
-                "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-            }
-        ],
+        "candidate_reference": {
+            "observation_handle": f"observation_{name}",
+            "candidate_handle": f"candidate_{name}",
+        },
+        "source_evidence": {
+            "ref": source_ref,
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        },
     }
-    record.update(updates)
     path = destination / "robot_frame_location_record.json"
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
+
+
+def _write_validation(
+    root: Path,
+    reachability: ReachabilityCheckRecord,
+    *,
+    status: str,
+) -> Path:
+    resource_symbol = reachability.resource_symbol
+    resource_iri = reachability.resource_iri
+    resource_jid = reachability.resource_jid
+    execution_mode = reachability.execution_mode
+    target_frame = reachability.target_frame
+    request_fingerprint = reachability.fingerprint
+    endpoint_status = "accepted" if status == "accepted" else "rejected"
+    endpoint = {
+        "status": endpoint_status,
+        "message": f"fixture {endpoint_status}",
+        "error_code": 1 if endpoint_status == "accepted" else -1,
+    }
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "record_type": "PlanOnlyFeasibilityValidationRecord",
+        "validation_number": 1,
+        "validator_authority": resource_jid,
+        "process_symbol": reachability.process_symbol,
+        "process_iri": reachability.process_iri,
+        "feature_iri": reachability.feature_iri,
+        "current_state_iri": reachability.current_state.state_iri,
+        "desired_state_iri": reachability.desired_state.state_iri,
+        "resource_symbol": resource_symbol,
+        "resource_iri": resource_iri,
+        "resource_jid": resource_jid,
+        "execution_mode": execution_mode,
+        "moveit_group": f"{resource_symbol}_manipulator",
+        "end_effector_link": f"{resource_symbol}_tcp",
+        "target_frame": target_frame,
+        "validation_scope": "endpoint_motion",
+        "checked_constraints": [
+            "positional_ik",
+            "collision_aware_endpoints",
+            "path_between_endpoints",
+        ],
+        "unvalidated_constraints": [
+            "grasping",
+            "end_effector_orientation",
+            "attached_object_geometry",
+            f"{reachability.process_symbol}_tolerance",
+            "force_contact",
+            "insertion_constraints",
+        ],
+        "current_state": dict(endpoint),
+        "desired_state": dict(endpoint),
+        "mode": "plan_only",
+        "motion_executed": False,
+        "status": status,
+        "feedback": None if status == "accepted" else "fixture rejection",
+        "validated_at_ns": 12,
+        "request_fingerprint": request_fingerprint,
+    }
+    payload["fingerprint"] = _fingerprint(payload)
+    path = (
+        root
+        / "resources"
+        / resource_jid
+        / "validation"
+        / "plan_only_validation_0001"
+        / "plan_only_feasibility_validation_record.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _fingerprint(value: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()

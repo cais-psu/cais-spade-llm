@@ -92,22 +92,44 @@ class ApprovedCameraToWorldCalibrationRuntime:
             )
         record_type = grounding_record.get("record_type")
         selected = grounding_record.get("selected_candidate")
-        record_frame = (
-            selected.get("frame")
-            if record_type == "CADSizeCorrespondenceRecord"
-            and isinstance(selected, Mapping)
-            else grounding_record.get("coordinate_frame")
+        cameras = grounding_record.get("cameras")
+        segmentation_frames = (
+            [camera.get("frame") for camera in cameras if isinstance(camera, Mapping)]
+            if isinstance(cameras, list)
+            else []
         )
-        valid_identity = (
-            (record_type == "CADSizeCorrespondenceRecord" and grounding_record.get("schema_version") == 1)
-            or (record_type == "CADPoseEstimationRecord" and grounding_record.get("schema_version") == 2)
-        )
-        if (
-            not valid_identity
-            or grounding_record.get("CAD_correspondence") != "accepted"
-            or grounding_record.get("location") != "available"
-            or record_frame != source_frame
+        if record_type == "CADSizeCorrespondenceRecord" and isinstance(
+            selected,
+            Mapping,
         ):
+            record_frame = selected.get("frame")
+        elif record_type == "RGBDSegmentationRecord":
+            record_frame = source_frame if source_frame in segmentation_frames else None
+        else:
+            record_frame = grounding_record.get("coordinate_frame")
+        valid_identity = (
+            (
+                record_type == "CADSizeCorrespondenceRecord"
+                and grounding_record.get("schema_version") == 2
+            )
+            or (
+                record_type == "CADPoseEstimationRecord"
+                and grounding_record.get("schema_version") == 3
+            )
+            or (
+                record_type == "RGBDSegmentationRecord"
+                and grounding_record.get("schema_version") == 2
+            )
+        )
+        accepted_geometry = (
+            grounding_record.get("candidate_state") == "candidates_available"
+            if record_type == "RGBDSegmentationRecord"
+            else (
+                grounding_record.get("CAD_correspondence") == "accepted"
+                and grounding_record.get("location") == "available"
+            )
+        )
+        if not valid_identity or not accepted_geometry or record_frame != source_frame:
             raise CameraToRobotCalibrationError(
                 "Grounding record cannot support the requested calibration."
             )
@@ -165,22 +187,17 @@ def load_camera_to_world_calibration_runtime(
     if not isinstance(value, Mapping) or set(value) != _ROOT_KEYS:
         raise ValueError("Camera-to-world calibration manifest fields are invalid.")
     if value["schema_version"] != 1:
-        raise ValueError(
-            "Camera-to-world calibration manifest schema_version must be 1."
-        )
+        raise ValueError("Camera-to-world calibration manifest schema_version must be 1.")
     entries = value["calibrations"]
     if not isinstance(entries, list):
         raise ValueError("Camera-to-world calibrations must be a list.")
 
     calibrations = tuple(
-        _validated_calibration(entry, index=index)
-        for index, entry in enumerate(entries)
+        _validated_calibration(entry, index=index) for index, entry in enumerate(entries)
     )
     source_frames = [entry.source_frame for entry in calibrations]
     if len(source_frames) != len(set(source_frames)):
-        raise ValueError(
-            "Camera-to-world calibration source_frame values must be unique."
-        )
+        raise ValueError("Camera-to-world calibration source_frame values must be unique.")
     return ApprovedCameraToWorldCalibrationRuntime(
         manifest_path=path,
         calibrations=calibrations,
@@ -225,9 +242,7 @@ def _validated_calibration(
         calibration_id=calibration_id,
         source_frame=source_frame,
         target_frame=target_frame,
-        target_from_camera_transform=tuple(
-            tuple(float(item) for item in row) for row in transform
-        ),
+        target_from_camera_transform=tuple(tuple(float(item) for item in row) for row in transform),
         valid_from_ns=valid_from_ns,
         valid_until_ns=valid_until_ns,
         provenance_source=provenance_source,
@@ -270,20 +285,14 @@ def _validity_bounds(
     *,
     label: str,
 ) -> tuple[int, int | None]:
-    if (
-        isinstance(valid_from_ns, bool)
-        or not isinstance(valid_from_ns, int)
-        or valid_from_ns < 0
-    ):
+    if isinstance(valid_from_ns, bool) or not isinstance(valid_from_ns, int) or valid_from_ns < 0:
         raise ValueError(f"{label}.valid_from_ns must be a nonnegative integer.")
     if valid_until_ns is not None and (
         isinstance(valid_until_ns, bool)
         or not isinstance(valid_until_ns, int)
         or valid_until_ns < valid_from_ns
     ):
-        raise ValueError(
-            f"{label}.valid_until_ns must be null or at least valid_from_ns."
-        )
+        raise ValueError(f"{label}.valid_until_ns must be null or at least valid_from_ns.")
     return valid_from_ns, valid_until_ns
 
 

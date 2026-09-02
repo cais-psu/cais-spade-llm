@@ -45,9 +45,11 @@ def test_asymmetric_surface_registration_recovers_known_camera_frame_pose() -> N
     hypotheses = _register_candidate(
         triangles,
         observed_points,
+        observation_handle="view_0001",
         camera_id="cam_mk3",
         camera_order=0,
         frame="cam_mk3_optical_frame",
+        candidate_handle="candidate_0001_0001",
         candidate_id=1,
     )
 
@@ -57,9 +59,7 @@ def test_asymmetric_surface_registration_recovers_known_camera_frame_pose() -> N
         key=lambda item: (-item.fitness, item.inlier_rmse_m, item.initialization),
     )[0]
     rotation_error_degrees = np.degrees(
-        Rotation.from_matrix(
-            best.transformation[:3, :3].T @ expected_rotation
-        ).magnitude()
+        Rotation.from_matrix(best.transformation[:3, :3].T @ expected_rotation).magnitude()
     )
     assert best.fitness == pytest.approx(1.0)
     assert rotation_error_degrees < 1.0
@@ -90,7 +90,7 @@ def test_unique_shape_fit_persists_complete_camera_frame_pose(
     assert len(result.selected_candidate["quaternion_xyzw"]) == 4
     record = _read_json(result.record_path)
     assert record == result.record
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["record_type"] == "CADPoseEstimationRecord"
     assert record["method"] == "principal_axis_multistart_point_to_point_ICP"
     assert record["coordinate_frame"] == "cam_mk3_optical_frame"
@@ -187,12 +187,8 @@ def test_symmetric_rotation_hypotheses_remain_pose_ambiguous(
         result.selected_candidate["CAD_centroid_translation_m"],
         camera_centroid_m,
     )
-    first_origin = result.record["qualified_pose_hypotheses"][0][
-        "camera_from_CAD_transform"
-    ][:3]
-    second_origin = result.record["qualified_pose_hypotheses"][1][
-        "camera_from_CAD_transform"
-    ][:3]
+    first_origin = result.record["qualified_pose_hypotheses"][0]["camera_from_CAD_transform"][:3]
+    second_origin = result.record["qualified_pose_hypotheses"][1]["camera_from_CAD_transform"][:3]
     assert not np.allclose(
         np.asarray(first_origin)[:, 3],
         np.asarray(second_origin)[:, 3],
@@ -214,13 +210,10 @@ def test_symmetric_rotations_with_different_centroids_keep_location_ambiguous(
         rotated = np.eye(4)
         rotated[:3, :3] = Rotation.from_euler("z", 90.0, degrees=True).as_matrix()
         camera_centroid_m = (
-            first.transformation[:3, :3] @ cad_centroid_m
-            + first.transformation[:3, 3]
+            first.transformation[:3, :3] @ cad_centroid_m + first.transformation[:3, 3]
         )
         rotated[:3, 3] = (
-            camera_centroid_m
-            + np.asarray([0.01, 0.0, 0.0])
-            - rotated[:3, :3] @ cad_centroid_m
+            camera_centroid_m + np.asarray([0.01, 0.0, 0.0]) - rotated[:3, :3] @ cad_centroid_m
         )
         return [
             first,
@@ -376,16 +369,20 @@ def _accepted_registration(
     triangles_m: np.ndarray,
     candidate_points_m: np.ndarray,
     *,
+    observation_handle: str,
     camera_id: str,
     camera_order: int,
     frame: str,
+    candidate_handle: str,
     candidate_id: int,
 ) -> list[_RegistrationHypothesis]:
     del triangles_m
     values = {
+        "observation_handle": observation_handle,
         "camera_id": camera_id,
         "camera_order": camera_order,
         "frame": frame,
+        "candidate_handle": candidate_handle,
         "candidate_id": candidate_id,
         "point_count": candidate_points_m.shape[0],
     }
@@ -403,9 +400,11 @@ def _hypothesis(
     if transformation is None:
         resolved_transform[:3, 3] = [0.12, -0.04, 0.75]
     return _RegistrationHypothesis(
+        observation_handle=str(values["observation_handle"]),
         camera_id=str(values["camera_id"]),
         camera_order=int(values["camera_order"]),
         frame=str(values["frame"]),
+        candidate_handle=str(values["candidate_handle"]),
         candidate_id=int(values["candidate_id"]),
         point_count=int(values.get("point_count", 100)),
         initialization=initialization,

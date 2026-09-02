@@ -21,6 +21,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondenc
     _GROUNDING_ROOT,
     _PRODUCER,
     CADSizeAssociationError,
+    _load_candidates,
     _load_json_record,
     _relative_ref,
     _sha256_path,
@@ -71,9 +72,10 @@ _POSE_RECORD_KEYS = {
 _PROVENANCE_KEYS = {"source", "source_sha256"}
 _VALIDITY_KEYS = {"valid_from_ns", "valid_until_ns"}
 _ACCEPTED_CANDIDATE_KEYS = {
+    "observation_handle",
     "camera_id",
-    "role",
     "frame",
+    "candidate_handle",
     "candidate_id",
     "point_count",
     "CAD_centroid_translation_m",
@@ -84,9 +86,10 @@ _ACCEPTED_CANDIDATE_KEYS = {
     "registration",
 }
 _CANDIDATE_IDENTITY_KEYS = {
+    "observation_handle",
     "camera_id",
-    "role",
     "frame",
+    "candidate_handle",
     "candidate_id",
     "point_count",
 }
@@ -116,9 +119,10 @@ _CORRESPONDENCE_RECORD_KEYS = {
     "cross_camera_fusion",
 }
 _CORRESPONDENCE_CANDIDATE_KEYS = {
+    "observation_handle",
     "camera_id",
-    "role",
     "frame",
+    "candidate_handle",
     "candidate_id",
     "candidate_center_m",
     "observed_dimensions_m",
@@ -190,7 +194,7 @@ class _ValidatedCalibration:
     target_from_camera: np.ndarray
 
 
-def record_camera_to_robot_calibration(
+def record_camera_to_robot_calibration(  # noqa: PLR0913
     *,
     interaction_root: Path,
     calibration_id: str,
@@ -227,9 +231,7 @@ def record_camera_to_robot_calibration(
             error_type=CameraToRobotCalibrationError,
         )
         if camera_frame == robot_frame:
-            raise CameraToRobotCalibrationError(
-                "source_frame and target_frame must be different."
-            )
+            raise CameraToRobotCalibrationError("source_frame and target_frame must be different.")
         transformation = _rigid_transform(
             target_from_camera_transform,
             "target_from_camera_transform",
@@ -258,9 +260,7 @@ def record_camera_to_robot_calibration(
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        temporary_root = Path(
-            tempfile.mkdtemp(prefix=".calibration-", dir=destination.parent)
-        )
+        temporary_root = Path(tempfile.mkdtemp(prefix=".calibration-", dir=destination.parent))
     except OSError as exc:
         raise CameraToRobotCalibrationError(
             "Camera-to-robot calibration temporary directory could not be created."
@@ -342,9 +342,7 @@ def transform_camera_pose_to_robot_frame(
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        temporary_root = Path(
-            tempfile.mkdtemp(prefix=".robot-pose-", dir=destination.parent)
-        )
+        temporary_root = Path(tempfile.mkdtemp(prefix=".robot-pose-", dir=destination.parent))
     except OSError as exc:
         raise RobotFrameConversionError(
             "Robot-frame pose temporary directory could not be created."
@@ -357,9 +355,7 @@ def transform_camera_pose_to_robot_frame(
             target_from_camera=calibration_input.target_from_camera,
         )
         conversion_state = (
-            "accepted"
-            if robot_frame_pose is not None
-            else str(pose_input.record["pose"])
+            "accepted" if robot_frame_pose is not None else str(pose_input.record["pose"])
         )
         record = _robot_frame_pose_record(
             root=root,
@@ -424,7 +420,7 @@ def transform_correspondence_location_to_robot_frame(
         if (
             relative != expected_ref
             or set(correspondence) != _CORRESPONDENCE_RECORD_KEYS
-            or correspondence.get("schema_version") != 1
+            or correspondence.get("schema_version") != 2
             or correspondence.get("record_type") != "CADSizeCorrespondenceRecord"
             or correspondence.get("producer") != _PRODUCER
             or correspondence.get("CAD_correspondence") != "accepted"
@@ -469,12 +465,10 @@ def transform_correspondence_location_to_robot_frame(
             f"Robot-frame location {location_number:04d} already exists."
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(
-        tempfile.mkdtemp(prefix=".robot-location-", dir=destination.parent)
-    )
+    temporary_root = Path(tempfile.mkdtemp(prefix=".robot-location-", dir=destination.parent))
     try:
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "RobotFrameLocationRecord",
             "producer": _PRODUCER,
             "location_number": location_number,
@@ -491,6 +485,10 @@ def transform_correspondence_location_to_robot_frame(
             },
             "CAD": correspondence["CAD"],
             "segmentation": correspondence["segmentation"],
+            "candidate_reference": {
+                "observation_handle": selected["observation_handle"],
+                "candidate_handle": selected["candidate_handle"],
+            },
             "observation_timestamp_ns": observation_timestamp_ns,
             "source_frame": source_frame,
             "target_frame": requested_target,
@@ -507,6 +505,120 @@ def transform_correspondence_location_to_robot_frame(
             raise
         raise RobotFrameConversionError(
             f"Robot-frame location conversion failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    return RobotFrameLocationResult(
+        record_path=destination / "robot_frame_location_record.json",
+        source_frame=source_frame,
+        target_frame=requested_target,
+        translated_location_m=tuple(float(value) for value in translated),
+        record=record,
+    )
+
+
+def transform_segmentation_candidate_location_to_robot_frame(  # noqa: PLR0913
+    *,
+    interaction_root: Path,
+    segmentation_record_path: Path,
+    calibration_record_path: Path,
+    observation_handle: str,
+    candidate_handle: str,
+    target_frame: str,
+    location_number: int = 1,
+) -> RobotFrameLocationResult:
+    """Derive one neutral candidate location only when a consumer requests it."""
+    try:
+        _validate_positive_integer(location_number, "location_number")
+        root = Path(interaction_root).resolve()
+        requested_target = _nonempty_string(target_frame, "target_frame")
+        segmentation_path, segmentation, candidates = _load_candidates(
+            root,
+            segmentation_record_path,
+        )
+        matches = [
+            candidate
+            for candidate in candidates
+            if candidate.get("observation_handle") == observation_handle
+            and candidate.get("candidate_handle") == candidate_handle
+        ]
+        if len(matches) != 1:
+            raise RobotFrameConversionError(
+                "Neutral candidate handles do not identify exactly one region."
+            )
+        selected = matches[0]
+        points_m = selected.get("points_m")
+        if not isinstance(points_m, np.ndarray) or points_m.ndim != 2:
+            raise RobotFrameConversionError("Neutral candidate point evidence is invalid.")
+        camera_location = points_m.mean(axis=0, dtype=np.float64)
+        source_frame = _nonempty_string(selected.get("frame"), "candidate frame")
+        segmentation_metadata = {
+            "observation_ref": segmentation["observation_ref"],
+            "record": {
+                "ref": _relative_ref(root, segmentation_path),
+                "sha256": _sha256_path(segmentation_path),
+            },
+        }
+        observation_timestamp_ns = _observation_timestamp_ns(
+            root,
+            {"segmentation": segmentation_metadata},
+        )
+        calibration = _load_calibration(
+            root,
+            calibration_record_path,
+            observation_timestamp_ns=observation_timestamp_ns,
+        )
+        if calibration.source_frame != source_frame:
+            raise RobotFrameConversionError(
+                "Calibration source_frame does not match the neutral candidate frame."
+            )
+        if calibration.target_frame != requested_target:
+            raise RobotFrameConversionError(
+                "Calibration target_frame does not match the requested target_frame."
+            )
+    except CADSizeAssociationError as exc:
+        raise RobotFrameConversionError(str(exc)) from exc
+
+    translated = (
+        calibration.target_from_camera[:3, :3] @ camera_location
+        + calibration.target_from_camera[:3, 3]
+    )
+    destination = root / _GROUNDING_ROOT / f"robot_location_{location_number:04d}"
+    if destination.exists():
+        raise RobotFrameConversionError(
+            f"Robot-frame location {location_number:04d} already exists."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(tempfile.mkdtemp(prefix=".robot-location-", dir=destination.parent))
+    try:
+        record = {
+            "schema_version": 2,
+            "record_type": "RobotFrameLocationRecord",
+            "producer": _PRODUCER,
+            "location_number": location_number,
+            "method": "calibrated_neutral_candidate_center",
+            "source_segmentation": segmentation_metadata["record"],
+            "source_calibration": {
+                "ref": _relative_ref(root, calibration.path),
+                "sha256": _sha256_path(calibration.path),
+                "payload_sha256": calibration.record["payload_sha256"],
+                "calibration_id": calibration.record["calibration_id"],
+            },
+            "candidate_reference": {
+                "observation_handle": observation_handle,
+                "candidate_handle": candidate_handle,
+            },
+            "observation_timestamp_ns": observation_timestamp_ns,
+            "source_frame": source_frame,
+            "target_frame": requested_target,
+            "translated_location_m": _float_vector(translated),
+            "location": "available",
+            "robot_frame_conversion": "accepted",
+        }
+        _write_json(temporary_root / "robot_frame_location_record.json", record)
+        temporary_root.rename(destination)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise RobotFrameConversionError(
+            f"Neutral candidate location conversion failed: {type(exc).__name__}: {exc}"
         ) from exc
     return RobotFrameLocationResult(
         record_path=destination / "robot_frame_location_record.json",
@@ -561,7 +673,7 @@ def _load_pose(interaction_root: Path, record_path: Path) -> _ValidatedPose:
     if relative != expected_ref:
         raise RobotFrameConversionError("CAD pose estimation record path is invalid.")
     if (
-        record["schema_version"] != 2
+        record["schema_version"] != 3
         or record["record_type"] != "CADPoseEstimationRecord"
         or record["producer"] != _PRODUCER
         or record["method"] != "principal_axis_multistart_point_to_point_ICP"
@@ -586,11 +698,9 @@ def _load_pose(interaction_root: Path, record_path: Path) -> _ValidatedPose:
     ):
         raise RobotFrameConversionError("CAD pose estimation provenance is inconsistent.")
 
-    source_frame, camera_from_CAD, camera_centroid_translation_m = (
-        _validated_pose_decision(
-            record,
-            pose_inputs.cad_triangles_m.reshape(-1, 3).mean(axis=0),
-        )
+    source_frame, camera_from_CAD, camera_centroid_translation_m = _validated_pose_decision(
+        record,
+        pose_inputs.cad_triangles_m.reshape(-1, 3).mean(axis=0),
     )
     observation_timestamp_ns = _observation_timestamp_ns(interaction_root, record)
     return _ValidatedPose(
@@ -658,9 +768,7 @@ def _validated_pose_decision(
             raise RobotFrameConversionError("Unselected CAD pose frame must be null.")
         return None, None, None
     expected_keys = (
-        _LOCATION_ONLY_CANDIDATE_KEYS
-        if location == "available"
-        else _CANDIDATE_IDENTITY_KEYS
+        _LOCATION_ONLY_CANDIDATE_KEYS if location == "available" else _CANDIDATE_IDENTITY_KEYS
     )
     if not isinstance(selected, Mapping) or set(selected) != expected_keys:
         raise RobotFrameConversionError("Ambiguous CAD pose candidate is invalid.")
@@ -736,9 +844,7 @@ def _load_calibration(
     except CADSizeAssociationError as exc:
         raise RobotFrameConversionError(str(exc)) from exc
     expected_ref = (
-        _GROUNDING_ROOT
-        / f"calibration_{calibration_number:04d}"
-        / "calibration_record.json"
+        _GROUNDING_ROOT / f"calibration_{calibration_number:04d}" / "calibration_record.json"
     )
     if relative != expected_ref:
         raise RobotFrameConversionError("Camera-to-robot calibration path is invalid.")
@@ -786,16 +892,12 @@ def _load_calibration(
         raise RobotFrameConversionError("Camera-to-robot calibration provenance is invalid.")
     _nonempty_string(provenance["source"], "calibration provenance source")
     if not _is_sha256(provenance["source_sha256"]):
-        raise RobotFrameConversionError(
-            "Camera-to-robot calibration provenance hash is invalid."
-        )
+        raise RobotFrameConversionError("Camera-to-robot calibration provenance hash is invalid.")
     payload = {key: value for key, value in record.items() if key != "payload_sha256"}
-    if not _is_sha256(record["payload_sha256"]) or record[
-        "payload_sha256"
-    ] != _payload_sha256(payload):
-        raise RobotFrameConversionError(
-            "Camera-to-robot calibration payload hash is invalid."
-        )
+    if not _is_sha256(record["payload_sha256"]) or record["payload_sha256"] != _payload_sha256(
+        payload
+    ):
+        raise RobotFrameConversionError("Camera-to-robot calibration payload hash is invalid.")
     return _ValidatedCalibration(
         path=path,
         record=record,
@@ -814,13 +916,10 @@ def _compose_robot_frame_pose(
     if camera_centroid_translation_m is None:
         return None
     target_centroid_translation_m = (
-        target_from_camera[:3, :3] @ camera_centroid_translation_m
-        + target_from_camera[:3, 3]
+        target_from_camera[:3, :3] @ camera_centroid_translation_m + target_from_camera[:3, 3]
     )
     result: dict[str, object] = {
-        "CAD_centroid_translation_m": _float_vector(
-            target_centroid_translation_m
-        ),
+        "CAD_centroid_translation_m": _float_vector(target_centroid_translation_m),
     }
     if camera_from_CAD is None:
         return result
@@ -832,9 +931,7 @@ def _compose_robot_frame_pose(
         {
             "CAD_origin_translation_m": _float_vector(robot_from_CAD[:3, 3]),
             "rotation_matrix": _float_matrix(rotation),
-            "quaternion_xyzw": _float_vector(
-                Rotation.from_matrix(rotation).as_quat()
-            ),
+            "quaternion_xyzw": _float_vector(Rotation.from_matrix(rotation).as_quat()),
             "robot_from_CAD_transform": _float_matrix(robot_from_CAD),
         }
     )
@@ -852,7 +949,7 @@ def _robot_frame_pose_record(
 ) -> dict[str, object]:
     pose_record = pose_input.record
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "record_type": "RobotFramePoseRecord",
         "producer": _PRODUCER,
         "conversion_number": conversion_number,
@@ -870,6 +967,14 @@ def _robot_frame_pose_record(
         },
         "CAD": pose_record["CAD"],
         "segmentation": pose_record["segmentation"],
+        "candidate_reference": (
+            None
+            if pose_record["selected_candidate"] is None
+            else {
+                "observation_handle": pose_record["selected_candidate"]["observation_handle"],
+                "candidate_handle": pose_record["selected_candidate"]["candidate_handle"],
+            }
+        ),
         "observation_timestamp_ns": pose_input.observation_timestamp_ns,
         "source_frame": pose_input.source_frame,
         "target_frame": calibration_input.target_frame,
@@ -887,13 +992,16 @@ def _validate_derived_pose(
     transformation: np.ndarray,
     label: str,
 ) -> None:
-    translation = _finite_array(record.get("translation_m", record.get("CAD_origin_translation_m")), (3,), f"{label} translation")
+    translation = _finite_array(
+        record.get("translation_m", record.get("CAD_origin_translation_m")),
+        (3,),
+        f"{label} translation",
+    )
     rotation = _finite_array(record.get("rotation_matrix"), (3, 3), f"{label} rotation")
     quaternion = _finite_array(record.get("quaternion_xyzw"), (4,), f"{label} quaternion")
-    if (
-        not np.allclose(translation, transformation[:3, 3], rtol=0.0, atol=_TRANSFORM_ATOL)
-        or not np.allclose(rotation, transformation[:3, :3], rtol=0.0, atol=_TRANSFORM_ATOL)
-    ):
+    if not np.allclose(
+        translation, transformation[:3, 3], rtol=0.0, atol=_TRANSFORM_ATOL
+    ) or not np.allclose(rotation, transformation[:3, :3], rtol=0.0, atol=_TRANSFORM_ATOL):
         raise RobotFrameConversionError(f"{label} derived values are inconsistent.")
     expected_quaternion = Rotation.from_matrix(transformation[:3, :3]).as_quat()
     if not (
@@ -909,20 +1017,14 @@ def _validity(
     *,
     error_type: type[ValueError],
 ) -> dict[str, int | None]:
-    if (
-        isinstance(valid_from_ns, bool)
-        or not isinstance(valid_from_ns, int)
-        or valid_from_ns < 0
-    ):
+    if isinstance(valid_from_ns, bool) or not isinstance(valid_from_ns, int) or valid_from_ns < 0:
         raise error_type("valid_from_ns must be a nonnegative integer.")
     if valid_until_ns is not None and (
         isinstance(valid_until_ns, bool)
         or not isinstance(valid_until_ns, int)
         or valid_until_ns < valid_from_ns
     ):
-        raise error_type(
-            "valid_until_ns must be null or an integer at least valid_from_ns."
-        )
+        raise error_type("valid_until_ns must be null or an integer at least valid_from_ns.")
     return {"valid_from_ns": valid_from_ns, "valid_until_ns": valid_until_ns}
 
 

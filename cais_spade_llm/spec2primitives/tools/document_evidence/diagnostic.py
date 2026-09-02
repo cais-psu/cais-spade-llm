@@ -17,6 +17,8 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingInterruption,
     commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
+    reject_ontology_grounding_candidate,
+    review_target_feature_semantics,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
@@ -83,9 +85,7 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
         resolved = resolve_context_ref({"context_ref": context_ref})
         served_context = resolved.get("served_context")
         if not isinstance(served_context, Mapping):
-            raise DocumentInterpretationError(
-                "The selected approved document could not be served."
-            )
+            raise DocumentInterpretationError("The selected approved document could not be served.")
         interpretation = await interpret_document_evidence(
             interaction_root=root,
             tbox=tbox,
@@ -112,9 +112,7 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
         )
         overview = overview_snapshot["overview"]
         if not isinstance(overview, Mapping):
-            raise DocumentInterpretationError(
-                "DocumentOverviewRecord snapshot is invalid."
-            )
+            raise DocumentInterpretationError("DocumentOverviewRecord snapshot is invalid.")
         overview_ref = str(interpretation.overview_record_path.relative_to(root))
         overview_stage = {
             "status": "accepted",
@@ -142,26 +140,28 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             tbox,
             load_predefined_resource_registry(tbox),
         )
+        evidence_catalog = [
+            {
+                "retrieval_state": "already_retrieved",
+                "evidence_type": "document",
+                "source": context_ref,
+                "evidence_refs": evidence_refs,
+                "record_refs": [overview_ref],
+                "summary": overview.get("summary"),
+                "pages": overview.get("pages"),
+                "visual_observations": overview.get("observations"),
+                "uncertainty": overview.get("uncertainty"),
+            }
+        ]
+        authorized_evidence_refs = {"requirement_0001", *evidence_refs}
         candidate = await propose_and_validate_ontology_grounding(
             product_agent,
             interaction_root=root,
             tbox=tbox,
             abox=overview_merge.abox,
             workcell=workcell,
-            evidence_catalog=[
-                {
-                    "retrieval_state": "already_retrieved",
-                    "evidence_type": "document",
-                    "source": context_ref,
-                    "evidence_refs": evidence_refs,
-                    "record_refs": [overview_ref],
-                    "summary": overview.get("summary"),
-                    "pages": overview.get("pages"),
-                    "visual_observations": overview.get("observations"),
-                    "uncertainty": overview.get("uncertainty"),
-                }
-            ],
-            authorized_evidence_refs=set(evidence_refs),
+            evidence_catalog=evidence_catalog,
+            authorized_evidence_refs=authorized_evidence_refs,
             tools=[],
             tool_executor=no_retrieval,
             max_tool_rounds=1,
@@ -175,13 +175,31 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             raise OntologyGroundingError(
                 f"Document diagnostic did not return a proposal: {candidate.message}"
             )
+        semantic_review = await review_target_feature_semantics(
+            product_agent,
+            interaction_root=root,
+            candidate=candidate,
+            product_requirement=product_requirement,
+            evidence_catalog=evidence_catalog,
+        )
+        if semantic_review.verdict != "complete":
+            reject_ontology_grounding_candidate(
+                candidate,
+                interaction_root=root,
+                abox=overview_merge.abox,
+                semantic_review=semantic_review,
+            )
+            raise OntologyGroundingError(
+                semantic_review.gap or "Document target feature is semantically incomplete."
+            )
         proposal = commit_ontology_grounding_candidate(
             candidate,
             interaction_root=root,
             tbox=tbox,
             abox=overview_merge.abox,
             workcell=workcell,
-            authorized_evidence_refs=set(evidence_refs),
+            authorized_evidence_refs=authorized_evidence_refs,
+            semantic_review=semantic_review,
         )
         proposal_record = _read_mapping(
             proposal.proposal_path,

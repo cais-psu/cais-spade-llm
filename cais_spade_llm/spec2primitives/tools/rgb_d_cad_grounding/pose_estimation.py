@@ -1,4 +1,4 @@
-"""Estimate a camera-frame CAD pose for segmented loose source candidates."""
+"""Estimate a camera-frame CAD pose for neutral segmented candidates."""
 
 from __future__ import annotations
 
@@ -92,9 +92,11 @@ class _PoseInputs:
 
 @dataclass(frozen=True)
 class _RegistrationHypothesis:
+    observation_handle: str
     camera_id: str
     camera_order: int
     frame: str
+    candidate_handle: str
     candidate_id: int
     point_count: int
     initialization: int
@@ -111,7 +113,7 @@ def estimate_camera_frame_pose(
     correspondence_record_path: Path,
     pose_number: int = 1,
 ) -> CADPoseEstimationResult:
-    """Estimate one CAD pose from size-plausible loose source candidates.
+    """Estimate one CAD pose from size-plausible neutral candidates.
 
     The returned transformation maps the exact approved CAD-local frame into
     the selected camera optical frame. It is not a robot-frame pose or pick
@@ -126,9 +128,7 @@ def estimate_camera_frame_pose(
 
     destination = root / _GROUNDING_ROOT / f"pose_{pose_number:04d}"
     if destination.exists():
-        raise CADPoseEstimationError(
-            f"CAD pose estimation {pose_number:04d} already exists."
-        )
+        raise CADPoseEstimationError(f"CAD pose estimation {pose_number:04d} already exists.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         temporary_root = Path(tempfile.mkdtemp(prefix=".pose-", dir=destination.parent))
@@ -149,9 +149,7 @@ def estimate_camera_frame_pose(
         )
         _write_json(temporary_root / "pose_record.json", record)
         if destination.exists():
-            raise CADPoseEstimationError(
-                f"CAD pose estimation {pose_number:04d} already exists."
-            )
+            raise CADPoseEstimationError(f"CAD pose estimation {pose_number:04d} already exists.")
         temporary_root.rename(destination)
     except CADPoseEstimationError:
         shutil.rmtree(temporary_root, ignore_errors=True)
@@ -189,7 +187,7 @@ def _load_pose_inputs(
     if relative != expected_ref:
         raise CADSizeAssociationError("CAD size correspondence record path is invalid.")
     if (
-        record["schema_version"] != 1
+        record["schema_version"] != 2
         or record["record_type"] != "CADSizeCorrespondenceRecord"
         or record["producer"] != _PRODUCER
         or record["method"] != "two_largest_principal_dimensions"
@@ -254,15 +252,16 @@ def _load_pose_inputs(
         raise CADSizeAssociationError("CAD size correspondence record is inconsistent.")
 
     plausible_keys = {
-        (candidate["camera_id"], candidate["candidate_id"])
-        for candidate in plausible
-        if candidate["role"] == "source"
+        (candidate["observation_handle"], candidate["candidate_handle"]) for candidate in plausible
     }
     eligible = tuple(
         candidate
         for candidate in candidate_inputs
-        if candidate["role"] == "source"
-        and (candidate["camera_id"], candidate["candidate_id"]) in plausible_keys
+        if (
+            candidate["observation_handle"],
+            candidate["candidate_handle"],
+        )
+        in plausible_keys
     )
     return _PoseInputs(
         correspondence_path=path,
@@ -283,9 +282,11 @@ def _estimate_hypotheses(inputs: _PoseInputs) -> list[_RegistrationHypothesis]:
             _register_candidate(
                 inputs.cad_triangles_m,
                 points_m,
+                observation_handle=str(candidate["observation_handle"]),
                 camera_id=str(candidate["camera_id"]),
                 camera_order=int(candidate["camera_order"]),
                 frame=str(candidate["frame"]),
+                candidate_handle=str(candidate["candidate_handle"]),
                 candidate_id=int(candidate["candidate_id"]),
             )
         )
@@ -305,9 +306,11 @@ def _register_candidate(
     triangles_m: np.ndarray,
     candidate_points_m: np.ndarray,
     *,
+    observation_handle: str,
     camera_id: str,
     camera_order: int,
     frame: str,
+    candidate_handle: str,
     candidate_id: int,
 ) -> list[_RegistrationHypothesis]:
     voxel_size_m = _voxel_size(triangles_m)
@@ -342,9 +345,11 @@ def _register_candidate(
         )
         hypotheses.append(
             _RegistrationHypothesis(
+                observation_handle=observation_handle,
                 camera_id=camera_id,
                 camera_order=camera_order,
                 frame=frame,
+                candidate_handle=candidate_handle,
                 candidate_id=candidate_id,
                 point_count=int(candidate_points_m.shape[0]),
                 initialization=initialization,
@@ -417,18 +422,14 @@ def _refine_point_to_point_icp(
         math.ceil(observed_points_m.shape[0] * _ICP_TRIM_FRACTION),
     )
     for _ in range(_MAXIMUM_ICP_ITERATIONS):
-        transformed_model = (
-            model_points_m @ transformation[:3, :3].T + transformation[:3, 3]
-        )
+        transformed_model = model_points_m @ transformation[:3, :3].T + transformation[:3, 3]
         distances, indices = cKDTree(transformed_model).query(observed_points_m, k=1)
         retained = np.argsort(distances, kind="stable")[:keep_count]
         updated = _rigid_transform(
             model_points_m[indices[retained]],
             observed_points_m[retained],
         )
-        translation_change = float(
-            np.linalg.norm(updated[:3, 3] - transformation[:3, 3])
-        )
+        translation_change = float(np.linalg.norm(updated[:3, 3] - transformation[:3, 3]))
         relative = transformation[:3, :3].T @ updated[:3, :3]
         cosine = min(1.0, max(-1.0, (float(np.trace(relative)) - 1.0) * 0.5))
         rotation_change = math.degrees(math.acos(cosine))
@@ -444,9 +445,7 @@ def _refine_point_to_point_icp(
 def _rigid_transform(source_points_m: np.ndarray, target_points_m: np.ndarray) -> np.ndarray:
     source_center = source_points_m.mean(axis=0)
     target_center = target_points_m.mean(axis=0)
-    covariance = (source_points_m - source_center).T @ (
-        target_points_m - target_center
-    )
+    covariance = (source_points_m - source_center).T @ (target_points_m - target_center)
     left, _, right_transpose = np.linalg.svd(covariance)
     rotation = right_transpose.T @ left.T
     if np.linalg.det(rotation) < 0:
@@ -506,9 +505,7 @@ def _observed_fit(
 ) -> tuple[float, float, int]:
     from scipy.spatial import cKDTree
 
-    transformed_model = (
-        model_points_m @ transformation[:3, :3].T + transformation[:3, 3]
-    )
+    transformed_model = model_points_m @ transformation[:3, :3].T + transformation[:3, 3]
     distances, _ = cKDTree(transformed_model).query(
         observed_points_m.astype(np.float64),
         k=1,
@@ -558,8 +555,7 @@ def _pose_decision(
         (
             item
             for item in qualified[1:]
-            if (item.camera_id, item.candidate_id)
-            != (best.camera_id, best.candidate_id)
+            if (item.camera_id, item.candidate_id) != (best.camera_id, best.candidate_id)
         ),
         None,
     )
@@ -614,19 +610,13 @@ def _pose_decision(
         }
 
     selected = dict(base_candidate)
-    selected["CAD_centroid_translation_m"] = _float_vector(
-        best_centroid_translation_m
-    )
+    selected["CAD_centroid_translation_m"] = _float_vector(best_centroid_translation_m)
     selected["CAD_origin_translation_m"] = _float_vector(best.transformation[:3, 3])
-    selected["rotation_matrix"] = [
-        _float_vector(row) for row in best.transformation[:3, :3]
-    ]
+    selected["rotation_matrix"] = [_float_vector(row) for row in best.transformation[:3, :3]]
     selected["quaternion_xyzw"] = _float_vector(
         Rotation.from_matrix(best.transformation[:3, :3]).as_quat()
     )
-    selected["camera_from_CAD_transform"] = [
-        _float_vector(row) for row in best.transformation
-    ]
+    selected["camera_from_CAD_transform"] = [_float_vector(row) for row in best.transformation]
     selected["registration"] = _registration_metrics(best)
     return {
         "CAD_correspondence": "accepted",
@@ -667,7 +657,7 @@ def _pose_record(
         raise CADPoseEstimationError("Qualified pose hypotheses are invalid.")
     correspondence = inputs.correspondence_record
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "record_type": "CADPoseEstimationRecord",
         "producer": _PRODUCER,
         "pose_number": pose_number,
@@ -694,9 +684,7 @@ def _pose_record(
         "CAD": correspondence["CAD"],
         "segmentation": correspondence["segmentation"],
         "ranked_pose_hypotheses": [_hypothesis_record(item) for item in hypotheses],
-        "qualified_pose_hypotheses": [
-            _hypothesis_record(item) for item in qualified
-        ],
+        "qualified_pose_hypotheses": [_hypothesis_record(item) for item in qualified],
         "selected_candidate": decision["selected_candidate"],
         "CAD_correspondence": decision["CAD_correspondence"],
         "location": decision["location"],
@@ -713,9 +701,10 @@ def _pose_record(
 
 def _candidate_identity(item: _RegistrationHypothesis) -> dict[str, object]:
     return {
+        "observation_handle": item.observation_handle,
         "camera_id": item.camera_id,
-        "role": "source",
         "frame": item.frame,
+        "candidate_handle": item.candidate_handle,
         "candidate_id": item.candidate_id,
         "point_count": item.point_count,
     }
@@ -726,9 +715,7 @@ def _hypothesis_record(item: _RegistrationHypothesis) -> dict[str, object]:
     record.update(
         {
             "initialization": item.initialization,
-            "camera_from_CAD_transform": [
-                _float_vector(row) for row in item.transformation
-            ],
+            "camera_from_CAD_transform": [_float_vector(row) for row in item.transformation],
             "registration": _registration_metrics(item),
         }
     )

@@ -93,9 +93,7 @@ def test_ui_observer_forwards_native_tools_without_changing_them() -> None:
             *,
             response_format: dict[str, Any],
             tools: list[dict[str, Any]] | None = None,
-            tool_executor: Callable[
-                [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
-            ]
+            tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
             | None = None,
             max_tool_rounds: int = 3,
         ) -> dict[str, Any]:
@@ -122,9 +120,7 @@ def test_ui_observer_forwards_native_tools_without_changing_them() -> None:
 
     assert result == {"insufficient_evidence": "More evidence is required."}
     assert tool_results == [("retrieve", {"evidence_id": "evidence_0001"})]
-    assert stages == [
-        "Investigating approved evidence and grounding the product context."
-    ]
+    assert stages == ["Investigating approved evidence and authoring the target feature."]
 
 
 def test_shared_product_agent_bridge_wraps_async_retrieve_callback(
@@ -243,8 +239,8 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert [event["title"] for event in view["timeline"]] == [
         "Requirement received",
         "Evidence investigated",
-        "Context grounded",
-        "Resource selected",
+        "Target feature grounded",
+        "Endpoint-motion allocation validated",
         "Grounding complete",
     ]
     final_result = view["final_result"]
@@ -253,9 +249,48 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["target_frame"] == "world"
     assert final_result["pose"] is None
     assert final_result["selected_resource"] == "xarm6"
-    assert final_result["limitations"] == [
-        "The available evidence does not identify the destination shaft."
-    ]
+    assert final_result["allocation_label"] == "validated endpoint-motion allocation"
+    assert final_result["motion_executed"] is False
+    assert final_result["limitations"] == []
+    assert final_result["reachability"]["status"] == "accepted"
+    assert final_result["reachability"]["resource_symbol"] == "xarm6"
+    assert final_result["reachability"]["process_symbol"] == "assembly"
+    assert final_result["reachability"]["target_frame"] == "world"
+    assert final_result["robot_agent_validation"]["status"] == "accepted"
+    assert final_result["robot_agent_validation"]["mode"] == "plan_only"
+    assert final_result["robot_agent_validation"]["validation_scope"] == (
+        "endpoint_motion"
+    )
+    assert final_result["robot_agent_validation"]["motion_executed"] is False
+    assert final_result["target_feature"]["desired_state"]["statement"]["text"] == (
+        "The medium gear is assembled as requested."
+    )
+    assert final_result["target_feature"]["current_state"]["state_values"] == []
+    assert final_result["target_feature"]["desired_state"]["state_values"] == []
+    current = final_result["current_state_evidence"]
+    desired = final_result["desired_state_evidence"]
+    assert current["state_iri"].endswith("currentstate_0001")
+    assert desired["state_iri"].endswith("desiredstate_0001")
+    assert current["evidence_handle"].startswith("state_evidence_")
+    assert desired["evidence_handle"].startswith("state_evidence_")
+    assert current["evidence_handle"] != desired["evidence_handle"]
+    assert current["translated_location_m"] == [0.0, -0.7, 1.1]
+    assert desired["translated_location_m"] == [0.0, -0.2, 1.1]
+    assert current["annotated_rgb"]["data_uri"].startswith("data:image/svg+xml;base64,")
+    assert desired["annotated_rgb"]["data_uri"].startswith("data:image/svg+xml;base64,")
+    ontology_rows = final_result["ontology"]["rows"]
+    assert any(
+        row["subject"] == "ctx:feature_0001"
+        and row["predicate"] == "ppr:hascurrentstate"
+        and row["object"] == "ctx:currentstate_0001"
+        for row in ontology_rows
+    )
+    assert any(
+        row["subject"] == "ctx:feature_0001"
+        and row["predicate"] == "ppr:hasdesiredstate"
+        and row["object"] == "ctx:desiredstate_0001"
+        for row in ontology_rows
+    )
     phase_5_1 = view["phase_5_1"]
     assert isinstance(phase_5_1, dict)
     assert phase_5_1["status"] == "ready_for_assignment"
@@ -317,9 +352,7 @@ def test_completed_limitations_hide_document_uncertainty() -> None:
     )
 
     assert limitations == [destination_gap]
-    assert [
-        item["description"] for item in product_context["uncertainty"]
-    ] == document_notices
+    assert [item["description"] for item in product_context["uncertainty"]] == document_notices
 
 
 def test_completed_limitations_hide_superseded_typed_record_claim() -> None:
@@ -345,10 +378,13 @@ def test_completed_limitations_hide_superseded_typed_record_claim() -> None:
     )
 
     assert limitations == [destination_gap]
-    assert spec2primitives_ui._final_result_limitations(
-        product_context,
-        {"missing_information": [stale_location_gap]},
-    ) == []
+    assert (
+        spec2primitives_ui._final_result_limitations(
+            product_context,
+            {"missing_information": [stale_location_gap]},
+        )
+        == []
+    )
 
 
 def test_completed_view_recovers_from_persisted_native_records(
@@ -362,9 +398,7 @@ def test_completed_view_recovers_from_persisted_native_records(
     assert recovered is not None
     assert recovered["recovered"] is True
     assert recovered["interaction_identifier"] == "interaction_native"
-    assert spec2primitives_ui._pa_ui_view(recovered)["activity_state"] == (
-        "grounding complete"
-    )
+    assert spec2primitives_ui._pa_ui_view(recovered)["activity_state"] == ("grounding complete")
 
 
 def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> None:
@@ -403,6 +437,53 @@ def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> Non
 
     assert clarification[-1]["title"] == "Clarification requested"
     assert incomplete[-1]["title"] == "Grounding incomplete"
+
+
+def test_cad_identity_reports_all_cited_candidates_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    record_refs = [
+        "products/grounding/cad/candidate_a.json",
+        "products/grounding/cad/candidate_b.json",
+    ]
+    context_refs = ["approved-cad-a", "approved-cad-b"]
+    typed_bindings: list[dict[str, object]] = []
+    for index, (record_ref, context_ref) in enumerate(
+        zip(record_refs, context_refs, strict=True),
+        start=1,
+    ):
+        record_path = tmp_path / record_ref
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        record_path.write_text(
+            json.dumps(
+                {
+                    "source": {"context_ref": context_ref},
+                    "coordinate_frame": "cad_local",
+                    "bounds_m": {"x": [0.0, float(index)]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        typed_bindings.append(
+            {
+                "output_symbol": "CADMeshRecord",
+                "status": "accepted",
+                "record_ref": record_ref,
+                "evidence_refs": [context_ref],
+            }
+        )
+
+    identity = spec2primitives_ui._cad_identity(
+        tmp_path,
+        typed_bindings=typed_bindings,
+        target_feature={"evidence_refs": context_refs},
+    )
+
+    assert identity is not None
+    assert identity["status"] == "ambiguous"
+    assert [
+        candidate["context_ref"] for candidate in identity["candidates"]
+    ] == context_refs
 
 
 def test_calibration_readiness_uses_actionable_runtime_state() -> None:

@@ -31,8 +31,16 @@ readable only where recovery validation explicitly supports them.
 
 The document tool never authors ontology facts. PA uses the requirement,
 authoritative ontology, and retrieved typed records together, then returns a
-cited TBox-constrained proposal. That proposal remains transient until every
+cited v8 `target_feature` with a required process, explicit current and desired
+states, optional typed state-value refs, and direct evidence. A separate PA
+semantic-review call checks adequacy before commit. That proposal remains transient until every
 typed prerequisite activated by its provisional graph is accepted.
+
+The VLM overview may provide semantic evidence that a manual describes a
+destination or final condition, but it neither labels RGB-D regions nor emits
+robot-frame geometry. `TargetFeatureGeometryRecord` is not part of the
+architecture. PA assigns approved typed evidence to feature states, while
+verifiers derive only the numeric values they require.
 
 No RAG, embeddings, vector database, independent-page ranking, or section
 retrieval is part of this boundary. Large-document retrieval remains future

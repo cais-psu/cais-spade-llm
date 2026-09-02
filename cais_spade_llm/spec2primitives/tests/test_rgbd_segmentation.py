@@ -79,7 +79,7 @@ class RejectedCapture:
         )
 
 
-def test_segmentation_removes_source_planes_and_retains_assembly_plate(
+def test_segmentation_applies_one_neutral_policy_to_every_observation(
     tmp_path: Path,
 ) -> None:
     preprocessing = _preprocess_observation(tmp_path, _segmentation_bundle())
@@ -89,8 +89,9 @@ def test_segmentation_removes_source_planes_and_retains_assembly_plate(
         observation_record_path=preprocessing.record_path,
     )
 
-    assert result.source_candidate_count == 6
-    assert result.assembly_candidate_count == 1
+    assert result.candidate_count == 10
+    assert result.record["schema_version"] == 2
+    assert result.record["candidate_count"] == 10
     assert result.record["candidate_state"] == "candidates_available"
     assert result.record["identity"] == "not_evaluated"
     assert result.record["CAD_correspondence"] == "not_evaluated"
@@ -108,7 +109,7 @@ def test_segmentation_removes_source_planes_and_retains_assembly_plate(
         "maximum_candidates": 32,
     }
 
-    for camera in result.record["cameras"]:
+    for camera_index, camera in enumerate(result.record["cameras"], start=1):
         camera_id = camera["camera_id"]
         mask_path = result.record_path.parent / f"{camera_id}_candidate_labels.npy"
         labels = np.load(mask_path, allow_pickle=False)
@@ -116,24 +117,23 @@ def test_segmentation_removes_source_planes_and_retains_assembly_plate(
         assert labels.dtype == np.uint16
         assert camera["label_mask_artifact"]["sha256"] == _sha256(mask_path)
         assert camera["frame"] == f"{camera_id}_optical_frame"
+        assert camera["observation_handle"] == f"view_{camera_index:04d}"
+        assert "role" not in camera
         assert camera["identity"] == "not_evaluated"
         assert camera["CAD_correspondence"] == "not_evaluated"
         assert camera["pose"] == "not_evaluated"
         if camera_id == "cam_assembly":
-            assert camera["role"] == "assembly_target"
             assert camera["candidate_count"] == 1
-            assert camera["support_plane"]["status"] == "retained_for_assembly_target"
-            assert camera["support_plane"]["removal_applied"] is False
             assert camera["support_plane"]["inlier_count"] == 8_000
             assert labels[120, 120] == 1
         else:
-            assert camera["role"] == "source"
-            assert camera["candidate_count"] == 2
-            assert camera["support_plane"]["status"] == "removed"
-            assert camera["support_plane"]["removal_applied"] is True
-            assert labels[105, 105] == 0
-            assert {int(labels[125, 125]), int(labels[125, 135])} == {1, 2}
+            assert camera["candidate_count"] == 3
+            assert labels[105, 105] == 1
+            assert {int(labels[125, 125]), int(labels[125, 135])} == {2, 3}
+        assert camera["support_plane"]["status"] == "detected"
+        assert camera["support_plane"]["candidate_filtering_applied"] is False
         for candidate in camera["candidates"]:
+            assert candidate["candidate_handle"].startswith(f"candidate_{camera_index:04d}_")
             assert candidate["point_count"] >= 50
             assert candidate["identity"] == "not_evaluated"
             assert candidate["CAD_correspondence"] == "not_evaluated"
@@ -193,7 +193,7 @@ def test_segmentation_rejects_tampered_point_cloud_without_partial_output(
     assert list(grounding_root.glob(".segmentation-*")) == []
 
 
-def test_segmentation_records_zero_source_candidates_as_unresolved(
+def test_segmentation_keeps_neutral_surface_candidates_when_parts_are_absent(
     tmp_path: Path,
 ) -> None:
     preprocessing = _preprocess_observation(
@@ -206,14 +206,11 @@ def test_segmentation_records_zero_source_candidates_as_unresolved(
         observation_record_path=preprocessing.record_path,
     )
 
-    assert result.source_candidate_count == 0
-    source_cameras = [
-        camera for camera in result.record["cameras"] if camera["role"] == "source"
-    ]
-    assert len(source_cameras) == 3
-    assert all(camera["candidate_count"] == 0 for camera in source_cameras)
-    assert all(camera["candidate_state"] == "unresolved" for camera in source_cameras)
-    assert all(camera["support_plane"]["status"] == "removed" for camera in source_cameras)
+    assert result.candidate_count == 4
+    assert all(camera["candidate_count"] == 1 for camera in result.record["cameras"])
+    assert all(
+        camera["candidate_state"] == "candidates_available" for camera in result.record["cameras"]
+    )
 
 
 def test_segmentation_rejects_mutated_record_without_partial_output(tmp_path: Path) -> None:
@@ -249,8 +246,7 @@ def test_automatic_pipeline_captures_preprocesses_and_segments_with_fixed_inputs
 
     assert first["status"] == "ready"
     assert second["status"] == "ready"
-    assert first["source_candidate_count"] == 6
-    assert first["assembly_candidate_count"] == 1
+    assert first["candidate_count"] == 10
     assert first["identity"] == "not_evaluated"
     assert first["CAD_correspondence"] == "not_evaluated"
     assert first["pose"] == "not_evaluated"
@@ -270,8 +266,7 @@ def test_automatic_pipeline_captures_preprocesses_and_segments_with_fixed_inputs
         assert _read_json(Path(result["pipeline_record_path"])) == result
     status = read_rgbd_segmentation_status(tmp_path)
     assert status["status"] == "ready"
-    assert status["source_candidate_count"] == 6
-    assert status["assembly_candidate_count"] == 1
+    assert status["candidate_count"] == 10
 
 
 def test_automatic_pipeline_records_failure_and_preserves_not_evaluated_states(
@@ -297,7 +292,7 @@ def test_automatic_pipeline_records_failure_and_preserves_not_evaluated_states(
 def test_status_reader_fails_closed_for_tampered_status(tmp_path: Path) -> None:
     assert read_rgbd_segmentation_status(tmp_path)["status"] == "idle"
     (tmp_path / "rgbd_segmentation_status.json").write_text(
-        json.dumps({"status": "ready", "source_candidate_count": 99}),
+        json.dumps({"status": "ready", "candidate_count": 99}),
         encoding="utf-8",
     )
 

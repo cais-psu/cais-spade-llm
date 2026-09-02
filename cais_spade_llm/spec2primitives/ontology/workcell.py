@@ -1,4 +1,4 @@
-"""Project the predefined assembly workcell into an immutable minimal ABox."""
+"""Project configured process capabilities into an immutable Workcell ABox."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from rdflib import Graph, Namespace, URIRef
 from rdflib.compare import to_isomorphic
 from rdflib.namespace import RDF
 
-from cais_spade_llm.spec2primitives.config import WorkcellProfile, load_workcell_profile
+from cais_spade_llm.spec2primitives.config import WorkcellProfile
 
 from .ppr_tbox import OntologyContextError, TBoxSnapshot
 from .resource_registry import ResourceRegistrySnapshot
+
 
 class PredefinedWorkcellError(OntologyContextError):
     """Raised when the predefined Workcell ABox cannot be trusted."""
@@ -21,14 +22,13 @@ class PredefinedWorkcellError(OntologyContextError):
 
 @dataclass(frozen=True)
 class PredefinedWorkcellSnapshot:
-    """Hold the validated broad assembly capabilities for the fixed workcell."""
+    """Hold the validated broad process capabilities for the workcell."""
 
     graph: Graph = field(repr=False, compare=False)
-    process_symbol: str
-    process_iri: str
+    processes: tuple[tuple[str, str], ...]
     resource_iris: tuple[str, ...]
+    resource_capabilities: tuple[tuple[str, tuple[str, ...]], ...]
     ppr_namespace: str
-    process_namespace: str
     resource_namespace: str
     tbox_fingerprint: str
     registry_fingerprint: str
@@ -64,12 +64,11 @@ class PredefinedWorkcellSnapshot:
         _validate_snapshot_symbols(self)
         if set(self.graph) != _expected_graph(
             ppr_namespace=self.ppr_namespace,
-            process_iri=self.process_iri,
             resource_iris=self.resource_iris,
+            processes=self.processes,
+            resource_capabilities=self.resource_capabilities,
         ):
-            raise PredefinedWorkcellError(
-                "Predefined Workcell graph changed after validation."
-            )
+            raise PredefinedWorkcellError("Predefined Workcell graph changed after validation.")
 
         payload = self.to_record()
         payload.pop("fingerprint")
@@ -81,13 +80,20 @@ class PredefinedWorkcellSnapshot:
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe identity and provenance projection."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "PredefinedWorkcellSnapshot",
-            "process_symbol": self.process_symbol,
-            "process_iri": self.process_iri,
+            "processes": [
+                {"process_symbol": symbol, "process_iri": iri} for symbol, iri in self.processes
+            ],
             "resource_iris": list(self.resource_iris),
+            "resource_capabilities": [
+                {
+                    "resource_iri": resource_iri,
+                    "capable_process_iris": list(process_iris),
+                }
+                for resource_iri, process_iris in self.resource_capabilities
+            ],
             "ppr_namespace": self.ppr_namespace,
-            "process_namespace": self.process_namespace,
             "resource_namespace": self.resource_namespace,
             "tbox_fingerprint": self.tbox_fingerprint,
             "registry_fingerprint": self.registry_fingerprint,
@@ -96,6 +102,23 @@ class PredefinedWorkcellSnapshot:
             "fingerprint": self.fingerprint,
         }
 
+    def process_symbol_for_iri(self, process_iri: str) -> str:
+        """Return the exact configured symbol for one authorized process IRI."""
+        matches = [symbol for symbol, iri in self.processes if iri == process_iri]
+        if len(matches) != 1:
+            raise PredefinedWorkcellError("Process IRI is not uniquely authorized.")
+        return matches[0]
+
+    def capable_resource_iris(self, process_iri: str) -> tuple[str, ...]:
+        """Return configured resources broadly capable of one exact process."""
+        if process_iri not in {iri for _symbol, iri in self.processes}:
+            raise PredefinedWorkcellError("Process IRI is not authorized by the workcell.")
+        return tuple(
+            resource_iri
+            for resource_iri, process_iris in self.resource_capabilities
+            if process_iri in process_iris
+        )
+
 
 def load_predefined_workcell(
     tbox: TBoxSnapshot,
@@ -103,14 +126,14 @@ def load_predefined_workcell(
     *,
     profile: WorkcellProfile | None = None,
 ) -> PredefinedWorkcellSnapshot:
-    """Load the exact broad assembly capabilities for the predefined workcell.
+    """Load exact broad process capabilities for the predefined workcell.
 
     Args:
         tbox: Validated immutable PPR TBox that defines the Workcell vocabulary.
-        registry: Validated identity-only registry for ``xarm6`` and ``ur5e``.
+        registry: Validated identity-only resource registry.
 
     Returns:
-        A five-triple Workcell ABox pinned to both ontology authorities.
+        A Workcell ABox pinned to both ontology authorities.
 
     Raises:
         PredefinedWorkcellError: If either input or the fixed Workcell profile
@@ -119,15 +142,11 @@ def load_predefined_workcell(
     if not isinstance(tbox, TBoxSnapshot):
         raise PredefinedWorkcellError("Predefined Workcell requires a TBoxSnapshot.")
     if not isinstance(registry, ResourceRegistrySnapshot):
-        raise PredefinedWorkcellError(
-            "Predefined Workcell requires a ResourceRegistrySnapshot."
-        )
+        raise PredefinedWorkcellError("Predefined Workcell requires a ResourceRegistrySnapshot.")
     try:
         tbox.assert_unchanged()
     except OntologyContextError as exc:
-        raise PredefinedWorkcellError(
-            "Predefined Workcell TBox is not immutable."
-        ) from exc
+        raise PredefinedWorkcellError("Predefined Workcell TBox is not immutable.") from exc
     try:
         registry.assert_unchanged()
     except OntologyContextError as exc:
@@ -156,27 +175,35 @@ def load_predefined_workcell(
             "Predefined Workcell resources do not match the validated profile."
         )
 
-    process_iri = configured_profile.process_iri
-    process_namespace = process_iri.rsplit("/", 1)[0] + "/"
+    processes = tuple((entry.symbol, entry.iri) for entry in configured_profile.processes)
+    resource_iris = tuple(iri for _, iri in configured_resources)
+    resource_capabilities = tuple(
+        (entry.iri, entry.capable_process_iris) for entry in configured_profile.resources
+    )
     graph = Graph()
     graph.bind("ppr", Namespace(tbox.ppr_namespace))
-    graph.bind("process", Namespace(process_namespace))
     graph.bind("resource", Namespace(registry.resource_namespace))
     for triple in _expected_graph(
         ppr_namespace=tbox.ppr_namespace,
-        process_iri=process_iri,
-        resource_iris=tuple(iri for _, iri in configured_resources),
+        resource_iris=resource_iris,
+        processes=processes,
+        resource_capabilities=resource_capabilities,
     ):
         graph.add(triple)
 
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_type": "PredefinedWorkcellSnapshot",
-        "process_symbol": configured_profile.process_symbol,
-        "process_iri": process_iri,
-        "resource_iris": [resource_iri for _, resource_iri in configured_resources],
+        "processes": [{"process_symbol": symbol, "process_iri": iri} for symbol, iri in processes],
+        "resource_iris": list(resource_iris),
+        "resource_capabilities": [
+            {
+                "resource_iri": resource_iri,
+                "capable_process_iris": list(process_iris),
+            }
+            for resource_iri, process_iris in resource_capabilities
+        ],
         "ppr_namespace": tbox.ppr_namespace,
-        "process_namespace": process_namespace,
         "resource_namespace": registry.resource_namespace,
         "tbox_fingerprint": tbox.fingerprint,
         "registry_fingerprint": registry.fingerprint,
@@ -185,11 +212,10 @@ def load_predefined_workcell(
     }
     snapshot = PredefinedWorkcellSnapshot(
         graph=graph,
-        process_symbol=configured_profile.process_symbol,
-        process_iri=process_iri,
-        resource_iris=tuple(resource_iri for _, resource_iri in configured_resources),
+        processes=processes,
+        resource_iris=resource_iris,
+        resource_capabilities=resource_capabilities,
         ppr_namespace=tbox.ppr_namespace,
-        process_namespace=process_namespace,
         resource_namespace=registry.resource_namespace,
         tbox_fingerprint=tbox.fingerprint,
         registry_fingerprint=registry.fingerprint,
@@ -204,31 +230,37 @@ def load_predefined_workcell(
 
 def _validate_snapshot_symbols(snapshot: PredefinedWorkcellSnapshot) -> None:
     expected_resource_iris = tuple(item.iri for item in snapshot._profile.resources)
+    expected_processes = tuple((item.symbol, item.iri) for item in snapshot._profile.processes)
+    expected_capabilities = tuple(
+        (item.iri, item.capable_process_iris) for item in snapshot._profile.resources
+    )
     if (
-        snapshot.process_symbol != snapshot._profile.process_symbol
-        or snapshot.process_iri != snapshot._profile.process_iri
+        snapshot.processes != expected_processes
         or snapshot.resource_iris != expected_resource_iris
+        or snapshot.resource_capabilities != expected_capabilities
         or snapshot.ppr_namespace != snapshot._tbox.ppr_namespace
         or snapshot.resource_namespace != snapshot._registry.resource_namespace
     ):
-        raise PredefinedWorkcellError(
-            "Predefined Workcell fixed symbols changed after validation."
-        )
+        raise PredefinedWorkcellError("Predefined Workcell fixed symbols changed after validation.")
 
 
 def _expected_graph(
     *,
     ppr_namespace: str,
-    process_iri: str,
     resource_iris: tuple[str, ...],
+    processes: tuple[tuple[str, str], ...],
+    resource_capabilities: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> set[tuple[URIRef, URIRef, URIRef]]:
     ppr = Namespace(ppr_namespace)
-    process = URIRef(process_iri)
-    graph = {(process, RDF.type, ppr.process)}
+    graph = {
+        (URIRef(process_iri), RDF.type, ppr.process) for _process_symbol, process_iri in processes
+    }
+    capability_map = dict(resource_capabilities)
     for resource_iri in resource_iris:
         resource = URIRef(resource_iri)
         graph.add((resource, RDF.type, ppr.resource))
-        graph.add((resource, ppr.capableOf, process))
+        for process_iri in capability_map[resource_iri]:
+            graph.add((resource, ppr.capableOf, URIRef(process_iri)))
     return graph
 
 

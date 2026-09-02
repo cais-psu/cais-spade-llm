@@ -6,10 +6,15 @@ primitive draft, plus future binding and robot-local validation work.
 
 ## Implemented Phase 5.1
 
-`activate_selected_ra_context(...)` verifies the Phase 4 completion, resource
-selection, and assignment delta before persisting one
-`SelectedRAAssignmentEnvelope`. The envelope tells the exact selected RA which
-requirement and semantic task it owns. An injected
+`activate_selected_ra_context(...)` requires and verifies the Phase 4 v6
+completion, PA-authored two-state allocation, reachability, exact RobotAgent
+plan-only validation, resource selection, and assignment delta before
+persisting one `SelectedRAAssignmentEnvelope` v3. The envelope pins the exact
+process/resource, both state-evidence assignments, evidence and allocation
+presentations, registry/workcell snapshots, reachability, endpoint-motion
+validation, and no-motion claim. It tells the exact selected RA which
+requirement, specification, host-generated feature and state individuals, and
+process it owns. An injected
 `RobotAgentCompositionRuntime` must confirm that assignment before returning
 fresh JSON state and its complete primitive-only composition catalog.
 
@@ -58,14 +63,24 @@ validate a candidate, or execute anything.
 
 `author_primitive_program_draft(...)` requires the latest validated Phase 5.1
 pair and asks the same exact selected RobotAgent for only a structural sequence.
-The bounded input includes the requirement and task IRIs, selected resource,
-the completion-consistent post-assignment ontology assertions and TBox/ABox
-fingerprints, current state, complete catalog, grounded summary, known limits,
-and typed-record identities. The host pushes that transient projection after
-validating its exact task/resource chain. It excludes raw RDF, unrelated
-`ProductContextView` fields, typed-record payloads, and parameter bindings.
+The bounded input begins with a reconstructed `target_feature` containing the
+exact product requirement, specification IRI, host-generated feature IRI,
+PA-authored required process, current state, desired state, and a bounded
+projection of every referenced state value. It also includes the selected resource,
+completion-consistent post-assignment ontology assertions and TBox/ABox
+fingerprints, current state, complete catalog, and typed-record identities.
 
-The RobotAgent may select and order only exact catalog symbols, may repeat a
+Before the RA call, the host reloads the hash-pinned v8 proposal, v6 completion,
+both state IRIs, accepted typed bindings, reachability, plan-only validation,
+and referenced JSON records. It resolves each JSON
+Pointer and rejects a changed hash, missing record, invalid path, empty value,
+or mismatched feature/process/resource chain. These checks establish authority
+and lineage; they do not select or order primitives. The input has no top-level
+`task` section and excludes raw RDF, unrelated `ProductContextView` fields,
+unreferenced typed-record payloads, and parameter bindings.
+
+The RobotAgent LLM treats `target_feature` as the authoritative semantic product
+outcome. It may select and order only exact catalog symbols, may repeat a
 symbol, and may instead return an explicit unsupported result. The host derives
 step indexes and all record identity fields, then writes one append-only
 `composition/primitive_program_drafts/draft_<number>.json` per state/catalog
@@ -81,9 +96,15 @@ Refresh remains read-only.
 For the current authored or unsupported draft, the same card also reconstructs
 the exact transient `COMPOSITION_INPUT` from the draft's hash-pinned completion,
 assignment, robot-state, and primitive-catalog records. The read-only evidence
-panel summarizes its six input sections and exposes the complete JSON payload.
+panel labels and displays `target_feature`, including the statement,
+record/path/evidence references, and bounded resolved-value projections, and
+exposes the complete JSON payload.
 It is input provenance, not private model reasoning, feasibility validation, or
 execution evidence, and the reconstructed payload is not persisted.
+
+`PrimitiveProgramDraft` itself is unchanged. It pins the v6 completion and
+other inputs but does not copy `target_feature`, its statement, or its resolved
+values; diagnostics reconstruct them from the same persisted authority.
 
 ## Planned continuation
 
@@ -93,3 +114,10 @@ but cannot create or repair the structural draft. RA-owned inputs remain local;
 product or scene inputs are deduplicated into a `MissingContextBatch` for PA.
 After receiving a versioned `CompositionContextBundle`, RA alone authors the
 fully bound `primitive_steps` candidate.
+
+Multi-feature input, orientation/tolerance grounding, parameter binding,
+`MissingContextBatch`, primitive-level execution validation, execution, and
+post-process state update remain future increments. Assembly is the current example; the target-feature handoff
+does not hard-code an assembly-only target shape and may later carry welding,
+painting, milling, or other product outcomes when their evidence and primitive
+contracts exist.

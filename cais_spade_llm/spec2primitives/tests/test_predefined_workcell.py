@@ -9,6 +9,7 @@ import pytest
 from rdflib import Namespace, URIRef
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.config import load_workcell_profile
 from cais_spade_llm.spec2primitives.ontology import (
     PredefinedWorkcellError,
     ResourceRegistrySnapshot,
@@ -34,10 +35,14 @@ def test_predefined_workcell_contains_only_broad_assembly_capabilities() -> None
     assembly = URIRef(f"{PROCESS_NAMESPACE}assembly")
     xarm6 = URIRef(f"{RESOURCE_NAMESPACE}xarm6")
     ur5e = URIRef(f"{RESOURCE_NAMESPACE}ur5e")
-    assert workcell.process_symbol == "assembly"
-    assert workcell.process_iri == str(assembly)
+    assert workcell.processes == (("assembly", str(assembly)),)
     assert workcell.resource_iris == (str(xarm6), str(ur5e))
-    assert workcell.process_namespace == PROCESS_NAMESPACE
+    assert workcell.resource_capabilities == (
+        (str(xarm6), (str(assembly),)),
+        (str(ur5e), (str(assembly),)),
+    )
+    assert workcell.process_symbol_for_iri(str(assembly)) == "assembly"
+    assert workcell.capable_resource_iris(str(assembly)) == (str(xarm6), str(ur5e))
     assert set(workcell.graph) == {
         (assembly, RDF.type, ppr.process),
         (xarm6, RDF.type, ppr.resource),
@@ -62,6 +67,7 @@ def test_predefined_workcell_record_is_deterministic_and_configuration_free() ->
     assert first.fingerprint == second.fingerprint
     assert first.to_record() == second.to_record()
     record = first.to_record()
+    assert record["schema_version"] == 2
     assert record["record_type"] == "PredefinedWorkcellSnapshot"
     assert record["tbox_fingerprint"] == tbox.fingerprint
     assert record["registry_fingerprint"] == registry.fingerprint
@@ -76,6 +82,67 @@ def test_predefined_workcell_record_is_deterministic_and_configuration_free() ->
         "services",
     ):
         assert forbidden_detail not in serialized
+
+
+def test_workcell_projects_multiple_configured_process_capabilities(tmp_path: Path) -> None:
+    tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
+    process_iris = {
+        "process_alpha": "https://example.local/process/process_alpha",
+        "process_beta": "https://example.local/process/process_beta",
+    }
+    resources = {
+        "resource_alpha": (process_iris["process_alpha"],),
+        "resource_beta": (process_iris["process_beta"],),
+    }
+    for symbol in resources:
+        (tmp_path / f"{symbol}.json").write_text(
+            json.dumps({symbol: {"type": "robot", "jid": f"{symbol}@localhost"}}),
+            encoding="utf-8",
+        )
+    profile_path = tmp_path / "workcell_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "processes": [
+                    {"symbol": symbol, "iri": iri} for symbol, iri in process_iris.items()
+                ],
+                "resources": [
+                    {
+                        "symbol": symbol,
+                        "iri": f"https://example.local/resource/{symbol}",
+                        "manifest_ref": f"{symbol}.json",
+                        "capable_process_iris": list(capabilities),
+                    }
+                    for symbol, capabilities in resources.items()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = load_workcell_profile(profile_path, repository_root=tmp_path)
+    registry = load_predefined_resource_registry(tbox, profile=profile)
+
+    workcell = load_predefined_workcell(tbox, registry, profile=profile)
+
+    ppr = Namespace(PPR_NAMESPACE)
+    assert workcell.processes == tuple(process_iris.items())
+    assert workcell.capable_resource_iris(process_iris["process_alpha"]) == (
+        "https://example.local/resource/resource_alpha",
+    )
+    assert workcell.capable_resource_iris(process_iris["process_beta"]) == (
+        "https://example.local/resource/resource_beta",
+    )
+    assert (
+        URIRef("https://example.local/resource/resource_alpha"),
+        ppr.capableOf,
+        URIRef(process_iris["process_alpha"]),
+    ) in workcell.graph
+    assert (
+        URIRef("https://example.local/resource/resource_alpha"),
+        ppr.capableOf,
+        URIRef(process_iris["process_beta"]),
+    ) not in workcell.graph
 
 
 def test_predefined_workcell_detects_graph_and_pinned_authority_changes() -> None:

@@ -22,8 +22,6 @@ from cais_spade_llm.spec2primitives.tools.observation_context import (
 )
 
 _GROUNDING_ROOT = Path("products/grounding/rgb_d_cad_grounding")
-_SOURCE_CAMERAS = frozenset({"cam_mk3", "cam_mk4_1", "cam_mk4_2"})
-_ASSEMBLY_CAMERA = "cam_assembly"
 _PRODUCER = "rgb_d_cad_grounding"
 
 _RANSAC_SEED = 0
@@ -79,8 +77,7 @@ class RGBDSegmentationResult:
 
     record_path: Path
     artifact_paths: tuple[Path, ...]
-    source_candidate_count: int
-    assembly_candidate_count: int
+    candidate_count: int
     record: Mapping[str, object]
 
 
@@ -100,23 +97,19 @@ def segment_preprocessed_observation(
 ) -> RGBDSegmentationResult:
     """Segment one validated Phase 4.2A observation record atomically.
 
-    Source cameras remove a reliable dominant plane before segmentation.
-    `cam_assembly` retains its dominant surface so the assembly plate remains
-    available to later correspondence work.
+    Every observation view uses the same geometry-only policy. A dominant
+    plane is recorded as neutral evidence but does not determine which points
+    or candidates represent a product state.
     """
     _validate_segmentation_number(segmentation_number)
     root = Path(interaction_root).resolve()
     source_path, source_record = _load_source_record(root, observation_record_path)
     destination = root / _GROUNDING_ROOT / f"segmentation_{segmentation_number:04d}"
     if destination.exists():
-        raise RGBDSegmentationError(
-            f"RGB-D segmentation {segmentation_number:04d} already exists."
-        )
+        raise RGBDSegmentationError(f"RGB-D segmentation {segmentation_number:04d} already exists.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        temporary_root = Path(
-            tempfile.mkdtemp(prefix=".segmentation-", dir=destination.parent)
-        )
+        temporary_root = Path(tempfile.mkdtemp(prefix=".segmentation-", dir=destination.parent))
     except OSError as exc:
         raise RGBDSegmentationError(
             "RGB-D segmentation temporary directory could not be created."
@@ -125,12 +118,9 @@ def segment_preprocessed_observation(
     try:
         camera_records = []
         artifact_names = []
-        source_candidate_count = 0
-        assembly_candidate_count = 0
-        source_cameras = {
-            camera["camera_id"]: camera for camera in source_record["cameras"]
-        }
-        for camera_id in CAMERA_IDS:
+        candidate_count = 0
+        source_cameras = {camera["camera_id"]: camera for camera in source_record["cameras"]}
+        for observation_index, camera_id in enumerate(CAMERA_IDS, start=1):
             camera_record = source_cameras[camera_id]
             points_m, pixels_uv, artifact_path = _load_point_cloud(
                 root,
@@ -138,23 +128,19 @@ def segment_preprocessed_observation(
                 operation_number=int(source_record["operation_number"]),
             )
             labels, candidates, plane_record = _segment_camera(
-                camera_id,
+                observation_index,
                 points_m,
                 pixels_uv,
             )
             artifact_name = f"{camera_id}_candidate_labels.npy"
             label_path = temporary_root / artifact_name
             np.save(label_path, labels, allow_pickle=False)
-            role = _camera_role(camera_id)
-            candidate_count = len(candidates)
-            if role == "source":
-                source_candidate_count += candidate_count
-            else:
-                assembly_candidate_count += candidate_count
+            view_candidate_count = len(candidates)
+            candidate_count += view_candidate_count
             camera_records.append(
                 {
+                    "observation_handle": f"view_{observation_index:04d}",
                     "camera_id": camera_id,
-                    "role": role,
                     "frame": camera_record["frame"],
                     "input_point_count": int(points_m.shape[0]),
                     "source_point_cloud": {
@@ -163,9 +149,9 @@ def segment_preprocessed_observation(
                     },
                     "source_artifacts": camera_record["source_artifacts"],
                     "support_plane": plane_record,
-                    "candidate_count": candidate_count,
+                    "candidate_count": view_candidate_count,
                     "candidate_state": (
-                        "unresolved" if candidate_count == 0 else "candidates_available"
+                        "unresolved" if view_candidate_count == 0 else "candidates_available"
                     ),
                     "candidates": candidates,
                     "label_mask_artifact": {
@@ -182,7 +168,7 @@ def segment_preprocessed_observation(
             artifact_names.append(artifact_name)
 
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "RGBDSegmentationRecord",
             "producer": _PRODUCER,
             "segmentation_number": segmentation_number,
@@ -192,13 +178,8 @@ def segment_preprocessed_observation(
                 "sha256": _sha256_path(source_path),
             },
             "parameters": _parameter_record(),
-            "source_candidate_count": source_candidate_count,
-            "assembly_candidate_count": assembly_candidate_count,
-            "candidate_state": (
-                "unresolved"
-                if source_candidate_count + assembly_candidate_count == 0
-                else "candidates_available"
-            ),
+            "candidate_count": candidate_count,
+            "candidate_state": ("unresolved" if candidate_count == 0 else "candidates_available"),
             "cameras": camera_records,
             "cross_camera_fusion": "not_evaluated",
             "identity": "not_evaluated",
@@ -223,8 +204,7 @@ def segment_preprocessed_observation(
     return RGBDSegmentationResult(
         record_path=destination / "segmentation_record.json",
         artifact_paths=tuple(destination / name for name in artifact_names),
-        source_candidate_count=source_candidate_count,
-        assembly_candidate_count=assembly_candidate_count,
+        candidate_count=candidate_count,
         record=record,
     )
 
@@ -251,9 +231,7 @@ def _load_source_record(
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RGBDSegmentationError(
-            "Observation preprocessing record could not be read."
-        ) from exc
+        raise RGBDSegmentationError("Observation preprocessing record could not be read.") from exc
     if not isinstance(record, dict) or set(record) != _SOURCE_RECORD_KEYS:
         raise RGBDSegmentationError("Observation preprocessing record fields are invalid.")
     if (
@@ -275,9 +253,7 @@ def _load_source_record(
         or not isinstance(operation_number, int)
         or operation_number <= 0
         or relative
-        != _GROUNDING_ROOT
-        / f"operation_{operation_number:04d}"
-        / "geometry_record.json"
+        != _GROUNDING_ROOT / f"operation_{operation_number:04d}" / "geometry_record.json"
     ):
         raise RGBDSegmentationError("Observation preprocessing record path is invalid.")
     observation_ref = record["observation_ref"]
@@ -299,10 +275,7 @@ def _load_source_record(
     ):
         raise RGBDSegmentationError("Observation source manifest metadata is invalid.")
     manifest_path = _resolved_ref(interaction_root, source_manifest["ref"])
-    if (
-        not manifest_path.is_file()
-        or source_manifest["sha256"] != _sha256_path(manifest_path)
-    ):
+    if not manifest_path.is_file() or source_manifest["sha256"] != _sha256_path(manifest_path):
         raise RGBDSegmentationError("Observation source manifest hash is invalid.")
     cameras = record["cameras"]
     if not isinstance(cameras, list) or len(cameras) != len(CAMERA_IDS):
@@ -329,9 +302,7 @@ def _load_point_cloud(
     artifact_path = _resolved_ref(interaction_root, artifact["ref"])
     camera_id = camera_record["camera_id"]
     expected_ref = (
-        _GROUNDING_ROOT
-        / f"operation_{operation_number:04d}"
-        / f"{camera_id}_point_cloud.npz"
+        _GROUNDING_ROOT / f"operation_{operation_number:04d}" / f"{camera_id}_point_cloud.npz"
     )
     if artifact["ref"] != str(expected_ref):
         raise RGBDSegmentationError("Point-cloud artifact ref is invalid.")
@@ -398,50 +369,27 @@ def _load_point_cloud(
 
 
 def _segment_camera(
-    camera_id: str,
+    observation_index: int,
     points_m: np.ndarray,
     pixels_uv: np.ndarray,
 ) -> tuple[np.ndarray, list[dict[str, object]], dict[str, object]]:
-    if camera_id in _SOURCE_CAMERAS:
-        plane = _dominant_plane(points_m)
-        if plane is None:
-            eligible_indices = np.empty(0, dtype=np.int64)
-            plane_record: dict[str, object] = {
-                "status": "support_plane_unavailable",
-                "removal_applied": False,
-            }
-        else:
-            eligible_indices = np.flatnonzero(~plane.inliers)
-            plane_record = {
-                "status": "removed",
-                "removal_applied": True,
-                "normal": _float_list(plane.normal),
-                "offset_m": float(plane.offset),
-                "inlier_count": int(np.count_nonzero(plane.inliers)),
-                "inlier_fraction": float(np.mean(plane.inliers)),
-                "rms_distance_m": plane.rms_distance_m,
-            }
-    elif camera_id == _ASSEMBLY_CAMERA:
-        plane = _dominant_plane(points_m)
-        if plane is None:
-            eligible_indices = np.empty(0, dtype=np.int64)
-            plane_record = {
-                "status": "assembly_surface_unavailable",
-                "removal_applied": False,
-            }
-        else:
-            eligible_indices = np.flatnonzero(plane.inliers)
-            plane_record = {
-                "status": "retained_for_assembly_target",
-                "removal_applied": False,
-                "normal": _float_list(plane.normal),
-                "offset_m": float(plane.offset),
-                "inlier_count": int(np.count_nonzero(plane.inliers)),
-                "inlier_fraction": float(np.mean(plane.inliers)),
-                "rms_distance_m": plane.rms_distance_m,
-            }
+    plane = _dominant_plane(points_m)
+    eligible_indices = np.arange(points_m.shape[0], dtype=np.int64)
+    if plane is None:
+        plane_record: dict[str, object] = {
+            "status": "unavailable",
+            "candidate_filtering_applied": False,
+        }
     else:
-        raise RGBDSegmentationError("Unknown camera role.")
+        plane_record = {
+            "status": "detected",
+            "candidate_filtering_applied": False,
+            "normal": _float_list(plane.normal),
+            "offset_m": float(plane.offset),
+            "inlier_count": int(np.count_nonzero(plane.inliers)),
+            "inlier_fraction": float(np.mean(plane.inliers)),
+            "rms_distance_m": plane.rms_distance_m,
+        }
 
     clusters = _depth_connected_clusters(points_m, pixels_uv, eligible_indices)
     ordered = sorted(
@@ -460,6 +408,7 @@ def _segment_camera(
         labels[candidate_pixels[:, 1], candidate_pixels[:, 0]] = candidate_id
         candidates.append(
             {
+                "candidate_handle": (f"candidate_{observation_index:04d}_{candidate_id:04d}"),
                 "candidate_id": candidate_id,
                 "point_count": int(indices.size),
                 "pixel_bounds_uv": {
@@ -497,9 +446,7 @@ def _dominant_plane(points_m: np.ndarray) -> _Plane | None:
     if sample_size == points_m.shape[0]:
         sample = points_m
     else:
-        sample = points_m[
-            rng.choice(points_m.shape[0], size=sample_size, replace=False)
-        ]
+        sample = points_m[rng.choice(points_m.shape[0], size=sample_size, replace=False)]
     best_inliers: np.ndarray | None = None
     best_count = 0
     for _ in range(_RANSAC_ITERATIONS):
@@ -589,14 +536,6 @@ def _depth_connected_clusters(
         if len(cluster) >= _MINIMUM_CANDIDATE_POINTS:
             clusters.append(np.asarray(cluster, dtype=np.int64))
     return clusters
-
-
-def _camera_role(camera_id: str) -> str:
-    if camera_id in _SOURCE_CAMERAS:
-        return "source"
-    if camera_id == _ASSEMBLY_CAMERA:
-        return "assembly_target"
-    raise RGBDSegmentationError("Unknown camera role.")
 
 
 def _parameter_record() -> dict[str, object]:

@@ -14,6 +14,7 @@ from cais_spade_llm.spec2primitives.config.model_runtime import (
 )
 from cais_spade_llm.spec2primitives.config.workcell_profile import (
     DEFAULT_WORKCELL_PROFILE_PATH,
+    WorkcellProcessProfile,
     WorkcellProfile,
     WorkcellProfileError,
     WorkcellResourceProfile,
@@ -30,6 +31,7 @@ __all__ = [
     "ProductAgentModelConfig",
     "WorkcellProfile",
     "WorkcellProfileError",
+    "WorkcellProcessProfile",
     "WorkcellResourceProfile",
     "load_camera_to_world_calibration_runtime",
     "load_model_runtime_config",
