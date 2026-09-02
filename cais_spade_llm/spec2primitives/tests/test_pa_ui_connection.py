@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -278,14 +280,14 @@ def test_shared_product_agent_bridge_applies_configured_reasoning_effort(
     monkeypatch.setattr(product_agent_runtime, "ProductAgent", _SharedAgent)
 
     runtime = product_agent_runtime.create_product_agent_context_runtime(
-        model="gpt-5.4",
-        reasoning_effort="none",
+        model="gpt-5.6",
+        reasoning_effort="medium",
     )
 
     assert runtime is not None
     assert len(created) == 1
-    assert created[0].reasoning_effort == "none"
-    assert created[0].kwargs["model"] == "gpt-5.4"
+    assert created[0].reasoning_effort == "medium"
+    assert created[0].kwargs["model"] == "gpt-5.6"
 
 
 def test_completed_view_has_five_simple_stages_and_location(
@@ -330,9 +332,7 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["reachability"]["target_frame"] == "world"
     assert final_result["robot_agent_validation"]["status"] == "accepted"
     assert final_result["robot_agent_validation"]["mode"] == "plan_only"
-    assert final_result["robot_agent_validation"]["validation_scope"] == (
-        "endpoint_motion"
-    )
+    assert final_result["robot_agent_validation"]["validation_scope"] == ("endpoint_motion")
     assert final_result["robot_agent_validation"]["motion_executed"] is False
     assert final_result["target_feature"]["desired_state"]["statement"]["text"] == (
         "The medium gear is assembled as requested."
@@ -350,6 +350,8 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert desired["translated_location_m"] == [0.0, -0.2, 1.1]
     assert current["annotated_rgb"]["data_uri"].startswith("data:image/svg+xml;base64,")
     assert desired["annotated_rgb"]["data_uri"].startswith("data:image/svg+xml;base64,")
+    assert current["annotated_rgb"]["source_view_data_uri"].startswith("data:image/svg+xml;base64,")
+    assert desired["annotated_rgb"]["source_view_data_uri"].startswith("data:image/svg+xml;base64,")
     ontology_rows = final_result["ontology"]["rows"]
     assert any(
         row["subject"] == "ctx:feature_0001"
@@ -553,9 +555,154 @@ def test_cad_identity_reports_all_cited_candidates_as_ambiguous(
 
     assert identity is not None
     assert identity["status"] == "ambiguous"
-    assert [
-        candidate["context_ref"] for candidate in identity["candidates"]
-    ] == context_refs
+    assert [candidate["context_ref"] for candidate in identity["candidates"]] == context_refs
+    summary = spec2primitives_ui._concise_final_grounding_summary(
+        {
+            "cad_identity": identity,
+            "target_frame": "world",
+            "current_state_evidence": {"translated_location_m": [0.1, 0.2, 0.3]},
+            "desired_state_evidence": {"translated_location_m": [0.4, 0.5, 0.6]},
+            "reachability": {"status": "accepted"},
+            "robot_agent_validation": {},
+        }
+    )
+    assert str(summary["target"]).splitlines()[0] == "CAD identity unresolved"
+
+
+def test_single_uncited_cad_identity_remains_unresolved(tmp_path: Path) -> None:
+    record_ref = "products/grounding/cad/candidate.json"
+    record_path = tmp_path / record_ref
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps({"source": {"context_ref": "approved-cad"}}),
+        encoding="utf-8",
+    )
+
+    identity = spec2primitives_ui._cad_identity(
+        tmp_path,
+        typed_bindings=[
+            {
+                "output_symbol": "CADMeshRecord",
+                "status": "accepted",
+                "record_ref": record_ref,
+                "evidence_refs": ["approved-cad"],
+            }
+        ],
+        target_feature={"evidence_refs": ["requirement_0001"]},
+    )
+
+    assert identity is None
+
+
+def test_reviewed_crop_requires_exact_accepted_binding_hash(tmp_path: Path) -> None:
+    segmentation_ref = "products/grounding/segmentation.json"
+    crop_ref = "products/grounding/review/candidate.png"
+    review_ref = "products/grounding/review/observation_candidate_review.json"
+    crop_bytes = b"stable reviewed crop"
+    crop_path = tmp_path / crop_ref
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(crop_bytes)
+    review_path = tmp_path / review_ref
+    review_path.write_text(
+        json.dumps(
+            {
+                "record_type": "ObservationCandidateReview",
+                "status": "accepted",
+                "source_segmentation": {
+                    "ref": segmentation_ref,
+                    "sha256": "a" * 64,
+                },
+                "candidates": [
+                    {
+                        "observation_handle": "view_0001",
+                        "candidate_handle": "candidate_0001_0001",
+                        "description": "visible medium circular part",
+                        "uncertainty": "identity not assigned",
+                        "crop_artifact": {
+                            "ref": crop_ref,
+                            "sha256": hashlib.sha256(crop_bytes).hexdigest(),
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    review_sha256 = hashlib.sha256(review_path.read_bytes()).hexdigest()
+
+    assert (
+        spec2primitives_ui._reviewed_candidate_crop(
+            tmp_path,
+            segmentation_ref=segmentation_ref,
+            segmentation_sha256="a" * 64,
+            observation_handle="view_0001",
+            candidate_handle="candidate_0001_0001",
+            observation_review_bindings={},
+        )
+        is None
+    )
+    reviewed = spec2primitives_ui._reviewed_candidate_crop(
+        tmp_path,
+        segmentation_ref=segmentation_ref,
+        segmentation_sha256="a" * 64,
+        observation_handle="view_0001",
+        candidate_handle="candidate_0001_0001",
+        observation_review_bindings={review_ref: review_sha256},
+    )
+    assert reviewed is not None
+    assert base64.b64decode(str(reviewed["data_uri"]).split(",", maxsplit=1)[1]) == crop_bytes
+    assert reviewed["observation_review_ref"] == review_ref
+
+
+def test_concise_grounding_summary_keeps_raw_details_out_of_top_level() -> None:
+    summary = spec2primitives_ui._concise_final_grounding_summary(
+        {
+            "cad_identity": {
+                "status": "accepted",
+                "context_ref": "approved/CAD/Gear_Medium.STL",
+                "record_ref": "products/grounding/cad/record.json",
+                "bounds_m": {"minimum": [0.0, 0.0, 0.0]},
+            },
+            "target_frame": "world",
+            "current_state_evidence": {
+                "statement": "The medium gear is separate.",
+                "state_value_name": "medium_gear",
+                "translated_location_m": [0.1, 0.2, 0.3],
+                "reachable": True,
+            },
+            "desired_state_evidence": {
+                "statement": "The medium gear is at the supported destination.",
+                "state_value_name": "supported_destination",
+                "translated_location_m": [0.4, 0.5, 0.6],
+                "reachable": True,
+            },
+            "reachability": {
+                "status": "accepted",
+                "resource_symbol": "selected_resource",
+                "target_frame": "world",
+                "record_ref": "products/grounding/reachability/check.json",
+            },
+            "robot_agent_validation": {
+                "status": "accepted",
+                "mode": "plan_only",
+                "validation_scope": "endpoint_motion",
+                "motion_executed": False,
+            },
+        }
+    )
+
+    target = str(summary["target"])
+    assert target.splitlines() == [
+        "CAD: Gear_Medium.STL",
+        "reference: approved/CAD/Gear_Medium.STL",
+        "target frame: world",
+        "current XYZ: [0.1, 0.2, 0.3]",
+        "desired XYZ: [0.4, 0.5, 0.6]",
+        "selected-resource reachability: accepted",
+    ]
+    assert "bounds_m" not in target
+    assert "record_ref" not in target
+    assert "products/grounding" not in target
 
 
 def test_calibration_readiness_uses_actionable_runtime_state() -> None:

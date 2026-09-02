@@ -49,6 +49,8 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     LiveGazeboObservationCaptureRuntime,
     ObservationCaptureRuntime,
+    ObservationVisionRuntime,
+    OpenAIObservationVisionRuntime,
 )
 
 SPEC2PRIMITIVES_CONTEXTS_ROOT = Path(__file__).resolve().parents[1] / "contexts"
@@ -70,6 +72,7 @@ class Spec2PrimitivesUIRuntime:
     tbox: TBoxSnapshot | None = None
     model_config: ModelRuntimeConfig | None = None
     document_vision_runtime: DocumentVisionRuntime | None = None
+    observation_vision_runtime: ObservationVisionRuntime | None = None
     document_diagnostic_unavailable_reason: str | None = None
     document_source_status: tuple[dict[str, object], ...] = ()
     observation_capture_runtime: ObservationCaptureRuntime | None = None
@@ -108,6 +111,7 @@ def create_spec2primitives_ui_runtime(
     ontology_config: PAOntologyConfig | None = None
     grounding_runtime: ProductContextGroundingRuntime | None = None
     vision_runtime: DocumentVisionRuntime | None = None
+    observation_vision_runtime: ObservationVisionRuntime | None = None
     tbox: TBoxSnapshot | None = None
     unavailable_reason: str | None = None
     calibration_runtime: CameraToWorldCalibrationRuntime | None = None
@@ -170,10 +174,13 @@ def create_spec2primitives_ui_runtime(
     robot_agent_runtime = InProcessRobotAgentCompositionRuntime(dual_gazebo)
     if unavailable_reason is None and model_config is not None and tbox is not None:
         vision_runtime = OpenAIDocumentVisionRuntime(model_config.document_vlm)
+        observation_vision_runtime = OpenAIObservationVisionRuntime(model_config.observation_vlm)
         grounding_runtime = ProductionProductContextGroundingRuntime(
             tbox=tbox,
             document_config=model_config.document_vlm,
             document_vision_runtime=vision_runtime,
+            observation_config=model_config.observation_vlm,
+            observation_vision_runtime=observation_vision_runtime,
             camera_to_world_calibration_runtime=calibration_runtime,
             camera_to_world_calibration_unavailable_reason=(calibration_unavailable_reason),
             robot_agent_feasibility_runtime=robot_agent_runtime,
@@ -188,6 +195,7 @@ def create_spec2primitives_ui_runtime(
         tbox=tbox,
         model_config=model_config,
         document_vision_runtime=vision_runtime,
+        observation_vision_runtime=observation_vision_runtime,
         document_diagnostic_unavailable_reason=unavailable_reason,
         document_source_status=document_source_status,
         observation_capture_runtime=LiveGazeboObservationCaptureRuntime(),

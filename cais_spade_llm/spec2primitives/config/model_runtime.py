@@ -10,7 +10,12 @@ from typing import Any
 
 DEFAULT_MODEL_RUNTIME_CONFIG_PATH = Path(__file__).with_name("model_runtime.json")
 
-_ROOT_KEYS = {"schema_version", "product_agent_llm", "document_vlm"}
+_ROOT_KEYS = {
+    "schema_version",
+    "product_agent_llm",
+    "document_vlm",
+    "observation_vlm",
+}
 _PRODUCT_AGENT_KEYS = {"model", "reasoning_effort"}
 _DOCUMENT_VLM_KEYS = {
     "provider",
@@ -43,12 +48,25 @@ class DocumentVLMConfig:
 
 
 @dataclass(frozen=True)
+class ObservationVLMConfig:
+    """Configure the OpenAI observation-candidate review request."""
+
+    provider: str
+    model: str
+    reasoning_effort: str
+    image_detail: str
+    max_output_tokens: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class ModelRuntimeConfig:
     """Hold all package-local model configuration."""
 
     schema_version: int
     product_agent_llm: ProductAgentModelConfig
     document_vlm: DocumentVLMConfig
+    observation_vlm: ObservationVLMConfig
 
 
 def load_model_runtime_config(
@@ -71,8 +89,8 @@ def load_model_runtime_config(
         value = json.load(stream)
     if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
         raise ValueError("Model config fields are invalid.")
-    if value["schema_version"] != 2:
-        raise ValueError("Model config schema_version must be 2.")
+    if value["schema_version"] != 3:
+        raise ValueError("Model config schema_version must be 3.")
 
     product_agent = _required_mapping(
         value["product_agent_llm"],
@@ -83,6 +101,11 @@ def load_model_runtime_config(
         value["document_vlm"],
         _DOCUMENT_VLM_KEYS,
         "document_vlm",
+    )
+    observation_vlm = _required_mapping(
+        value["observation_vlm"],
+        _DOCUMENT_VLM_KEYS,
+        "observation_vlm",
     )
     product_agent_model = _nonempty_string(product_agent["model"], "product_agent_llm.model")
     product_agent_reasoning_effort = _nonempty_string(
@@ -98,53 +121,66 @@ def load_model_runtime_config(
         "xhigh",
     }:
         raise ValueError("product_agent_llm.reasoning_effort is invalid.")
-    if (
-        product_agent_model.startswith("gpt-5.4")
-        and product_agent_reasoning_effort != "none"
-    ):
+    if product_agent_model.startswith("gpt-5.4") and product_agent_reasoning_effort != "none":
         raise ValueError(
             "product_agent_llm.reasoning_effort must be none for GPT-5.4 "
             "function tools through Chat Completions."
         )
-    provider = _nonempty_string(document_vlm["provider"], "document_vlm.provider")
-    if provider != "openai":
-        raise ValueError("document_vlm.provider must be openai.")
-    model = _nonempty_string(document_vlm["model"], "document_vlm.model")
-    reasoning_effort = _nonempty_string(
-        document_vlm["reasoning_effort"],
-        "document_vlm.reasoning_effort",
-    )
-    if reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
-        raise ValueError("document_vlm.reasoning_effort is invalid.")
-    image_detail = _nonempty_string(
-        document_vlm["image_detail"],
-        "document_vlm.image_detail",
-    )
-    if image_detail not in {"auto", "low", "high"}:
-        raise ValueError("document_vlm.image_detail is invalid.")
-    max_output_tokens = _positive_int(
-        document_vlm["max_output_tokens"],
-        "document_vlm.max_output_tokens",
-    )
-    timeout_seconds = _positive_number(
-        document_vlm["timeout_seconds"],
-        "document_vlm.timeout_seconds",
+    document_values = _validated_vision_config(document_vlm, "document_vlm")
+    observation_values = _validated_vision_config(
+        observation_vlm,
+        "observation_vlm",
     )
     return ModelRuntimeConfig(
-        schema_version=2,
+        schema_version=3,
         product_agent_llm=ProductAgentModelConfig(
             model=product_agent_model,
             reasoning_effort=product_agent_reasoning_effort,
         ),
         document_vlm=DocumentVLMConfig(
-            provider=provider,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            image_detail=image_detail,
-            max_output_tokens=max_output_tokens,
-            timeout_seconds=timeout_seconds,
+            **document_values,
+        ),
+        observation_vlm=ObservationVLMConfig(
+            **observation_values,
         ),
     )
+
+
+def _validated_vision_config(
+    value: Mapping[str, object],
+    field_name: str,
+) -> dict[str, Any]:
+    """Validate one package-owned OpenAI vision configuration."""
+    provider = _nonempty_string(value["provider"], f"{field_name}.provider")
+    if provider != "openai":
+        raise ValueError(f"{field_name}.provider must be openai.")
+    model = _nonempty_string(value["model"], f"{field_name}.model")
+    reasoning_effort = _nonempty_string(
+        value["reasoning_effort"],
+        f"{field_name}.reasoning_effort",
+    )
+    if reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
+        raise ValueError(f"{field_name}.reasoning_effort is invalid.")
+    image_detail = _nonempty_string(
+        value["image_detail"],
+        f"{field_name}.image_detail",
+    )
+    if image_detail not in {"auto", "low", "high"}:
+        raise ValueError(f"{field_name}.image_detail is invalid.")
+    return {
+        "provider": provider,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "image_detail": image_detail,
+        "max_output_tokens": _positive_int(
+            value["max_output_tokens"],
+            f"{field_name}.max_output_tokens",
+        ),
+        "timeout_seconds": _positive_number(
+            value["timeout_seconds"],
+            f"{field_name}.timeout_seconds",
+        ),
+    }
 
 
 def _required_mapping(

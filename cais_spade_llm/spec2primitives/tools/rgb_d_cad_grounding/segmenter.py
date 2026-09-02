@@ -98,8 +98,8 @@ def segment_preprocessed_observation(
     """Segment one validated Phase 4.2A observation record atomically.
 
     Every observation view uses the same geometry-only policy. A dominant
-    plane is recorded as neutral evidence but does not determine which points
-    or candidates represent a product state.
+    plane removes the support surface and points behind it; it does not assign
+    a product-state role to any retained candidate.
     """
     _validate_segmentation_number(segmentation_number)
     root = Path(interaction_root).resolve()
@@ -374,16 +374,24 @@ def _segment_camera(
     pixels_uv: np.ndarray,
 ) -> tuple[np.ndarray, list[dict[str, object]], dict[str, object]]:
     plane = _dominant_plane(points_m)
-    eligible_indices = np.arange(points_m.shape[0], dtype=np.int64)
     if plane is None:
+        eligible_indices = np.empty(0, dtype=np.int64)
         plane_record: dict[str, object] = {
             "status": "unavailable",
             "candidate_filtering_applied": False,
+            "retained_point_count": 0,
         }
     else:
+        signed_distances = points_m @ plane.normal + plane.offset
+        camera_side_sign = -1.0 if plane.offset < 0.0 else 1.0
+        eligible_indices = np.flatnonzero(
+            signed_distances * camera_side_sign > _PLANE_DISTANCE_THRESHOLD_M
+        ).astype(np.int64)
         plane_record = {
             "status": "detected",
-            "candidate_filtering_applied": False,
+            "candidate_filtering_applied": True,
+            "candidate_side": "camera_side",
+            "retained_point_count": int(eligible_indices.size),
             "normal": _float_list(plane.normal),
             "offset_m": float(plane.offset),
             "inlier_count": int(np.count_nonzero(plane.inliers)),

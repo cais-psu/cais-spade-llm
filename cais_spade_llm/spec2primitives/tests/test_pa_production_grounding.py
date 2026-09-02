@@ -23,6 +23,7 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingCandidate,
     OntologyGroundingError,
     OntologyGroundingInterruption,
+    OntologyGroundingProposal,
     OntologyGroundingResult,
     commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
@@ -39,7 +40,9 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+    ProductionGroundingError,
     ProductionProductContextGroundingRuntime,
+    _allocation_entry_for_binding,
     _approved_evidence_handles,
     _approved_evidence_sources,
     _clarification_requests_system_choice,
@@ -49,6 +52,7 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     _pa_allocation_prompt,
     _producer_descriptors,
     _proposal_cad_bindings,
+    _proposal_state_candidate_bindings,
     _raw_evidence_types_for_gap,
     _required_record_plan,
     _retrieve_tool,
@@ -75,8 +79,7 @@ def _presentation_for_handles(
     handles: tuple[_EvidenceHandle, ...],
 ) -> EvidencePresentationRecord:
     sources = tuple(
-        (handle.context_ref, handle.evidence_type, handle.source_revision)
-        for handle in handles
+        (handle.context_ref, handle.evidence_type, handle.source_revision) for handle in handles
     )
     explicit_order = tuple(handle.context_ref or "__live_observation__" for handle in handles)
     return load_or_create_evidence_presentation(
@@ -94,6 +97,34 @@ def _default_handles(root: Path) -> tuple[EvidencePresentationRecord, tuple[_Evi
         explicit_order=tuple(source_ref or "__live_observation__" for source_ref, _, _ in sources),
     )
     return presentation, _approved_evidence_handles(presentation)
+
+
+def _allow_unrelated_test_through_selected_candidate_gate(
+    runtime: ProductionProductContextGroundingRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep legacy semantic/clarification tests focused on their own boundary."""
+    binding = SimpleNamespace(
+        state="current_state",
+        name="selected_candidate",
+        record_ref="selected_segmentation.json",
+        field_path="/cameras/0/candidates/0",
+    )
+    monkeypatch.setattr(
+        production_grounding,
+        "_proposal_state_candidate_bindings",
+        lambda proposal: (binding, binding),
+    )
+
+    async def accepted_correspondence(**kwargs: object) -> None:
+        del kwargs
+        return None
+
+    monkeypatch.setattr(
+        runtime,
+        "_validate_current_state_cad_correspondence",
+        accepted_correspondence,
+    )
 
 
 def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
@@ -129,6 +160,18 @@ def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
     projected = _neutral_candidate_views(
         segmentation,
         segmentation_record_ref="products/grounding/segmentation_record.json",
+        review={
+            "record_type": "ObservationCandidateReview",
+            "status": "accepted",
+            "candidates": [
+                {
+                    "observation_handle": "view_0001",
+                    "candidate_handle": "candidate_0001_0001",
+                    "description": "visible toothed circular part",
+                    "uncertainty": "identity not assigned",
+                }
+            ],
+        },
     )
 
     serialized = json.dumps(projected)
@@ -148,8 +191,7 @@ def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
 
 def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candidate() -> None:
     canonical_record_ref = (
-        "products/grounding/rgb_d_cad_grounding/segmentation_0001/"
-        "rgbd_segmentation_record.json"
+        "products/grounding/rgb_d_cad_grounding/segmentation_0001/rgbd_segmentation_record.json"
     )
     opaque_record_ref = "typed_record_0003"
     field_path = "/cameras/0/candidates/1"
@@ -239,23 +281,28 @@ def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candi
         },
         allocation_presentation=allocation_presentation,
         investigation=investigation,
+        current_state_evidence=entry,
+        desired_state_evidence=entry,
         validation_feedback=None,
     )
 
     prompt_input = json.loads(prompt.split("Allocation input:\n", maxsplit=1)[1])
-    assert {
-        item["evidence_type"] for item in prompt_input["approved_retrieved_evidence"]
-    } == {"document", "CAD", "observation"}
-    state_evidence = prompt_input["neutral_state_evidence_pool"][0]
+    assert {item["evidence_type"] for item in prompt_input["approved_retrieved_evidence"]} == {
+        "document",
+        "CAD",
+        "observation",
+    }
+    state_evidence = prompt_input["grounded_state_evidence"]["current_state"]
     assert state_evidence["observation_handle"] == "view_0001"
     assert state_evidence["candidate_handle"] == "candidate_0001_0002"
     assert state_evidence["candidate_value_ref"] == {
         "record_ref": opaque_record_ref,
         "field_path": field_path,
     }
-    assert state_evidence["candidate_value_ref"] == observation_result["segmentation"][
-        "views"
-    ][0]["candidates"][0]["candidate_value_ref"]
+    assert (
+        state_evidence["candidate_value_ref"]
+        == observation_result["segmentation"]["views"][0]["candidates"][0]["candidate_value_ref"]
+    )
     assert canonical_record_ref not in prompt
     assert "Gazebo_ground_truth" not in prompt
 
@@ -354,19 +401,14 @@ class _RevisingAllocationAgent:
         assert response_format["name"] == "spec2primitives_pa_resource_allocation"
         assert tool_executor is not None
         assert tools is not None
-        evidence_handles = tools[0]["function"]["parameters"]["properties"][
-            "current_state_evidence_handle"
-        ]["enum"]
-        assert len(evidence_handles) == 2
+        parameters = tools[0]["function"]["parameters"]
+        assert set(parameters["properties"]) == {"resource_symbol"}
+        assert parameters["required"] == ["resource_symbol"]
         resource_symbol = self.resource_choices[len(self.prompts)]
         self.prompts.append(prompt)
         reachability = await tool_executor(
             "check_reachability",
-            {
-                "resource_symbol": resource_symbol,
-                "current_state_evidence_handle": evidence_handles[0],
-                "desired_state_evidence_handle": evidence_handles[1],
-            },
+            {"resource_symbol": resource_symbol},
         )
         assert reachability["status"] == "accepted"
         return {
@@ -930,13 +972,13 @@ def test_static_cad_is_reused_across_calls_and_clarification_resume(
     repeated_result = asyncio.run(first.execute("retrieve", {"evidence_id": medium.evidence_id}))
     assert first_result == repeated_result
     serialized_result = json.dumps(first_result)
-    assert "synthetic.stl" not in serialized_result
+    assert '"context_ref": "synthetic.stl"' in serialized_result
+    assert "/home/" not in serialized_result
     assert "synthetic static CAD" not in serialized_result
     assert "CAD_identity" not in serialized_result
     assert first_result["evidence_handle"] == medium.evidence_id
     assert all(
-        str(record_ref).startswith("typed_record_")
-        for record_ref in first_result["record_refs"]
+        str(record_ref).startswith("typed_record_") for record_ref in first_result["record_refs"]
     )
     assert retrieval_calls == [1]
     assert (
@@ -1027,15 +1069,149 @@ def test_target_cad_requires_primary_feature_citation(tmp_path: Path) -> None:
         record_ref=record_path.relative_to(tmp_path).as_posix(),
         evidence_refs=("Gear_Medium.STL",),
     )
-    view = SimpleNamespace(typed_bindings=(binding,))
-    uncited = SimpleNamespace(evidence_refs=("requirement_0001",))
-    cited = SimpleNamespace(evidence_refs=("Gear_Medium.STL",))
+    other_path = tmp_path / "products/grounding/cad/other_geometry_record.json"
+    other_path.write_text(
+        json.dumps({"source": {"context_ref": "Gear_Other.STL"}}),
+        encoding="utf-8",
+    )
+    other_binding = SimpleNamespace(
+        record_type="CADMeshRecord",
+        status="accepted",
+        record_ref=other_path.relative_to(tmp_path).as_posix(),
+        evidence_refs=("Gear_Other.STL",),
+    )
+    view = SimpleNamespace(typed_bindings=(other_binding, binding))
+    uncited = SimpleNamespace(
+        target_feature={
+            "current_state": {
+                "statement": {"evidence_refs": ["requirement_0001"]},
+                "state_values": [],
+            }
+        }
+    )
+    cited = SimpleNamespace(
+        target_feature={
+            "current_state": {
+                "statement": {"evidence_refs": ["Gear_Medium.STL"]},
+                "state_values": [],
+            }
+        }
+    )
 
-    assert _proposal_cad_bindings(tmp_path, view, uncited) == ()
-    assert _proposal_cad_bindings(tmp_path, view, cited) == (binding,)
+    assert _proposal_cad_bindings(tmp_path, view, uncited, state_name="current_state") == ()
+    assert _proposal_cad_bindings(tmp_path, view, cited, state_name="current_state") == (binding,)
 
 
-def test_semantic_commit_does_not_require_precomputed_target_geometry(
+def test_state_candidate_bindings_and_allocation_ignore_presentation_order() -> None:
+    current_ref = "products/grounding/segmentation_current.json"
+    desired_ref = "products/grounding/segmentation_desired.json"
+    current_path = "/cameras/1/candidates/2"
+    desired_path = "/cameras/0/candidates/0"
+    proposal = OntologyGroundingProposal(
+        target_feature={},
+        feature_iri="urn:feature:1",
+        resolved_state_values=(
+            {
+                "state": "desired_state",
+                "name": "supported_destination",
+                "record_type": "RGBDSegmentationRecord",
+                "record_sha256": "b" * 64,
+                "value_ref": {
+                    "record_ref": desired_ref,
+                    "field_path": desired_path,
+                },
+                "resolved_value": {"candidate_handle": "candidate_desired"},
+            },
+            {
+                "state": "current_state",
+                "name": "medium_gear",
+                "record_type": "RGBDSegmentationRecord",
+                "record_sha256": "a" * 64,
+                "value_ref": {
+                    "record_ref": current_ref,
+                    "field_path": current_path,
+                },
+                "resolved_value": {"candidate_handle": "candidate_current"},
+            },
+        ),
+        evidence_refs=(),
+    )
+
+    current, desired = _proposal_state_candidate_bindings(proposal)
+
+    assert (current.name, current.record_ref, current.field_path) == (
+        "medium_gear",
+        current_ref,
+        current_path,
+    )
+    assert (desired.name, desired.record_ref, desired.field_path) == (
+        "supported_destination",
+        desired_ref,
+        desired_path,
+    )
+    entries = (
+        _allocation_entry("desired", desired_ref, desired_path),
+        _allocation_entry("unselected", current_ref, "/cameras/0/candidates/1"),
+        _allocation_entry("current", current_ref, current_path),
+    )
+    presentation = SimpleNamespace(evidence_entries=entries)
+    assert _allocation_entry_for_binding(presentation, current).pa_handle == "current"
+    assert _allocation_entry_for_binding(presentation, desired).pa_handle == "desired"
+
+
+def test_state_candidate_binding_rejects_only_incompatible_candidate_reuse() -> None:
+    def proposal(current_name: str, desired_name: str) -> OntologyGroundingProposal:
+        return OntologyGroundingProposal(
+            target_feature={},
+            feature_iri="urn:feature:1",
+            resolved_state_values=tuple(
+                {
+                    "state": state,
+                    "name": name,
+                    "record_type": "RGBDSegmentationRecord",
+                    "record_sha256": "a" * 64,
+                    "value_ref": {
+                        "record_ref": "products/grounding/segmentation.json",
+                        "field_path": "/cameras/0/candidates/0",
+                    },
+                    "resolved_value": {"candidate_handle": "candidate_0001_0001"},
+                }
+                for state, name in (
+                    ("current_state", current_name),
+                    ("desired_state", desired_name),
+                )
+            ),
+            evidence_refs=(),
+        )
+
+    current, desired = _proposal_state_candidate_bindings(
+        proposal("same_supported_value", "same_supported_value")
+    )
+    assert current.field_path == desired.field_path
+    with pytest.raises(ProductionGroundingError, match="incompatible"):
+        _proposal_state_candidate_bindings(proposal("medium_gear", "supported_destination"))
+
+
+def _allocation_entry(
+    handle: str,
+    record_ref: str,
+    field_path: str,
+) -> AllocationEvidenceEntry:
+    return AllocationEvidenceEntry(
+        pa_handle=handle,
+        canonical_key=f"{record_ref}#{field_path}",
+        record_type="RGBDSegmentationRecord",
+        record_ref=record_ref,
+        record_sha256="a" * 64,
+        field_path=field_path,
+        observation_handle=f"view_{handle}",
+        candidate_handle=f"candidate_{handle}",
+        source_frame="camera_frame",
+        neutral_projection={"visual_region_available": True},
+    )
+
+
+def test_completion_requires_pa_selected_state_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1049,17 +1225,6 @@ def test_semantic_commit_does_not_require_precomputed_target_geometry(
     )
     agent = _ToolUsingProductAgent(retrieve_order=())
 
-    async def complete(**kwargs: object) -> Mapping[str, object]:
-        proposal = kwargs["proposal"]
-        assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
-        assert proposal.target_feature["current_state"]["state_values"] == []
-        assert proposal.target_feature["desired_state"]["state_values"] == []
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": "products/grounding/resource_selection/test.json",
-        }
-
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
     result = asyncio.run(
         runtime.ground_product_context(
             agent,
@@ -1071,16 +1236,72 @@ def test_semantic_commit_does_not_require_precomputed_target_geometry(
         )
     )
 
-    assert result["grounding_status"] == "complete"
-    assert len(agent.calls) == 1
+    assert result["grounding_status"] == "incomplete"
+    assert result["insufficient_evidence"] == (
+        "current_state must select exactly one supplied neutral candidate."
+    )
+    assert len(agent.calls) == 3
     assert "current_validation_gap" not in str(agent.calls[0]["prompt"])
     assert "TargetFeatureGeometryRecord" not in str(agent.calls[0]["prompt"])
-    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
-    assert (root / "products/grounding/ontology_grounding/proposal_0001.json").is_file()
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
+    assert not (root / "products/grounding/ontology_grounding/proposal_0001.json").exists()
+
+
+@pytest.mark.parametrize("failure_mode", ["ambiguous", "malformed"])
+def test_cad_correspondence_failure_remains_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    binding = SimpleNamespace(
+        state="current_state",
+        name="medium_gear",
+        record_ref="selected_segmentation.json",
+        field_path="/cameras/0/candidates/0",
+    )
+    monkeypatch.setattr(
+        production_grounding,
+        "_proposal_state_candidate_bindings",
+        lambda proposal: (binding, binding),
+    )
+
+    async def correspondence(**kwargs: object) -> str | None:
+        del kwargs
+        if failure_mode == "malformed":
+            raise ValueError("controlled malformed evidence")
+        return "The cited CAD size correspondence is ambiguous."
+
+    monkeypatch.setattr(runtime, "_validate_current_state_cad_correspondence", correspondence)
+
+    result = asyncio.run(
+        runtime.ground_product_context(
+            _ToolUsingProductAgent(retrieve_order=()),
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=1,
+        )
+    )
+
+    assert result["grounding_status"] == "incomplete"
+    message = str(result["insufficient_evidence"])
+    assert "CAD" in message
+    assert "correspondence" in message
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
 
 
 def test_robot_agent_rejection_returns_to_pa_without_resource_substitution(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -1211,6 +1432,39 @@ def test_robot_agent_rejection_returns_to_pa_without_resource_substitution(
         presentation=_default_handles(root)[0],
     )
     allocation_agent = _RevisingAllocationAgent()
+    bindings = (
+        SimpleNamespace(
+            state="current_state",
+            record_ref=current_ref,
+            field_path="/translated_location_m",
+        ),
+        SimpleNamespace(
+            state="desired_state",
+            record_ref=desired_ref,
+            field_path="/translated_location_m",
+        ),
+    )
+    monkeypatch.setattr(
+        production_grounding,
+        "_proposal_state_candidate_bindings",
+        lambda proposal: bindings,
+    )
+
+    def selected_location_entry(
+        presentation: object,
+        binding: object,
+    ) -> AllocationEvidenceEntry:
+        return next(
+            entry
+            for entry in presentation.evidence_entries
+            if entry.record_ref == binding.record_ref
+        )
+
+    monkeypatch.setattr(
+        production_grounding,
+        "_allocation_entry_for_binding",
+        selected_location_entry,
+    )
 
     result = asyncio.run(
         runtime._complete_resource_assignment(
@@ -1268,6 +1522,7 @@ def test_invalid_proposal_receives_bounded_feedback_before_commit(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
     invalid = _proposal("requirement_0001")
     del invalid["target_feature"]["desired_state"]
     agent = _SequencedProductAgent((invalid, _proposal("requirement_0001")))
@@ -1323,6 +1578,7 @@ def test_incomplete_semantic_review_reenters_pa_before_commit(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
 
     class _ReviewRevisionAgent(_SequencedProductAgent):
         def __init__(self) -> None:
@@ -1428,6 +1684,7 @@ def test_clarification_requires_successful_approved_evidence(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
     question = {"clarification_question": "Which product variant is intended?"}
     agent = _SequencedProductAgent((question, _proposal("requirement_0001")))
 
@@ -1470,6 +1727,7 @@ def test_clarification_after_successful_retrieval_is_returned(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
 
     async def retrieve(
         investigation: _NativeEvidenceInvestigation,
@@ -1496,9 +1754,7 @@ def test_clarification_after_successful_retrieval_is_returned(
         ) -> dict[str, Any]:
             assert tool_executor is not None
             assert tools is not None
-            evidence_ids = tools[0]["function"]["parameters"]["properties"]["evidence_id"][
-                "enum"
-            ]
+            evidence_ids = tools[0]["function"]["parameters"]["properties"]["evidence_id"]["enum"]
             await tool_executor("retrieve", {"evidence_id": evidence_ids[0]})
             self.calls.append(
                 {
@@ -1573,6 +1829,7 @@ def test_answered_clarification_uses_persisted_record_ref(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
     clarification = {
         "record_type": "PAClarification",
         "question_turn": 3,
@@ -1638,6 +1895,7 @@ def test_system_owned_evidence_question_is_not_user_clarification(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
     question = {
         "clarification_question": (
             "Do you also want retrieval of the live RGB-D observation evidence "

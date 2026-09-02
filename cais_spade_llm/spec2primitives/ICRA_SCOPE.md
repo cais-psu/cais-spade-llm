@@ -11,9 +11,10 @@ implemented through Phase 4.4 under the current framework.** The package also
 implements the PA interaction boundary through Phase 3.5. PA uses one native
 `retrieve` tool and returns a direct ontology proposal. Phase 4.4 validates and
 commits one v8 PA-authored, evidence-grounded `target_feature` with explicit
-current and desired states; a separate structured PA semantic review must
-accept its adequacy. PA then chooses two opaque neutral evidence handles and a provisional
-resource through `check_reachability`. The exact selected RobotAgent performs
+current and desired states, each with a PA-selected neutral candidate; a separate
+structured PA semantic review must accept the unchanged pair. PA then chooses a
+provisional resource through `check_reachability(resource_symbol)`, which reuses
+those bindings. The exact selected RobotAgent performs
 plan-only endpoint validation, and only acceptance commits that resource as a
 `processExecution` assignment. The production profile configures only
 `assembly`, `xarm6`, and `ur5e`; this is an assembly case study, not runtime
@@ -205,11 +206,13 @@ validate its exact seven-assertion projection without merging
         ↓
 separate PA semantic review accepts or returns a revision gap ↺
         ↓
+validate the unchanged candidate refs, hashes, and CAD size correspondence ↺
+        ↓
 commit the accepted feature-state ABox
         ↓
 unresolved processExecution activates PA allocation
         ↓
-PA assigns two state values and chooses a provisional resource
+PA chooses a provisional resource without reselecting either state value
         ↓
 check_reachability evaluates both state locations ↺
         ↓
@@ -243,8 +246,8 @@ The model never manages hidden host-authored information-need state. The system
 validates native tool calls, exact replay keys, citations, hashes, and TBox
 signatures. After grounding the feature and both states, unresolved
 `processExecution` activates PA allocation directly. PA supplies the resource
-and state-evidence choices to `check_reachability`; the tool derives only the
-numeric verifier inputs it needs and returns two-state evidence. Invalid,
+choice to `check_reachability`; the tool derives both numeric verifier inputs
+from the accepted state bindings and returns two-state evidence. Invalid,
 unavailable, stale, ambiguous, or exhausted paths stop fail-closed without a
 manufactured assertion.
 
@@ -463,11 +466,13 @@ host generates feature_0001, both states, and seven transient assertions
         ↓
 separate PA semantic review accepts or returns a revision gap ↺
         ↓
+validate the unchanged candidate refs, hashes, and CAD size correspondence ↺
+        ↓
 commit the accepted feature-state ABox
         ↓
 unresolved processExecution activates PA allocation
         ↓
-PA assigns approved neutral candidates to currentstate and desiredstate
+PA chooses a provisional resource without revising currentstate or desiredstate
         ↓
 check_reachability derives and checks both state locations ↺
         ↓

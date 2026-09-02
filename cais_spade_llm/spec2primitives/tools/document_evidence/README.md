@@ -18,14 +18,15 @@ images, invokes the VLM once, and atomically caches a generic overview by
 source hash, full model configuration, and overview-schema version. The cache
 lives under `contexts/source_cache/` and is not committed.
 
-The version-2 overview contains every ordered page's extracted text,
-rendered-page hash, neutral visual observations, uncertainty, and exact page
-refs. Its preparation request contains no question, user requirement, TBox,
+The version-3 overview contains every ordered page's extracted text,
+rendered-page hash, neutral visual observations that retain visible callouts,
+part labels, and spatial relationships, uncertainty, and exact page refs. Its
+preparation request contains no question, user requirement, TBox,
 ABox, ontology vocabulary, entity keys, relations, or triple delta.
 
 When PA retrieves the current approved NIST PDF, the system supplies pages 1
 through 6, including page 4, exactly once and in document order in one
-`DocumentOverviewRecord` version 2. New production retrieval does not ask a
+`DocumentOverviewRecord` version 3. New production retrieval does not ask a
 focused question or produce `DocumentEvidenceRecord`. Older records remain
 readable only where recovery validation explicitly supports them.
 

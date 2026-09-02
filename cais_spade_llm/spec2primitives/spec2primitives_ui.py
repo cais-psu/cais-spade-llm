@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import re
 import uuid
@@ -17,6 +18,7 @@ from nicegui import ui
 from nicegui.elements.badge import Badge
 from nicegui.elements.button import Button
 from nicegui.elements.label import Label
+from PIL import Image
 
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
     DualGazeboRuntime,
@@ -725,8 +727,6 @@ def _cad_identity(
         return {"status": "accepted", **cited_candidates[0]}
     if len(cited_candidates) > 1:
         return {"status": "ambiguous", "candidates": cited_candidates}
-    if len(candidates) == 1:
-        return {"status": "accepted", **candidates[0][1]}
     if len(candidates) > 1:
         return {
             "status": "ambiguous",
@@ -779,9 +779,10 @@ def _annotated_candidate_rgb(
     *,
     segmentation_ref: str,
     candidate_reference: Mapping[str, object],
+    observation_review_bindings: Mapping[str, str],
     state_label: str,
 ) -> dict[str, object] | None:
-    """Build a browser-safe annotated RGB view for one selected neutral region."""
+    """Build a crop-first visual with an optional annotated source view."""
     try:
         segmentation = _read_json_object(_interaction_ref_path(interaction_root, segmentation_ref))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -862,9 +863,36 @@ def _annotated_candidate_rgb(
             f'fill="#f0fdf4" font-size="14" font-family="sans-serif">{label}</text>'
             "</svg>"
         )
+        source_view_data_uri = "data:image/svg+xml;base64," + base64.b64encode(
+            svg.encode("utf-8")
+        ).decode("ascii")
+        crop = _reviewed_candidate_crop(
+            interaction_root,
+            segmentation_ref=segmentation_ref,
+            segmentation_sha256=hashlib.sha256(
+                _interaction_ref_path(interaction_root, segmentation_ref).read_bytes()
+            ).hexdigest(),
+            observation_handle=observation_handle,
+            candidate_handle=candidate_handle,
+            observation_review_bindings=observation_review_bindings,
+        )
+        if crop is None:
+            try:
+                with Image.open(io.BytesIO(rgb_bytes)) as source_image:
+                    crop_image = source_image.convert("RGB").crop(
+                        (x_min, y_min, x_max + 1, y_max + 1)
+                    )
+                    crop_buffer = io.BytesIO()
+                    crop_image.save(crop_buffer, format="PNG")
+                crop = {
+                    "data_uri": "data:image/png;base64,"
+                    + base64.b64encode(crop_buffer.getvalue()).decode("ascii"),
+                }
+            except OSError:
+                crop = {"data_uri": source_view_data_uri}
         return {
-            "data_uri": "data:image/svg+xml;base64,"
-            + base64.b64encode(svg.encode("utf-8")).decode("ascii"),
+            **crop,
+            "source_view_data_uri": source_view_data_uri,
             "rgb_evidence_ref": rgb_ref,
             "segmentation_ref": segmentation_ref,
             "pixel_bounds_uv": {
@@ -875,12 +903,73 @@ def _annotated_candidate_rgb(
     return None
 
 
+def _reviewed_candidate_crop(
+    interaction_root: Path,
+    *,
+    segmentation_ref: str,
+    segmentation_sha256: str,
+    observation_handle: str,
+    candidate_handle: str,
+    observation_review_bindings: Mapping[str, str],
+) -> dict[str, object] | None:
+    """Load the hash-pinned VLM review crop for one exact candidate."""
+    for review_ref, review_sha256 in sorted(observation_review_bindings.items()):
+        try:
+            review_path = _interaction_ref_path(interaction_root, review_ref)
+            if hashlib.sha256(review_path.read_bytes()).hexdigest() != review_sha256:
+                continue
+            review = _read_json_object(review_path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            continue
+        source = review.get("source_segmentation")
+        candidates = review.get("candidates")
+        if (
+            review.get("record_type") != "ObservationCandidateReview"
+            or review.get("status") != "accepted"
+            or not isinstance(source, Mapping)
+            or source.get("ref") != segmentation_ref
+            or source.get("sha256") != segmentation_sha256
+            or not isinstance(candidates, list)
+        ):
+            continue
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, Mapping)
+                and item.get("observation_handle") == observation_handle
+                and item.get("candidate_handle") == candidate_handle
+            ),
+            None,
+        )
+        artifact = candidate.get("crop_artifact") if isinstance(candidate, Mapping) else None
+        crop_ref = artifact.get("ref") if isinstance(artifact, Mapping) else None
+        crop_sha256 = artifact.get("sha256") if isinstance(artifact, Mapping) else None
+        if not isinstance(crop_ref, str) or not isinstance(crop_sha256, str):
+            continue
+        try:
+            crop_bytes = _interaction_ref_path(interaction_root, crop_ref).read_bytes()
+        except (OSError, ValueError):
+            continue
+        if hashlib.sha256(crop_bytes).hexdigest() != crop_sha256:
+            continue
+        return {
+            "data_uri": "data:image/png;base64," + base64.b64encode(crop_bytes).decode("ascii"),
+            "crop_evidence_ref": crop_ref,
+            "observation_review_ref": review_ref,
+            "description": candidate.get("description"),
+            "uncertainty": candidate.get("uncertainty"),
+        }
+    return None
+
+
 def _state_result_evidence(
     interaction_root: Path,
     *,
     target_feature: Mapping[str, object],
     state_name: str,
     reach_state: Mapping[str, object],
+    observation_review_bindings: Mapping[str, str],
 ) -> dict[str, object]:
     """Join one ontology state to its exact location, reach, and RGB evidence."""
     location_ref = reach_state.get("location_record_ref")
@@ -906,6 +995,7 @@ def _state_result_evidence(
             interaction_root,
             segmentation_ref=segmentation_ref,
             candidate_reference=candidate,
+            observation_review_bindings=observation_review_bindings,
             state_label=state_label,
         )
         if isinstance(segmentation_ref, str)
@@ -971,11 +1061,18 @@ def _final_grounding_result(
     typed_bindings = product_context.get("typed_bindings")
     if not isinstance(typed_bindings, list):
         raise ValueError("Final typed context bindings are invalid.")
+    observation_review_bindings = {
+        str(binding["record_ref"]): str(binding["record_sha256"])
+        for binding in typed_bindings
+        if isinstance(binding, Mapping)
+        and binding.get("output_symbol") == "ObservationCandidateReview"
+        and binding.get("status") == "accepted"
+        and isinstance(binding.get("record_ref"), str)
+        and isinstance(binding.get("record_sha256"), str)
+    }
     completion_schema = completion.get("schema_version")
     grounding_record_type = (
-        "RobotFrameLocationRecord"
-        if completion_schema in {3, 4, 5, 6}
-        else "RobotFramePoseRecord"
+        "RobotFrameLocationRecord" if completion_schema in {3, 4, 5, 6} else "RobotFramePoseRecord"
     )
     reachability: Mapping[str, object] | None = None
     validation: Mapping[str, object] | None = None
@@ -1072,12 +1169,14 @@ def _final_grounding_result(
             target_feature=target_feature,
             state_name="current_state",
             reach_state=current_reach,
+            observation_review_bindings=observation_review_bindings,
         )
         desired_state_evidence = _state_result_evidence(
             interaction_root,
             target_feature=target_feature,
             state_name="desired_state",
             reach_state=desired_reach,
+            observation_review_bindings=observation_review_bindings,
         )
     cad_identity = _cad_identity(
         interaction_root,
@@ -1155,9 +1254,7 @@ def _final_grounding_result(
                 "feature_iri": validation.get("feature_iri"),
                 "validation_scope": validation.get("validation_scope"),
                 "checked_constraints": validation.get("checked_constraints"),
-                "unvalidated_constraints": validation.get(
-                    "unvalidated_constraints"
-                ),
+                "unvalidated_constraints": validation.get("unvalidated_constraints"),
                 "motion_executed": validation.get("motion_executed"),
                 "current_state": validation.get("current_state"),
                 "desired_state": validation.get("desired_state"),
@@ -1752,6 +1849,80 @@ def _json_text(value: object) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
 
 
+def _compact_json_text(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def _concise_final_grounding_summary(
+    result: Mapping[str, object],
+) -> dict[str, object]:
+    """Return only the operator-readable facts for the visible result card."""
+    cad_identity = result.get("cad_identity")
+    context_ref = (
+        cad_identity.get("context_ref")
+        if isinstance(cad_identity, Mapping)
+        and cad_identity.get("status") == "accepted"
+        and isinstance(cad_identity.get("context_ref"), str)
+        else None
+    )
+    cad_name = Path(context_ref).name if isinstance(context_ref, str) else None
+    current = result.get("current_state_evidence")
+    desired = result.get("desired_state_evidence")
+    current_mapping = current if isinstance(current, Mapping) else {}
+    desired_mapping = desired if isinstance(desired, Mapping) else {}
+    reachability = result.get("reachability")
+    reachability_mapping = reachability if isinstance(reachability, Mapping) else {}
+    validation = result.get("robot_agent_validation")
+    validation_mapping = validation if isinstance(validation, Mapping) else {}
+    return {
+        "target": "\n".join(
+            (
+                f"CAD: {cad_name}" if cad_name else "CAD identity unresolved",
+                f"reference: {context_ref}" if context_ref else "",
+                f"target frame: {result.get('target_frame')}",
+                f"current XYZ: {_compact_json_text(current_mapping.get('translated_location_m'))}",
+                f"desired XYZ: {_compact_json_text(desired_mapping.get('translated_location_m'))}",
+                (f"selected-resource reachability: {reachability_mapping.get('status')}"),
+            )
+        ).replace("\n\n", "\n"),
+        "current_state": _concise_state_summary(current_mapping),
+        "desired_state": _concise_state_summary(desired_mapping),
+        "reachability": "\n".join(
+            (
+                f"status: {reachability_mapping.get('status')}",
+                f"resource: {reachability_mapping.get('resource_symbol')}",
+                f"target frame: {reachability_mapping.get('target_frame')}",
+            )
+        ),
+        "validation": "\n".join(
+            (
+                f"status: {validation_mapping.get('status')}",
+                f"mode: {validation_mapping.get('mode')}",
+                f"scope: {validation_mapping.get('validation_scope')}",
+                f"motion executed: {validation_mapping.get('motion_executed')}",
+            )
+        ),
+    }
+
+
+def _concise_state_summary(state: Mapping[str, object]) -> str:
+    """Return a short state summary while detailed provenance remains expandable."""
+    visual = state.get("annotated_rgb")
+    description = visual.get("description") if isinstance(visual, Mapping) else None
+    values = [
+        state.get("statement"),
+        (
+            f"semantic value: {state.get('state_value_name')}"
+            if state.get("state_value_name")
+            else None
+        ),
+        f"visible evidence: {description}" if isinstance(description, str) else None,
+        f"XYZ: {_compact_json_text(state.get('translated_location_m'))}",
+        f"reachable: {state.get('reachable')}",
+    ]
+    return "\n".join(str(value) for value in values if value not in {None, ""})
+
+
 def _render_pa_timeline_events(
     container: Any,
     events: list[dict[str, str]],
@@ -1805,10 +1976,12 @@ def _render_final_grounding_result() -> dict[str, Any]:
         requirement_value = ui.label("").classes(
             "text-base font-medium text-slate-900 whitespace-pre-wrap"
         )
-        ui.label("PA-authored target feature").classes("text-xs font-semibold text-slate-500")
-        target_feature_value = ui.code("", language="json").classes(
-            "w-full text-xs overflow-x-auto"
-        )
+        with ui.expansion("PA-authored target feature details", icon="data_object").classes(
+            "w-full border border-slate-200 rounded"
+        ):
+            target_feature_value = ui.code("", language="json").classes(
+                "w-full text-xs overflow-x-auto"
+            )
 
         with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
             with ui.card().classes(
@@ -1824,12 +1997,16 @@ def _render_final_grounding_result() -> dict[str, Any]:
             with ui.card().classes(
                 "flex-[2] min-w-72 border border-slate-200 bg-slate-50 shadow-none"
             ):
-                ui.label("CAD identity and grounded frame").classes(
-                    "text-xs font-semibold text-slate-500"
-                )
+                ui.label("CAD and grounded states").classes("text-xs font-semibold text-slate-500")
                 target_value = ui.label("").classes(
                     "text-sm font-medium text-slate-900 whitespace-pre-wrap"
                 )
+                with ui.expansion("Grounding record details", icon="data_object").classes(
+                    "w-full border border-slate-200 rounded"
+                ):
+                    target_details_value = ui.code("", language="json").classes(
+                        "w-full text-xs overflow-x-auto"
+                    )
 
         ui.label("PA-Selected Feature-State Evidence").classes(
             "text-sm font-semibold text-slate-800"
@@ -1849,6 +2026,16 @@ def _render_final_grounding_result() -> dict[str, Any]:
                 current_state_value = ui.label("").classes(
                     "text-xs text-slate-700 whitespace-pre-wrap break-words"
                 )
+                with ui.expansion("Evidence details and source view", icon="image").classes(
+                    "w-full border border-sky-200 rounded"
+                ):
+                    current_source_image = ui.image("").classes(
+                        "w-full max-h-80 object-contain rounded"
+                    )
+                    current_source_image.set_visibility(False)
+                    current_state_details = ui.code("", language="json").classes(
+                        "w-full text-xs overflow-x-auto"
+                    )
             with ui.card().classes(
                 "flex-1 min-w-80 border border-violet-200 bg-violet-50 shadow-none"
             ):
@@ -1865,6 +2052,16 @@ def _render_final_grounding_result() -> dict[str, Any]:
                 desired_state_value = ui.label("").classes(
                     "text-xs text-slate-700 whitespace-pre-wrap break-words"
                 )
+                with ui.expansion("Evidence details and source view", icon="image").classes(
+                    "w-full border border-violet-200 rounded"
+                ):
+                    desired_source_image = ui.image("").classes(
+                        "w-full max-h-80 object-contain rounded"
+                    )
+                    desired_source_image.set_visibility(False)
+                    desired_state_details = ui.code("", language="json").classes(
+                        "w-full text-xs overflow-x-auto"
+                    )
 
         with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
             with ui.card().classes(
@@ -1873,18 +2070,30 @@ def _render_final_grounding_result() -> dict[str, Any]:
                 ui.label("Reachability · both states").classes(
                     "text-xs font-semibold text-slate-500"
                 )
-                reachability_value = ui.code("", language="json").classes(
-                    "w-full text-xs overflow-x-auto"
+                reachability_value = ui.label("").classes(
+                    "text-sm font-medium text-slate-900 whitespace-pre-wrap"
                 )
+                with ui.expansion("Reachability record details", icon="data_object").classes(
+                    "w-full border border-slate-200 rounded"
+                ):
+                    reachability_details = ui.code("", language="json").classes(
+                        "w-full text-xs overflow-x-auto"
+                    )
             with ui.card().classes(
                 "flex-1 min-w-80 border border-slate-200 bg-slate-50 shadow-none"
             ):
                 ui.label("Exact RobotAgent · endpoint-motion validation").classes(
                     "text-xs font-semibold text-slate-500"
                 )
-                validation_value = ui.code("", language="json").classes(
-                    "w-full text-xs overflow-x-auto"
+                validation_value = ui.label("").classes(
+                    "text-sm font-medium text-slate-900 whitespace-pre-wrap"
                 )
+                with ui.expansion("RobotAgent record details", icon="data_object").classes(
+                    "w-full border border-slate-200 rounded"
+                ):
+                    validation_details = ui.code("", language="json").classes(
+                        "w-full text-xs overflow-x-auto"
+                    )
 
         ui.label("Validated Evidence").classes("text-sm font-semibold text-slate-800")
         evidence_container = ui.row().classes("w-full gap-2 flex-wrap")
@@ -1936,14 +2145,21 @@ def _render_final_grounding_result() -> dict[str, Any]:
         "process": process_value,
         "resource": resource_value,
         "target": target_value,
+        "target_details": target_details_value,
         "current_image": current_image,
         "current_image_placeholder": current_image_placeholder,
+        "current_source_image": current_source_image,
         "current_state": current_state_value,
+        "current_state_details": current_state_details,
         "desired_image": desired_image,
         "desired_image_placeholder": desired_image_placeholder,
+        "desired_source_image": desired_source_image,
         "desired_state": desired_state_value,
+        "desired_state_details": desired_state_details,
         "reachability": reachability_value,
+        "reachability_details": reachability_details,
         "validation": validation_value,
+        "validation_details": validation_details,
         "evidence": evidence_container,
         "limitations_expansion": limitations_expansion,
         "limitations": limitations_value,
@@ -1962,9 +2178,7 @@ def _apply_final_grounding_result(
     if result is None:
         card.set_visibility(False)
         return
-    allocation_label = str(
-        result.get("allocation_label") or "validated endpoint-motion allocation"
-    )
+    allocation_label = str(result.get("allocation_label") or "validated endpoint-motion allocation")
     elements["status_badge"].set_text(allocation_label)
     elements["result_kind"].set_text(f"{allocation_label} · no motion executed")
     elements["requirement"].set_text(str(result.get("product_requirement", "")))
@@ -1996,26 +2210,20 @@ def _apply_final_grounding_result(
         if result.get(field) not in {None, ""}
     )
     elements["resource"].set_text(resource_text)
-    target_lines = [
-        " · ".join(
-            str(result[field])
-            for field in ("target_context_ref", "target_frame")
-            if result.get(field) not in {None, ""}
-        ),
-        f"location: {result.get('location')}",
-    ]
-    cad_identity = result.get("cad_identity")
-    if isinstance(cad_identity, Mapping):
-        target_lines.append(
-            "CAD identity: " + json.dumps(cad_identity, ensure_ascii=False, allow_nan=False)
-        )
-    translation = result.get("CAD_centroid_translation_m")
-    if isinstance(translation, list):
-        target_lines.append(
-            "CAD_centroid_translation_m: "
-            + json.dumps(translation, ensure_ascii=False, allow_nan=False)
-        )
-    elements["target"].set_text("\n".join(line for line in target_lines if line))
+    summary = _concise_final_grounding_summary(result)
+    elements["target"].set_text(str(summary["target"]))
+    elements["target_details"].content = _json_text(
+        {
+            "cad_identity": result.get("cad_identity"),
+            "target_context_ref": result.get("target_context_ref"),
+            "target_frame": result.get("target_frame"),
+            "location": result.get("location"),
+            "pose": result.get("pose"),
+            "robot_frame_conversion": result.get("robot_frame_conversion"),
+            "CAD_centroid_translation_m": result.get("CAD_centroid_translation_m"),
+        }
+    )
+    elements["target_details"].update()
 
     for prefix, result_key in (
         ("current", "current_state_evidence"),
@@ -2023,30 +2231,16 @@ def _apply_final_grounding_result(
     ):
         state_evidence = result.get(result_key)
         state_mapping = state_evidence if isinstance(state_evidence, Mapping) else {}
-        state_lines = [
-            str(state_mapping.get("statement") or ""),
-            f"ontology state: {state_mapping.get('state_iri')}",
-            f"PA evidence handle: {state_mapping.get('evidence_handle')}",
-            f"semantic value: {state_mapping.get('state_value_name')}",
-            "candidate: "
-            + json.dumps(
-                state_mapping.get("candidate_reference"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ),
-            "location_m: "
-            + json.dumps(
-                state_mapping.get("translated_location_m"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ),
-            (f"reach distance_m: {state_mapping.get('distance_from_reach_origin_m')}"),
-            f"reachable: {state_mapping.get('reachable')}",
-        ]
-        elements[f"{prefix}_state"].set_text("\n".join(line for line in state_lines if line))
+        elements[f"{prefix}_state"].set_text(str(summary[f"{prefix}_state"]))
+        elements[f"{prefix}_state_details"].content = _json_text(state_mapping)
+        elements[f"{prefix}_state_details"].update()
         annotated = state_mapping.get("annotated_rgb")
         data_uri = annotated.get("data_uri") if isinstance(annotated, Mapping) else None
+        source_view_data_uri = (
+            annotated.get("source_view_data_uri") if isinstance(annotated, Mapping) else None
+        )
         image_element = elements[f"{prefix}_image"]
+        source_image_element = elements[f"{prefix}_source_image"]
         placeholder = elements[f"{prefix}_image_placeholder"]
         if isinstance(data_uri, str) and data_uri:
             image_element.set_source(data_uri)
@@ -2055,18 +2249,24 @@ def _apply_final_grounding_result(
         else:
             image_element.set_visibility(False)
             placeholder.set_visibility(True)
+        if isinstance(source_view_data_uri, str) and source_view_data_uri:
+            source_image_element.set_source(source_view_data_uri)
+            source_image_element.set_visibility(True)
+        else:
+            source_image_element.set_visibility(False)
 
     for element_key, result_key in (
         ("reachability", "reachability"),
         ("validation", "robot_agent_validation"),
     ):
         value = result.get(result_key)
-        elements[element_key].content = (
+        elements[element_key].set_text(str(summary[element_key]))
+        elements[f"{element_key}_details"].content = (
             json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
             if isinstance(value, Mapping)
             else "unavailable"
         )
-        elements[element_key].update()
+        elements[f"{element_key}_details"].update()
 
     evidence_container = elements["evidence"]
     evidence_container.clear()

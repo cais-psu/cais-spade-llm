@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 
 from cais_spade_llm.spec2primitives import spec2primitives_ui
+from cais_spade_llm.spec2primitives.config import load_model_runtime_config
 from cais_spade_llm.spec2primitives.tools.observation_context import (
     CAMERA_IDS,
     IMAGE_HEIGHT,
@@ -23,14 +26,22 @@ from cais_spade_llm.spec2primitives.tools.observation_context import (
     write_observation_bundle,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
+    ObservationCandidateReviewError,
+    ObservationCandidateReviewRequest,
+    ObservationCandidateReviewResponse,
+    OpenAIObservationVisionRuntime,
     RGBDSegmentationError,
     preprocess_served_geometry,
     read_rgbd_segmentation_status,
+    review_observation_candidates,
     run_automatic_rgbd_segmentation_pipeline,
     segment_preprocessed_observation,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation_provider import (
     GazeboObservationProviderError,
+)
+from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.observation_review import (
+    ObservationCandidateImage,
 )
 
 
@@ -79,6 +90,37 @@ class RejectedCapture:
         )
 
 
+class ControlledObservationVision:
+    """Describe every opaque candidate without adding ontology assignments."""
+
+    def __init__(self, *, forbidden_assignment: str | None = None) -> None:
+        self.forbidden_assignment = forbidden_assignment
+        self.requests: list[ObservationCandidateReviewRequest] = []
+
+    async def review_candidates(
+        self,
+        request: ObservationCandidateReviewRequest,
+    ) -> ObservationCandidateReviewResponse:
+        """Return one deterministic description for every supplied handle."""
+        self.requests.append(request)
+        candidates: list[dict[str, object]] = []
+        for candidate in request.candidates:
+            value: dict[str, object] = {
+                "observation_handle": candidate.observation_handle,
+                "candidate_handle": candidate.candidate_handle,
+                "description": f"visible region {candidate.candidate_handle}",
+                "uncertainty": "identity not assigned",
+            }
+            if self.forbidden_assignment is not None:
+                value[self.forbidden_assignment] = True
+            candidates.append(value)
+        return ObservationCandidateReviewResponse(
+            response_id="response_observation_0001",
+            model="gpt-5.6-sol",
+            output={"candidates": candidates},
+        )
+
+
 def test_segmentation_applies_one_neutral_policy_to_every_observation(
     tmp_path: Path,
 ) -> None:
@@ -89,9 +131,9 @@ def test_segmentation_applies_one_neutral_policy_to_every_observation(
         observation_record_path=preprocessing.record_path,
     )
 
-    assert result.candidate_count == 10
+    assert result.candidate_count == 6
     assert result.record["schema_version"] == 2
-    assert result.record["candidate_count"] == 10
+    assert result.record["candidate_count"] == 6
     assert result.record["candidate_state"] == "candidates_available"
     assert result.record["identity"] == "not_evaluated"
     assert result.record["CAD_correspondence"] == "not_evaluated"
@@ -123,21 +165,82 @@ def test_segmentation_applies_one_neutral_policy_to_every_observation(
         assert camera["CAD_correspondence"] == "not_evaluated"
         assert camera["pose"] == "not_evaluated"
         if camera_id == "cam_assembly":
-            assert camera["candidate_count"] == 1
+            assert camera["candidate_count"] == 0
             assert camera["support_plane"]["inlier_count"] == 8_000
-            assert labels[120, 120] == 1
+            assert camera["support_plane"]["retained_point_count"] == 0
+            assert labels[120, 120] == 0
         else:
-            assert camera["candidate_count"] == 3
-            assert labels[105, 105] == 1
-            assert {int(labels[125, 125]), int(labels[125, 135])} == {2, 3}
+            assert camera["candidate_count"] == 2
+            assert camera["support_plane"]["retained_point_count"] == 200
+            assert labels[105, 105] == 0
+            assert (int(labels[125, 125]), int(labels[125, 135])) == (1, 2)
         assert camera["support_plane"]["status"] == "detected"
-        assert camera["support_plane"]["candidate_filtering_applied"] is False
+        assert camera["support_plane"]["candidate_filtering_applied"] is True
+        assert camera["support_plane"]["candidate_side"] == "camera_side"
         for candidate in camera["candidates"]:
             assert candidate["candidate_handle"].startswith(f"candidate_{camera_index:04d}_")
             assert candidate["point_count"] >= 50
             assert candidate["identity"] == "not_evaluated"
             assert candidate["CAD_correspondence"] == "not_evaluated"
             assert candidate["pose"] == "not_evaluated"
+
+
+def test_openai_observation_adapter_uses_schema_3_runtime_configuration() -> None:
+    class ControlledResponses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> object:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                id="response_observation_0001",
+                model="gpt-5.6-sol",
+                output_text=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "observation_handle": "view_0001",
+                                "candidate_handle": "candidate_0001_0001",
+                                "description": "visible circular part",
+                                "uncertainty": "identity not assigned",
+                            }
+                        ]
+                    }
+                ),
+            )
+
+    responses = ControlledResponses()
+    config = load_model_runtime_config().observation_vlm
+    runtime = OpenAIObservationVisionRuntime(
+        config,
+        client=SimpleNamespace(responses=responses),
+    )
+    request = ObservationCandidateReviewRequest(
+        candidates=(
+            ObservationCandidateImage(
+                observation_handle="view_0001",
+                candidate_handle="candidate_0001_0001",
+                source_data_url="data:image/png;base64,source",
+                crop_data_url="data:image/png;base64,crop",
+            ),
+        )
+    )
+
+    response = asyncio.run(runtime.review_candidates(request))
+
+    assert response.model == "gpt-5.6-sol"
+    call = responses.calls[0]
+    assert call["model"] == "gpt-5.6"
+    assert call["reasoning"] == {"effort": "medium"}
+    assert call["max_output_tokens"] == 4096
+    assert call["store"] is False
+    image_inputs = [item for item in call["input"][0]["content"] if item["type"] == "input_image"]
+    assert len(image_inputs) == 2
+    assert all(item["detail"] == "high" for item in image_inputs)
+    schema = call["text"]["format"]["schema"]
+    serialized_schema = json.dumps(schema)
+    for forbidden in ("current_state", "desired_state", "CAD", "process", "resource"):
+        assert forbidden not in serialized_schema
 
 
 def test_segmentation_is_deterministic_and_does_not_overwrite(tmp_path: Path) -> None:
@@ -173,6 +276,90 @@ def test_segmentation_is_deterministic_and_does_not_overwrite(tmp_path: Path) ->
     assert first.record_path.read_bytes() == before
 
 
+def test_observation_review_covers_exact_handles_and_pins_candidate_crops(
+    tmp_path: Path,
+) -> None:
+    preprocessing = _preprocess_observation(tmp_path, _segmentation_bundle())
+    segmentation = segment_preprocessed_observation(
+        interaction_root=tmp_path,
+        observation_record_path=preprocessing.record_path,
+    )
+    vision = ControlledObservationVision()
+
+    review = asyncio.run(
+        review_observation_candidates(
+            interaction_root=tmp_path,
+            segmentation_record_path=segmentation.record_path,
+            review_number=1,
+            config=load_model_runtime_config().observation_vlm,
+            vision_runtime=vision,
+        )
+    )
+
+    expected_handles = [
+        (camera["observation_handle"], candidate["candidate_handle"])
+        for camera in segmentation.record["cameras"]
+        for candidate in camera["candidates"]
+    ]
+    assert [
+        (candidate.observation_handle, candidate.candidate_handle)
+        for candidate in vision.requests[0].candidates
+    ] == expected_handles
+    assert [
+        (candidate["observation_handle"], candidate["candidate_handle"])
+        for candidate in review.record["candidates"]
+    ] == expected_handles
+    assert review.record["source_segmentation"] == {
+        "ref": segmentation.record_path.relative_to(tmp_path).as_posix(),
+        "sha256": _sha256(segmentation.record_path),
+    }
+    for candidate, crop_path in zip(
+        review.record["candidates"],
+        review.crop_paths,
+        strict=True,
+    ):
+        assert crop_path.is_file()
+        assert candidate["crop_artifact"]["sha256"] == _sha256(crop_path)
+        assert set(candidate).isdisjoint(
+            {"current_state", "desired_state", "CAD", "process", "resource"}
+        )
+
+
+@pytest.mark.parametrize(
+    "forbidden_assignment",
+    ["current_state", "desired_state", "CAD", "process", "resource"],
+)
+def test_observation_review_rejects_assignment_without_partial_output(
+    tmp_path: Path,
+    forbidden_assignment: str,
+) -> None:
+    preprocessing = _preprocess_observation(tmp_path, _segmentation_bundle())
+    segmentation = segment_preprocessed_observation(
+        interaction_root=tmp_path,
+        observation_record_path=preprocessing.record_path,
+    )
+
+    with pytest.raises(
+        ObservationCandidateReviewError,
+        match="fields are invalid",
+    ):
+        asyncio.run(
+            review_observation_candidates(
+                interaction_root=tmp_path,
+                segmentation_record_path=segmentation.record_path,
+                review_number=1,
+                config=load_model_runtime_config().observation_vlm,
+                vision_runtime=ControlledObservationVision(
+                    forbidden_assignment=forbidden_assignment
+                ),
+            )
+        )
+
+    grounding_root = tmp_path / "products/grounding/rgb_d_cad_grounding"
+    assert not (grounding_root / "observation_review_0001").exists()
+    assert list(grounding_root.glob(".observation-review-*")) == []
+
+
 def test_segmentation_rejects_tampered_point_cloud_without_partial_output(
     tmp_path: Path,
 ) -> None:
@@ -193,7 +380,7 @@ def test_segmentation_rejects_tampered_point_cloud_without_partial_output(
     assert list(grounding_root.glob(".segmentation-*")) == []
 
 
-def test_segmentation_keeps_neutral_surface_candidates_when_parts_are_absent(
+def test_segmentation_excludes_support_and_background_when_parts_are_absent(
     tmp_path: Path,
 ) -> None:
     preprocessing = _preprocess_observation(
@@ -206,11 +393,29 @@ def test_segmentation_keeps_neutral_surface_candidates_when_parts_are_absent(
         observation_record_path=preprocessing.record_path,
     )
 
-    assert result.candidate_count == 4
-    assert all(camera["candidate_count"] == 1 for camera in result.record["cameras"])
-    assert all(
-        camera["candidate_state"] == "candidates_available" for camera in result.record["cameras"]
+    assert result.candidate_count == 0
+    assert all(camera["candidate_count"] == 0 for camera in result.record["cameras"])
+    assert all(camera["candidate_state"] == "unresolved" for camera in result.record["cameras"])
+
+
+def test_segmentation_fails_closed_when_support_plane_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    preprocessing = _preprocess_observation(tmp_path, _plane_unavailable_bundle())
+
+    result = segment_preprocessed_observation(
+        interaction_root=tmp_path,
+        observation_record_path=preprocessing.record_path,
     )
+
+    assert result.candidate_count == 0
+    for camera in result.record["cameras"]:
+        assert camera["support_plane"] == {
+            "status": "unavailable",
+            "candidate_filtering_applied": False,
+            "retained_point_count": 0,
+        }
+        assert camera["candidate_state"] == "unresolved"
 
 
 def test_segmentation_rejects_mutated_record_without_partial_output(tmp_path: Path) -> None:
@@ -246,7 +451,7 @@ def test_automatic_pipeline_captures_preprocesses_and_segments_with_fixed_inputs
 
     assert first["status"] == "ready"
     assert second["status"] == "ready"
-    assert first["candidate_count"] == 10
+    assert first["candidate_count"] == 6
     assert first["identity"] == "not_evaluated"
     assert first["CAD_correspondence"] == "not_evaluated"
     assert first["pose"] == "not_evaluated"
@@ -266,7 +471,7 @@ def test_automatic_pipeline_captures_preprocesses_and_segments_with_fixed_inputs
         assert _read_json(Path(result["pipeline_record_path"])) == result
     status = read_rgbd_segmentation_status(tmp_path)
     assert status["status"] == "ready"
-    assert status["candidate_count"] == 10
+    assert status["candidate_count"] == 6
 
 
 def test_automatic_pipeline_records_failure_and_preserves_not_evaluated_states(
@@ -366,6 +571,37 @@ def _segmentation_bundle(*, source_objects: bool = True) -> ObservationBundle:
                 depth_m[120:130, 130:140] = np.float32(0.7)
                 rgb[120:130, 120:130] = np.asarray([200, 10, 10], dtype=np.uint8)
                 rgb[120:130, 130:140] = np.asarray([10, 200, 10], dtype=np.uint8)
+        timestamp_ns = 2_000_000_000 + camera_index * 1_000
+        frame = f"{camera_id}_optical_frame"
+        camera_observations.append(
+            CameraObservation(
+                camera_id=camera_id,
+                rgb=rgb,
+                depth_m=depth_m,
+                rgb_timestamp_ns=timestamp_ns,
+                depth_timestamp_ns=timestamp_ns + 100,
+                rgb_frame=frame,
+                depth_frame=frame,
+                camera_calibration=_calibration(frame),
+            )
+        )
+    return ObservationBundle(
+        observation_ref="observation_0001",
+        evidence_label="live",
+        captured_at_ns=2_000_004_000,
+        camera_observations=tuple(camera_observations),
+    )
+
+
+def _plane_unavailable_bundle() -> ObservationBundle:
+    camera_observations = []
+    for camera_index, camera_id in enumerate(CAMERA_IDS):
+        rgb = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
+        depth_m = np.full((IMAGE_HEIGHT, IMAGE_WIDTH), np.nan, dtype=np.float32)
+        for point_index in range(80):
+            row = 100 + point_index // 10
+            column = 100 + point_index % 10
+            depth_m[row, column] = np.float32(0.7 + point_index * 0.001)
         timestamp_ns = 2_000_000_000 + camera_index * 1_000
         frame = f"{camera_id}_optical_frame"
         camera_observations.append(

@@ -36,7 +36,8 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
 
 _BINDING_STATUSES = frozenset({"accepted", "ambiguous", "rejected", "stale", "unavailable"})
 _TYPED_RECORD_SCHEMA_VERSIONS = {
-    "DocumentOverviewRecord": frozenset({1, 2}),
+    "DocumentOverviewRecord": frozenset({1, 2, 3}),
+    "ObservationCandidateReview": frozenset({1}),
     "RGBDSegmentationRecord": frozenset({1, 2}),
     "CADSizeCorrespondenceRecord": frozenset({1, 2}),
     "CADPoseEstimationRecord": frozenset({2, 3}),
@@ -4801,6 +4802,7 @@ def _binding_status(record_type: str, record: Mapping[str, object]) -> str:
     if record_type in {
         "CADMeshRecord",
         "ColoredPointCloudSetRecord",
+        "ObservationCandidateReview",
         "RGBDSegmentationRecord",
         "CameraToRobotCalibrationRecord",
     }:

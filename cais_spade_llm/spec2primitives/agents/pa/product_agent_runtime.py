@@ -35,8 +35,8 @@ class _SharedProductAgentContextRuntime:
             instruction_override=_PRODUCT_AGENT_INSTRUCTIONS,
             model=model,
         )
-        # The shared ProductAgent uses Chat Completions, where GPT-5.4 function
-        # tools require reasoning effort "none" rather than a reasoning level.
+        # Keep the configured effort exact because the shared ProductAgent owns
+        # the Chat Completions request and must not silently downgrade reasoning.
         self._product_agent.reasoning_effort = reasoning_effort
 
     async def ask_llm_structured(

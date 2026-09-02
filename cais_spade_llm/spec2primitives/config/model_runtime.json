@@ -1,13 +1,21 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "product_agent_llm": {
-    "model": "gpt-5.4",
-    "reasoning_effort": "none"
+    "model": "gpt-5.6",
+    "reasoning_effort": "medium"
   },
   "document_vlm": {
     "provider": "openai",
-    "model": "gpt-5.4-mini-2026-03-17",
-    "reasoning_effort": "low",
+    "model": "gpt-5.6",
+    "reasoning_effort": "medium",
+    "image_detail": "high",
+    "max_output_tokens": 4096,
+    "timeout_seconds": 90
+  },
+  "observation_vlm": {
+    "provider": "openai",
+    "model": "gpt-5.6",
+    "reasoning_effort": "medium",
     "image_detail": "high",
     "max_output_tokens": 4096,
     "timeout_seconds": 90

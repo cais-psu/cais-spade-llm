@@ -24,7 +24,7 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     approved_document_path,
 )
 
-DOCUMENT_OVERVIEW_SCHEMA_VERSION = 2
+DOCUMENT_OVERVIEW_SCHEMA_VERSION = 3
 _PRODUCER = "document_evidence"
 _OUTPUT_NAME = "spec2primitives_document_overview"
 _OUTPUT_KEYS = {"summary", "observations", "uncertainty"}
@@ -232,7 +232,7 @@ async def prepare_document_overview(
             pages=rendered_pages,
         )
         response = await vision_runtime.interpret_document(request)
-        if response.model != config.model:
+        if not _response_model_matches_config(response.model, config.model):
             raise DocumentInterpretationError(
                 "Document vision response model does not match configured model."
             )
@@ -376,7 +376,7 @@ async def interpret_document_evidence(
             for page_number in range(1, int(overview.record["page_count"]) + 1)
         )
         snapshot = {
-            "schema_version": 2,
+            "schema_version": DOCUMENT_OVERVIEW_SCHEMA_VERSION,
             "record_type": "DocumentOverviewRecord",
             "producer": _PRODUCER,
             "operation_number": operation_number,
@@ -481,7 +481,7 @@ def _request_text(request: DocumentVisionRequest) -> str:
     )
 
 
-_OPENAI_INSTRUCTIONS = """You are a bounded document overview tool. Describe only the supplied ordered PDF page images and extracted text. Produce a generic source overview independent of any user requirement or ontology. Record short surface-form observations with the visible page numbers that support them. Put ambiguous or unclear content in uncertainty. Do not create entity keys, IRIs, ontology classes, ontology properties, RDF assertions, robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
+_OPENAI_INSTRUCTIONS = """You are a bounded document overview tool. Describe only the supplied ordered PDF page images and extracted text. Produce a generic source overview independent of any user requirement or ontology. Preserve visible callout text, part labels, relative sizes, and spatial or support relationships when the page shows them. Record short surface-form observations with the visible page numbers that support them. Put ambiguous, occluded, or unclear content in uncertainty rather than guessing. Do not create entity keys, IRIs, ontology classes, ontology properties, RDF assertions, robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
 
 
 def _document_vision_response(response: object, label: str) -> DocumentVisionResponse:
@@ -509,6 +509,13 @@ def _document_vision_response(response: object, label: str) -> DocumentVisionRes
         response_id=response_id,
         model=model,
         output=output,
+    )
+
+
+def _response_model_matches_config(response_model: str, configured_model: str) -> bool:
+    """Accept the documented GPT-5.6 alias while preserving both audit values."""
+    return response_model == configured_model or (
+        configured_model == "gpt-5.6" and response_model == "gpt-5.6-sol"
     )
 
 
@@ -683,7 +690,7 @@ def _overview_cache_record(
         ]
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "record_type": "DocumentOverviewRecord",
         "overview_schema_version": DOCUMENT_OVERVIEW_SCHEMA_VERSION,
         "context_ref": context_ref,
@@ -739,7 +746,7 @@ def _load_cache_record(
     if not isinstance(value, dict) or set(value) != _CACHE_RECORD_KEYS:
         raise DocumentInterpretationError("Document overview cache fields are invalid.")
     if (
-        value["schema_version"] != 2
+        value["schema_version"] != 3
         or value["record_type"] != "DocumentOverviewRecord"
         or value["overview_schema_version"] != DOCUMENT_OVERVIEW_SCHEMA_VERSION
         or value["context_ref"] != context_ref

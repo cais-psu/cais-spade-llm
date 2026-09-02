@@ -36,9 +36,10 @@ requirement
 → the provisional graph activates its typed downstream requirements
 → missing prerequisites are reported to PA, which may retrieve again
 → a separate PA semantic review accepts the target meaning or requests revision
+→ exact candidate refs, hashes, CAD size, and state-value consistency are checked
 → accepted typed evidence gates the semantic ABox commit
-→ PA assigns neutral evidence to both states and chooses a provisional resource
-→ PA calls check_reachability for that exact resource and both states
+→ PA chooses a provisional resource without reselecting either state
+→ PA calls check_reachability(resource_symbol) for that resource
 → the exact selected RobotAgent returns a plan-only endpoint verdict
 → rejection evidence returns to PA without automatic substitution
 → only an accepted PA choice is committed as processExecution
@@ -101,9 +102,10 @@ Every approved PDF and STL is registered with an expected SHA-256 in
 when its source revision still matches. A live-observation handle always
 creates a fresh capture revision.
 
-A document retrieval creates `DocumentOverviewRecord` version 2. It contains
+A document retrieval creates `DocumentOverviewRecord` version 3. It contains
 every page in order, extracted text, rendered-page hashes, neutral visual
-observations, uncertainty, and exact page citations. There is no targeted
+observations that retain visible callouts, labels, and spatial relationships,
+uncertainty, and exact page citations. There is no targeted
 inspection question, preferred page, product-specific answer, RAG ranking, or
 `DocumentEvidenceRecord` in the new path.
 
@@ -113,10 +115,12 @@ centroid. `Gear_Medium.STL` is therefore typed evidence; it is not a TBox class
 and does not add a product-specific RDF predicate. PA may cite it when grounding
 an ABox feature.
 
-A live RGB-D retrieval creates hash-pinned observation, point-cloud, and
-uniform neutral segmentation records. PA-facing projections omit semantic
-camera names and source/target shortcuts. When PA asks to check one provisional
-resource, each selected candidate plus approved calibration produces a neutral
+A live RGB-D retrieval creates hash-pinned observation, point-cloud, uniform
+neutral segmentation, stable crop, and `ObservationCandidateReview` records.
+The observation VLM describes every opaque candidate and its uncertainty but
+cannot assign a state, CAD identity, process, or resource. PA-facing projections
+omit semantic camera names and source/target shortcuts. Each candidate that PA
+binds through `state_values` plus approved calibration produces a neutral
 `RobotFrameLocationRecord` version 2. Coarse reach evaluates both translated 3D
 locations. Full pose estimation remains available only for a consumer that
 explicitly requires orientation.
@@ -132,11 +136,20 @@ endpoint verdict. Neither verifier chooses or substitutes a resource.
 PA authors exactly one `target_feature` in this increment. Its
 `required_process` selects one configured process and cites direct evidence. Its
 `current_state.statement` and `desired_state.statement` state the observed and
-requested feature conditions and cite direct evidence. Optional `state_values`
+requested feature conditions and cite direct evidence. `state_values`
 carry PA-authored semantic names,
 accepted typed-record refs, JSON Pointer field paths, and direct citations.
-There is no host enum of value names; zero, one, or multiple values are valid,
-and one record may supply multiple values through different paths.
+There is no host enum of value names. The general proposal schema permits zero,
+one, or multiple values, while fresh production completion requires exactly one
+`RGBDSegmentationRecord` candidate value for each state. Reusing one candidate
+is rejected only when the two PA-authored value names are incompatible.
+
+`config/model_runtime.json` schema version 3 configures `product_agent_llm`,
+`document_vlm`, and `observation_vlm` as `gpt-5.6` with `medium` reasoning. Both
+vision calls use high image detail, a 4096 output-token limit, a 90-second
+timeout, and `store: false`. Document cache keys include the complete model
+configuration and overview schema, so this change creates a new cache entry
+without rewriting an older one.
 
 The host generates `feature_0001`, `currentstate_0001`, and
 `desiredstate_0001`. It compiles the feature and state types,

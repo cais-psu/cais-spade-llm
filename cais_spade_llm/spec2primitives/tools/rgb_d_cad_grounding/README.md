@@ -22,13 +22,19 @@ in its independent optical frame.
 
 `segmenter.py` accepts only an intact Phase 4.2A observation record. It verifies
 every referenced point-cloud hash and array contract, then uses deterministic
-fixed internal parameters. `cam_mk3`, `cam_mk4_1`, and `cam_mk4_2` remove a
-reliable dominant support plane before depth-connected loose-region extraction.
-`cam_assembly` retains its dominant surface and segments the assembly-plate area
-in its own optical frame. Each successful call atomically persists one compact
+fixed internal parameters. Every view applies the same neutral one-sided
+dominant-plane filter and retains only camera-side foreground points before
+depth-connected region extraction. If no reliable plane is available, that
+view produces no candidates. Each successful call atomically persists one compact
 `RGBDSegmentationRecord` and four `uint16` label masks. Zero candidates are
 recorded as unresolved; identity, `CAD_correspondence`, pose, and cross-camera
 fusion remain `not_evaluated`.
+
+`observation_review.py` creates one stable hash-pinned crop for every valid
+candidate and submits the source views and crops to the configured observation
+VLM. The strict `ObservationCandidateReview` version 1 output covers the exact
+opaque handles once and stores only visible descriptions and uncertainty. It
+cannot add `current_state`, `desired_state`, CAD, process, or resource decisions.
 
 `size_correspondence.py` accepts one validated segmentation record and one
 already-preprocessed exact approved CAD record. It revalidates their paths,

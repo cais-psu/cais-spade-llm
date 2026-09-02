@@ -55,7 +55,7 @@ class ControlledVisionRuntime:
         self,
         output: dict[str, object] | None = None,
         *,
-        model: str = "gpt-5.4-mini-2026-03-17",
+        model: str = "gpt-5.6-sol",
     ) -> None:
         self.output = output or _valid_output()
         self.model = model
@@ -82,7 +82,7 @@ def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
             self.calls.append(kwargs)
             return SimpleNamespace(
                 id="resp_openai_controlled",
-                model="gpt-5.4-mini-2026-03-17",
+                model="gpt-5.6-sol",
                 output_text=json.dumps(_valid_output()),
             )
 
@@ -115,7 +115,7 @@ def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
     call = responses.calls[0]
     assert call["store"] is False
     assert call["max_output_tokens"] == 4096
-    assert call["reasoning"] == {"effort": "low"}
+    assert call["reasoning"] == {"effort": "medium"}
     assert "tools" not in call
     serialized = json.dumps(call)
     for forbidden in (
@@ -291,7 +291,7 @@ def test_one_document_interpretation_persists_every_ordered_page(
     )
     snapshot = _read_json(result.overview_record_path)
     overview = snapshot["overview"]
-    assert snapshot["schema_version"] == 2
+    assert snapshot["schema_version"] == 3
     assert [page["page"] for page in overview["pages"]] == list(range(1, 7))
     assert [page["extracted_text"] for page in overview["pages"]] == [
         page.text for page in vision.requests[0].pages

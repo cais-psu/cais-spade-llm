@@ -44,17 +44,20 @@ performs document extraction, STL measurement, live capture, segmentation,
 correspondence, calibration, frame conversion, and coarse resource checks.
 Those operations are descriptor-driven services, not additional PA choices.
 
-Document retrieval yields the complete ordered `DocumentOverviewRecord` v2.
+Document retrieval yields the complete ordered `DocumentOverviewRecord` v3.
 CAD retrieval yields `CADMeshRecord`. Observation retrieval yields typed RGB-D,
-point-cloud, and segmentation records. Compatible CAD and observation evidence
-automatically activates correspondence. Accepted correspondence and calibration
-can support neutral location or pose derivation when a verifier requests it.
-During allocation, PA assigns approved candidates to both states and invokes
-`check_reachability`, which derives and evaluates both robot-frame locations.
+point-cloud, segmentation, stable crop, and `ObservationCandidateReview`
+records. The review describes visible candidates without assigning state, CAD,
+process, or resource meaning. The PA binds exactly one supplied candidate to
+each state in `state_values`; deterministic CAD-size validation checks the
+unchanged current candidate. During allocation, `check_reachability` accepts
+only the PA-selected `resource_symbol` and derives both locations from those
+already accepted state bindings.
 
 Before retrieval, `EvidencePresentationRecord` maps canonical sources to
-randomized opaque handles. CAD filenames, paths, URLs, canonical refs, and
-semantic camera roles are absent from PA projections. After semantic grounding,
+randomized opaque handles. Approved CAD names and exact `context_ref` values are
+available to PA, while repository paths, Gazebo identities, predetermined
+matches, URLs, and semantic camera roles are absent. After semantic grounding,
 `AllocationPresentationRecord` pins one randomized capable-resource order and
 one shared neutral candidate pool. The same stored order drives the prompt,
 tool enums, and response schema; it is audit evidence, not selection priority.
@@ -107,14 +110,14 @@ as accepted missing information and no private reasoning is stored.
 
 The accepted v8 proposal creates explicit `currentstate_0001` and
 `desiredstate_0001` individuals attached to `feature_0001`. The unresolved
-`processExecution` then activates a separate PA allocation call. PA chooses one
-opaque neutral evidence handle for each state and one capable resource, invokes
-`check_reachability`, and cites the resulting two-state evidence. The exact
+`processExecution` then activates a separate PA allocation call. The call reuses
+the two accepted state bindings; PA chooses one capable resource, invokes
+`check_reachability(resource_symbol)`, and cites the resulting two-state evidence. The exact
 provisional RobotAgent performs plan-only endpoint IK/collision/path validation.
 Only its `accepted` verdict allows the runtime to commit the assignment;
 rejection returns evidence for another PA choice without host substitution.
-The PA may revise either evidence handle, the resource, or all three. Semantic
-feature/state assertions stay fixed during these physical-evidence revisions.
+The PA may revise the resource, but allocation cannot revise either state image.
+Semantic feature/state assertions stay fixed during physical-evidence revision.
 
 `RobotFrameLocationRecord` version 2 is semantically neutral. Its current or
 desired meaning comes from the PA state assignment. The architecture does not

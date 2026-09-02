@@ -20,7 +20,7 @@ Phase 4.0 is wired into Phase 3 through package-local Python contracts and adds
 no ontology file to this directory. Retrieval, interpretation, ontology delta, and
 Phase 4.3-style decision records share an aligned operation number.
 
-Document handling uses a strict `DocumentOverviewRecord` version 2 contract,
+Document handling uses a strict `DocumentOverviewRecord` version 3 contract,
 owned by `tools/document_evidence/interpreter.py`. One retrieval contains every
 ordered page's extracted text, rendered-page hash, neutral visual observations,
 uncertainty, and exact page citations. New runs do not produce targeted
@@ -81,7 +81,8 @@ calibrated colored point cloud per camera optical frame. Their generic deltas
 contain no RDF assertions and leave correspondence and pose unresolved.
 
 Phase 4.2B1 records are owned by
-`tools/rgb_d_cad_grounding/segmenter.py` and `diagnostic.py`.
+`tools/rgb_d_cad_grounding/segmenter.py`, `observation_review.py`, and
+`diagnostic.py`.
 `RGBDSegmentationRecord` references one camera-local `uint16` label mask per
 camera and stores neutral candidate handles, candidate count, bounds, centroid,
 hashes, and fixed parameters. `RGBDSegmentationStatus` is the compact
@@ -89,6 +90,11 @@ status-only UI contract with `idle`, `running`, `ready`, or `failed`, a neutral
 candidate count, and unevaluated identity, CAD correspondence, and pose. These
 records contain no ontology assertions and express neither matching, context
 completion, nor assembly readiness.
+
+`ObservationCandidateReview` version 1 pins the segmentation record, source RGB
+hashes, stable candidate crops, exact opaque-handle coverage, visible
+descriptions, uncertainty, provider configuration, and response metadata. Its
+strict output has no state, CAD, process, or resource assignment fields.
 
 Phase 4.2B2A adds `CADSizeCorrespondenceRecord`, owned by
 `tools/rgb_d_cad_grounding/size_correspondence.py`. It binds one exact validated
@@ -136,7 +142,8 @@ Implemented pre-RA grounding contracts in
 - `EvidencePresentationRecord` version 1, pinning host-only opaque source
   handles to canonical source identities and hashes;
 - `AllocationPresentationRecord` version 1, pinning randomized resource and
-  shared neutral-candidate presentation orders;
+  shared neutral-candidate presentation orders while allocation reuses the two
+  candidate bindings already accepted in `state_values`;
 - `ReachabilityCheckRecord` version 2, recording the selected process,
   PA-authored state-evidence mapping, explicit provisional resource, and
   separately derived evidence for both state locations;
