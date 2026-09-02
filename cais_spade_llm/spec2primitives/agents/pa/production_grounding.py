@@ -1184,6 +1184,7 @@ class ProductionProductContextGroundingRuntime:
                     ),
                     resource_catalog=resource_catalog,
                     allocation_presentation=allocation_presentation,
+                    investigation=investigation,
                     validation_feedback=validation_feedback,
                 ),
                 response_format=_pa_allocation_response_format(
@@ -1576,13 +1577,16 @@ def _pa_allocation_prompt(
     target_feature: Mapping[str, object],
     resource_catalog: Mapping[str, Mapping[str, str]],
     allocation_presentation: AllocationPresentationRecord,
+    investigation: _NativeEvidenceInvestigation,
     validation_feedback: Mapping[str, object] | None,
 ) -> str:
     prompt_input: dict[str, object] = {
         "exact_requirement": requirement,
         "grounded_target_feature": dict(target_feature),
+        "approved_retrieved_evidence": _current_evidence_catalog((), investigation),
         "neutral_state_evidence_pool": [
-            entry.prompt_projection() for entry in allocation_presentation.evidence_entries
+            _allocation_evidence_prompt_projection(entry, investigation)
+            for entry in allocation_presentation.evidence_entries
         ],
         "capable_resource_catalog": [
             {"resource_symbol": symbol, **dict(resource_catalog[symbol])}
@@ -1609,6 +1613,33 @@ def _pa_allocation_prompt(
         "not claim that manufacturing or motion has executed.\n\n"
         f"Allocation input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
+
+
+def _allocation_evidence_prompt_projection(
+    entry: AllocationEvidenceEntry,
+    investigation: _NativeEvidenceInvestigation,
+) -> dict[str, object]:
+    """Link one neutral segmentation choice to its prior blinded evidence."""
+    projection = entry.prompt_projection()
+    if entry.record_type == "RGBDSegmentationRecord":
+        if entry.observation_handle is None or entry.candidate_handle is None:
+            raise ProductionGroundingError(
+                "RGBDSegmentationRecord allocation evidence has no candidate identity."
+            )
+        projection.update(
+            {
+                "observation_handle": entry.observation_handle,
+                "candidate_handle": entry.candidate_handle,
+                # Reuse the earlier retrieval projection so PA can join evidence
+                # without receiving the canonical interaction path.
+                "candidate_value_ref": {
+                    "record_ref": investigation.project_canonical_reference(entry.record_ref),
+                    "field_path": entry.field_path,
+                },
+            }
+        )
+    _assert_blinded_pa_projection(projection, investigation.presentation)
+    return projection
 
 
 def _check_reachability_tool(

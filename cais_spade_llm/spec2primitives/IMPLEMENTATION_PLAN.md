@@ -99,9 +99,11 @@ evidence services with a bounded timeout.
 
 The loop is bounded by the existing emergency PA-turn ceiling. A candidate
 proposal and its provisional graph remain transient between rounds; retrieved
-evidence, citations, tool failures, and audit records remain available. The gap
-shown to PA is computed from consumer and provider descriptors, not from a
-fixed CAD/observation condition.
+evidence, citations, tool failures, and audit records remain available. The
+active production path currently supplies a fixed `RGBDSegmentationRecord`
+required-output projection. The existing descriptor and record-gap helpers are
+not connected to that path; activating them remains deferred unless the claim
+expands to dynamic perception/context chain selection.
 
 ## Evidence records
 

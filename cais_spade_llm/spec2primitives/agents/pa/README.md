@@ -59,13 +59,13 @@ semantic camera roles are absent from PA projections. After semantic grounding,
 one shared neutral candidate pool. The same stored order drives the prompt,
 tool enums, and response schema; it is audit evidence, not selection priority.
 
-After a proposal, the runtime builds a provisional graph without merging it.
-That graph identifies the active consumer and its declared record requirement.
-Provider descriptors expand the requirement into a prerequisite closure, run
-any derivable providers, and map missing source-produced records back to the
-eligible evidence catalog. PA receives this prompt-only gap and may retrieve
-again. The same mechanism can use a future compatible provider without adding
-a product, filename, or modality branch.
+After a proposal, the runtime builds a provisional graph without merging it and
+returns deterministic validation feedback without repairing the PA result. The
+active production path supplies a fixed `RGBDSegmentationRecord`
+required-output projection. PA may retrieve another approved source in the same
+logical investigation, but provider-descriptor expansion through
+`_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
+connected to this path and remains deferred.
 
 ## Ontology grounding
 

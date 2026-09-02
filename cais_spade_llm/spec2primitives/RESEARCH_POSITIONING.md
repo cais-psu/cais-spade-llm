@@ -21,11 +21,11 @@ The dynamic PA-to-RA composition workflow in this document is the proposed
 ICRA architecture. The PA context adapter through Phase 3.5 exists, and **Phase
 4 is implemented through Phase 4.4 under the current framework**. Phase 4.4
 adds a native controlled `retrieve` tool, transient ontology-proposal
-validation, descriptor-derived typed evidence gating, a configuration-derived
-Workcell with explicit per-resource process capabilities, PA-authored physical
-state-evidence and resource choices, two-state coarse reach, and exact-resource
-plan-only endpoint validation before a system-authored `processExecution`
-assignment. **Phase 5.1 now implements only the contract-first selected-RA
+validation, fixed `RGBDSegmentationRecord` typed evidence gating, a
+configuration-derived Workcell with explicit per-resource process capabilities,
+PA-authored physical state-evidence and resource choices, two-state coarse
+reach, and exact-resource plan-only endpoint validation before a system-authored
+`processExecution` assignment. **Phase 5.1 now implements only the contract-first selected-RA
 assignment and state/catalog snapshot boundary, and Phase 5.2A implements
 RA-LLM-authored structural `PrimitiveProgramDraft`.** The composition input
 reconstructs the accepted PA `target_feature` and resolves its completion-pinned
@@ -137,6 +137,19 @@ PA dynamically chooses approved evidence and assigns candidates to
 `current_state` and `desired_state`; calibration and numeric robot-frame
 locations are derived only when reachability or another verifier needs them.
 No fixed evidence or resource order is prescribed.
+
+This PA claim is bounded. The active Phase 4 contract requires an
+`RGBDSegmentationRecord`, and approved observation retrieval automatically runs
+the deterministic preprocessing and segmentation implementation. PA does not
+choose that algorithm, its parameters, or the required record type. It does
+choose the approved evidence handle, the neutral candidate and state
+assignments, and the provisional resource; deterministic reachability and
+RobotAgent checks can only accept or reject those unchanged choices. The paper
+therefore describes evidence-conditioned bounded PA autonomy within the fixed
+`assembly` process, not unrestricted freewill or dynamic perception-chain
+selection. Replacing the fixed record requirement with the existing
+descriptor-derived record plan is deferred and is required only for the latter
+claim.
 
 Spec2Primitives studies a composite-function coverage gap. It begins after an RA
 has been selected and no valid selection, ordering, and parameterization of its

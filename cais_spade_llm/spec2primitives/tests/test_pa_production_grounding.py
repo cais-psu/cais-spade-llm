@@ -29,6 +29,7 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     review_target_feature_semantics,
 )
 from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
+    AllocationEvidenceEntry,
     EvidencePresentationRecord,
     load_or_create_evidence_presentation,
 )
@@ -45,6 +46,7 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     _EvidenceHandle,
     _NativeEvidenceInvestigation,
     _neutral_candidate_views,
+    _pa_allocation_prompt,
     _producer_descriptors,
     _proposal_cad_bindings,
     _raw_evidence_types_for_gap,
@@ -142,6 +144,120 @@ def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
         "source",
     ):
         assert forbidden not in serialized
+
+
+def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candidate() -> None:
+    canonical_record_ref = (
+        "products/grounding/rgb_d_cad_grounding/segmentation_0001/"
+        "rgbd_segmentation_record.json"
+    )
+    opaque_record_ref = "typed_record_0003"
+    field_path = "/cameras/0/candidates/1"
+    observation_result = {
+        "evidence_type": "observation",
+        "evidence_handle": "observation_candidate_0001",
+        "evidence_refs": ["citation_0003", opaque_record_ref],
+        "record_refs": ["typed_record_0002", opaque_record_ref],
+        "segmentation": {
+            "candidate_state": "available",
+            "candidate_count": 2,
+            "views": [
+                {
+                    "observation_handle": "view_0001",
+                    "candidates": [
+                        {
+                            "candidate_handle": "candidate_0001_0002",
+                            "candidate_value_ref": {
+                                "record_ref": opaque_record_ref,
+                                "field_path": field_path,
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    presentation = SimpleNamespace(entries=())
+    investigation = SimpleNamespace(
+        presentation=presentation,
+        prior_evidence=[
+            {
+                "retrieval_state": "already_retrieved",
+                "evidence_type": "document",
+                "evidence_handle": "document_candidate_0001",
+                "record_refs": ["typed_record_0001"],
+                "summary": "Approved assembly instructions.",
+            }
+        ],
+        retrieved_results={
+            "cad_candidate_0001": {
+                "evidence_type": "CAD",
+                "evidence_handle": "cad_candidate_0001",
+                "record_refs": ["typed_record_0004"],
+                "dimensions": {"size": [0.04, 0.04, 0.01]},
+            },
+            "observation_candidate_0001": observation_result,
+        },
+        project_canonical_reference=lambda record_ref: (
+            opaque_record_ref
+            if record_ref == canonical_record_ref
+            else (_ for _ in ()).throw(AssertionError(record_ref))
+        ),
+    )
+    entry = AllocationEvidenceEntry(
+        pa_handle="state_evidence_0001",
+        canonical_key=f"{canonical_record_ref}#{field_path}",
+        record_type="RGBDSegmentationRecord",
+        record_ref=canonical_record_ref,
+        record_sha256="a" * 64,
+        field_path=field_path,
+        observation_handle="view_0001",
+        candidate_handle="candidate_0001_0002",
+        source_frame="camera_frame",
+        neutral_projection={
+            "visual_region_available": True,
+            "point_count": 400,
+        },
+    )
+    allocation_presentation = SimpleNamespace(
+        evidence_entries=(entry,),
+        resource_order=("xarm6", "ur5e"),
+    )
+
+    prompt = _pa_allocation_prompt(
+        requirement="assemble medium gear",
+        target_feature={"feature_iri": "urn:feature:1"},
+        resource_catalog={
+            "xarm6": {
+                "resource_iri": "urn:resource:xarm6",
+                "resource_jid": "xarm6@localhost",
+            },
+            "ur5e": {
+                "resource_iri": "urn:resource:ur5e",
+                "resource_jid": "ur5e@localhost",
+            },
+        },
+        allocation_presentation=allocation_presentation,
+        investigation=investigation,
+        validation_feedback=None,
+    )
+
+    prompt_input = json.loads(prompt.split("Allocation input:\n", maxsplit=1)[1])
+    assert {
+        item["evidence_type"] for item in prompt_input["approved_retrieved_evidence"]
+    } == {"document", "CAD", "observation"}
+    state_evidence = prompt_input["neutral_state_evidence_pool"][0]
+    assert state_evidence["observation_handle"] == "view_0001"
+    assert state_evidence["candidate_handle"] == "candidate_0001_0002"
+    assert state_evidence["candidate_value_ref"] == {
+        "record_ref": opaque_record_ref,
+        "field_path": field_path,
+    }
+    assert state_evidence["candidate_value_ref"] == observation_result["segmentation"][
+        "views"
+    ][0]["candidates"][0]["candidate_value_ref"]
+    assert canonical_record_ref not in prompt
+    assert "Gazebo_ground_truth" not in prompt
 
 
 class _ToolUsingProductAgent:

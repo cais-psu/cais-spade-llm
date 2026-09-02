@@ -65,11 +65,13 @@ derives and checks the two PA-selected locations and returns evidence without
 choosing a resource.
 
 The proposal is not accepted merely because its RDF vocabulary is valid. The
-system first evaluates it against a provisional graph. If that graph activates
-a consumer whose declared typed input is unavailable, PA receives the derived
-record gap and the still-eligible evidence handles. It may call `retrieve`
-again in the same logical investigation. There is no fixed modality order or
-product-specific missing-evidence rule.
+system first evaluates it against a provisional graph and returns deterministic
+validation feedback without repairing the proposal. The current production
+path supplies a fixed `RGBDSegmentationRecord` required-output projection, while
+PA may call `retrieve` again in the same logical investigation and may choose
+approved sources in any order. Descriptor-derived record planning through
+`_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
+active in this path and remains deferred.
 
 The required-output projection is supplied by the system, not chosen by the
 user. PA may ask the user about genuinely ambiguous requirement meaning, but it

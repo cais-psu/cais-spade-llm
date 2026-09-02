@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from cais_spade_llm.spec2primitives import spec2primitives_ui
 from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
 from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
@@ -130,7 +132,7 @@ def test_shared_product_agent_bridge_wraps_async_retrieve_callback(
 
     class _Future:
         def result(self, *, timeout: float) -> Mapping[str, object]:
-            assert timeout == product_agent_runtime._TOOL_TIMEOUT_SEC
+            assert timeout == 120.0
             return {
                 "tool_name": "retrieve",
                 "evidence_id": "evidence_0001",
@@ -189,6 +191,76 @@ def test_shared_product_agent_bridge_wraps_async_retrieve_callback(
         "evidence_id": "evidence_0001",
     }
     assert len(scheduled) == 1
+
+
+def test_shared_product_agent_bridge_cancels_timed_out_retrieve_callback(
+    monkeypatch: Any,
+) -> None:
+    cancelled: list[bool] = []
+
+    class _Future:
+        def result(self, *, timeout: float) -> Mapping[str, object]:
+            assert timeout == 120.0
+            raise product_agent_runtime.FutureTimeoutError
+
+        def cancel(self) -> bool:
+            cancelled.append(True)
+            return True
+
+    def _schedule(coroutine: object, event_loop: object) -> _Future:
+        del event_loop
+        close = getattr(coroutine, "close", None)
+        if callable(close):
+            close()
+        return _Future()
+
+    monkeypatch.setattr(
+        product_agent_runtime.asyncio,
+        "run_coroutine_threadsafe",
+        _schedule,
+    )
+
+    class _SharedAgent:
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None,
+            tool_executor: Callable[[str, dict[str, Any]], Mapping[str, object]],
+            max_tool_rounds: int,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, max_tool_rounds
+            return dict(
+                tool_executor(
+                    "retrieve",
+                    {"evidence_id": "evidence_0001"},
+                )
+            )
+
+    async def _retrieve(
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return {"tool_name": tool_name, **arguments}
+
+    runtime = object.__new__(product_agent_runtime._SharedProductAgentContextRuntime)
+    runtime._product_agent = _SharedAgent()
+    with pytest.raises(RuntimeError) as error:
+        asyncio.run(
+            runtime.ask_llm_structured(
+                "ground context",
+                response_format={"name": "spec2primitives_grounding_result"},
+                tools=[{"type": "function"}],
+                tool_executor=_retrieve,
+                max_tool_rounds=4,
+            )
+        )
+
+    assert str(error.value) == (
+        "Controlled evidence retrieval and processing timed out after 120 seconds."
+    )
+    assert cancelled == [True]
 
 
 def test_shared_product_agent_bridge_applies_configured_reasoning_effort(

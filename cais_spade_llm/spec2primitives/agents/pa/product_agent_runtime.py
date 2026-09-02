@@ -19,7 +19,9 @@ _PRODUCT_AGENT_INSTRUCTIONS = (
     "and return the requested structured grounding result. Do not contact another "
     "agent or execute robot behavior."
 )
-_TOOL_TIMEOUT_SEC = 30.0
+# Live observation tools include capture, preprocessing, and four-camera
+# segmentation, so this bridge deadline covers the complete controlled operation.
+_TOOL_TIMEOUT_SEC = 120.0
 
 
 class _SharedProductAgentContextRuntime:
@@ -69,7 +71,8 @@ class _SharedProductAgentContextRuntime:
                 except FutureTimeoutError as exc:
                     future.cancel()
                     raise RuntimeError(
-                        "Controlled evidence retrieval timed out."
+                        "Controlled evidence retrieval and processing timed out "
+                        "after 120 seconds."
                     ) from exc
 
         return await self._product_agent.ask_llm_structured(

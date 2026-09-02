@@ -326,6 +326,19 @@ desired states, and numeric robot-frame locations are derived only when a
 verifier needs them. No fixed document, CAD, RGB-D, or resource order is
 prescribed.
 
+The current successful Phase 4 path explicitly requests an
+`RGBDSegmentationRecord`. Retrieving an approved live observation then invokes
+deterministic preprocessing and segmentation; PA does not select the
+segmentation algorithm or author that record. PA authority begins with its
+choice of approved evidence handle and continues through its selection of the
+neutral segmentation candidate, its `current_state` and `desired_state`
+assignments, and its provisional resource. This is bounded PA autonomy inside a
+fixed perception contract, not dynamic perception-chain selection or
+unrestricted freewill. Descriptor-derived selection through
+`_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` remains
+deferred unless the research claim is expanded to dynamic perception/context
+chain selection.
+
 RGB-D capture, calibrated deprojection, support-plane removal, connected-region
 segmentation, mask persistence, one-CAD principal-size comparison,
 camera-frame candidate-center measurement, generalized camera-frame
@@ -384,6 +397,31 @@ experiments may vary catalog size and symbols and must report those differences.
 Monolithic, no-retrieval, and stale-context conditions are supporting PA-pipeline
 ablations. Retrieval, schema validation, simulation, observed outcome, and
 physical execution remain distinct claims.
+
+### Phase 4 PA bounded-autonomy experiments
+
+The Phase 4 study begins with five fresh interactions for each condition below.
+Each interaction uses `product requirement: assemble Medium Gear`, a new
+interaction root, the same approved source set and workcell snapshots, and no
+records copied from an earlier run. Five repetitions provide an initial
+artifact-complete study set; results are reported as counts and traces, not as a
+statistical generality claim.
+
+| ID | Condition | Required observation |
+| --- | --- | --- |
+| 1 | Baseline with independently pinned presentation orders | PA authors the evidence retrievals, target feature, state-evidence assignments, and provisional resource. |
+| 2 | Reverse the baseline evidence, neutral segmentation-candidate, and capable-resource presentation orders | A first-item policy must not explain all candidate or resource selections; every selection must still cite PA-visible evidence. |
+| 3 | Return a rejected plan-only validation whenever PA provisionally chooses `xarm6`; accept no host-selected replacement | Rejection returns to PA, which authors a new choice or reports `insufficient_evidence`. A run in which PA initially chooses another resource is recorded as a non-triggered run, not rewritten. |
+| 4 | Present two segmentation candidates that remain indistinguishable under the allowed document, CAD, RGB, depth, and calibration evidence | PA requests admissible additional evidence or clarification, or reports `insufficient_evidence`; it must not silently adopt the first candidate. |
+
+The study audits `EvidencePresentationRecord`, `ProductAgentToolCall`,
+`OntologyGroundingProposal`, `TargetFeatureSemanticReview`,
+`AllocationPresentationRecord`, `ProductAgentAllocationToolCall`,
+`ReachabilityCheckRecord`, `ResourceSelectionRecord`, and
+`PAContextGroundingCompletion` in creation order. Ground-truth evaluation may
+start only after the PA prediction is finalized. The experiment does not claim
+that RGB-D segmentation, reachability, RobotAgent validation, or the Phase 4
+stage order is PA-authored.
 
 ## Starting case
 
