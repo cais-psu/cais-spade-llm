@@ -42,6 +42,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.gazebo_observation
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.observation_review import (
     ObservationCandidateImage,
+    _validated_output,
 )
 
 
@@ -234,13 +235,45 @@ def test_openai_observation_adapter_uses_schema_3_runtime_configuration() -> Non
     assert call["reasoning"] == {"effort": "medium"}
     assert call["max_output_tokens"] == 4096
     assert call["store"] is False
-    image_inputs = [item for item in call["input"][0]["content"] if item["type"] == "input_image"]
+    content = call["input"][0]["content"]
+    image_inputs = [item for item in content if item["type"] == "input_image"]
     assert len(image_inputs) == 2
     assert all(item["detail"] == "high" for item in image_inputs)
+    request_text = str(content[0]["text"])
+    assert "cylindrical forms" in request_text
+    assert "without naming a candidate as a shaft, pin" in request_text
+    assert "Do not infer a part identity such as shaft or pin" in call["instructions"]
     schema = call["text"]["format"]["schema"]
     serialized_schema = json.dumps(schema)
     for forbidden in ("current_state", "desired_state", "CAD", "process", "resource"):
         assert forbidden not in serialized_schema
+
+
+@pytest.mark.parametrize("identity_term", ["shaft", "pin"])
+def test_observation_review_rejects_inferred_part_identity(identity_term: str) -> None:
+    expected = (
+        ObservationCandidateImage(
+            observation_handle="view_0001",
+            candidate_handle="candidate_0001_0001",
+            source_data_url="data:image/png;base64,source",
+            crop_data_url="data:image/png;base64,crop",
+        ),
+    )
+
+    with pytest.raises(ObservationCandidateReviewError, match="morphology"):
+        _validated_output(
+            {
+                "candidates": [
+                    {
+                        "observation_handle": "view_0001",
+                        "candidate_handle": "candidate_0001_0001",
+                        "description": f"visible cylindrical {identity_term}",
+                        "uncertainty": "identity not assigned",
+                    }
+                ]
+            },
+            expected,
+        )
 
 
 def test_segmentation_is_deterministic_and_does_not_overwrite(tmp_path: Path) -> None:

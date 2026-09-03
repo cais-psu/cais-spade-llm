@@ -795,40 +795,22 @@ def _build_assignment_envelope(
                 "current_state_evidence": selection["current_state_evidence"],
                 "desired_state_evidence": selection["desired_state_evidence"],
                 "registry_snapshot_ref": completion_record["registry_snapshot_ref"],
-                "registry_snapshot_sha256": completion_record[
-                    "registry_snapshot_sha256"
-                ],
-                "registry_snapshot_fingerprint": completion_record[
-                    "registry_snapshot_fingerprint"
-                ],
+                "registry_snapshot_sha256": completion_record["registry_snapshot_sha256"],
+                "registry_snapshot_fingerprint": completion_record["registry_snapshot_fingerprint"],
                 "workcell_snapshot_ref": completion_record["workcell_snapshot_ref"],
-                "workcell_snapshot_sha256": completion_record[
-                    "workcell_snapshot_sha256"
-                ],
-                "workcell_snapshot_fingerprint": completion_record[
-                    "workcell_snapshot_fingerprint"
-                ],
+                "workcell_snapshot_sha256": completion_record["workcell_snapshot_sha256"],
+                "workcell_snapshot_fingerprint": completion_record["workcell_snapshot_fingerprint"],
                 "evidence_presentation_ref": selection["evidence_presentation_ref"],
-                "evidence_presentation_sha256": selection[
-                    "evidence_presentation_sha256"
-                ],
-                "evidence_presentation_fingerprint": selection[
-                    "evidence_presentation_fingerprint"
-                ],
-                "allocation_presentation_ref": selection[
-                    "allocation_presentation_ref"
-                ],
-                "allocation_presentation_sha256": selection[
-                    "allocation_presentation_sha256"
-                ],
+                "evidence_presentation_sha256": selection["evidence_presentation_sha256"],
+                "evidence_presentation_fingerprint": selection["evidence_presentation_fingerprint"],
+                "allocation_presentation_ref": selection["allocation_presentation_ref"],
+                "allocation_presentation_sha256": selection["allocation_presentation_sha256"],
                 "allocation_presentation_fingerprint": selection[
                     "allocation_presentation_fingerprint"
                 ],
                 "validation_scope": completion_record["validation_scope"],
                 "checked_constraints": completion_record["checked_constraints"],
-                "unvalidated_constraints": completion_record[
-                    "unvalidated_constraints"
-                ],
+                "unvalidated_constraints": completion_record["unvalidated_constraints"],
             }
         )
     payload["fingerprint"] = _fingerprint(payload)
@@ -1120,10 +1102,8 @@ def _load_validated_selection_v4(  # noqa: C901
     if (
         selection_fingerprint != completion.get("resource_selection_fingerprint")
         or selection.get("tbox_fingerprint") != completion.get("tbox_fingerprint")
-        or selection.get("registry_fingerprint")
-        != completion.get("registry_snapshot_fingerprint")
-        or selection.get("workcell_fingerprint")
-        != completion.get("workcell_snapshot_fingerprint")
+        or selection.get("registry_fingerprint") != completion.get("registry_snapshot_fingerprint")
+        or selection.get("workcell_fingerprint") != completion.get("workcell_snapshot_fingerprint")
     ):
         raise RAContextHandoffError("ResourceSelectionRecord v4 authority is inconsistent.")
 
@@ -1430,9 +1410,10 @@ def _assignment_from_mapping(
     else:
         expected = base_expected
     _require_exact_keys(value, expected, "SelectedRAAssignmentEnvelope")
-    if schema_version not in {1, 2, 3} or value.get(
-        "record_type"
-    ) != "SelectedRAAssignmentEnvelope":
+    if (
+        schema_version not in {1, 2, 3}
+        or value.get("record_type") != "SelectedRAAssignmentEnvelope"
+    ):
         raise RAContextHandoffError("SelectedRAAssignmentEnvelope identity is invalid.")
     fingerprint = _record_fingerprint(value, "SelectedRAAssignmentEnvelope")
     text_fields = (
@@ -1470,10 +1451,15 @@ def _assignment_from_mapping(
                 "allocation_label",
             )
         }
+        validation_scope = value.get("validation_scope")
         expected_label = (
-            "validated endpoint-motion allocation"
-            if schema_version == 3
-            else "validated allocation"
+            "validated Cartesian pick-place allocation"
+            if schema_version == 3 and validation_scope == "cartesian_pick_place"
+            else (
+                "validated endpoint-motion allocation"
+                if schema_version == 3
+                else "validated allocation"
+            )
         )
         if (
             version_two_texts["allocation_label"] != expected_label
@@ -1510,10 +1496,9 @@ def _assignment_from_mapping(
                 "validation_scope",
             )
         }
-        if version_three_texts["validation_scope"] != "endpoint_motion":
-            raise RAContextHandoffError(
-                "SelectedRAAssignmentEnvelope validation scope is invalid."
-            )
+        validation_scope = version_three_texts["validation_scope"]
+        if validation_scope not in {"endpoint_motion", "cartesian_pick_place"}:
+            raise RAContextHandoffError("SelectedRAAssignmentEnvelope validation scope is invalid.")
         version_three_shas = {
             field: _sha256_text(value.get(field), field)
             for field in (
@@ -1541,20 +1526,41 @@ def _assignment_from_mapping(
         unvalidated_constraints = tuple(
             _text_list(value.get("unvalidated_constraints"), "unvalidated_constraints")
         )
-        if checked_constraints != (
-            "positional_ik",
-            "collision_aware_endpoints",
-            "path_between_endpoints",
-        ) or unvalidated_constraints != (
-            "grasping",
-            "end_effector_orientation",
-            "attached_object_geometry",
-            f"{version_three_texts['process_symbol']}_tolerance",
-            "force_contact",
-            "insertion_constraints",
+        if validation_scope == "cartesian_pick_place":
+            expected_checked = (
+                "live_tf",
+                "collision_aware_cartesian_pick_path",
+                "collision_aware_cartesian_transfer_place_path",
+                "complete_path_fraction",
+            )
+            expected_unvalidated = (
+                "grasp_contact",
+                "gripper_actuation",
+                "attached_part_collision_geometry",
+                f"{version_three_texts['process_symbol']}_tolerance",
+                "force_control",
+                "final_constrained_insertion_stroke",
+            )
+        else:
+            expected_checked = (
+                "positional_ik",
+                "collision_aware_endpoints",
+                "path_between_endpoints",
+            )
+            expected_unvalidated = (
+                "grasping",
+                "end_effector_orientation",
+                "attached_object_geometry",
+                f"{version_three_texts['process_symbol']}_tolerance",
+                "force_contact",
+                "insertion_constraints",
+            )
+        if (
+            checked_constraints != expected_checked
+            or unvalidated_constraints != expected_unvalidated
         ):
             raise RAContextHandoffError(
-                "SelectedRAAssignmentEnvelope endpoint constraints are invalid."
+                "SelectedRAAssignmentEnvelope plan-only constraints are invalid."
             )
     return SelectedRAAssignmentEnvelope(
         product_requirement=texts["product_requirement"],
@@ -1592,29 +1598,17 @@ def _assignment_from_mapping(
         desired_state_evidence=desired_state_evidence,
         registry_snapshot_ref=version_three_texts.get("registry_snapshot_ref"),
         registry_snapshot_sha256=version_three_shas.get("registry_snapshot_sha256"),
-        registry_snapshot_fingerprint=version_three_shas.get(
-            "registry_snapshot_fingerprint"
-        ),
+        registry_snapshot_fingerprint=version_three_shas.get("registry_snapshot_fingerprint"),
         workcell_snapshot_ref=version_three_texts.get("workcell_snapshot_ref"),
         workcell_snapshot_sha256=version_three_shas.get("workcell_snapshot_sha256"),
-        workcell_snapshot_fingerprint=version_three_shas.get(
-            "workcell_snapshot_fingerprint"
-        ),
-        evidence_presentation_ref=version_three_texts.get(
-            "evidence_presentation_ref"
-        ),
-        evidence_presentation_sha256=version_three_shas.get(
-            "evidence_presentation_sha256"
-        ),
+        workcell_snapshot_fingerprint=version_three_shas.get("workcell_snapshot_fingerprint"),
+        evidence_presentation_ref=version_three_texts.get("evidence_presentation_ref"),
+        evidence_presentation_sha256=version_three_shas.get("evidence_presentation_sha256"),
         evidence_presentation_fingerprint=version_three_shas.get(
             "evidence_presentation_fingerprint"
         ),
-        allocation_presentation_ref=version_three_texts.get(
-            "allocation_presentation_ref"
-        ),
-        allocation_presentation_sha256=version_three_shas.get(
-            "allocation_presentation_sha256"
-        ),
+        allocation_presentation_ref=version_three_texts.get("allocation_presentation_ref"),
+        allocation_presentation_sha256=version_three_shas.get("allocation_presentation_sha256"),
         allocation_presentation_fingerprint=version_three_shas.get(
             "allocation_presentation_fingerprint"
         ),

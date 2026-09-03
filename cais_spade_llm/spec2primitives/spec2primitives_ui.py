@@ -606,7 +606,7 @@ def _final_result_evidence(  # noqa: C901
     )
     if reachability is not None:
         _add(
-            "ReachabilityCheckRecord · current + desired",
+            "ReachabilityCheckRecord · grounded motion targets",
             reachability.get("status", "unavailable"),
             "verifier evidence",
         )
@@ -1001,7 +1001,7 @@ def _state_result_evidence(
         if isinstance(segmentation_ref, str)
         else None
     )
-    return {
+    result = {
         "state_name": state_name,
         "state_iri": state_iri,
         "statement": _state_statement(target_feature, state_name),
@@ -1019,16 +1019,30 @@ def _state_result_evidence(
         "candidate_reference": candidate,
         "target_frame": location.get("target_frame"),
         "translated_location_m": location.get("translated_location_m"),
-        "planar_distance_from_reach_origin_m": reach_state.get(
-            "planar_distance_from_reach_origin_m"
-        ),
-        "distance_from_reach_origin_m": reach_state.get("distance_from_reach_origin_m"),
-        "in_workspace": reach_state.get("in_workspace"),
-        "in_gripper_reach": reach_state.get("in_gripper_reach"),
-        "reachable": reach_state.get("reachable"),
-        "verdicts": reach_state.get("verdicts"),
         "annotated_rgb": visual,
     }
+    if "in_workspace" in reach_state:
+        result.update(
+            {
+                "planar_distance_from_reach_origin_m": reach_state.get(
+                    "planar_distance_from_reach_origin_m"
+                ),
+                "distance_from_reach_origin_m": reach_state.get("distance_from_reach_origin_m"),
+                "in_workspace": reach_state.get("in_workspace"),
+                "in_gripper_reach": reach_state.get("in_gripper_reach"),
+                "reachable": reach_state.get("reachable"),
+                "verdicts": reach_state.get("verdicts"),
+            }
+        )
+    else:
+        result.update(
+            {
+                "cad_dimensions_m": reach_state.get("cad_dimensions_m"),
+                "support_plane": reach_state.get("support_plane"),
+                "reachability_basis": "live_cartesian_pick_place",
+            }
+        )
+    return result
 
 
 def _final_grounding_result(
@@ -1248,6 +1262,9 @@ def _final_grounding_result(
                 "validator_authority": validation.get("validator_authority"),
                 "moveit_group": validation.get("moveit_group"),
                 "end_effector_link": validation.get("end_effector_link"),
+                "tcp_link": validation.get("tcp_link"),
+                "cartesian_path_service": validation.get("cartesian_path_service"),
+                "motion_mode": validation.get("motion_mode"),
                 "mode": validation.get("mode"),
                 "process_symbol": validation.get("process_symbol"),
                 "process_iri": validation.get("process_iri"),
@@ -1258,6 +1275,10 @@ def _final_grounding_result(
                 "motion_executed": validation.get("motion_executed"),
                 "current_state": validation.get("current_state"),
                 "desired_state": validation.get("desired_state"),
+                "live_start_pose": validation.get("live_start_pose"),
+                "ee_to_tcp_transform": validation.get("ee_to_tcp_transform"),
+                "waypoints": validation.get("waypoints"),
+                "phases": validation.get("phases"),
                 "feedback": validation.get("feedback"),
             }
             if isinstance(validation, Mapping)
@@ -1319,10 +1340,15 @@ def _persisted_pa_timeline(
     if final_result is not None:
         resource = final_result.get("selected_resource")
         mode = final_result.get("execution_mode")
+        cartesian = final_result.get("validation_scope") == "cartesian_pick_place"
         events.append(
             _timeline_event(
                 "accepted",
-                "Endpoint-motion allocation validated",
+                (
+                    "Cartesian pick-place allocation validated"
+                    if cartesian
+                    else "Endpoint-motion allocation validated"
+                ),
                 " · ".join(
                     [
                         *(str(value) for value in (resource, mode) if value not in {None, ""}),
@@ -1335,7 +1361,11 @@ def _persisted_pa_timeline(
             _timeline_event(
                 "accepted",
                 "Grounding complete",
-                "The validated context and endpoint-motion resource assignment are available.",
+                (
+                    "The validated context and Cartesian resource assignment are available."
+                    if cartesian
+                    else "The validated context and endpoint-motion resource assignment are available."
+                ),
             )
         )
         return events
@@ -1966,11 +1996,9 @@ def _render_final_grounding_result() -> dict[str, Any]:
             with ui.column().classes("gap-0"):
                 ui.label("Final Grounding Result").classes("text-xl font-semibold text-slate-900")
                 result_kind_value = ui.label(
-                    "Validated endpoint-motion allocation · no motion executed"
+                    "Validated plan-only allocation · no motion executed"
                 ).classes("text-xs text-slate-500")
-            status_badge = ui.badge("validated endpoint-motion allocation").props(
-                "color=green outline"
-            )
+            status_badge = ui.badge("validated plan-only allocation").props("color=green outline")
 
         ui.label("product_requirement").classes("text-xs font-semibold text-slate-500")
         requirement_value = ui.label("").classes(
@@ -2178,7 +2206,7 @@ def _apply_final_grounding_result(
     if result is None:
         card.set_visibility(False)
         return
-    allocation_label = str(result.get("allocation_label") or "validated endpoint-motion allocation")
+    allocation_label = str(result.get("allocation_label") or "validated plan-only allocation")
     elements["status_badge"].set_text(allocation_label)
     elements["result_kind"].set_text(f"{allocation_label} · no motion executed")
     elements["requirement"].set_text(str(result.get("product_requirement", "")))

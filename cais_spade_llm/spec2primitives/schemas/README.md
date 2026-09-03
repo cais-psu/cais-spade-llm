@@ -144,19 +144,25 @@ Implemented pre-RA grounding contracts in
 - `AllocationPresentationRecord` version 1, pinning randomized resource and
   shared neutral-candidate presentation orders while allocation reuses the two
   candidate bindings already accepted in `state_values`;
-- `ReachabilityCheckRecord` version 2, recording the selected process,
-  PA-authored state-evidence mapping, explicit provisional resource, and
-  separately derived evidence for both state locations;
+- `ReachabilityCheckRecord` version 3 for simulation, recording the selected
+  process, PA-authored state-evidence mapping, explicit provisional resource,
+  hash-pinned CAD/support provenance, derived Cartesian targets, request
+  fingerprint, exact RobotAgent validation ref, phase results, and final status
+  without static `in_workspace` or `in_gripper_reach` claims;
+- `PlanOnlyFeasibilityValidationRecord` version 3 for simulation, recording the
+  live start pose, EE-to-TCP transform, ordered waypoint roles, configured
+  group/link/service, per-phase fractions and MoveIt error codes, and
+  `motion_executed: false`;
 - `ResourceSelectionRecord` version 4, pinning PA authority, process and
   candidate set, both presentations, both state-evidence assignments, the
-  provisional choice, reach evidence, and exact RobotAgent endpoint-motion
+  provisional choice, reach evidence, and exact RobotAgent plan-only
   verdict;
 - `TargetFeatureSemanticReview` schema version 2, preserving only the structured
   `complete`/`incomplete` verdict and concise gap, never private reasoning;
 - `TypedGroundingContract` schema version 6, pinning the accepted v8 proposal,
   selected process, both state IRIs, semantic review, nested evidence, typed
   values, both presentation records, registry/workcell snapshots, two-state
-  reachability, endpoint-motion RobotAgent validation, resource selection,
+  reachability, endpoint-motion or Cartesian RobotAgent validation, resource selection,
   assignment delta, and final ABox without copying `target_feature`; and
 - append-only native PA tool audits, `PAClarification` records, and
   `PAContextGroundingCompletion` version 6.
@@ -194,9 +200,11 @@ into the model-authored `PrimitiveProgramDraft`.
 
 The active system exposes approved neutral evidence to PA. Once PA has grounded
 both feature states, it explicitly chooses state values and a provisional
-resource through `check_reachability`. That verifier derives only the selected
-locations and evaluates both against the requested manifest; it never chooses
-or substitutes a resource.
+resource through `check_reachability`. In simulation that verifier derives the
+gear pick and shaft-centered place targets from pinned geometry and requests
+live Cartesian planning from the exact chosen RobotAgent; it never chooses or
+substitutes a resource. Historical and physical-mode version 2 records remain
+read-only/compatible.
 
 `GroundingNextAction`, `GroundingActionAttempt`, `GroundingSession` version 2,
 targeted document evidence, pose-linked `ResourceSelectionRecord` version 1,

@@ -147,7 +147,7 @@ class InProcessRobotAgentCompositionRuntime:
             )
         return response
 
-    async def validate_plan_only_allocation(
+    async def validate_plan_only_allocation(  # noqa: C901
         self,
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
@@ -182,6 +182,25 @@ class InProcessRobotAgentCompositionRuntime:
             resource_jid=resource_jid,
             execution_mode=execution_mode,
         )
+
+        if request.get("motion_mode") == "cartesian_pick_place":
+            if execution_mode != "simulation":
+                raise RAContextHandoffError(
+                    "Cartesian pick-and-place allocation validation is simulation-only."
+                )
+            validate = getattr(self._moveit_plan_only_runtime, "validate", None)
+            if not callable(validate):
+                raise RAContextHandoffError(
+                    "MoveIt Cartesian plan-only validation runtime is unavailable."
+                )
+            response = validate(deepcopy(dict(request)))
+            if isawaitable(response):
+                response = await response
+            if not isinstance(response, Mapping):
+                raise RAContextHandoffError(
+                    "MoveIt Cartesian plan-only validation response is invalid."
+                )
+            return deepcopy(dict(response))
 
         async def _robot_agent_precheck() -> Mapping[str, object]:
             self._require_alive(selected_agent, resource_jid)

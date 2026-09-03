@@ -274,19 +274,19 @@ def test_shared_product_agent_bridge_applies_configured_reasoning_effort(
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.args = args
             self.kwargs = kwargs
-            self.reasoning_effort = "medium"
+            self.reasoning_effort = "low"
             created.append(self)
 
     monkeypatch.setattr(product_agent_runtime, "ProductAgent", _SharedAgent)
 
     runtime = product_agent_runtime.create_product_agent_context_runtime(
         model="gpt-5.6",
-        reasoning_effort="medium",
+        reasoning_effort="none",
     )
 
     assert runtime is not None
     assert len(created) == 1
-    assert created[0].reasoning_effort == "medium"
+    assert created[0].reasoning_effort == "none"
     assert created[0].kwargs["model"] == "gpt-5.6"
 
 

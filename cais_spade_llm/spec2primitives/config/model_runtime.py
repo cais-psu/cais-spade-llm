@@ -121,9 +121,11 @@ def load_model_runtime_config(
         "xhigh",
     }:
         raise ValueError("product_agent_llm.reasoning_effort is invalid.")
-    if product_agent_model.startswith("gpt-5.4") and product_agent_reasoning_effort != "none":
+    if product_agent_model.startswith(
+        ("gpt-5.4", "gpt-5.6")
+    ) and product_agent_reasoning_effort != "none":
         raise ValueError(
-            "product_agent_llm.reasoning_effort must be none for GPT-5.4 "
+            "product_agent_llm.reasoning_effort must be none for GPT-5.4 or GPT-5.6 "
             "function tools through Chat Completions."
         )
     document_values = _validated_vision_config(document_vlm, "document_vlm")

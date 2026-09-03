@@ -56,8 +56,8 @@ def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
     assert selected["camera_id"] == "cam_mk3"
     assert selected["frame"] == "cam_mk3_optical_frame"
     assert selected["observation_handle"] == "view_0001"
-    assert selected["candidate_handle"] == "candidate_0001_0003"
-    assert selected["candidate_id"] == 3
+    assert selected["candidate_handle"] == "candidate_0001_0002"
+    assert selected["candidate_id"] == 2
     np.testing.assert_allclose(
         selected["candidate_center_m"],
         [-0.04, -0.06, 0.8],
@@ -161,6 +161,41 @@ def test_duplicate_size_candidates_are_ambiguous(tmp_path: Path) -> None:
     assert result.location == "ambiguous"
     assert result.selected_candidate is None
     assert len(result.record["plausible_candidates"]) == 2
+
+
+def test_shaft_size_keeps_three_mounted_candidates_and_rejects_45_mm_pins(
+    tmp_path: Path,
+) -> None:
+    segmentation_path, _medium_cad_path = _prepare_inputs(
+        tmp_path,
+        _shaft_and_pin_bundle(),
+    )
+    resolution = resolve_context_ref({"context_ref": "Gear_Shaft.STL"})
+    assert "served_context" in resolution
+    shaft = preprocess_served_geometry(
+        interaction_root=tmp_path,
+        served_context=resolution["served_context"],
+        operation_number=3,
+    )
+
+    result = associate_segmented_candidate_by_size(
+        interaction_root=tmp_path,
+        segmentation_record_path=segmentation_path,
+        cad_record_path=shaft.record_path,
+    )
+
+    assert result.CAD_correspondence == "ambiguous"
+    plausible = result.record["plausible_candidates"]
+    assert len(plausible) == 3
+    assert all(candidate["within_size_tolerance"] is True for candidate in plausible)
+    rejected = [
+        candidate
+        for candidate in result.record["ranked_candidates"]
+        if candidate["within_size_tolerance"] is False
+        and candidate["observed_dimensions_m"] is not None
+    ]
+    assert len(rejected) >= 2
+    assert all(candidate["dimension_errors"][0] > 1.0 for candidate in rejected[:2])
 
 
 @pytest.mark.parametrize("diameters_m", [(0.022, 0.062), ()])
@@ -356,11 +391,20 @@ def _size_bundle(
         elif camera_id == "cam_assembly":
             if large_assembly_candidate:
                 assembly_rows = slice(20, 460)
-                assembly_columns = slice(40, 600)
+                assembly_columns = slice(20, 500)
+                rows, columns = np.indices((440, 480))
+                depth_m[assembly_rows, assembly_columns] = (
+                    0.82 + 0.04 * np.sin(columns * 0.12) + 0.04 * np.cos(rows * 0.13)
+                ).astype(np.float32)
+                depth_m[10:470, 510:630] = np.float32(1.0)
+                rgb[10:470, 510:630] = np.asarray(
+                    [20, 30, 40],
+                    dtype=np.uint8,
+                )
             else:
                 assembly_rows = slice(100, 300)
                 assembly_columns = slice(200, 440)
-            depth_m[assembly_rows, assembly_columns] = np.float32(0.9)
+                depth_m[assembly_rows, assembly_columns] = np.float32(0.9)
             rgb[assembly_rows, assembly_columns] = np.asarray(
                 [80, 90, 100],
                 dtype=np.uint8,
@@ -375,6 +419,62 @@ def _size_bundle(
                     diameters_m,
                     clipped_candidate=clipped_candidate,
                 )
+        timestamp_ns = 3_000_000_000 + camera_index * 1_000
+        frame = f"{camera_id}_optical_frame"
+        observations.append(
+            CameraObservation(
+                camera_id=camera_id,
+                rgb=rgb,
+                depth_m=depth_m,
+                rgb_timestamp_ns=timestamp_ns,
+                depth_timestamp_ns=timestamp_ns + 100,
+                rgb_frame=frame,
+                depth_frame=frame,
+                camera_calibration=_calibration(frame),
+            )
+        )
+    return ObservationBundle(
+        observation_ref="observation_0001",
+        evidence_label="live",
+        captured_at_ns=3_000_004_000,
+        camera_observations=tuple(observations),
+    )
+
+
+def _shaft_and_pin_bundle() -> ObservationBundle:
+    observations = []
+    dimensions_m = (
+        (0.020, 0.010),
+        (0.020, 0.010),
+        (0.020, 0.010),
+        (0.046, 0.012),
+        (0.045, 0.012),
+    )
+    centers = ((90, 170), (190, 170), (290, 170), (410, 170), (530, 170))
+    for camera_index, camera_id in enumerate(CAMERA_IDS):
+        rgb = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
+        depth_m = np.full((IMAGE_HEIGHT, IMAGE_WIDTH), np.nan, dtype=np.float32)
+        if camera_id == "cam_mk3":
+            depth_m[80:320, 20:620] = np.float32(1.0)
+            rgb[80:320, 20:620] = np.asarray([20, 30, 40], dtype=np.uint8)
+            for index, ((length_m, width_m), (center_u, center_v)) in enumerate(
+                zip(dimensions_m, centers, strict=True)
+            ):
+                length_px = round(length_m * _FOCAL_LENGTH_PX / _DEPTH_M)
+                width_px = round(width_m * _FOCAL_LENGTH_PX / _DEPTH_M)
+                rows = slice(center_v - width_px // 2, center_v + (width_px + 1) // 2)
+                columns = slice(
+                    center_u - length_px // 2,
+                    center_u + (length_px + 1) // 2,
+                )
+                depth_m[rows, columns] = np.float32(_DEPTH_M)
+                rgb[rows, columns] = np.asarray(
+                    [210 - index * 20, 20 + index * 30, 60],
+                    dtype=np.uint8,
+                )
+        else:
+            depth_m[100:300, 200:440] = np.float32(0.9)
+            rgb[100:300, 200:440] = np.asarray([80, 90, 100], dtype=np.uint8)
         timestamp_ns = 3_000_000_000 + camera_index * 1_000
         frame = f"{camera_id}_optical_frame"
         observations.append(

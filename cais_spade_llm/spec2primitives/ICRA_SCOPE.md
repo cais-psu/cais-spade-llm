@@ -8,14 +8,15 @@
 
 The end-to-end workflow in this document is proposed architecture. **Phase 4 is
 implemented through Phase 4.4 under the current framework.** The package also
-implements the PA interaction boundary through Phase 3.5. PA uses one native
-`retrieve` tool and returns a direct ontology proposal. Phase 4.4 validates and
+implements the PA interaction boundary through Phase 3.5. PA uses native
+`retrieve` and `compare_cad_size` tools and returns a direct ontology proposal. Phase 4.4 validates and
 commits one v8 PA-authored, evidence-grounded `target_feature` with explicit
 current and desired states, each with a PA-selected neutral candidate; a separate
 structured PA semantic review must accept the unchanged pair. PA then chooses a
 provisional resource through `check_reachability(resource_symbol)`, which reuses
 those bindings. The exact selected RobotAgent performs
-plan-only endpoint validation, and only acceptance commits that resource as a
+live, no-motion Cartesian pick/place validation in simulation, and only
+acceptance commits that resource as a
 `processExecution` assignment. The production profile configures only
 `assembly`, `xarm6`, and `ur5e`; this is an assembly case study, not runtime
 process discovery. Their identities and configured capabilities remain pinned
@@ -27,9 +28,9 @@ state/catalog snapshot boundary. Phase 5.2A implements one RA-LLM-authored
 structural `PrimitiveProgramDraft` from a reconstructed target feature and exact
 catalog symbols.
 
-Phase 4 completion is the implemented location-based pre-RA grounding and
-resource-assignment boundary. Cross-camera fusion, an active orientation-sensitive
-consumer, grasp/contact/tolerance/insertion validation, parameter binding,
+Phase 4 completion is the implemented grounded, plan-only resource-assignment
+boundary. Cross-camera fusion, object-pose estimation,
+grasp/contact/tolerance/insertion validation, parameter binding,
 primitive-level robot validation, execution, and observed outcomes are not part
 of the completed Phase 4 claim.
 
@@ -99,8 +100,8 @@ combination of:
 
 1. PA dynamically grounding an incomplete product requirement from only the
    relevant approved document, CAD, and RGB-D evidence, followed by an
-   evidence-backed PA selection from the configured capable resources and
-   endpoint validation of that exact choice.
+   evidence-backed PA selection from the configured capable resources and live
+   Cartesian validation of that exact choice.
 2. RA, where RA means RobotAgent, interpreting that required transition against
    fresh selected-resource state and the complete current semantic primitive
    catalog with partial local executable contracts, then agentically authoring
@@ -214,9 +215,9 @@ unresolved processExecution activates PA allocation
         ↓
 PA chooses a provisional resource without reselecting either state value
         ↓
-check_reachability evaluates both state locations ↺
+check_reachability derives the gear pick and installed-shaft place targets ↺
         ↓
-exact selected RobotAgent validates plan-only endpoints ↺
+exact selected RobotAgent validates chained live Cartesian phases ↺
         ↓
 system commits only the accepted PA choice
 ```
@@ -247,14 +248,14 @@ validates native tool calls, exact replay keys, citations, hashes, and TBox
 signatures. After grounding the feature and both states, unresolved
 `processExecution` activates PA allocation directly. PA supplies the resource
 choice to `check_reachability`; the tool derives both numeric verifier inputs
-from the accepted state bindings and returns two-state evidence. Invalid,
+from the accepted state bindings and returns Cartesian phase evidence. Invalid,
 unavailable, stale, ambiguous, or exhausted paths stop fail-closed without a
 manufactured assertion.
 
 The PA handoff is `PAContextGroundingCompletion` v6, which pins the accepted v8
 proposal, both feature states, semantic review, evidence and allocation
 presentation records, process and state-evidence choices, registry and workcell
-snapshots, two-state reachability, endpoint-motion RobotAgent validation, the
+snapshots, two-state reachability, plan-only RobotAgent validation, the
 post-assignment ontology projection, `ResourceSelectionRecord` v4, and referenced
 typed records without copying the target feature. There is no separate
 `TaskTransitionContract`. The
@@ -263,9 +264,9 @@ resolved state values, selected-resource projection, fresh state, and its
 complete current primitive-only catalog. The RA LLM authors a structural
 `PrimitiveProgramDraft`; a deterministic binding preflight gathers all currently
 unbound inputs without creating or repairing steps. Robot state and later
-primitive-level feasibility remain RA-owned. Allocation performs only endpoint
-IK/collision/path validation through the exact selected RobotAgent and never
-executes motion.
+primitive-level feasibility remain RA-owned. Simulation allocation performs
+only collision-aware Cartesian pick/place path validation through the exact
+selected RobotAgent and never executes motion.
 Product or scene gaps are deduplicated into one `MissingContextBatch` per round.
 
 Formal PA completion pins both the exact `ResourceSelectionRecord` and the
@@ -278,7 +279,7 @@ For `assemble medium gear`, PA may retrieve the NIST manual, approved CAD, and
 live RGB-D evidence; author current and desired feature states; and assign a
 neutral candidate to each state. It then freely proposes one capable resource
 and calls two-state reachability. The exact proposed RobotAgent validates both
-endpoints in plan-only mode. Rejection returns evidence to PA without an ABox
+chained Cartesian phases in plan-only mode. Rejection returns evidence to PA without an ABox
 assignment or host-selected replacement. Acceptance commits exactly the PA
 choice. `xarm6` is therefore a possible PA-authored outcome for the evaluated
 scene, not a registry-order default, retrieval rule, or ontology entailment.
@@ -294,8 +295,9 @@ not that every later primitive input is already available.
 
 Phase 4.4 candidate discovery is a semantic join over the pinned workcell-profile
 v2 and registry snapshots for the process selected from the authorized catalog.
-Distance/workspace and plan-only checks are deterministic evidence providers;
-PA remains the allocation authority and no optimality claim is made. Both
+Live Cartesian checks are deterministic evidence providers in simulation;
+the retained physical path continues to use its configured safety checks. PA
+remains the allocation authority and no optimality claim is made. Both
 nominal and recovery cases consume the selected exact
 `resource_jid` and use unicast; Spec2Primitives does not broadcast or reallocate
 during composition.
@@ -474,11 +476,11 @@ unresolved processExecution activates PA allocation
         ↓
 PA chooses a provisional resource without revising currentstate or desiredstate
         ↓
-check_reachability derives and checks both state locations ↺
+check_reachability derives the gear pick and installed-shaft place targets ↺
         ↓
-exact selected RobotAgent validates endpoints in plan-only mode ↺
+exact selected RobotAgent validates chained Cartesian phases in plan-only mode ↺
         ↓
-system commits the exact accepted choice and v6 endpoint-motion completion
+system commits the exact accepted choice and v6 plan-only completion
         ↓
 Phase 5.1 activates the selected exact resource_jid through the current adapter
         ↓

@@ -112,7 +112,7 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
     tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]],
     max_tool_rounds: int,
     required_output_projection: Mapping[str, object],
-    validation_gap: Mapping[str, object] | None = None,
+    validation_feedback_history: Sequence[Mapping[str, object]] = (),
     typed_record_resolver: TypedRecordResolver | None = None,
     pa_reference_resolver: PAReferenceTranslator | None = None,
 ) -> OntologyGroundingCandidate | OntologyGroundingInterruption:
@@ -145,16 +145,17 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
         ],
         "target_feature_contract": {
             "cardinality": "exactly_one",
-            "current_state_values": "zero_one_or_multiple",
-            "desired_state_values": "zero_one_or_multiple",
+            "state_value_cardinality": "follow_required_output_projection",
             "value_names": "PA_authored_without_host_enum",
         },
     }
-    if validation_gap is not None:
-        prompt_input["current_validation_gap"] = dict(validation_gap)
+    if validation_feedback_history:
+        prompt_input["validation_feedback_history"] = [
+            dict(item) for item in validation_feedback_history
+        ]
     prompt = (
         "Investigate the exact product requirement using only the requirement and "
-        "evidence returned by the controlled retrieve tool. Catalog metadata is "
+        "evidence returned by the controlled tools. Catalog metadata is "
         "discovery-only. Never use hidden case knowledge, evaluator information, or "
         "an interpretation supplied by these instructions. Before asking a "
         "requirement-meaning clarification, retrieve "
@@ -165,9 +166,13 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
         "one process_iri from authorized_processes and cite its direct evidence. "
         "Write complete current and desired product-state statements and cite their "
         "direct evidence. The current_state must describe the evidenced state now; "
-        "the desired_state must describe the requested product outcome. Add zero, "
-        "one, or multiple state_values to either state only when an accepted typed "
-        "record returned by retrieve supplies a value belonging to that state. For "
+        "the desired_state must describe the requested product outcome. When the "
+        "required_output_projection requires state candidates, select exactly one "
+        "current object candidate and exactly one desired destination or support "
+        "candidate. A desired-state destination value identifies where the requested "
+        "assembly will be realized; it does not assert that the completed assembly is "
+        "already visible. Otherwise, add state_values only when an accepted typed "
+        "record returned by a controlled tool supplies a value belonging to that state. For "
         "each state value, author a unique semantic name within that state, exact "
         "record_ref, JSON Pointer field_path, and direct evidence_refs. The same "
         "record may supply multiple values through different paths. Do not invent a "
@@ -181,7 +186,8 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
         "primitive choices, resource choices, or execution details. The controller "
         "creates feature_0001, both state individuals, and the exact ontology "
         "assertions after validation. "
-        "Cite only requirement_0001 or evidence refs actually returned by retrieve.\n\n"
+        "Cite only requirement_0001 or evidence refs actually returned by a controlled "
+        "tool. Preserve and address every distinct item in validation_feedback_history.\n\n"
         f"Grounding input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
     proposal_number = _next_number(root / _PROPOSAL_ROOT, "proposal_")
@@ -263,6 +269,7 @@ async def review_target_feature_semantics(
     product_requirement: str,
     evidence_catalog: Sequence[Mapping[str, object]],
     pa_reference_projector: PAReferenceTranslator | None = None,
+    required_output_projection: Mapping[str, object] | None = None,
 ) -> TargetFeatureSemanticReview:
     """Run and persist a separate structured semantic-sufficiency review."""
     root = Path(interaction_root).resolve()
@@ -297,13 +304,20 @@ async def review_target_feature_semantics(
         "target_feature": target_feature_projection,
         "resolved_state_values": state_value_projection,
         "currently_retrieved_evidence": [dict(item) for item in evidence_catalog],
+        "required_output_projection": (
+            {} if required_output_projection is None else dict(required_output_projection)
+        ),
     }
     prompt = (
         "Review whether the PA-authored target_feature adequately represents the "
         "exact product requirement using the currently retrieved evidence. Judge "
-        "semantic product-state completeness, not robot execution readiness. An "
-        "empty state_values list is valid when current evidence supports either state "
-        "semantically but supplies no accepted typed values for that state. Do "
+        "semantic product-state completeness, not robot execution readiness. Apply "
+        "the same required_output_projection used for the proposal. An empty "
+        "state_values list is valid only when that projection does not require a "
+        "candidate for the state and current evidence supplies no accepted typed "
+        "value. A desired-state destination or support candidate may identify where "
+        "the requested assembly will be realized without depicting the completed "
+        "assembly. Judge whether each included value has the correct semantic role. Do "
         "not demand target geometry, target_pose, tolerance, primitive parameters, "
         "resource state, or other information absent from current evidence. Mark "
         "incomplete only when the current-state or desired-state statement or included "
@@ -1006,10 +1020,7 @@ def _translate_pa_references(
                 )
         return translated
     if isinstance(value, list):
-        return [
-            _translate_pa_references(item, translator, parent_key=parent_key)
-            for item in value
-        ]
+        return [_translate_pa_references(item, translator, parent_key=parent_key) for item in value]
     return _json_clone(value)
 
 

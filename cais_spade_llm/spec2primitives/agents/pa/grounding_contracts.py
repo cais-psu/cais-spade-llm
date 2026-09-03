@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -195,6 +196,125 @@ _RESOURCE_SELECTION_V4_KEYS = frozenset(
         "tbox_fingerprint",
         "registry_fingerprint",
         "workcell_fingerprint",
+        "fingerprint",
+    }
+)
+_REACHABILITY_V3_KEYS = frozenset(
+    {
+        "schema_version",
+        "record_type",
+        "check_number",
+        "authority",
+        "specification_iri",
+        "feature_iri",
+        "process_symbol",
+        "process_iri",
+        "resource_symbol",
+        "resource_iri",
+        "resource_jid",
+        "execution_mode",
+        "target_frame",
+        "manifest_ref",
+        "manifest_sha256",
+        "allocation_presentation_ref",
+        "allocation_presentation_sha256",
+        "allocation_presentation_fingerprint",
+        "current_state",
+        "desired_state",
+        "motion_mode",
+        "cartesian_targets",
+        "request_fingerprint",
+        "robot_agent_validation_ref",
+        "robot_agent_validation_sha256",
+        "robot_agent_validation_fingerprint",
+        "phase_results",
+        "tbox_fingerprint",
+        "registry_fingerprint",
+        "workcell_fingerprint",
+        "status",
+        "fingerprint",
+    }
+)
+_CARTESIAN_STATE_EVIDENCE_KEYS = frozenset(
+    {
+        "state_name",
+        "state_iri",
+        "evidence_handle",
+        "source_record_type",
+        "source_record_ref",
+        "source_record_sha256",
+        "source_field_path",
+        "location_record_ref",
+        "location_record_sha256",
+        "observation_timestamp_ns",
+        "translation_m",
+        "cad_correspondence_record",
+        "cad_geometry_record",
+        "cad_dimensions_m",
+        "segmentation_record",
+        "calibration_record",
+        "support_plane",
+    }
+)
+_CARTESIAN_TARGET_KEYS = frozenset(
+    {
+        "pick_object_center_m",
+        "pick_support_point_m",
+        "pick_surface_normal",
+        "place_support_point_m",
+        "place_surface_normal",
+        "place_object_center_m",
+        "part_dimensions_m",
+        "support_dimensions_m",
+        "part_height_m",
+        "motion_offsets",
+    }
+)
+_CARTESIAN_MOTION_OFFSET_KEYS = frozenset(
+    {
+        "pick_approach_height_m",
+        "pick_surface_clearance_m",
+        "pick_tcp_z_bias_min_m",
+        "pick_tcp_z_bias_max_m",
+        "transfer_clearance_m",
+        "place_approach_height_m",
+    }
+)
+_PLAN_VALIDATION_V3_KEYS = frozenset(
+    {
+        "schema_version",
+        "record_type",
+        "validation_number",
+        "validator_authority",
+        "process_symbol",
+        "process_iri",
+        "feature_iri",
+        "current_state_iri",
+        "desired_state_iri",
+        "resource_symbol",
+        "resource_iri",
+        "resource_jid",
+        "execution_mode",
+        "motion_mode",
+        "moveit_group",
+        "end_effector_link",
+        "tcp_link",
+        "target_frame",
+        "cartesian_path_service",
+        "validation_scope",
+        "checked_constraints",
+        "unvalidated_constraints",
+        "cartesian_parameters",
+        "live_start_pose",
+        "ee_to_tcp_transform",
+        "waypoints",
+        "phases",
+        "mode",
+        "motion_executed",
+        "status",
+        "feedback",
+        "validated_at_ns",
+        "request_fingerprint",
         "fingerprint",
     }
 )
@@ -1034,7 +1154,7 @@ class PAContextGroundingCompletionV5:
 
 @dataclass(frozen=True)
 class PAContextGroundingCompletionV6:
-    """Hold one verified process-aware endpoint-motion allocation completion."""
+    """Hold one verified process-aware plan-only allocation completion."""
 
     record: Mapping[str, object]
 
@@ -1289,9 +1409,7 @@ def _validated_target_feature(  # noqa: C901
     _require_exact_keys(output, {"target_feature"}, "proposal output")
     target_feature = _required_mapping(output["target_feature"], "target_feature")
     state_names = (
-        ("desired_state",)
-        if proposal_schema_version == 6
-        else ("current_state", "desired_state")
+        ("desired_state",) if proposal_schema_version == 6 else ("current_state", "desired_state")
     )
     _require_exact_keys(
         target_feature,
@@ -1707,10 +1825,8 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
         selection.get("evidence_presentation_ref") != evidence_presentation.record_ref
         or selection.get("evidence_presentation_sha256")
         != _sha256_path(evidence_presentation.record_path)
-        or selection.get("evidence_presentation_fingerprint")
-        != evidence_presentation.fingerprint
-        or selection.get("allocation_presentation_ref")
-        != allocation_presentation.record_ref
+        or selection.get("evidence_presentation_fingerprint") != evidence_presentation.fingerprint
+        or selection.get("allocation_presentation_ref") != allocation_presentation.record_ref
         or selection.get("allocation_presentation_sha256")
         != _sha256_path(allocation_presentation.record_path)
         or selection.get("allocation_presentation_fingerprint")
@@ -1728,9 +1844,7 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
     ):
         raise GroundingContractError("PA allocation presentation lineage is inconsistent.")
     for assignment in assignments.values():
-        entry = allocation_presentation.evidence_for_handle(
-            str(assignment["evidence_handle"])
-        )
+        entry = allocation_presentation.evidence_for_handle(str(assignment["evidence_handle"]))
         if (
             entry.record_type != assignment["source_record_type"]
             or entry.record_ref != assignment["source_record_ref"]
@@ -1751,12 +1865,15 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
         reach_ref,
         prefix=("products", "grounding", "reachability"),
     )
-    reach = _read_json_mapping(reach_path, "ReachabilityCheckRecord v2")
+    reach = _read_json_mapping(reach_path, "ReachabilityCheckRecord")
+    reach_schema = reach.get("schema_version")
+    if reach_schema not in {2, 3}:
+        raise GroundingContractError("ReachabilityCheckRecord schema is unsupported.")
     reach_fingerprint = _validated_fingerprinted_record(
         reach,
-        expected_schema=2,
+        expected_schema=int(reach_schema),
         expected_type="ReachabilityCheckRecord",
-        label="ReachabilityCheckRecord v2",
+        label=f"ReachabilityCheckRecord v{reach_schema}",
     )
     if (
         _sha256_path(reach_path) != selection.get("reachability_check_sha256")
@@ -1766,31 +1883,61 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
         or reach.get("feature_iri") != feature_iri
         or reach.get("process_symbol") != allocation_authority.process_symbol
         or reach.get("process_iri") != process_iri
-        or tuple(reach.get(field_name) for field_name in (
-            "resource_symbol",
-            "resource_iri",
-            "resource_jid",
-            "execution_mode",
-        ))
+        or tuple(
+            reach.get(field_name)
+            for field_name in (
+                "resource_symbol",
+                "resource_iri",
+                "resource_jid",
+                "execution_mode",
+            )
+        )
         != selected_fields
         or reach.get("allocation_presentation_ref") != allocation_presentation.record_ref
         or reach.get("allocation_presentation_sha256")
         != _sha256_path(allocation_presentation.record_path)
-        or reach.get("allocation_presentation_fingerprint")
-        != allocation_presentation.fingerprint
+        or reach.get("allocation_presentation_fingerprint") != allocation_presentation.fingerprint
         or reach.get("registry_fingerprint") != allocation_authority.registry_fingerprint
         or reach.get("workcell_fingerprint") != allocation_authority.workcell_fingerprint
         or reach.get("status") != "accepted"
     ):
-        raise GroundingContractError("PA reachability v2 lineage is inconsistent.")
+        raise GroundingContractError("PA reachability lineage is inconsistent.")
     for state_name, assignment in assignments.items():
-        _validate_state_reach_v2(
-            root,
-            state_name=state_name,
-            state=reach.get(state_name),
-            assignment=assignment,
-            product_context=product_context,
-        )
+        if reach_schema == 2:
+            _validate_state_reach_v2(
+                root,
+                state_name=state_name,
+                state=reach.get(state_name),
+                assignment=assignment,
+                product_context=product_context,
+            )
+        else:
+            _validate_state_reach_v3(
+                root,
+                state_name=state_name,
+                state=reach.get(state_name),
+                assignment=assignment,
+                product_context=product_context,
+            )
+    if reach_schema == 3:
+        _require_exact_keys(reach, _REACHABILITY_V3_KEYS, "ReachabilityCheckRecord v3")
+        if (
+            reach.get("execution_mode") != "simulation"
+            or reach.get("motion_mode") != "cartesian_pick_place"
+            or not _is_sha256_value(reach.get("request_fingerprint"))
+            or not _valid_cartesian_targets(
+                reach.get("cartesian_targets"),
+                current_state=reach.get("current_state"),
+                desired_state=reach.get("desired_state"),
+            )
+            or reach.get("robot_agent_validation_ref")
+            != selection.get("robot_agent_validation_ref")
+            or reach.get("robot_agent_validation_sha256")
+            != selection.get("robot_agent_validation_sha256")
+            or reach.get("robot_agent_validation_fingerprint")
+            != selection.get("robot_agent_validation_fingerprint")
+        ):
+            raise GroundingContractError("PA reachability v3 lineage is inconsistent.")
 
     validation_ref = _required_string(
         selection["robot_agent_validation_ref"],
@@ -1801,15 +1948,13 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
         validation_ref,
         prefix=("resources", str(selected_fields[2]), "validation"),
     )
-    validation = _read_json_mapping(
-        validation_path,
-        "PlanOnlyFeasibilityValidationRecord v2",
-    )
+    validation = _read_json_mapping(validation_path, "PlanOnlyFeasibilityValidationRecord")
+    expected_validation_schema = 3 if reach_schema == 3 else 2
     validation_fingerprint = _validated_fingerprinted_record(
         validation,
-        expected_schema=2,
+        expected_schema=expected_validation_schema,
         expected_type="PlanOnlyFeasibilityValidationRecord",
-        label="PlanOnlyFeasibilityValidationRecord v2",
+        label=f"PlanOnlyFeasibilityValidationRecord v{expected_validation_schema}",
     )
     if (
         _sha256_path(validation_path) != selection.get("robot_agent_validation_sha256")
@@ -1820,33 +1965,46 @@ def _validate_target_selection_v4(  # noqa: C901, PLR0913
         or validation.get("feature_iri") != feature_iri
         or validation.get("current_state_iri") != current_state_iri
         or validation.get("desired_state_iri") != desired_state_iri
-        or tuple(validation.get(field_name) for field_name in (
-            "resource_symbol",
-            "resource_iri",
-            "resource_jid",
-            "execution_mode",
-        ))
+        or tuple(
+            validation.get(field_name)
+            for field_name in (
+                "resource_symbol",
+                "resource_iri",
+                "resource_jid",
+                "execution_mode",
+            )
+        )
         != selected_fields
-        or validation.get("validation_scope") != "endpoint_motion"
-        or validation.get("checked_constraints")
-        != ["positional_ik", "collision_aware_endpoints", "path_between_endpoints"]
-        or validation.get("unvalidated_constraints")
-        != [
-            "grasping",
-            "end_effector_orientation",
-            "attached_object_geometry",
-            f"{allocation_authority.process_symbol}_tolerance",
-            "force_contact",
-            "insertion_constraints",
-        ]
         or validation.get("mode") != "plan_only"
         or validation.get("motion_executed") is not False
         or validation.get("status") != "accepted"
-        or validation.get("request_fingerprint") != reach_fingerprint
-        or not _accepted_endpoint_result(validation.get("current_state"))
-        or not _accepted_endpoint_result(validation.get("desired_state"))
     ):
-        raise GroundingContractError("Endpoint-motion validation v2 is inconsistent.")
+        raise GroundingContractError("Plan-only validation lineage is inconsistent.")
+    if reach_schema == 2:
+        if (
+            validation.get("validation_scope") != "endpoint_motion"
+            or validation.get("checked_constraints")
+            != ["positional_ik", "collision_aware_endpoints", "path_between_endpoints"]
+            or validation.get("unvalidated_constraints")
+            != [
+                "grasping",
+                "end_effector_orientation",
+                "attached_object_geometry",
+                f"{allocation_authority.process_symbol}_tolerance",
+                "force_contact",
+                "insertion_constraints",
+            ]
+            or validation.get("request_fingerprint") != reach_fingerprint
+            or not _accepted_endpoint_result(validation.get("current_state"))
+            or not _accepted_endpoint_result(validation.get("desired_state"))
+        ):
+            raise GroundingContractError("Endpoint-motion validation v2 is inconsistent.")
+    else:
+        _validate_cartesian_plan_record_v3(
+            validation,
+            reach=reach,
+            process_symbol=allocation_authority.process_symbol,
+        )
 
 
 def _validated_state_evidence_assignment(
@@ -1866,9 +2024,7 @@ def _validated_state_evidence_assignment(
     }
     _require_exact_keys(assignment, expected, label)
     result = {key: _required_string(assignment[key], f"{label}.{key}") for key in expected}
-    if result["state_iri"] != state_iri or not _is_sha256_value(
-        result["source_record_sha256"]
-    ):
+    if result["state_iri"] != state_iri or not _is_sha256_value(result["source_record_sha256"]):
         raise GroundingContractError(f"{label} is inconsistent.")
     return result
 
@@ -1931,6 +2087,347 @@ def _validate_state_reach_v2(
         raise GroundingContractError(f"{state_name} reachability v2 is inconsistent.")
 
 
+def _validate_state_reach_v3(
+    root: Path,
+    *,
+    state_name: str,
+    state: object,
+    assignment: Mapping[str, str],
+    product_context: ProductContextView,
+) -> None:
+    value = _required_mapping(state, f"{state_name} Cartesian reachability")
+    _require_exact_keys(
+        value,
+        _CARTESIAN_STATE_EVIDENCE_KEYS,
+        f"{state_name} Cartesian reachability",
+    )
+    direct_pairs = {
+        "state_iri": "state_iri",
+        "evidence_handle": "evidence_handle",
+        "source_record_type": "source_record_type",
+        "source_record_ref": "source_record_ref",
+        "source_record_sha256": "source_record_sha256",
+        "source_field_path": "source_field_path",
+    }
+    location_ref = value.get("location_record_ref")
+    location_sha256 = value.get("location_record_sha256")
+    support_plane = value.get("support_plane")
+    if (
+        value.get("state_name") != state_name
+        or any(value.get(left) != assignment[right] for left, right in direct_pairs.items())
+        or value.get("source_record_type") != "RGBDSegmentationRecord"
+        or not isinstance(location_ref, str)
+        or not _is_sha256_value(location_sha256)
+        or _sha256_path(_completion_ref_path(root, location_ref, prefix=None)) != location_sha256
+        or not _accepted_typed_binding_matches(
+            product_context,
+            record_type="RobotFrameLocationRecord",
+            record_ref=location_ref,
+            record_sha256=str(location_sha256),
+        )
+        or not _finite_vector(value.get("translation_m"), 3)
+        or not _finite_vector(value.get("cad_dimensions_m"), 3, positive=True)
+        or not isinstance(support_plane, Mapping)
+        or set(support_plane) != {"point_m", "normal", "rms_distance_m"}
+        or not _finite_vector(support_plane.get("point_m"), 3)
+        or not _unit_vector(support_plane.get("normal"))
+        or not _finite_nonnegative(support_plane.get("rms_distance_m"))
+        or _validate_embedded_hash_refs(value, root) != 4
+    ):
+        raise GroundingContractError(f"{state_name} Cartesian reachability v3 is inconsistent.")
+
+
+def _validate_cartesian_plan_record_v3(
+    validation: Mapping[str, object],
+    *,
+    reach: Mapping[str, object],
+    process_symbol: str,
+) -> None:
+    _require_exact_keys(
+        validation,
+        _PLAN_VALIDATION_V3_KEYS,
+        "PlanOnlyFeasibilityValidationRecord v3",
+    )
+    checked = [
+        "live_tf",
+        "collision_aware_cartesian_pick_path",
+        "collision_aware_cartesian_transfer_place_path",
+        "complete_path_fraction",
+    ]
+    unvalidated = [
+        "grasp_contact",
+        "gripper_actuation",
+        "attached_part_collision_geometry",
+        f"{process_symbol}_tolerance",
+        "force_control",
+        "final_constrained_insertion_stroke",
+    ]
+    parameters = validation.get("cartesian_parameters")
+    phases = validation.get("phases")
+    live_start_pose = validation.get("live_start_pose")
+    ee_to_tcp = validation.get("ee_to_tcp_transform")
+    if (
+        validation.get("execution_mode") != "simulation"
+        or validation.get("motion_mode") != "cartesian_pick_place"
+        or validation.get("validation_scope") != "cartesian_pick_place"
+        or validation.get("checked_constraints") != checked
+        or validation.get("unvalidated_constraints") != unvalidated
+        or validation.get("request_fingerprint") != reach.get("request_fingerprint")
+        or validation.get("phases") != reach.get("phase_results")
+        or not isinstance(parameters, Mapping)
+        or parameters
+        != {
+            "max_step_m": 0.01,
+            "jump_threshold": 0.0,
+            "avoid_collisions": True,
+            "minimum_fraction": 0.999,
+        }
+        or not _accepted_cartesian_phases(phases)
+        or not _valid_live_pose(live_start_pose)
+        or not _valid_ee_to_tcp(ee_to_tcp)
+        or not _cartesian_configuration_matches(
+            validation,
+            reach=reach,
+            live_start_pose=live_start_pose,
+            ee_to_tcp=ee_to_tcp,
+        )
+        or not _valid_cartesian_waypoints(validation.get("waypoints"))
+    ):
+        raise GroundingContractError("Cartesian pick-and-place validation v3 is inconsistent.")
+
+
+def _accepted_cartesian_phases(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"pick", "place"}:
+        return False
+    expected_roles = {
+        "pick": ["pick_approach", "grasp", "pick_retreat"],
+        "place": ["transfer", "place_approach", "placement", "place_retreat"],
+    }
+    for phase, roles in expected_roles.items():
+        result = value.get(phase)
+        if (
+            not isinstance(result, Mapping)
+            or set(result)
+            != {
+                "phase",
+                "status",
+                "waypoint_roles",
+                "fraction",
+                "moveit_error_code",
+                "terminal_state_available",
+                "message",
+            }
+            or result.get("phase") != phase
+            or result.get("status") != "accepted"
+            or result.get("waypoint_roles") != roles
+            or not _finite_nonnegative(result.get("fraction"))
+            or float(result["fraction"]) < 0.999
+            or float(result["fraction"]) > 1.0
+            or result.get("moveit_error_code") != 1
+            or result.get("terminal_state_available") is not True
+            or not isinstance(result.get("message"), str)
+            or not result.get("message")
+        ):
+            return False
+    return True
+
+
+def _valid_cartesian_targets(
+    value: object,
+    *,
+    current_state: object,
+    desired_state: object,
+) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _CARTESIAN_TARGET_KEYS
+        or not isinstance(current_state, Mapping)
+        or not isinstance(desired_state, Mapping)
+    ):
+        return False
+    current_support = current_state.get("support_plane")
+    desired_support = desired_state.get("support_plane")
+    offsets = value.get("motion_offsets")
+    part_height = value.get("part_height_m")
+    if (
+        not isinstance(current_support, Mapping)
+        or not isinstance(desired_support, Mapping)
+        or not isinstance(offsets, Mapping)
+        or set(offsets) != _CARTESIAN_MOTION_OFFSET_KEYS
+        or not _finite_nonnegative(part_height)
+        or float(part_height) <= 0.0
+        or not all(_finite_nonnegative(item) for item in offsets.values())
+        or float(offsets["pick_tcp_z_bias_min_m"]) > float(offsets["pick_tcp_z_bias_max_m"])
+    ):
+        return False
+    current_dimensions = current_state.get("cad_dimensions_m")
+    desired_dimensions = desired_state.get("cad_dimensions_m")
+    if (
+        not _vectors_close(value.get("pick_object_center_m"), current_state.get("translation_m"))
+        or not _vectors_close(value.get("pick_support_point_m"), current_support.get("point_m"))
+        or not _vectors_close(value.get("pick_surface_normal"), current_support.get("normal"))
+        or not _vectors_close(value.get("place_support_point_m"), desired_support.get("point_m"))
+        or not _vectors_close(value.get("place_surface_normal"), desired_support.get("normal"))
+        or not _vectors_close(value.get("part_dimensions_m"), current_dimensions)
+        or not _vectors_close(value.get("support_dimensions_m"), desired_dimensions)
+        or not _finite_vector(current_dimensions, 3, positive=True)
+        or not math.isclose(
+            float(part_height),
+            min(float(item) for item in current_dimensions),  # type: ignore[union-attr]
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    ):
+        return False
+    support_point = desired_support.get("point_m")
+    support_normal = desired_support.get("normal")
+    if not _finite_vector(support_point, 3) or not _unit_vector(support_normal):
+        return False
+    expected_place_center = [
+        float(support_point[index])  # type: ignore[index]
+        + float(support_normal[index]) * float(part_height) * 0.5  # type: ignore[index]
+        for index in range(3)
+    ]
+    return _vectors_close(value.get("place_object_center_m"), expected_place_center)
+
+
+def _cartesian_configuration_matches(
+    validation: Mapping[str, object],
+    *,
+    reach: Mapping[str, object],
+    live_start_pose: object,
+    ee_to_tcp: object,
+) -> bool:
+    configured = (
+        "moveit_group",
+        "end_effector_link",
+        "tcp_link",
+        "target_frame",
+        "cartesian_path_service",
+    )
+    return (
+        all(
+            isinstance(validation.get(field), str) and validation.get(field) for field in configured
+        )
+        and validation.get("target_frame") == reach.get("target_frame")
+        and isinstance(live_start_pose, Mapping)
+        and live_start_pose.get("frame_id") == validation.get("target_frame")
+        and live_start_pose.get("link_name") == validation.get("end_effector_link")
+        and isinstance(ee_to_tcp, Mapping)
+        and ee_to_tcp.get("parent_link") == validation.get("end_effector_link")
+        and ee_to_tcp.get("child_link") == validation.get("tcp_link")
+    )
+
+
+def _vectors_close(left: object, right: object) -> bool:
+    return (
+        _finite_vector(left, 3)
+        and _finite_vector(right, 3)
+        and all(
+            math.isclose(float(left[index]), float(right[index]), rel_tol=1e-9, abs_tol=1e-9)  # type: ignore[index]
+            for index in range(3)
+        )
+    )
+
+
+def _valid_live_pose(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"frame_id", "link_name", "position_m", "orientation_xyzw"}
+        and isinstance(value.get("frame_id"), str)
+        and bool(value.get("frame_id"))
+        and isinstance(value.get("link_name"), str)
+        and bool(value.get("link_name"))
+        and _finite_vector(value.get("position_m"), 3)
+        and _unit_quaternion(value.get("orientation_xyzw"))
+    )
+
+
+def _valid_ee_to_tcp(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"parent_link", "child_link", "translation_m", "rotation_xyzw"}
+        and isinstance(value.get("parent_link"), str)
+        and bool(value.get("parent_link"))
+        and isinstance(value.get("child_link"), str)
+        and bool(value.get("child_link"))
+        and _finite_vector(value.get("translation_m"), 3)
+        and _unit_quaternion(value.get("rotation_xyzw"))
+    )
+
+
+def _valid_cartesian_waypoints(value: object) -> bool:
+    expected = [
+        ("pick", "pick_approach"),
+        ("pick", "grasp"),
+        ("pick", "pick_retreat"),
+        ("place", "transfer"),
+        ("place", "place_approach"),
+        ("place", "placement"),
+        ("place", "place_retreat"),
+    ]
+    if not isinstance(value, list) or len(value) != len(expected):
+        return False
+    for item, (phase, role) in zip(value, expected, strict=True):
+        pose = item.get("pose") if isinstance(item, Mapping) else None
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"phase", "role", "pose"}
+            or item.get("phase") != phase
+            or item.get("role") != role
+            or not isinstance(pose, Mapping)
+            or set(pose) != {"position_m", "orientation_xyzw"}
+            or not _finite_vector(pose.get("position_m"), 3)
+            or not _unit_quaternion(pose.get("orientation_xyzw"))
+        ):
+            return False
+    return True
+
+
+def _finite_nonnegative(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def _finite_vector(value: object, length: int, *, positive: bool = False) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and len(value) == length
+        and all(
+            not isinstance(item, bool)
+            and isinstance(item, (int, float))
+            and math.isfinite(float(item))
+            and (not positive or float(item) > 0.0)
+            for item in value
+        )
+    )
+
+
+def _unit_vector(value: object) -> bool:
+    return (
+        _finite_vector(value, 3)
+        and abs(
+            math.sqrt(sum(float(item) ** 2 for item in value)) - 1.0  # type: ignore[union-attr]
+        )
+        <= 1e-5
+    )
+
+
+def _unit_quaternion(value: object) -> bool:
+    return (
+        _finite_vector(value, 4)
+        and abs(
+            math.sqrt(sum(float(item) ** 2 for item in value)) - 1.0  # type: ignore[union-attr]
+        )
+        <= 1e-5
+    )
+
+
 def _accepted_typed_binding_matches(
     product_context: ProductContextView,
     *,
@@ -1938,13 +2435,16 @@ def _accepted_typed_binding_matches(
     record_ref: str,
     record_sha256: str,
 ) -> bool:
-    return sum(
-        binding.record_type == record_type
-        and binding.status == "accepted"
-        and binding.record_ref == record_ref
-        and binding.record_sha256 == record_sha256
-        for binding in product_context.typed_bindings
-    ) == 1
+    return (
+        sum(
+            binding.record_type == record_type
+            and binding.status == "accepted"
+            and binding.record_ref == record_ref
+            and binding.record_sha256 == record_sha256
+            for binding in product_context.typed_bindings
+        )
+        == 1
+    )
 
 
 def _validated_fingerprinted_record(
@@ -2038,8 +2538,7 @@ def _completion_allocation_authority(
         or workcell.get("registry_fingerprint") != registry_fingerprint
         or workcell.get("ppr_namespace") != registry.get("ppr_namespace")
         or workcell.get("resource_namespace") != registry.get("resource_namespace")
-        or workcell.get("workcell_profile_sha256")
-        != registry.get("workcell_profile_sha256")
+        or workcell.get("workcell_profile_sha256") != registry.get("workcell_profile_sha256")
     ):
         raise GroundingContractError("Pinned registry/workcell lineage is inconsistent.")
 
@@ -2380,7 +2879,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
     registry: ResourceRegistrySnapshot | None = None,
     workcell: PredefinedWorkcellSnapshot | None = None,
 ) -> Path:
-    """Persist one process-aware, endpoint-motion-only PA allocation."""
+    """Persist one process-aware, no-motion PA allocation."""
     root = Path(interaction_root).resolve()
     if product_context.product_requirement != product_requirement:
         raise GroundingContractError(
@@ -2458,7 +2957,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
     )
     validation = _read_json_mapping(
         validation_path,
-        "PlanOnlyFeasibilityValidationRecord v2",
+        "PlanOnlyFeasibilityValidationRecord",
     )
     evidence_presentation_ref = _required_string(
         selection["evidence_presentation_ref"],
@@ -2511,9 +3010,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
     tool_refs = tuple(
         {
             "ref": ref,
-            "sha256": _sha256_path(
-                _completion_ref_path(root, ref, prefix=("interaction_record",))
-            ),
+            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
         }
         for ref in tool_call_refs
     )
@@ -2541,6 +3038,15 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         review["fingerprint"],
         "semantic_review_fingerprint",
     )
+    validation_scope = _required_string(
+        validation.get("validation_scope"),
+        "validation_scope",
+    )
+    allocation_label = (
+        "validated Cartesian pick-place allocation"
+        if validation_scope == "cartesian_pick_place"
+        else "validated endpoint-motion allocation"
+    )
     common: dict[str, object] = {
         "process_symbol": process_symbol,
         "process_iri": process_iri,
@@ -2562,9 +3068,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         "evidence_presentation_fingerprint": selection["evidence_presentation_fingerprint"],
         "allocation_presentation_ref": allocation_presentation_ref,
         "allocation_presentation_sha256": _sha256_path(allocation_presentation_path),
-        "allocation_presentation_fingerprint": selection[
-            "allocation_presentation_fingerprint"
-        ],
+        "allocation_presentation_fingerprint": selection["allocation_presentation_fingerprint"],
         "resource_selection_ref": resource_selection_ref,
         "resource_selection_sha256": _sha256_path(selection_path),
         "resource_selection_fingerprint": selection_fingerprint,
@@ -2574,10 +3078,10 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         "robot_agent_validation_ref": validation_ref,
         "robot_agent_validation_sha256": _sha256_path(validation_path),
         "robot_agent_validation_fingerprint": validation_fingerprint,
-        "validation_scope": "endpoint_motion",
+        "validation_scope": validation_scope,
         "checked_constraints": validation["checked_constraints"],
         "unvalidated_constraints": validation["unvalidated_constraints"],
-        "allocation_label": "validated endpoint-motion allocation",
+        "allocation_label": allocation_label,
         "motion_executed": False,
     }
     contract: dict[str, object] = {
@@ -3294,7 +3798,7 @@ def _load_pa_context_grounding_completion_v6(  # noqa: C901
     root: Path,
     value: Mapping[str, object],
 ) -> PAContextGroundingCompletionV6:
-    """Validate the process-aware endpoint-motion allocation completion."""
+    """Validate the process-aware plan-only allocation completion."""
     common_fields = {
         "process_symbol",
         "process_iri",
@@ -3357,25 +3861,45 @@ def _load_pa_context_grounding_completion_v6(  # noqa: C901
     _require_exact_keys(value, expected, "PAContextGroundingCompletion v6")
     payload = dict(value)
     fingerprint = payload.pop("fingerprint", None)
-    checked_constraints = [
-        "positional_ik",
-        "collision_aware_endpoints",
-        "path_between_endpoints",
-    ]
-    unvalidated_constraints = [
-        "grasping",
-        "end_effector_orientation",
-        "attached_object_geometry",
-        f"{value['process_symbol']}_tolerance",
-        "force_contact",
-        "insertion_constraints",
-    ]
+    validation_scope = value.get("validation_scope")
+    if validation_scope == "cartesian_pick_place":
+        allocation_label = "validated Cartesian pick-place allocation"
+        checked_constraints = [
+            "live_tf",
+            "collision_aware_cartesian_pick_path",
+            "collision_aware_cartesian_transfer_place_path",
+            "complete_path_fraction",
+        ]
+        unvalidated_constraints = [
+            "grasp_contact",
+            "gripper_actuation",
+            "attached_part_collision_geometry",
+            f"{value['process_symbol']}_tolerance",
+            "force_control",
+            "final_constrained_insertion_stroke",
+        ]
+    elif validation_scope == "endpoint_motion":
+        allocation_label = "validated endpoint-motion allocation"
+        checked_constraints = [
+            "positional_ik",
+            "collision_aware_endpoints",
+            "path_between_endpoints",
+        ]
+        unvalidated_constraints = [
+            "grasping",
+            "end_effector_orientation",
+            "attached_object_geometry",
+            f"{value['process_symbol']}_tolerance",
+            "force_contact",
+            "insertion_constraints",
+        ]
+    else:
+        raise GroundingContractError("PAContextGroundingCompletion v6 validation scope is invalid.")
     if (
         value.get("schema_version") != 6
         or value.get("record_type") != "PAContextGroundingCompletion"
         or value.get("status") != "grounding complete"
-        or value.get("allocation_label") != "validated endpoint-motion allocation"
-        or value.get("validation_scope") != "endpoint_motion"
+        or value.get("allocation_label") != allocation_label
         or value.get("checked_constraints") != checked_constraints
         or value.get("unvalidated_constraints") != unvalidated_constraints
         or value.get("motion_executed") is not False
@@ -3399,7 +3923,7 @@ def _load_pa_context_grounding_completion_v6(  # noqa: C901
         or decision.get("failure") is not None
         or not isinstance(output, Mapping)
         or output.get("grounding_status") != "complete"
-        or output.get("allocation_label") != "validated endpoint-motion allocation"
+        or output.get("allocation_label") != allocation_label
         or output.get("ontology_projection_ref") != value["ontology_projection_ref"]
         or output.get("resource_selection_ref") != value["resource_selection_ref"]
     ):
@@ -3477,10 +4001,8 @@ def _load_pa_context_grounding_completion_v6(  # noqa: C901
     if (
         allocation_authority.process_symbol != value["process_symbol"]
         or allocation_authority.tbox_fingerprint != value["tbox_fingerprint"]
-        or allocation_authority.registry_fingerprint
-        != value["registry_snapshot_fingerprint"]
-        or allocation_authority.workcell_fingerprint
-        != value["workcell_snapshot_fingerprint"]
+        or allocation_authority.registry_fingerprint != value["registry_snapshot_fingerprint"]
+        or allocation_authority.workcell_fingerprint != value["workcell_snapshot_fingerprint"]
     ):
         raise GroundingContractError("Native v6 allocation authority is inconsistent.")
 

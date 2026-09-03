@@ -13,6 +13,9 @@ import pytest
 from rdflib import Namespace, URIRef
 from rdflib.namespace import RDF
 
+from cais_spade_llm.spec2primitives.adapters.moveit_plan_only import (
+    _cartesian_waypoints,
+)
 from cais_spade_llm.spec2primitives.agents.pa import resource_grounding
 from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
     AllocationEvidenceSource,
@@ -27,12 +30,15 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    CartesianReachabilityRequest,
     ReachabilityCheckRecord,
     ResourceGroundingError,
     RobotFrameLocationEvidenceError,
     candidate_resource_catalog,
     commit_resource_assignment,
+    persist_cartesian_reachability,
     persist_pa_resource_selection,
+    prepare_cartesian_reachability,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     check_resource_reachability as _runtime_check_resource_reachability,
@@ -77,6 +83,70 @@ class _CapturingFeasibilityRuntime:
             "current_state": dict(endpoint),
             "desired_state": dict(endpoint),
             "feedback": None,
+        }
+
+
+class _CapturingCartesianRuntime:
+    def __init__(self, *, status: str = "accepted") -> None:
+        self.status = status
+        self.requests: list[Mapping[str, object]] = []
+
+    async def validate_plan_only_allocation(
+        self,
+        request: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        self.requests.append(dict(request))
+        live_start_pose = {
+            "frame_id": "world",
+            "link_name": str(request["end_effector_link"]),
+            "position_m": [0.0, -0.5, 1.3],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+        ee_to_tcp = {
+            "parent_link": str(request["end_effector_link"]),
+            "child_link": str(request["tcp_link"]),
+            "translation_m": [0.0, 0.0, -0.17],
+            "rotation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+        waypoints = _cartesian_waypoints(
+            request,
+            live_start_pose=live_start_pose,
+            ee_to_tcp=ee_to_tcp,
+        )
+
+        def phase(name: str, roles: list[str]) -> Mapping[str, object]:
+            phase_status = (
+                "accepted" if self.status == "rejected" and name == "pick" else self.status
+            )
+            fraction = 1.0 if phase_status == "accepted" else 0.5
+            error_code = 1 if phase_status == "accepted" else -1
+            return {
+                "phase": name,
+                "status": phase_status,
+                "waypoint_roles": roles,
+                "fraction": fraction,
+                "moveit_error_code": error_code,
+                "terminal_state_available": phase_status == "accepted",
+                "message": f"{name} Cartesian path {phase_status}",
+            }
+
+        return {
+            "status": self.status,
+            "live_start_pose": live_start_pose,
+            "ee_to_tcp_transform": ee_to_tcp,
+            "waypoints": waypoints,
+            "phases": {
+                "pick": phase(
+                    "pick",
+                    ["pick_approach", "grasp", "pick_retreat"],
+                ),
+                "place": phase(
+                    "place",
+                    ["transfer", "place_approach", "placement", "place_retreat"],
+                ),
+            },
+            "feedback": (None if self.status == "accepted" else "Cartesian path rejected"),
+            "motion_executed": False,
         }
 
 
@@ -140,12 +210,8 @@ def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
         workcell=workcell,
         resource_symbol="beta_bot",
         allocation_presentation=presentation,
-        current_state_evidence_handle=handles[
-            _location_candidate_key(root, current_path)
-        ],
-        desired_state_evidence_handle=handles[
-            _location_candidate_key(root, desired_path)
-        ],
+        current_state_evidence_handle=handles[_location_candidate_key(root, current_path)],
+        desired_state_evidence_handle=handles[_location_candidate_key(root, desired_path)],
         current_location_record_path=current_path,
         desired_location_record_path=desired_path,
     )
@@ -237,6 +303,249 @@ def test_reachability_checks_both_states_for_the_explicit_pa_resource(
     assert check.desired_state.distance_from_reach_origin_m >= 0.0
     assert "selected_resource" not in check.to_record()
     check.assert_unchanged()
+
+
+def test_live_cartesian_reachability_ignores_static_workspace_box(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        desired_y=0.144,
+    )
+
+    prepared = prepare_cartesian_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol="xarm6",
+        allocation_presentation=fixture["presentation"],
+        current_state_evidence_handle=fixture["current_handle"],
+        desired_state_evidence_handle=fixture["desired_handle"],
+        current_location_record_path=fixture["current_location"],
+        desired_location_record_path=fixture["desired_location"],
+        current_cad_correspondence_record_path=fixture["current_correspondence"],
+        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
+    )
+    runtime = _CapturingCartesianRuntime()
+    validation = asyncio.run(
+        validate_provisional_allocation(
+            runtime,
+            interaction_root=root,
+            workcell=workcell,
+            reachability=prepared,
+        )
+    )
+    reachability = persist_cartesian_reachability(
+        interaction_root=root,
+        prepared=prepared,
+        robot_agent_validation_path=validation.record_path,
+    )
+    selection = persist_pa_resource_selection(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        reachability=reachability,
+        allocation_presentation=fixture["presentation"],
+        robot_agent_validation_path=validation.record_path,
+    )
+
+    assert isinstance(prepared, CartesianReachabilityRequest)
+    xarm_manifest = json.loads(manifest_paths["xarm6"].read_text(encoding="utf-8"))
+    assert (
+        xarm_manifest["xarm6"]["gazebo"]["static_capabilities"]["workspace_bounds"]["y_max_m"]
+        == 0.1
+    )
+    assert prepared.desired_state.translation_m[1] == pytest.approx(0.144)
+    assert prepared.cartesian_targets["place_object_center_m"] != list(
+        prepared.desired_state.translation_m
+    )
+    assert runtime.requests[0]["motion_mode"] == "cartesian_pick_place"
+    assert runtime.requests[0]["cartesian_parameters"] == {
+        "max_step_m": 0.01,
+        "jump_threshold": 0.0,
+        "avoid_collisions": True,
+        "minimum_fraction": 0.999,
+    }
+    assert reachability.schema_version == 3
+    assert reachability.status == "accepted"
+    assert "in_workspace" not in reachability.to_record()["desired_state"]
+    assert "gripper_reach" not in json.dumps(reachability.to_record())
+    assert validation.schema_version == 3
+    assert validation.status == "accepted"
+    assert validation.to_record()["motion_executed"] is False
+    assert selection.selected_resource_symbol == "xarm6"
+    assert selection.allocation_status == "accepted"
+
+
+@pytest.mark.parametrize("resource_symbol", ["xarm6", "ur5e"])
+def test_cartesian_request_uses_pa_chosen_resource_controller_profile(
+    tmp_path: Path,
+    resource_symbol: str,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        desired_y=0.144,
+    )
+
+    prepared = prepare_cartesian_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol=resource_symbol,
+        allocation_presentation=fixture["presentation"],
+        current_state_evidence_handle=fixture["current_handle"],
+        desired_state_evidence_handle=fixture["desired_handle"],
+        current_location_record_path=fixture["current_location"],
+        desired_location_record_path=fixture["desired_location"],
+        current_cad_correspondence_record_path=fixture["current_correspondence"],
+        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
+    )
+
+    assert prepared.resource_symbol == resource_symbol
+    assert prepared.resource_jid == f"{resource_symbol}@localhost"
+    assert prepared.controller.moveit_group == f"{resource_symbol}_manipulator"
+    assert prepared.controller.end_effector_link == f"{resource_symbol}_ee"
+    assert prepared.controller.tcp_link == f"{resource_symbol}_tcp"
+    assert prepared.controller.cartesian_path_service == "/compute_cartesian_path"
+
+
+def test_cartesian_reachability_fails_closed_without_support_plane(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        desired_y=0.144,
+        support_status="unavailable",
+    )
+
+    with pytest.raises(ResourceGroundingError, match="support-plane evidence"):
+        prepare_cartesian_reachability(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            resource_symbol="xarm6",
+            allocation_presentation=fixture["presentation"],
+            current_state_evidence_handle=fixture["current_handle"],
+            desired_state_evidence_handle=fixture["desired_handle"],
+            current_location_record_path=fixture["current_location"],
+            desired_location_record_path=fixture["desired_location"],
+            current_cad_correspondence_record_path=fixture["current_correspondence"],
+            desired_cad_correspondence_record_path=fixture["desired_correspondence"],
+        )
+
+
+def test_cartesian_reachability_rejects_tampered_robot_frame_location(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        desired_y=0.144,
+    )
+    current_location = fixture["current_location"]
+    assert isinstance(current_location, Path)
+    record = json.loads(current_location.read_text(encoding="utf-8"))
+    record["translated_location_m"][0] += 0.1
+    current_location.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ResourceGroundingError, match="calibrated candidate"):
+        prepare_cartesian_reachability(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            resource_symbol="xarm6",
+            allocation_presentation=fixture["presentation"],
+            current_state_evidence_handle=fixture["current_handle"],
+            desired_state_evidence_handle=fixture["desired_handle"],
+            current_location_record_path=current_location,
+            desired_location_record_path=fixture["desired_location"],
+            current_cad_correspondence_record_path=fixture["current_correspondence"],
+            desired_cad_correspondence_record_path=fixture["desired_correspondence"],
+        )
+
+
+def test_rejected_cartesian_plan_cannot_commit_or_substitute_resource(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        desired_y=0.144,
+    )
+    prepared = prepare_cartesian_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol="xarm6",
+        allocation_presentation=fixture["presentation"],
+        current_state_evidence_handle=fixture["current_handle"],
+        desired_state_evidence_handle=fixture["desired_handle"],
+        current_location_record_path=fixture["current_location"],
+        desired_location_record_path=fixture["desired_location"],
+        current_cad_correspondence_record_path=fixture["current_correspondence"],
+        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
+    )
+    validation = asyncio.run(
+        validate_provisional_allocation(
+            _CapturingCartesianRuntime(status="rejected"),
+            interaction_root=root,
+            workcell=workcell,
+            reachability=prepared,
+        )
+    )
+    reachability = persist_cartesian_reachability(
+        interaction_root=root,
+        prepared=prepared,
+        robot_agent_validation_path=validation.record_path,
+    )
+
+    assert reachability.status == "rejected"
+    assert validation.status == "rejected"
+    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
+        persist_pa_resource_selection(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            reachability=reachability,
+            allocation_presentation=fixture["presentation"],
+            robot_agent_validation_path=validation.record_path,
+        )
+    assert not (root / "products/grounding/resource_selection").exists()
 
 
 def test_reversing_registry_order_cannot_override_the_pa_choice(
@@ -493,6 +802,272 @@ def check_resource_reachability(  # noqa: PLR0913
     )
 
 
+def _cartesian_grounding_fixture(  # noqa: PLR0913
+    root: Path,
+    *,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    desired_y: float,
+    support_status: str = "detected",
+) -> dict[str, object]:
+    fixture_root = root / "products/grounding/cartesian_fixture"
+    fixture_root.mkdir(parents=True, exist_ok=True)
+
+    def write(relative: str, value: Mapping[str, object]) -> Path:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    current_cad = write(
+        "products/grounding/cartesian_fixture/current_cad.json",
+        {
+            "schema_version": 1,
+            "record_type": "CADMeshRecord",
+            "stored_units": "m",
+            "bounds_m": {"size": [0.042, 0.042, 0.02]},
+        },
+    )
+    desired_cad = write(
+        "products/grounding/cartesian_fixture/desired_cad.json",
+        {
+            "schema_version": 1,
+            "record_type": "CADMeshRecord",
+            "stored_units": "m",
+            "bounds_m": {"size": [0.01, 0.01, 0.02]},
+        },
+    )
+    identity = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    current_calibration = write(
+        "products/grounding/cartesian_fixture/current_calibration.json",
+        {
+            "schema_version": 1,
+            "record_type": "CameraToRobotCalibrationRecord",
+            "source_frame": "neutral_current_frame",
+            "target_frame": "world",
+            "target_from_camera_transform": identity,
+        },
+    )
+    desired_calibration = write(
+        "products/grounding/cartesian_fixture/desired_calibration.json",
+        {
+            "schema_version": 1,
+            "record_type": "CameraToRobotCalibrationRecord",
+            "source_frame": "neutral_desired_frame",
+            "target_frame": "world",
+            "target_from_camera_transform": identity,
+        },
+    )
+    support_plane = {
+        "status": support_status,
+        "candidate_filtering_applied": support_status == "detected",
+        "normal": [0.0, 0.0, 1.0],
+        "offset_m": -1.04,
+        "rms_distance_m": 0.001,
+    }
+    segmentation = write(
+        "products/grounding/cartesian_fixture/segmentation.json",
+        {
+            "schema_version": 2,
+            "record_type": "RGBDSegmentationRecord",
+            "cameras": [
+                {
+                    "observation_handle": "view_current",
+                    "frame": "neutral_current_frame",
+                    "support_plane": support_plane,
+                    "candidates": [
+                        {
+                            "candidate_handle": "candidate_current",
+                            "centroid_m": [0.4, -0.3, 1.06],
+                        }
+                    ],
+                },
+                {
+                    "observation_handle": "view_desired",
+                    "frame": "neutral_desired_frame",
+                    "support_plane": support_plane,
+                    "candidates": [
+                        {
+                            "candidate_handle": "candidate_desired",
+                            "centroid_m": [0.0, desired_y, 1.06],
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+    segmentation_ref = segmentation.relative_to(root).as_posix()
+    segmentation_sha256 = hashlib.sha256(segmentation.read_bytes()).hexdigest()
+
+    def location(
+        name: str,
+        *,
+        calibration: Path,
+        observation_handle: str,
+        candidate_handle: str,
+        source_frame: str,
+        translation: list[float],
+    ) -> Path:
+        return write(
+            f"products/grounding/cartesian_fixture/{name}_location.json",
+            {
+                "schema_version": 2,
+                "record_type": "RobotFrameLocationRecord",
+                "method": "calibrated_neutral_candidate_center",
+                "source_segmentation": {
+                    "ref": segmentation_ref,
+                    "sha256": segmentation_sha256,
+                },
+                "source_calibration": {
+                    "ref": calibration.relative_to(root).as_posix(),
+                    "sha256": hashlib.sha256(calibration.read_bytes()).hexdigest(),
+                },
+                "candidate_reference": {
+                    "observation_handle": observation_handle,
+                    "candidate_handle": candidate_handle,
+                },
+                "observation_timestamp_ns": 1,
+                "source_frame": source_frame,
+                "target_frame": "world",
+                "translated_location_m": translation,
+                "location": "available",
+                "robot_frame_conversion": "accepted",
+            },
+        )
+
+    current_location = location(
+        "current",
+        calibration=current_calibration,
+        observation_handle="view_current",
+        candidate_handle="candidate_current",
+        source_frame="neutral_current_frame",
+        translation=[0.4, -0.3, 1.06],
+    )
+    desired_location = location(
+        "desired",
+        calibration=desired_calibration,
+        observation_handle="view_desired",
+        candidate_handle="candidate_desired",
+        source_frame="neutral_desired_frame",
+        translation=[0.0, desired_y, 1.06],
+    )
+
+    def correspondence(
+        name: str,
+        *,
+        cad_path: Path,
+        observation_handle: str,
+        candidate_handle: str,
+        status: str,
+    ) -> Path:
+        candidate = {
+            "observation_handle": observation_handle,
+            "candidate_handle": candidate_handle,
+            "within_size_tolerance": True,
+        }
+        return write(
+            f"products/grounding/cartesian_fixture/{name}_correspondence.json",
+            {
+                "schema_version": 2,
+                "record_type": "CADSizeCorrespondenceRecord",
+                "CAD": {
+                    "record": {
+                        "ref": cad_path.relative_to(root).as_posix(),
+                        "sha256": hashlib.sha256(cad_path.read_bytes()).hexdigest(),
+                    }
+                },
+                "segmentation": {
+                    "record": {
+                        "ref": segmentation_ref,
+                        "sha256": segmentation_sha256,
+                    }
+                },
+                "plausible_candidates": [candidate],
+                "selected_candidate": candidate if status == "accepted" else None,
+                "CAD_correspondence": status,
+            },
+        )
+
+    current_correspondence = correspondence(
+        "current",
+        cad_path=current_cad,
+        observation_handle="view_current",
+        candidate_handle="candidate_current",
+        status="accepted",
+    )
+    desired_correspondence = correspondence(
+        "desired",
+        cad_path=desired_cad,
+        observation_handle="view_desired",
+        candidate_handle="candidate_desired",
+        status="ambiguous",
+    )
+
+    evidence_presentation = load_or_create_evidence_presentation(
+        root,
+        sources=((None, "observation", "fresh_on_call"),),
+        explicit_order=("__live_observation__",),
+    )
+    evidence_sources = (
+        AllocationEvidenceSource(
+            canonical_key=f"{segmentation_ref}#/cameras/0/candidates/0",
+            record_type="RGBDSegmentationRecord",
+            record_ref=segmentation_ref,
+            record_sha256=segmentation_sha256,
+            field_path="/cameras/0/candidates/0",
+            observation_handle="view_current",
+            candidate_handle="candidate_current",
+            source_frame="neutral_current_frame",
+            neutral_projection={"candidate_available": True},
+        ),
+        AllocationEvidenceSource(
+            canonical_key=f"{segmentation_ref}#/cameras/1/candidates/0",
+            record_type="RGBDSegmentationRecord",
+            record_ref=segmentation_ref,
+            record_sha256=segmentation_sha256,
+            field_path="/cameras/1/candidates/0",
+            observation_handle="view_desired",
+            candidate_handle="candidate_desired",
+            source_frame="neutral_desired_frame",
+            neutral_projection={"candidate_available": True},
+        ),
+    )
+    abox = load_interaction_abox(root, tbox)
+    catalog = candidate_resource_catalog(abox, registry, workcell)
+    presentation = load_or_create_allocation_presentation(
+        root,
+        evidence_presentation=evidence_presentation,
+        process_symbol="assembly",
+        process_iri=PROCESS_IRI,
+        feature_iri=f"{abox.namespace}feature_0001",
+        current_state_iri=f"{abox.namespace}currentstate_0001",
+        desired_state_iri=f"{abox.namespace}desiredstate_0001",
+        resources=tuple(
+            (symbol, str(entry["resource_iri"]), str(entry["resource_jid"]))
+            for symbol, entry in catalog.items()
+        ),
+        evidence_sources=evidence_sources,
+        explicit_resource_order=tuple(catalog),
+        explicit_candidate_order=tuple(source.canonical_key for source in evidence_sources),
+    )
+    entries = {entry.canonical_key: entry.pa_handle for entry in presentation.evidence_entries}
+    return {
+        "presentation": presentation,
+        "current_handle": entries[evidence_sources[0].canonical_key],
+        "desired_handle": entries[evidence_sources[1].canonical_key],
+        "current_location": current_location,
+        "desired_location": desired_location,
+        "current_correspondence": current_correspondence,
+        "desired_correspondence": desired_correspondence,
+    }
+
+
 def _allocation_presentation_for_locations(  # noqa: PLR0913
     root: Path,
     *,
@@ -534,9 +1109,7 @@ def _allocation_presentation_for_locations(  # noqa: PLR0913
                 observation_handle=(
                     str(observation_handle) if observation_handle is not None else None
                 ),
-                candidate_handle=(
-                    str(candidate_handle) if candidate_handle is not None else None
-                ),
+                candidate_handle=(str(candidate_handle) if candidate_handle is not None else None),
                 source_frame=source_frame,
                 neutral_projection={"location_record_available": True},
             )
@@ -559,9 +1132,7 @@ def _allocation_presentation_for_locations(  # noqa: PLR0913
         explicit_resource_order=tuple(catalog),
         explicit_candidate_order=tuple(source.canonical_key for source in sources),
     )
-    handles = {
-        entry.canonical_key: entry.pa_handle for entry in presentation.evidence_entries
-    }
+    handles = {entry.canonical_key: entry.pa_handle for entry in presentation.evidence_entries}
     return presentation, handles
 
 
@@ -753,9 +1324,20 @@ def _write_manifest(
                         "controller": {
                             "move_group": {
                                 "group_name": f"{symbol}_manipulator",
+                                "ee_link": f"{symbol}_ee",
                                 "tcp_link": f"{symbol}_tcp",
                                 "frame_id": "world",
-                            }
+                            },
+                            "services": {
+                                "cartesian_path": "/compute_cartesian_path",
+                            },
+                            "motion": {
+                                "approach_height_m": 0.2,
+                                "recovery_observed_pick_approach_height_m": 0.06,
+                                "recovery_observed_pick_surface_clearance_m": 0.005,
+                                "pick_tcp_z_bias_min_m": 0.003,
+                                "pick_tcp_z_bias_max_m": 0.02,
+                            },
                         },
                     },
                 }

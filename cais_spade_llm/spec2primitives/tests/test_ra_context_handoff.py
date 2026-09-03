@@ -17,6 +17,7 @@ from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
 from cais_spade_llm.spec2primitives.adapters.in_process_robot_agent import (
     InProcessRobotAgentCompositionRuntime,
 )
+from cais_spade_llm.spec2primitives.agents.ra import context_handoff
 from cais_spade_llm.spec2primitives.agents.ra.context_handoff import (
     RAContextHandoffError,
     SelectedRAAssignmentEnvelope,
@@ -354,6 +355,27 @@ def test_robot_agent_precheck_rejection_never_invokes_moveit() -> None:
     assert response["current_state"]["status"] == "rejected"
     assert response["desired_state"]["status"] == "rejected"
     assert moveit.requests == []
+
+
+def test_cartesian_simulation_bypasses_static_robot_agent_precheck() -> None:
+    xarm6 = _LiveRobotAgent(jid="xarm6@localhost", feasibility_allowed=False)
+    ur5e = _LiveRobotAgent(jid="ur5e@localhost", feasibility_allowed=False)
+    moveit = _PlanOnlyRuntime()
+    runtime = InProcessRobotAgentCompositionRuntime(
+        _LiveRobotAgentHost([xarm6, ur5e]),
+        moveit_plan_only_runtime=moveit,
+    )
+    request = _plan_only_request("xarm6@localhost")
+    request["motion_mode"] = "cartesian_pick_place"
+
+    response = asyncio.run(runtime.validate_plan_only_allocation(request))
+
+    assert response["status"] == "accepted"
+    assert xarm6.feasibility_calls == []
+    assert ur5e.feasibility_calls == []
+    assert len(moveit.requests) == 1
+    assert moveit.requests[0]["resource_jid"] == "xarm6@localhost"
+    assert moveit.requests[0]["motion_mode"] == "cartesian_pick_place"
 
 
 def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
@@ -1027,9 +1049,7 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert assignment_record["schema_version"] == 3
     assert assignment_record["process_symbol"] == "assembly"
     assert assignment_record["selected_resource_symbol"] == "xarm6"
-    assert assignment_record["allocation_label"] == (
-        "validated endpoint-motion allocation"
-    )
+    assert assignment_record["allocation_label"] == ("validated endpoint-motion allocation")
     assert assignment_record["validation_scope"] == "endpoint_motion"
     assert assignment_record["motion_executed"] is False
     assert assignment_record["current_state_evidence"]["evidence_handle"]
@@ -1081,6 +1101,37 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert diagnostic["primitive_symbols"] == ["detect_parts", "move_pose"]
     assert diagnostic["primitive_count"] == 2
     assert diagnostic["catalog_fingerprint"] == (second.primitive_catalog.catalog_fingerprint)
+
+
+def test_phase_5_assignment_schema_accepts_cartesian_validation_contract(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    capture = asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    assignment = _read_json(capture.assignment_path)
+    assignment["allocation_label"] = "validated Cartesian pick-place allocation"
+    assignment["validation_scope"] = "cartesian_pick_place"
+    assignment["checked_constraints"] = [
+        "live_tf",
+        "collision_aware_cartesian_pick_path",
+        "collision_aware_cartesian_transfer_place_path",
+        "complete_path_fraction",
+    ]
+    assignment["unvalidated_constraints"] = [
+        "grasp_contact",
+        "gripper_actuation",
+        "attached_part_collision_geometry",
+        "assembly_tolerance",
+        "force_control",
+        "final_constrained_insertion_stroke",
+    ]
+    assignment["fingerprint"] = _record_fingerprint(assignment)
+
+    parsed = context_handoff._assignment_from_mapping(assignment)
+
+    assert parsed.validation_scope == "cartesian_pick_place"
+    assert parsed.allocation_label == "validated Cartesian pick-place allocation"
+    assert parsed.checked_constraints == tuple(assignment["checked_constraints"])
 
 
 def test_phase_5_1_restart_preserves_legacy_catalog_and_exposes_latest_synthesis(

@@ -2,7 +2,19 @@
 
 RA means RobotAgent. This directory owns the implemented Phase 5.1
 contract-first assignment/context-snapshot boundary and Phase 5.2A structural
-primitive draft, plus future binding and robot-local validation work.
+primitive draft, plus the Phase 4 plan-only feasibility record boundary.
+
+## Implemented Phase 4 allocation validation
+
+For simulation allocation, the PA-requested `check_reachability` call contacts
+only the exact provisional RobotAgent JID and validates its execution mode. The
+Spec2Primitives adapter bypasses the shared recovery workspace precheck for this
+one `motion_mode: cartesian_pick_place` path and asks the configured live MoveIt
+`GetCartesianPath` service for chained pick and place phases. It uses live TF,
+the configured group and EE/TCP links, collision checking, `max_step = 0.01`,
+`jump_threshold = 0`, and a minimum fraction of `0.999`. It never contacts an
+execution action. Missing TF, service, CAD, or support evidence returns
+`needs_context`; physical mode retains its existing validation behavior.
 
 ## Implemented Phase 5.1
 
@@ -12,7 +24,7 @@ plan-only validation, resource selection, and assignment delta before
 persisting one `SelectedRAAssignmentEnvelope` v3. The envelope pins the exact
 process/resource, both state-evidence assignments, evidence and allocation
 presentations, registry/workcell snapshots, reachability, endpoint-motion
-validation, and no-motion claim. It tells the exact selected RA which
+or Cartesian validation, and no-motion claim. It tells the exact selected RA which
 requirement, specification, host-generated feature and state individuals, and
 process it owns. An injected
 `RobotAgentCompositionRuntime` must confirm that assignment before returning

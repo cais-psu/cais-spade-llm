@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -29,6 +30,7 @@ _CANDIDATE_OUTPUT_KEYS = {
     "description",
     "uncertainty",
 }
+_PART_IDENTITY_TERM = re.compile(r"\b(?:shaft|pin|peg|gear)s?\b", re.IGNORECASE)
 
 
 class ObservationCandidateReviewError(ValueError):
@@ -386,6 +388,10 @@ def _validated_output(
         candidate_handle = _nonempty(item["candidate_handle"], "candidate_handle")
         description = _nonempty(item["description"], "description")
         uncertainty = _nonempty(item["uncertainty"], "uncertainty")
+        if _PART_IDENTITY_TERM.search(description) or _PART_IDENTITY_TERM.search(uncertainty):
+            raise ObservationCandidateReviewError(
+                "Observation review must describe morphology without inferred part identity."
+            )
         if (
             observation_handle != expected_item.observation_handle
             or candidate_handle != expected_item.candidate_handle
@@ -434,17 +440,20 @@ def _request_text(candidates: Sequence[ObservationCandidateImage]) -> str:
     return (
         "Describe every supplied candidate in this exact order. The full source view "
         "provides spatial context and the following image is the candidate crop. Report "
-        "only visible shape, relative size, color, openings, shafts, surfaces, and support "
-        "relationships. Preserve the opaque handles exactly. Do not assign current_state, "
-        "desired_state, a process, a CAD identity, or a resource. State uncertainty rather "
-        f"than guessing. Expected handles:\n{json.dumps(handles, indent=2)}"
+        "only visible shape, relative size, color, openings, cylindrical forms, surfaces, "
+        "and support contacts or relationships. Describe morphology without naming a "
+        "candidate as a shaft, pin, peg, gear, or any other inferred part identity. "
+        "Preserve the opaque handles exactly. Do not assign current_state, desired_state, "
+        "a process, a CAD identity, or a resource. State uncertainty rather than guessing. "
+        f"Expected handles:\n{json.dumps(handles, indent=2)}"
     )
 
 
 _OPENAI_INSTRUCTIONS = (
     "You are the ontology-neutral observation reviewer for Spec2Primitives. Use only "
-    "the supplied images and opaque handles. Describe visible evidence without choosing "
-    "a product state, CAD file, process, robot, or execution action."
+    "the supplied images and opaque handles. Describe only morphology, dimensions, "
+    "surfaces, and support contacts. Do not infer a part identity such as shaft or pin, "
+    "and do not choose a product state, CAD file, process, robot, or execution action."
 )
 
 

@@ -13,12 +13,12 @@ from cais_spade_llm.spec2primitives.config import (
 )
 
 
-def test_default_model_configuration_uses_gpt_5_6_medium() -> None:
+def test_default_model_configuration_uses_compatible_gpt_5_6_efforts() -> None:
     config = load_model_runtime_config()
 
     assert config.schema_version == 3
     assert config.product_agent_llm.model == "gpt-5.6"
-    assert config.product_agent_llm.reasoning_effort == "medium"
+    assert config.product_agent_llm.reasoning_effort == "none"
     for vision_config in (config.document_vlm, config.observation_vlm):
         assert vision_config.provider == "openai"
         assert vision_config.model == "gpt-5.6"
@@ -27,6 +27,24 @@ def test_default_model_configuration_uses_gpt_5_6_medium() -> None:
         assert vision_config.max_output_tokens == 4096
         assert vision_config.timeout_seconds == 90.0
     assert "API_KEY" not in DEFAULT_MODEL_RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.6", "gpt-5.6-sol"])
+def test_chat_completions_tool_models_require_none_reasoning_effort(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    value = _default_value()
+    value["product_agent_llm"]["model"] = model
+    value["product_agent_llm"]["reasoning_effort"] = "medium"
+    path = tmp_path / "incompatible.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="reasoning_effort must be none",
+    ):
+        load_model_runtime_config(path)
 
 
 def test_models_can_be_changed_only_through_the_validated_config_file(

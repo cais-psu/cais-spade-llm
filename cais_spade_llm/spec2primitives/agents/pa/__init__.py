@@ -47,6 +47,8 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     ProductionProductContextGroundingRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+    CartesianReachabilityRequest,
+    CartesianStateEvidence,
     ReachabilityCheckRecord,
     ResourceGroundingError,
     ResourceSelectionRecord,
@@ -55,12 +57,16 @@ from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     candidate_resource_catalog,
     check_resource_reachability,
     commit_resource_assignment,
+    persist_cartesian_reachability,
     persist_pa_resource_selection,
+    prepare_cartesian_reachability,
 )
 
 __all__ = [
     "ProductAgentContextRuntime",
     "CameraToWorldCalibrationRuntime",
+    "CartesianReachabilityRequest",
+    "CartesianStateEvidence",
     "ReachabilityCheckRecord",
     "GroundingProducerDescriptor",
     "AllocationEvidenceEntry",
@@ -97,6 +103,8 @@ __all__ = [
     "load_or_create_evidence_presentation",
     "load_pa_context_grounding_completion",
     "persist_pa_resource_selection",
+    "persist_cartesian_reachability",
+    "prepare_cartesian_reachability",
     "serve_pa_requested_context",
     "start_pa_context_interaction",
     "submit_pa_clarification_reply",

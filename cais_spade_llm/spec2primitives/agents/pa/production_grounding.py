@@ -49,9 +49,12 @@ from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     candidate_resource_catalog,
     check_resource_reachability,
     commit_resource_assignment,
+    persist_cartesian_reachability,
     persist_pa_resource_selection,
+    prepare_cartesian_reachability,
 )
 from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
+    PlanOnlyFeasibilityValidation,
     RobotAgentFeasibilityRuntime,
     validate_provisional_allocation,
 )
@@ -84,8 +87,10 @@ _DOCUMENT_PRODUCER = "document_evidence"
 _GEOMETRY_PRODUCER = "rgb_d_cad_grounding"
 _CALIBRATION_PRODUCER = "camera_to_world_calibration"
 _RETRIEVE_TOOL_NAME = "retrieve"
+_COMPARE_CAD_SIZE_TOOL_NAME = "compare_cad_size"
 _MAX_TOOL_ROUNDS = 12
 _LIVE_OBSERVATION_TIMEOUT_SEC = 5.0
+_TOOL_ROUND_LIMIT_MESSAGE = "Exceeded max tool rounds"
 
 
 class ProductionGroundingError(RuntimeError):
@@ -167,6 +172,15 @@ class _StateCandidateBinding:
     field_path: str
 
 
+@dataclass(frozen=True)
+class _CADComparisonBinding:
+    """Pin one PA-requested CAD comparison to its exact typed inputs."""
+
+    record_ref: str
+    cad_record_ref: str
+    segmentation_record_ref: str
+
+
 class _NativeEvidenceInvestigation:
     """Resolve native retrieve calls and retain validated evidence state."""
 
@@ -194,8 +208,12 @@ class _NativeEvidenceInvestigation:
         self._pa_by_canonical_ref: dict[str, str] = {"requirement_0001": "requirement_0001"}
         self.tool_call_refs: list[str] = []
         self.retrieved_results: dict[str, Mapping[str, object]] = {}
+        self.comparison_results: dict[tuple[str, str], Mapping[str, object]] = {}
+        self.comparison_bindings: dict[str, _CADComparisonBinding] = {}
         self.retrieved_handle_ids: list[str] = []
         self.prior_evidence: list[Mapping[str, object]] = []
+        self._served_observation_context: Mapping[str, object] | None = None
+        self.run_tool_call_count = 0
         self._tool_call_number = _latest_number(
             self.root / "interaction_record", "tool_call_*.json", "tool_call_"
         )
@@ -210,6 +228,9 @@ class _NativeEvidenceInvestigation:
             audit = _read_json(path)
             if audit.get("failure") is not None:
                 continue
+            if audit.get("record_type") == "ProductAgentCADComparisonToolCall":
+                # A resumed interaction must compare against its new live observation.
+                continue
             resolved = audit.get("resolved_evidence")
             result_refs = audit.get("result_refs")
             if not isinstance(resolved, Mapping) or not isinstance(result_refs, list):
@@ -220,6 +241,9 @@ class _NativeEvidenceInvestigation:
                 raise ProductionGroundingError(
                     f"Previously retrieved evidence is stale: {path.name}."
                 )
+            if handle.evidence_type == "observation":
+                # Every resumed grounding run receives one new live observation.
+                continue
             record_refs: list[str] = []
             for item in result_refs:
                 ref = item.get("ref") if isinstance(item, Mapping) else None
@@ -256,8 +280,7 @@ class _NativeEvidenceInvestigation:
             if handle.evidence_id not in self.retrieved_handle_ids:
                 self.retrieved_handle_ids.append(handle.evidence_id)
                 self.prior_evidence.append({"retrieval_state": "already_retrieved", **dict(result)})
-            if handle.evidence_type != "observation":
-                self.retrieved_results[handle.evidence_id] = result
+            self.retrieved_results[handle.evidence_id] = result
 
     async def execute(
         self,
@@ -267,32 +290,59 @@ class _NativeEvidenceInvestigation:
         """Execute one fail-closed ProductAgent tool call."""
         self._tool_call_number += 1
         call_id = f"tool_call_{self._tool_call_number:04d}"
-        if tool_name != _RETRIEVE_TOOL_NAME or set(arguments) != {"evidence_id"}:
+        if self.run_tool_call_count >= _MAX_TOOL_ROUNDS:
             return self._record_failure(
                 call_id,
                 tool_name,
                 arguments,
+                "tool_budget_exhausted",
+                "The bounded grounding tool budget is exhausted; return a final result.",
+            )
+        self.run_tool_call_count += 1
+        if tool_name == _RETRIEVE_TOOL_NAME:
+            return await self._execute_retrieve(call_id, arguments)
+        if tool_name == _COMPARE_CAD_SIZE_TOOL_NAME:
+            return await self._execute_cad_size_comparison(call_id, arguments)
+        return self._record_failure(
+            call_id,
+            tool_name,
+            arguments,
+            "malformed_tool_call",
+            "Only retrieve and compare_cad_size are authorized.",
+        )
+
+    async def _execute_retrieve(
+        self,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Retrieve one approved source and retain its neutral typed projection."""
+        if set(arguments) != {"evidence_id"}:
+            return self._record_failure(
+                call_id,
+                _RETRIEVE_TOOL_NAME,
+                arguments,
                 "malformed_tool_call",
-                "Only retrieve with one evidence_id is authorized.",
+                "retrieve requires exactly one evidence_id.",
             )
         evidence_id = arguments.get("evidence_id")
         handle = self.handles.get(evidence_id) if isinstance(evidence_id, str) else None
         if handle is None:
             return self._record_failure(
                 call_id,
-                tool_name,
+                _RETRIEVE_TOOL_NAME,
                 arguments,
                 "unauthorized_evidence_id",
                 "The evidence_id is unknown or no longer eligible.",
             )
-        if handle.evidence_type != "observation" and evidence_id in self.retrieved_results:
+        if evidence_id in self.retrieved_results:
             result = self.retrieved_results[evidence_id]
             self._record_success(call_id, handle, arguments, result, reused=True)
             return result
         if not _handle_revision_is_current(handle):
             return self._record_failure(
                 call_id,
-                tool_name,
+                _RETRIEVE_TOOL_NAME,
                 arguments,
                 "stale_evidence_id",
                 "The approved source changed after the evidence catalog was issued.",
@@ -300,26 +350,33 @@ class _NativeEvidenceInvestigation:
             )
 
         self._retrieval_number += 1
-        served = await asyncio.to_thread(
-            context_serving.retrieve_pa_evidence,
-            self.root,
-            product_requirement=self.requirement,
-            evidence_type=handle.evidence_type,
-            context_ref=handle.context_ref,
-            retrieval_number=self._retrieval_number,
-            live_observation_timeout_sec=_LIVE_OBSERVATION_TIMEOUT_SEC,
+        served_context = (
+            self._served_observation_context if handle.evidence_type == "observation" else None
         )
-        served_context = served.get("served_context") if isinstance(served, Mapping) else None
+        served: Mapping[str, object] | None = None
+        if served_context is None:
+            served = await asyncio.to_thread(
+                context_serving.retrieve_pa_evidence,
+                self.root,
+                product_requirement=self.requirement,
+                evidence_type=handle.evidence_type,
+                context_ref=handle.context_ref,
+                retrieval_number=self._retrieval_number,
+                live_observation_timeout_sec=_LIVE_OBSERVATION_TIMEOUT_SEC,
+            )
+            served_context = served.get("served_context") if isinstance(served, Mapping) else None
         if not isinstance(served_context, Mapping):
             failure = served.get("failure") if isinstance(served, Mapping) else None
             return self._record_failure(
                 call_id,
-                tool_name,
+                _RETRIEVE_TOOL_NAME,
                 arguments,
                 "retrieval_failed",
                 _failure_message(failure),
                 handle=handle,
             )
+        if handle.evidence_type == "observation":
+            self._served_observation_context = dict(served_context)
         try:
             delta = await self.runtime.interpret_retrieved_evidence(
                 interaction_root=self.root,
@@ -356,7 +413,7 @@ class _NativeEvidenceInvestigation:
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return self._record_failure(
                 call_id,
-                tool_name,
+                _RETRIEVE_TOOL_NAME,
                 arguments,
                 "evidence_processing_failed",
                 f"{type(exc).__name__}: {exc}",
@@ -365,8 +422,147 @@ class _NativeEvidenceInvestigation:
         self.authorized_evidence_refs.update(source_refs)
         self.authorized_evidence_refs.update(record_refs)
         self.retrieved_results[handle.evidence_id] = result
-        self.retrieved_handle_ids.append(handle.evidence_id)
+        if handle.evidence_id not in self.retrieved_handle_ids:
+            self.retrieved_handle_ids.append(handle.evidence_id)
         self._record_success(call_id, handle, arguments, result, reused=False)
+        return result
+
+    async def _execute_cad_size_comparison(
+        self,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Run one PA-requested neutral CAD-to-observation size comparison."""
+        required = {"cad_evidence_id", "observation_evidence_id"}
+        if set(arguments) != required:
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "malformed_tool_call",
+                "compare_cad_size requires cad_evidence_id and observation_evidence_id.",
+            )
+        cad_id = arguments.get("cad_evidence_id")
+        observation_id = arguments.get("observation_evidence_id")
+        cad_handle = self.handles.get(cad_id) if isinstance(cad_id, str) else None
+        observation_handle = (
+            self.handles.get(observation_id) if isinstance(observation_id, str) else None
+        )
+        if cad_handle is None or cad_handle.evidence_type != "CAD":
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "unauthorized_cad_evidence_id",
+                "cad_evidence_id must identify an approved CAD catalog entry.",
+            )
+        if observation_handle is None or observation_handle.evidence_type != "observation":
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "unauthorized_observation_evidence_id",
+                "observation_evidence_id must identify approved observation evidence.",
+            )
+        if not _handle_revision_is_current(cad_handle) or not _handle_revision_is_current(
+            observation_handle
+        ):
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "stale_comparison_input",
+                "A comparison input changed after the evidence catalog was issued.",
+            )
+        cad_result = self.retrieved_results.get(cad_handle.evidence_id)
+        observation_result = self.retrieved_results.get(observation_handle.evidence_id)
+        if cad_result is None or observation_result is None:
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "comparison_prerequisite_not_retrieved",
+                "Retrieve both comparison inputs before calling compare_cad_size.",
+            )
+        key = (cad_handle.evidence_id, observation_handle.evidence_id)
+        reused = self.comparison_results.get(key)
+        if reused is not None:
+            self._record_comparison_success(call_id, arguments, reused, reused=True)
+            return reused
+
+        try:
+            cad_record_ref = _retrieved_record_ref(
+                self,
+                cad_result,
+                expected_record_type="CADMeshRecord",
+            )
+            segmentation_record_ref = _retrieved_record_ref(
+                self,
+                observation_result,
+                expected_record_type="RGBDSegmentationRecord",
+            )
+            view = build_product_context_view(
+                self.root,
+                self.abox,
+                attempted_evidence=tuple(self.retrieved_handle_ids),
+                assessed_at_ns=time.time_ns(),
+            )
+            cad_binding = _accepted_binding(
+                view,
+                cad_record_ref,
+                expected_record_type="CADMeshRecord",
+            )
+            segmentation_binding = _accepted_binding(
+                view,
+                segmentation_record_ref,
+                expected_record_type="RGBDSegmentationRecord",
+            )
+            correspondence = await asyncio.to_thread(
+                associate_segmented_candidate_by_size,
+                interaction_root=self.root,
+                segmentation_record_path=self.root / segmentation_record_ref,
+                cad_record_path=self.root / cad_record_ref,
+                correspondence_number=_next_number(
+                    self.root,
+                    "products/grounding/rgb_d_cad_grounding/correspondence_*",
+                ),
+            )
+            self.abox, _binding = _merge_derived_record(
+                self.root,
+                self.tbox,
+                self.abox,
+                correspondence.record_path,
+                status=correspondence.CAD_correspondence,
+                prerequisite_bindings=(cad_binding, segmentation_binding),
+            )
+            comparison_ref = correspondence.record_path.relative_to(self.root).as_posix()
+            self._register_references(source_refs=(), record_refs=(comparison_ref,))
+            self.authorized_evidence_refs.add(comparison_ref)
+            result = _cad_size_comparison_projection(
+                self,
+                correspondence.record,
+                comparison_ref=comparison_ref,
+                cad_evidence_id=cad_handle.evidence_id,
+                observation_evidence_id=observation_handle.evidence_id,
+                cad_result=cad_result,
+                observation_result=observation_result,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return self._record_failure(
+                call_id,
+                _COMPARE_CAD_SIZE_TOOL_NAME,
+                arguments,
+                "cad_size_comparison_failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+
+        self.comparison_results[key] = result
+        self.comparison_bindings[comparison_ref] = _CADComparisonBinding(
+            record_ref=comparison_ref,
+            cad_record_ref=cad_record_ref,
+            segmentation_record_ref=segmentation_record_ref,
+        )
+        self._record_comparison_success(call_id, arguments, result, reused=False)
         return result
 
     def _record_success(
@@ -438,6 +634,32 @@ class _NativeEvidenceInvestigation:
             },
         )
         return {"error": {"reason": reason, "message": message}}
+
+    def _record_comparison_success(
+        self,
+        call_id: str,
+        arguments: Mapping[str, object],
+        result: Mapping[str, object],
+        *,
+        reused: bool,
+    ) -> None:
+        """Persist one exact PA-requested comparison without changing its result."""
+        comparison_ref = self.resolve_pa_reference(str(result["comparison_ref"]))
+        self._persist_tool_call(
+            call_id,
+            {
+                "schema_version": 1,
+                "record_type": "ProductAgentCADComparisonToolCall",
+                "tool_call_id": call_id,
+                "tool_name": _COMPARE_CAD_SIZE_TOOL_NAME,
+                "arguments": dict(arguments),
+                "reused": reused,
+                "result_ref": comparison_ref,
+                "result_sha256": _sha256_path(self.root / comparison_ref),
+                "result": dict(result),
+                "failure": None,
+            },
+        )
 
     def _persist_tool_call(self, call_id: str, record: Mapping[str, object]) -> None:
         path = self.root / "interaction_record" / f"{call_id}.json"
@@ -537,6 +759,8 @@ class _PAAllocationInvestigation:
         allocation_presentation: AllocationPresentationRecord,
         current_state_evidence: AllocationEvidenceEntry,
         desired_state_evidence: AllocationEvidenceEntry,
+        current_cad_correspondence_path: Path | None,
+        desired_cad_correspondence_path: Path | None,
         target_frame: str,
     ) -> None:
         self.runtime = runtime
@@ -549,8 +773,20 @@ class _PAAllocationInvestigation:
         self.allocation_presentation.assert_unchanged()
         self.current_state_evidence = current_state_evidence
         self.desired_state_evidence = desired_state_evidence
+        self.current_cad_correspondence_path = (
+            Path(current_cad_correspondence_path).resolve()
+            if current_cad_correspondence_path is not None
+            else None
+        )
+        self.desired_cad_correspondence_path = (
+            Path(desired_cad_correspondence_path).resolve()
+            if desired_cad_correspondence_path is not None
+            else None
+        )
         self.target_frame = target_frame
         self.reachability_checks: dict[str, ReachabilityCheckRecord] = {}
+        self.validations: dict[str, PlanOnlyFeasibilityValidation] = {}
+        self.pa_results: list[Mapping[str, object]] = []
         self._location_paths: dict[str, Path] = {}
 
     async def execute(
@@ -579,7 +815,65 @@ class _PAAllocationInvestigation:
             desired_handle = desired_option.pa_handle
             current_location = await self._location_for(current_option)
             desired_location = await self._location_for(desired_option)
-            reachability = check_resource_reachability(
+            catalog = candidate_resource_catalog(
+                self.abox,
+                self.runtime._registry,
+                self.runtime._workcell,
+            )
+            resource = catalog.get(resource_symbol)
+            if resource is None:
+                raise ProductionGroundingError(
+                    "PA allocation resource is not an authorized candidate."
+                )
+            if resource.get("execution_mode") != "simulation":
+                reachability = check_resource_reachability(
+                    interaction_root=self.root,
+                    tbox=self.tbox,
+                    registry=self.runtime._registry,
+                    workcell=self.runtime._workcell,
+                    resource_symbol=resource_symbol,
+                    allocation_presentation=self.allocation_presentation,
+                    current_state_evidence_handle=current_handle,
+                    desired_state_evidence_handle=desired_handle,
+                    current_location_record_path=current_location,
+                    desired_location_record_path=desired_location,
+                    check_number=_next_number(
+                        self.root,
+                        "products/grounding/reachability/check_*",
+                    ),
+                )
+                reachability_handle = f"reachability_check_{reachability.check_number:04d}"
+                self.reachability_checks[reachability_handle] = reachability
+                result = {
+                    "reachability_check_ref": reachability_handle,
+                    "resource_symbol": reachability.resource_symbol,
+                    "status": reachability.status,
+                    "current_state_evidence_handle": current_handle,
+                    "desired_state_evidence_handle": desired_handle,
+                    "current_state": _legacy_reachability_pa_projection(reachability.current_state),
+                    "desired_state": _legacy_reachability_pa_projection(reachability.desired_state),
+                    "selection_made_by_tool": False,
+                }
+                _assert_blinded_pa_projection(result, self.investigation.presentation)
+                self.pa_results.append(dict(result))
+                self._persist_call(
+                    call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result_ref=reachability.record_ref,
+                    result_sha256=_sha256_path(reachability.record_path),
+                    result=result,
+                    failure=None,
+                )
+                return result
+            if (
+                self.current_cad_correspondence_path is None
+                or self.desired_cad_correspondence_path is None
+            ):
+                raise ProductionGroundingError(
+                    "Cartesian reachability requires both PA-requested CAD comparison records."
+                )
+            prepared = prepare_cartesian_reachability(
                 interaction_root=self.root,
                 tbox=self.tbox,
                 registry=self.runtime._registry,
@@ -590,6 +884,26 @@ class _PAAllocationInvestigation:
                 desired_state_evidence_handle=desired_handle,
                 current_location_record_path=current_location,
                 desired_location_record_path=desired_location,
+                current_cad_correspondence_record_path=(self.current_cad_correspondence_path),
+                desired_cad_correspondence_record_path=(self.desired_cad_correspondence_path),
+            )
+            feasibility_runtime = self.runtime._robot_agent_feasibility_runtime
+            if feasibility_runtime is None:
+                feasibility_runtime = _UnavailableRobotAgentFeasibilityRuntime()
+            validation = await validate_provisional_allocation(
+                feasibility_runtime,
+                interaction_root=self.root,
+                workcell=self.runtime._workcell,
+                reachability=prepared,
+                validation_number=_next_number(
+                    self.root,
+                    "resources/*/validation/plan_only_validation_*",
+                ),
+            )
+            reachability = persist_cartesian_reachability(
+                interaction_root=self.root,
+                prepared=prepared,
+                robot_agent_validation_path=validation.record_path,
                 check_number=_next_number(
                     self.root,
                     "products/grounding/reachability/check_*",
@@ -597,17 +911,22 @@ class _PAAllocationInvestigation:
             )
             reachability_handle = f"reachability_check_{reachability.check_number:04d}"
             self.reachability_checks[reachability_handle] = reachability
+            self.validations[reachability_handle] = validation
             result = {
                 "reachability_check_ref": reachability_handle,
                 "resource_symbol": reachability.resource_symbol,
                 "status": reachability.status,
                 "current_state_evidence_handle": current_handle,
                 "desired_state_evidence_handle": desired_handle,
-                "current_state": _reachability_pa_projection(reachability.current_state),
-                "desired_state": _reachability_pa_projection(reachability.desired_state),
+                "phase_results": _cartesian_phase_pa_projection(reachability.phase_results),
+                "robot_agent_validation_ref": (
+                    f"robot_agent_validation_{validation.validation_number:04d}"
+                ),
+                "feedback": validation.feedback,
                 "selection_made_by_tool": False,
             }
             _assert_blinded_pa_projection(result, self.investigation.presentation)
+            self.pa_results.append(dict(result))
             self._persist_call(
                 call_id,
                 tool_name=tool_name,
@@ -619,22 +938,46 @@ class _PAAllocationInvestigation:
             )
             return result
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            message = f"{type(exc).__name__}: {exc}"
+            audit_failure = f"{type(exc).__name__}: {exc}"
+            message = _allocation_context_feedback(exc)
+            result = {
+                "resource_symbol": (
+                    arguments.get("resource_symbol")
+                    if isinstance(arguments.get("resource_symbol"), str)
+                    else None
+                ),
+                "status": "needs_context",
+                "phase_results": {
+                    "pick": {
+                        "status": "needs_context",
+                        "fraction": None,
+                        "moveit_error_code": None,
+                    },
+                    "place": {
+                        "status": "needs_context",
+                        "fraction": None,
+                        "moveit_error_code": None,
+                    },
+                },
+                "feedback": message,
+                "selection_made_by_tool": False,
+            }
+            _assert_blinded_pa_projection(result, self.investigation.presentation)
+            self.pa_results.append(dict(result))
             self._persist_call(
                 call_id,
                 tool_name=tool_name,
                 arguments=arguments,
                 result_ref=None,
                 result_sha256=None,
-                result=None,
-                failure=message,
+                result=result,
+                failure=audit_failure,
             )
-            return {
-                "error": {
-                    "reason": "reachability_check_failed",
-                    "message": message,
-                }
-            }
+            return result
+
+    def pa_result_history(self) -> list[Mapping[str, object]]:
+        """Return prior neutral tool results for the next bounded PA attempt."""
+        return [dict(result) for result in self.pa_results]
 
     async def _location_for(self, option: AllocationEvidenceEntry) -> Path:
         key = option.pa_handle
@@ -805,7 +1148,7 @@ class ProductionProductContextGroundingRuntime:
         self._validate_authorities(self._tbox)
         return self._descriptors
 
-    async def ground_product_context(  # noqa: C901
+    async def ground_product_context(  # noqa: C901, PLR0912, PLR0915
         self,
         product_agent: ProductAgentContextRuntime,
         *,
@@ -841,12 +1184,56 @@ class ProductionProductContextGroundingRuntime:
             clarification_history,
             investigation,
         )
-        validation_feedback: Mapping[str, object] | None = None
+        validation_feedback_history: list[Mapping[str, object]] = []
         evidence_gap: _GroundingGap | None = None
         target_frame = _configured_target_frame(self._workcell)
-        for pa_round in range(1, max_pa_turns + 1):
+        required_output_projection: Mapping[str, object] = {
+            "state_evidence": {
+                "current_state": (
+                    "exactly one loose observed Gear_Medium candidate for the object "
+                    "whose state changes"
+                ),
+                "desired_state": (
+                    "exactly one mounted Gear_Shaft destination or support candidate "
+                    "where the requested assembly will be realized"
+                ),
+            },
+            "required_evidence": [
+                "relevant STL evidence",
+                "live observation evidence",
+                "relevant document evidence",
+            ],
+            "required_CAD_size_comparisons": ["Gear_Medium", "Gear_Shaft"],
+            "comparison_citations": (
+                "Each selected state_value must cite its PA-requested compare_cad_size "
+                "record and the relevant CAD evidence."
+            ),
+            "selection_authority": (
+                "The ProductAgent selects candidates using size, support relationships, "
+                "candidate centroids, gear dimensions, and document evidence."
+            ),
+            "approved_candidate_record_type": "RGBDSegmentationRecord",
+            "target_frame_if_a_verifier_derives_geometry": target_frame,
+            "purpose": "later PA-controlled reachability verification",
+        }
+        final_no_tools_pending = False
+        last_failure_message: str | None = None
+        for pa_round in range(1, max_pa_turns + 2):
+            if pa_round > max_pa_turns and not final_no_tools_pending:
+                break
             catalog = _current_evidence_catalog(handles, investigation)
             catalog.extend(clarification_evidence)
+            remaining_tool_rounds = max(
+                0,
+                _MAX_TOOL_ROUNDS - investigation.run_tool_call_count,
+            )
+            final_no_tools_attempt = final_no_tools_pending or remaining_tool_rounds == 0
+            final_no_tools_pending = False
+            grounding_tools = (
+                []
+                if final_no_tools_attempt
+                else [_retrieve_tool(handles), _compare_cad_size_tool(handles)]
+            )
             try:
                 outcome = await propose_and_validate_ontology_grounding(
                     product_agent,
@@ -856,28 +1243,45 @@ class ProductionProductContextGroundingRuntime:
                     workcell=self._workcell,
                     evidence_catalog=catalog,
                     authorized_evidence_refs=investigation.authorized_evidence_refs,
-                    tools=[_retrieve_tool(handles)],
+                    tools=grounding_tools,
                     tool_executor=investigation.execute,
-                    max_tool_rounds=min(
-                        max_pa_turns - pa_round + 1,
-                        _MAX_TOOL_ROUNDS,
-                    ),
-                    required_output_projection={
-                        "state_evidence": (
-                            "PA-authored current_state and desired_state, each with one "
-                            "state_value using the supplied candidate_value_ref"
-                        ),
-                        "approved_candidate_record_type": "RGBDSegmentationRecord",
-                        "target_frame_if_a_verifier_derives_geometry": target_frame,
-                        "purpose": "later PA-controlled reachability verification",
-                    },
-                    validation_gap=(None if validation_feedback is None else validation_feedback),
+                    max_tool_rounds=(0 if final_no_tools_attempt else remaining_tool_rounds),
+                    required_output_projection=required_output_projection,
+                    validation_feedback_history=tuple(validation_feedback_history),
                     typed_record_resolver=investigation.resolve_typed_record,
                     pa_reference_resolver=investigation.resolve_pa_reference,
                 )
+            except RuntimeError as exc:
+                if not _is_tool_round_exhaustion(exc):
+                    raise
+                feedback = {
+                    "kind": "tool_budget_exhausted",
+                    "message": (
+                        "The bounded grounding tool budget was exhausted before a final "
+                        "structured result was returned."
+                    ),
+                    "expected_revision": (
+                        "Return the best final proposal, clarification, or "
+                        "insufficient_evidence result using accumulated evidence and no "
+                        "further tool calls."
+                    ),
+                }
+                _append_validation_feedback(validation_feedback_history, feedback)
+                last_failure_message = str(feedback["message"])
+                if final_no_tools_attempt:
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": last_failure_message,
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
+                final_no_tools_pending = True
+                continue
             except OntologyGroundingError as exc:
-                if pa_round < max_pa_turns:
-                    validation_feedback = {
+                can_retry = not final_no_tools_attempt and (
+                    pa_round < max_pa_turns or investigation.run_tool_call_count >= _MAX_TOOL_ROUNDS
+                )
+                if can_retry:
+                    feedback = {
                         "kind": "ontology_proposal_validation_error",
                         "message": str(exc),
                         "expected_revision": (
@@ -886,9 +1290,24 @@ class ProductionProductContextGroundingRuntime:
                             "unsupported assertion."
                         ),
                     }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
+                    if pa_round >= max_pa_turns:
+                        final_no_tools_pending = True
                     evidence_gap = None
                     continue
+                if final_no_tools_attempt:
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": str(exc),
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
                 raise ProductionGroundingError(str(exc)) from exc
+            can_retry = not final_no_tools_attempt and (
+                pa_round < max_pa_turns or investigation.run_tool_call_count >= _MAX_TOOL_ROUNDS
+            )
+            if can_retry and pa_round >= max_pa_turns:
+                final_no_tools_pending = True
             if isinstance(outcome, OntologyGroundingInterruption):
                 if (
                     outcome.kind == "clarification_question"
@@ -898,8 +1317,8 @@ class ProductionProductContextGroundingRuntime:
                         handles=handles,
                     )
                 ):
-                    if pa_round < max_pa_turns:
-                        validation_feedback = {
+                    if can_retry:
+                        feedback = {
                             "kind": "system_owned_grounding_choice",
                             "message": (
                                 "A user clarification cannot decide whether a supplied "
@@ -912,6 +1331,8 @@ class ProductionProductContextGroundingRuntime:
                                 "required output cannot be supported."
                             ),
                         }
+                        _append_validation_feedback(validation_feedback_history, feedback)
+                        last_failure_message = str(feedback["message"])
                         continue
                     return {
                         "grounding_status": "incomplete",
@@ -924,8 +1345,8 @@ class ProductionProductContextGroundingRuntime:
                     outcome.kind == "clarification_question"
                     and not investigation.retrieved_handle_ids
                 ):
-                    if pa_round < max_pa_turns:
-                        validation_feedback = {
+                    if can_retry:
+                        feedback = {
                             "kind": "evidence_first_clarification",
                             "message": (
                                 "A user clarification is permitted only after relevant "
@@ -939,6 +1360,8 @@ class ProductionProductContextGroundingRuntime:
                                 "interpretation on the user's behalf."
                             ),
                         }
+                        _append_validation_feedback(validation_feedback_history, feedback)
+                        last_failure_message = str(feedback["message"])
                         continue
                     return {
                         "grounding_status": "incomplete",
@@ -952,7 +1375,7 @@ class ProductionProductContextGroundingRuntime:
                     outcome.kind == "insufficient_evidence"
                     and evidence_gap is not None
                     and _has_unattempted_evidence(evidence_gap, investigation)
-                    and pa_round < max_pa_turns
+                    and can_retry
                 ):
                     continue
                 key = outcome.kind
@@ -976,10 +1399,11 @@ class ProductionProductContextGroundingRuntime:
                     product_requirement=investigation.abox.product_requirement,
                     evidence_catalog=review_catalog,
                     pa_reference_projector=investigation.project_canonical_reference,
+                    required_output_projection=required_output_projection,
                 )
             except OntologyGroundingError as exc:
-                if pa_round < max_pa_turns:
-                    validation_feedback = {
+                if can_retry:
+                    feedback = {
                         "kind": "target_feature_semantic_review_error",
                         "message": str(exc),
                         "expected_revision": (
@@ -987,8 +1411,16 @@ class ProductionProductContextGroundingRuntime:
                             "structured semantic review."
                         ),
                     }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
                     evidence_gap = None
                     continue
+                if final_no_tools_attempt:
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": str(exc),
+                        "tool_call_refs": list(investigation.tool_call_refs),
+                    }
                 raise ProductionGroundingError(str(exc)) from exc
             if semantic_review.verdict == "incomplete":
                 reject_ontology_grounding_candidate(
@@ -998,8 +1430,8 @@ class ProductionProductContextGroundingRuntime:
                     semantic_review=semantic_review,
                 )
                 gap = semantic_review.gap or "Target feature is semantically incomplete."
-                if pa_round < max_pa_turns:
-                    validation_feedback = {
+                if can_retry:
+                    feedback = {
                         "kind": "target_feature_semantic_review",
                         "message": gap,
                         "expected_revision": (
@@ -1008,6 +1440,8 @@ class ProductionProductContextGroundingRuntime:
                             "the stated semantic gap requires it."
                         ),
                     }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
                     evidence_gap = None
                     continue
                 return {
@@ -1018,8 +1452,8 @@ class ProductionProductContextGroundingRuntime:
             try:
                 _proposal_state_candidate_bindings(outcome.proposal)
             except ProductionGroundingError as exc:
-                if pa_round < max_pa_turns:
-                    validation_feedback = {
+                if can_retry:
+                    feedback = {
                         "kind": "state_candidate_binding",
                         "message": str(exc),
                         "expected_revision": (
@@ -1028,6 +1462,8 @@ class ProductionProductContextGroundingRuntime:
                             "rather than delegating image selection to allocation."
                         ),
                     }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
                     evidence_gap = None
                     continue
                 return {
@@ -1036,26 +1472,30 @@ class ProductionProductContextGroundingRuntime:
                     "tool_call_refs": list(investigation.tool_call_refs),
                 }
             try:
-                correspondence_gap = await self._validate_current_state_cad_correspondence(
+                correspondence_gap = self._validate_pa_state_cad_comparisons(
                     investigation=investigation,
                     proposal=outcome.proposal,
                 )
             except (OSError, RuntimeError, TypeError, ValueError):
                 correspondence_gap = (
-                    "The PA-selected current_state CAD correspondence could not be "
-                    "validated from the accepted evidence."
+                    "The PA-selected state candidates could not be verified against "
+                    "their cited PA-requested CAD size correspondence records."
                 )
             if correspondence_gap is not None:
-                if pa_round < max_pa_turns:
-                    validation_feedback = {
-                        "kind": "current_state_CAD_correspondence",
+                if can_retry:
+                    feedback = {
+                        "kind": "state_CAD_comparison_evidence",
                         "message": correspondence_gap,
                         "expected_revision": (
-                            "Reconsider the current_state candidate and its cited approved "
-                            "CAD evidence from the supplied visual and measured evidence. "
-                            "The validator does not select an alternative."
+                            "Invoke compare_cad_size for Gear_Medium and Gear_Shaft, then "
+                            "reconsider the selected current object and desired destination "
+                            "using the returned measurements and other retrieved evidence. "
+                            "Cite each comparison record in its selected state value. The "
+                            "validator does not select an alternative."
                         ),
                     }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
                     evidence_gap = None
                     continue
                 return {
@@ -1102,7 +1542,9 @@ class ProductionProductContextGroundingRuntime:
             required_record_type="grounded feature states",
             missing_record_types=("grounded feature states",),
             eligible_evidence_ids=(),
-            provider_failure="The bounded PA investigation was exhausted.",
+            provider_failure=(
+                last_failure_message or "The bounded PA investigation was exhausted."
+            ),
         )
         return {
             "grounding_status": "incomplete",
@@ -1171,76 +1613,37 @@ class ProductionProductContextGroundingRuntime:
             delta["typed_context_refs"] = refs
         return delta
 
-    async def _validate_current_state_cad_correspondence(
+    def _validate_pa_state_cad_comparisons(
         self,
         *,
         investigation: _NativeEvidenceInvestigation,
         proposal: OntologyGroundingProposal,
     ) -> str | None:
-        """Validate the PA-selected current candidate against its cited CAD evidence."""
-        current_binding, _desired_binding = _proposal_state_candidate_bindings(proposal)
+        """Verify both PA selections against comparison records the PA requested."""
+        current_binding, desired_binding = _proposal_state_candidate_bindings(proposal)
         view = build_product_context_view(
             investigation.root,
             investigation.abox,
             attempted_evidence=tuple(investigation.retrieved_handle_ids),
             assessed_at_ns=time.time_ns(),
         )
-        cad_bindings = _proposal_cad_bindings(
-            investigation.root,
-            view,
-            proposal,
-            state_name="current_state",
-        )
-        if len(cad_bindings) != 1:
-            return (
-                "current_state must cite exactly one approved CAD record before "
-                "candidate correspondence can be validated."
-            )
-        segmentation_binding = _accepted_binding(
-            view,
-            current_binding.record_ref,
-            expected_record_type="RGBDSegmentationRecord",
-        )
-        correspondence = await asyncio.to_thread(
-            associate_segmented_candidate_by_size,
-            interaction_root=investigation.root,
-            segmentation_record_path=investigation.root / segmentation_binding.record_ref,
-            cad_record_path=investigation.root / cad_bindings[0].record_ref,
-            correspondence_number=_next_number(
-                investigation.root,
-                "products/grounding/rgb_d_cad_grounding/correspondence_*",
-            ),
-        )
-        investigation.abox, _correspondence_binding = _merge_derived_record(
-            investigation.root,
-            self._tbox,
-            investigation.abox,
-            correspondence.record_path,
-            status=correspondence.CAD_correspondence,
-            prerequisite_bindings=(cad_bindings[0], segmentation_binding),
-        )
-        selected = correspondence.selected_candidate
-        if (
-            correspondence.CAD_correspondence != "accepted"
-            or not isinstance(selected, Mapping)
-            or selected.get("observation_handle")
-            != _candidate_observation_handle(
-                investigation.root / current_binding.record_ref,
-                current_binding.field_path,
-            )
-            or selected.get("candidate_handle")
-            != _candidate_handle(
-                investigation.root / current_binding.record_ref,
-                current_binding.field_path,
-            )
+        for state_name, state_binding in (
+            ("current_state", current_binding),
+            ("desired_state", desired_binding),
         ):
-            return (
-                "The PA-selected current_state candidate is not uniquely supported by "
-                "its cited CAD size correspondence."
+            gap = _validate_pa_state_cad_comparison(
+                investigation,
+                view,
+                proposal,
+                state_name=state_name,
+                state_binding=state_binding,
+                require_unique=state_name == "current_state",
             )
+            if gap is not None:
+                return gap
         return None
 
-    async def _complete_resource_assignment(
+    async def _complete_resource_assignment(  # noqa: C901
         self,
         *,
         product_agent: ProductAgentContextRuntime,
@@ -1311,6 +1714,16 @@ class ProductionProductContextGroundingRuntime:
             allocation_presentation,
             desired_binding,
         )
+        current_cad_correspondence_path = _proposal_state_comparison_path(
+            investigation,
+            proposal,
+            state_name="current_state",
+        )
+        desired_cad_correspondence_path = _proposal_state_comparison_path(
+            investigation,
+            proposal,
+            state_name="desired_state",
+        )
         allocation = _PAAllocationInvestigation(
             runtime=self,
             investigation=investigation,
@@ -1321,38 +1734,100 @@ class ProductionProductContextGroundingRuntime:
             allocation_presentation=allocation_presentation,
             current_state_evidence=current_state_evidence,
             desired_state_evidence=desired_state_evidence,
+            current_cad_correspondence_path=current_cad_correspondence_path,
+            desired_cad_correspondence_path=desired_cad_correspondence_path,
             target_frame=_configured_target_frame(self._workcell),
         )
         validation_feedback: Mapping[str, object] | None = None
         last_selection_ref: str | None = None
         rounds = max(1, max_pa_turns)
         for allocation_round in range(1, rounds + 1):
-            response = await product_agent.ask_llm_structured(
-                _pa_allocation_prompt(
-                    requirement=abox.product_requirement,
-                    target_feature=_pa_target_feature_projection(
-                        proposal.target_feature,
-                        investigation,
-                    ),
-                    resource_catalog=resource_catalog,
-                    allocation_presentation=allocation_presentation,
-                    investigation=investigation,
-                    current_state_evidence=current_state_evidence,
-                    desired_state_evidence=desired_state_evidence,
-                    validation_feedback=validation_feedback,
+            allocation_prompt = _pa_allocation_prompt(
+                requirement=abox.product_requirement,
+                target_feature=_pa_target_feature_projection(
+                    proposal.target_feature,
+                    investigation,
                 ),
-                response_format=_pa_allocation_response_format(
-                    allocation_presentation.resource_order
-                ),
-                tools=[
-                    _check_reachability_tool(
-                        allocation_presentation.resource_order,
-                    )
-                ],
-                tool_executor=allocation.execute,
-                max_tool_rounds=min(rounds - allocation_round + 1, _MAX_TOOL_ROUNDS),
+                resource_catalog=resource_catalog,
+                allocation_presentation=allocation_presentation,
+                investigation=investigation,
+                current_state_evidence=current_state_evidence,
+                desired_state_evidence=desired_state_evidence,
+                validation_feedback=validation_feedback,
+                reachability_history=allocation.pa_result_history(),
             )
-            choice, insufficient = _validated_pa_allocation_response(response)
+            final_no_tools_attempt = False
+            try:
+                response = await product_agent.ask_llm_structured(
+                    allocation_prompt,
+                    response_format=_pa_allocation_response_format(
+                        allocation_presentation.resource_order
+                    ),
+                    tools=[
+                        _check_reachability_tool(
+                            allocation_presentation.resource_order,
+                        )
+                    ],
+                    tool_executor=allocation.execute,
+                    max_tool_rounds=min(rounds - allocation_round + 1, _MAX_TOOL_ROUNDS),
+                )
+            except RuntimeError as exc:
+                if not _is_tool_round_exhaustion(exc):
+                    raise
+                final_no_tools_attempt = True
+                validation_feedback = {
+                    "kind": "allocation_tool_budget_exhausted",
+                    "message": (
+                        "The bounded allocation tool budget was exhausted before a "
+                        "final structured result was returned."
+                    ),
+                    "expected_revision": (
+                        "Using the accumulated reachability results, cite an existing "
+                        "accepted result or return insufficient_evidence without tools."
+                    ),
+                }
+                try:
+                    response = await product_agent.ask_llm_structured(
+                        _pa_allocation_prompt(
+                            requirement=abox.product_requirement,
+                            target_feature=_pa_target_feature_projection(
+                                proposal.target_feature,
+                                investigation,
+                            ),
+                            resource_catalog=resource_catalog,
+                            allocation_presentation=allocation_presentation,
+                            investigation=investigation,
+                            current_state_evidence=current_state_evidence,
+                            desired_state_evidence=desired_state_evidence,
+                            validation_feedback=validation_feedback,
+                            reachability_history=allocation.pa_result_history(),
+                        ),
+                        response_format=_pa_allocation_response_format(
+                            allocation_presentation.resource_order
+                        ),
+                        tools=[],
+                        tool_executor=allocation.execute,
+                        max_tool_rounds=0,
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as final_exc:
+                    return {
+                        "grounding_status": "incomplete",
+                        "insufficient_evidence": (
+                            "Allocation tool exhaustion prevented a final PA result: "
+                            f"{type(final_exc).__name__}: {final_exc}"
+                        ),
+                    }
+            try:
+                choice, insufficient = _validated_pa_allocation_response(response)
+            except ProductionGroundingError as exc:
+                if not final_no_tools_attempt:
+                    raise
+                return {
+                    "grounding_status": "incomplete",
+                    "insufficient_evidence": (
+                        f"Allocation tool exhaustion produced no valid final PA result: {exc}"
+                    ),
+                }
             if insufficient is not None:
                 return {
                     "grounding_status": "incomplete",
@@ -1381,26 +1856,48 @@ class ProductionProductContextGroundingRuntime:
                         "already-grounded state evidence, and cite one accepted result."
                     ),
                 }
-                if allocation_round < rounds:
+                if allocation_round < rounds and not final_no_tools_attempt:
                     continue
                 return {
                     "grounding_status": "incomplete",
                     "insufficient_evidence": str(validation_feedback["message"]),
                 }
 
-            feasibility_runtime = self._robot_agent_feasibility_runtime
-            if feasibility_runtime is None:
-                feasibility_runtime = _UnavailableRobotAgentFeasibilityRuntime()
-            validation = await validate_provisional_allocation(
-                feasibility_runtime,
-                interaction_root=root,
-                workcell=self._workcell,
-                reachability=reachability,
-                validation_number=_next_number(
-                    root,
-                    "resources/*/validation/plan_only_validation_*",
-                ),
-            )
+            validation = allocation.validations.get(str(choice["reachability_check_ref"]))
+            if reachability.schema_version == 2:
+                feasibility_runtime = self._robot_agent_feasibility_runtime
+                if feasibility_runtime is None:
+                    feasibility_runtime = _UnavailableRobotAgentFeasibilityRuntime()
+                validation = await validate_provisional_allocation(
+                    feasibility_runtime,
+                    interaction_root=root,
+                    workcell=self._workcell,
+                    reachability=reachability,
+                    validation_number=_next_number(
+                        root,
+                        "resources/*/validation/plan_only_validation_*",
+                    ),
+                )
+            if validation is None or (
+                reachability.schema_version == 3 and validation.status != "accepted"
+            ):
+                validation_feedback = {
+                    "kind": "uncited_or_rejected_cartesian_validation",
+                    "message": (
+                        "The cited reachability result has no accepted live Cartesian "
+                        "RobotAgent validation."
+                    ),
+                    "expected_revision": (
+                        "Call check_reachability for another freely chosen resource, "
+                        "or report insufficient_evidence."
+                    ),
+                }
+                if allocation_round < rounds and not final_no_tools_attempt:
+                    continue
+                return {
+                    "grounding_status": "incomplete",
+                    "insufficient_evidence": str(validation_feedback["message"]),
+                }
             selection = persist_pa_resource_selection(
                 interaction_root=root,
                 tbox=tbox,
@@ -1427,7 +1924,7 @@ class ProductionProductContextGroundingRuntime:
                         "insufficient_evidence."
                     ),
                 }
-                if allocation_round < rounds:
+                if allocation_round < rounds and not final_no_tools_attempt:
                     continue
                 return {
                     "grounding_status": "incomplete",
@@ -1455,7 +1952,11 @@ class ProductionProductContextGroundingRuntime:
                 "grounding_status": "complete",
                 "resource_selection_ref": selection.record_ref,
                 "resource_assignment_delta_count": assignment.abox.delta_count,
-                "allocation_label": "validated endpoint-motion allocation",
+                "allocation_label": (
+                    "validated Cartesian pick-place allocation"
+                    if reachability.schema_version == 3
+                    else "validated endpoint-motion allocation"
+                ),
             }
         return {
             "grounding_status": "incomplete",
@@ -1781,13 +2282,15 @@ def _pa_target_feature_projection(
     return projected
 
 
-def _reachability_pa_projection(state: StateReachEvidence) -> Mapping[str, object]:
-    """Return verifier evidence without canonical interaction paths or identities."""
+def _legacy_reachability_pa_projection(
+    state: StateReachEvidence,
+) -> Mapping[str, object]:
+    """Return the unchanged physical-mode coarse reach evidence."""
     return {
         "state_name": state.state_name,
         "evidence_handle": state.evidence_handle,
         "translation_m": list(state.translation_m),
-        "planar_distance_from_reach_origin_m": state.planar_distance_from_reach_origin_m,
+        "planar_distance_from_reach_origin_m": (state.planar_distance_from_reach_origin_m),
         "distance_from_reach_origin_m": state.distance_from_reach_origin_m,
         "in_workspace": state.in_workspace,
         "in_gripper_reach": state.in_gripper_reach,
@@ -1796,7 +2299,42 @@ def _reachability_pa_projection(state: StateReachEvidence) -> Mapping[str, objec
     }
 
 
-def _pa_allocation_prompt(
+def _cartesian_phase_pa_projection(value: object) -> Mapping[str, object]:
+    """Expose neutral Cartesian phase evidence without runtime identities."""
+    if not isinstance(value, Mapping):
+        raise ProductionGroundingError("Cartesian phase evidence is unavailable.")
+    result: dict[str, object] = {}
+    for phase in ("pick", "place"):
+        item = value.get(phase)
+        if not isinstance(item, Mapping):
+            raise ProductionGroundingError(f"Cartesian {phase} phase evidence is unavailable.")
+        result[phase] = {
+            "status": item.get("status"),
+            "fraction": item.get("fraction"),
+            "moveit_error_code": item.get("moveit_error_code"),
+            "waypoint_roles": item.get("waypoint_roles"),
+            "message": item.get("message"),
+        }
+    return result
+
+
+def _allocation_context_feedback(exc: Exception) -> str:
+    """Return actionable PA feedback without canonical evidence identities."""
+    message = str(exc).casefold()
+    if "support-plane" in message or "support plane" in message:
+        return "Required support-plane evidence is unavailable, stale, or inconsistent."
+    if "cad" in message or "correspondence" in message:
+        return (
+            "Required CAD geometry or size correspondence is unavailable, stale, or inconsistent."
+        )
+    if "calibration" in message or "robot-frame" in message:
+        return "Required calibrated robot-frame evidence is unavailable, stale, or inconsistent."
+    if "profile" in message or "manifest" in message:
+        return "The chosen resource has no valid configured Cartesian planning context."
+    return "Cartesian reachability context is unavailable, stale, or inconsistent."
+
+
+def _pa_allocation_prompt(  # noqa: PLR0913
     *,
     requirement: str,
     target_feature: Mapping[str, object],
@@ -1806,6 +2344,7 @@ def _pa_allocation_prompt(
     current_state_evidence: AllocationEvidenceEntry,
     desired_state_evidence: AllocationEvidenceEntry,
     validation_feedback: Mapping[str, object] | None,
+    reachability_history: Sequence[Mapping[str, object]] = (),
 ) -> str:
     prompt_input: dict[str, object] = {
         "exact_requirement": requirement,
@@ -1827,6 +2366,10 @@ def _pa_allocation_prompt(
         ],
         "presentation_order_has_no_priority": True,
     }
+    if reachability_history:
+        prompt_input["reachability_results_so_far"] = [
+            dict(result) for result in reachability_history
+        ]
     if validation_feedback is not None:
         prompt_input["previous_validation_feedback"] = dict(validation_feedback)
     return (
@@ -1836,9 +2379,10 @@ def _pa_allocation_prompt(
         "replace either value. Select one provisional resource according to the "
         "requirement, grounded state evidence, and reachability results. "
         "Presentation order is randomized and is never priority. Use check_reachability "
-        "for any resource you consider. That tool "
-        "only evaluates both selected state locations against manifest-backed "
-        "distance and workspace envelopes; it never chooses a robot. Return a "
+        "for any resource you consider. In simulation, that tool asks the exact "
+        "RobotAgent and live MoveIt model for strict, collision-aware Cartesian "
+        "pick and place paths using the grounded loose object and installed support; "
+        "it never treats the support as the object to move and never chooses a robot. Return a "
         "provisional_resource_symbol only with the exact ref of an accepted check "
         "created during this investigation. RobotAgent feedback is evidence for a "
         "new free choice: do not ask the validator to substitute a resource or "
@@ -1883,8 +2427,8 @@ def _check_reachability_tool(
         "function": {
             "name": "check_reachability",
             "description": (
-                "Evaluate both PA-selected state locations for one explicitly "
-                "chosen resource without selecting or commanding that resource."
+                "Evaluate the complete grounded pick-and-place path for one "
+                "explicitly chosen resource without selecting or commanding it."
             ),
             "strict": True,
             "parameters": {
@@ -2127,6 +2671,41 @@ def _retrieve_tool(handles: Sequence[_EvidenceHandle]) -> dict[str, Any]:
     }
 
 
+def _compare_cad_size_tool(handles: Sequence[_EvidenceHandle]) -> dict[str, Any]:
+    """Describe the neutral CAD-size comparison available to the ProductAgent."""
+    cad_ids = [handle.evidence_id for handle in handles if handle.evidence_type == "CAD"]
+    observation_ids = [
+        handle.evidence_id for handle in handles if handle.evidence_type == "observation"
+    ]
+    return {
+        "type": "function",
+        "function": {
+            "name": _COMPARE_CAD_SIZE_TOOL_NAME,
+            "description": (
+                "Compare one previously retrieved CAD mesh with candidates in one "
+                "previously retrieved RGB-D observation. Returns measurements and "
+                "tolerance results only; it does not identify or select a candidate."
+            ),
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["cad_evidence_id", "observation_evidence_id"],
+                "properties": {
+                    "cad_evidence_id": {
+                        "type": "string",
+                        "enum": cad_ids,
+                    },
+                    "observation_evidence_id": {
+                        "type": "string",
+                        "enum": observation_ids,
+                    },
+                },
+            },
+        },
+    }
+
+
 def _static_source_revision(context_ref: str, evidence_type: str) -> str:
     if evidence_type == "document":
         return str(approved_document_metadata(context_ref)["source_sha256"])
@@ -2284,6 +2863,123 @@ def _compact_retrieval_result(
             },
         }
     _assert_blinded_pa_projection(result, presentation)
+    return result
+
+
+def _retrieved_record_ref(
+    investigation: _NativeEvidenceInvestigation,
+    result: Mapping[str, object],
+    *,
+    expected_record_type: str,
+) -> str:
+    """Resolve one exact typed record from a retained PA retrieval result."""
+    refs = result.get("record_refs")
+    if not isinstance(refs, list):
+        raise ProductionGroundingError("Retrieved evidence has no typed record refs.")
+    matches: list[str] = []
+    for pa_ref in refs:
+        if not isinstance(pa_ref, str):
+            continue
+        canonical_ref = investigation.resolve_pa_reference(pa_ref)
+        record = _read_json(investigation.root / canonical_ref)
+        if record.get("record_type") == expected_record_type:
+            matches.append(canonical_ref)
+    if len(matches) != 1:
+        raise ProductionGroundingError(
+            f"Retrieved evidence must contain exactly one {expected_record_type}."
+        )
+    return matches[0]
+
+
+def _cad_size_comparison_projection(  # noqa: PLR0913
+    investigation: _NativeEvidenceInvestigation,
+    record: Mapping[str, object],
+    *,
+    comparison_ref: str,
+    cad_evidence_id: str,
+    observation_evidence_id: str,
+    cad_result: Mapping[str, object],
+    observation_result: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Project objective candidate measurements without making a semantic choice."""
+    cad = record.get("CAD")
+    ranked = record.get("ranked_candidates")
+    segmentation = observation_result.get("segmentation")
+    views = segmentation.get("views") if isinstance(segmentation, Mapping) else None
+    if not isinstance(cad, Mapping) or not isinstance(ranked, list) or not isinstance(views, list):
+        raise ProductionGroundingError("CAD size comparison projection is invalid.")
+
+    candidate_refs: dict[tuple[str, str], Mapping[str, object]] = {}
+    for view in views:
+        if not isinstance(view, Mapping):
+            raise ProductionGroundingError("Observation comparison view is invalid.")
+        observation_handle = view.get("observation_handle")
+        candidates = view.get("candidates")
+        if not isinstance(observation_handle, str) or not isinstance(candidates, list):
+            raise ProductionGroundingError("Observation comparison candidates are invalid.")
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise ProductionGroundingError("Observation comparison candidate is invalid.")
+            candidate_handle = candidate.get("candidate_handle")
+            candidate_value_ref = candidate.get("candidate_value_ref")
+            if not isinstance(candidate_handle, str) or not isinstance(
+                candidate_value_ref, Mapping
+            ):
+                raise ProductionGroundingError("Observation candidate reference is invalid.")
+            candidate_refs[(observation_handle, candidate_handle)] = candidate_value_ref
+
+    projected_candidates: list[dict[str, object]] = []
+    for candidate in ranked:
+        if not isinstance(candidate, Mapping):
+            raise ProductionGroundingError("Ranked CAD comparison candidate is invalid.")
+        observation_handle = candidate.get("observation_handle")
+        candidate_handle = candidate.get("candidate_handle")
+        value_ref = candidate_refs.get((str(observation_handle), str(candidate_handle)))
+        if value_ref is None:
+            raise ProductionGroundingError(
+                "Ranked CAD comparison candidate is absent from observation evidence."
+            )
+        projected_candidates.append(
+            {
+                "rank": candidate.get("rank"),
+                "observation_handle": observation_handle,
+                "candidate_handle": candidate_handle,
+                "candidate_value_ref": dict(value_ref),
+                "observed_dimensions_m": candidate.get("observed_dimensions_m"),
+                "dimension_errors": candidate.get("dimension_errors"),
+                "mean_dimension_error": candidate.get("mean_dimension_error"),
+                "within_size_tolerance": candidate.get("within_size_tolerance"),
+                "candidate_center_m": candidate.get("candidate_center_m"),
+            }
+        )
+
+    comparison_pa_ref = investigation.project_canonical_reference(comparison_ref)
+    evidence_refs: list[str] = []
+    for source in (cad_result, observation_result):
+        refs = source.get("evidence_refs")
+        if isinstance(refs, list):
+            evidence_refs.extend(ref for ref in refs if isinstance(ref, str))
+    evidence_refs.append(comparison_pa_ref)
+    parameters = record.get("parameters")
+    result = {
+        "evidence_type": "CAD_size_comparison",
+        "cad_evidence_handle": cad_evidence_id,
+        "observation_evidence_handle": observation_evidence_id,
+        "comparison_ref": comparison_pa_ref,
+        "evidence_refs": list(dict.fromkeys(evidence_refs)),
+        "record_refs": [comparison_pa_ref],
+        "compared_dimensions_m": cad.get("compared_dimensions_m"),
+        "dimension_error_limit": (
+            parameters.get("dimension_error_limit") if isinstance(parameters, Mapping) else None
+        ),
+        "CAD_correspondence": record.get("CAD_correspondence"),
+        "ranked_candidates": projected_candidates,
+        "plausible_candidate_count": sum(
+            candidate.get("within_size_tolerance") is True for candidate in projected_candidates
+        ),
+        "selection_made_by_tool": False,
+    }
+    _assert_blinded_pa_projection(result, investigation.presentation)
     return result
 
 
@@ -2530,6 +3226,116 @@ def _proposal_cad_bindings(
     return tuple(candidates)
 
 
+def _validate_pa_state_cad_comparison(  # noqa: PLR0911
+    investigation: _NativeEvidenceInvestigation,
+    view: ProductContextView,
+    proposal: OntologyGroundingProposal,
+    *,
+    state_name: str,
+    state_binding: _StateCandidateBinding,
+    require_unique: bool,
+) -> str | None:
+    """Validate one state against its own PA-requested size comparison."""
+    cad_bindings = _proposal_cad_bindings(
+        investigation.root,
+        view,
+        proposal,
+        state_name=state_name,
+    )
+    if len(cad_bindings) != 1:
+        return f"{state_name} must cite exactly one approved CAD record."
+
+    value_refs = _proposal_state_value_evidence_refs(proposal, state_name)
+    comparisons = [
+        binding
+        for record_ref, binding in investigation.comparison_bindings.items()
+        if record_ref in value_refs
+    ]
+    if len(comparisons) != 1:
+        return (
+            f"{state_name} must cite exactly one compare_cad_size record requested "
+            "by the PA during this grounding run in its selected state value."
+        )
+    comparison = comparisons[0]
+    if comparison.cad_record_ref != cad_bindings[0].record_ref:
+        return f"{state_name} cites CAD evidence different from its size comparison input."
+    if comparison.segmentation_record_ref != state_binding.record_ref:
+        return (
+            f"{state_name} selects a candidate outside the observation used by its size comparison."
+        )
+
+    typed_bindings = [
+        binding
+        for binding in view.typed_bindings
+        if binding.record_ref == comparison.record_ref
+        and binding.record_type == "CADSizeCorrespondenceRecord"
+    ]
+    if len(typed_bindings) != 1:
+        return f"{state_name} size comparison is not one pinned typed record."
+    record_path = investigation.root / comparison.record_ref
+    if _sha256_path(record_path) != typed_bindings[0].record_sha256:
+        return f"{state_name} size comparison changed after it was produced."
+    record = _read_json(record_path)
+    cad = record.get("CAD")
+    cad_record = cad.get("record") if isinstance(cad, Mapping) else None
+    segmentation = record.get("segmentation")
+    segmentation_record = segmentation.get("record") if isinstance(segmentation, Mapping) else None
+    if (
+        record.get("record_type") != "CADSizeCorrespondenceRecord"
+        or not isinstance(cad_record, Mapping)
+        or cad_record.get("ref") != comparison.cad_record_ref
+        or not isinstance(segmentation_record, Mapping)
+        or segmentation_record.get("ref") != comparison.segmentation_record_ref
+        or typed_bindings[0].status != record.get("CAD_correspondence")
+    ):
+        return f"{state_name} size comparison inputs or status are inconsistent."
+
+    observation_handle = _candidate_observation_handle(
+        investigation.root / state_binding.record_ref,
+        state_binding.field_path,
+    )
+    candidate_handle = _candidate_handle(
+        investigation.root / state_binding.record_ref,
+        state_binding.field_path,
+    )
+    if require_unique:
+        selected = record.get("selected_candidate")
+        if (
+            record.get("CAD_correspondence") != "accepted"
+            or not isinstance(selected, Mapping)
+            or selected.get("observation_handle") != observation_handle
+            or selected.get("candidate_handle") != candidate_handle
+        ):
+            return (
+                "The PA-selected current_state candidate is not the unique candidate "
+                "supported by its cited compare_cad_size record."
+            )
+        return None
+
+    plausible = record.get("plausible_candidates")
+    matches = (
+        [
+            candidate
+            for candidate in plausible
+            if isinstance(candidate, Mapping)
+            and candidate.get("observation_handle") == observation_handle
+            and candidate.get("candidate_handle") == candidate_handle
+            and candidate.get("within_size_tolerance") is True
+        ]
+        if isinstance(plausible, list)
+        else []
+    )
+    if len(matches) != 1:
+        return (
+            "The PA-selected desired_state destination is outside the size-plausible "
+            "candidate set in its cited compare_cad_size record. Reconsider the "
+            "selection using the reported dimensions, support relationships, "
+            "candidate centroids, gear dimensions, and document evidence; the "
+            "validator does not choose an alternative."
+        )
+    return None
+
+
 def _proposal_state_evidence_refs(
     proposal: OntologyGroundingProposal,
     state_name: str,
@@ -2550,6 +3356,38 @@ def _proposal_state_evidence_refs(
             if isinstance(evidence_refs, list):
                 refs.extend(str(ref) for ref in evidence_refs if isinstance(ref, str))
     return frozenset(refs)
+
+
+def _proposal_state_value_evidence_refs(
+    proposal: OntologyGroundingProposal,
+    state_name: str,
+) -> frozenset[str]:
+    """Return citations attached to the state's exactly one selected value."""
+    state = proposal.target_feature.get(state_name)
+    values = state.get("state_values") if isinstance(state, Mapping) else None
+    if not isinstance(values, list) or len(values) != 1:
+        return frozenset()
+    value = values[0]
+    refs = value.get("evidence_refs") if isinstance(value, Mapping) else None
+    if not isinstance(refs, list):
+        return frozenset()
+    return frozenset(str(ref) for ref in refs if isinstance(ref, str))
+
+
+def _proposal_state_comparison_path(
+    investigation: _NativeEvidenceInvestigation,
+    proposal: OntologyGroundingProposal,
+    *,
+    state_name: str,
+) -> Path | None:
+    """Resolve the one PA-requested CAD comparison cited by a state value."""
+    refs = _proposal_state_value_evidence_refs(proposal, state_name)
+    matches = [
+        investigation.root / record_ref
+        for record_ref in investigation.comparison_bindings
+        if record_ref in refs
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _candidate_observation_handle(record_path: Path, field_path: str) -> str:
@@ -2777,6 +3615,10 @@ def _current_evidence_catalog(
             {"retrieval_state": "already_retrieved", **dict(result)}
             for result in investigation.retrieved_results.values()
         ),
+        *(
+            {"comparison_state": "already_compared", **dict(result)}
+            for result in getattr(investigation, "comparison_results", {}).values()
+        ),
     ):
         refs = item.get("record_refs")
         key = tuple(str(ref) for ref in refs) if isinstance(refs, list) else ()
@@ -2786,6 +3628,30 @@ def _current_evidence_catalog(
             seen_record_refs.add(key)
         catalog.append(dict(item))
     return catalog
+
+
+def _append_validation_feedback(
+    history: list[Mapping[str, object]],
+    feedback: Mapping[str, object],
+) -> None:
+    """Append one distinct correction while preserving its first-seen order."""
+    fingerprint = json.dumps(feedback, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    if any(
+        json.dumps(item, sort_keys=True, ensure_ascii=False, allow_nan=False) == fingerprint
+        for item in history
+    ):
+        return
+    history.append(dict(feedback))
+
+
+def _is_tool_round_exhaustion(error: RuntimeError) -> bool:
+    """Recognize only the shared agent runtime's bounded-tool terminal error."""
+    cause: BaseException | None = error
+    while cause is not None:
+        if str(cause) == _TOOL_ROUND_LIMIT_MESSAGE:
+            return True
+        cause = cause.__cause__
+    return False
 
 
 def _has_unattempted_evidence(
@@ -2882,7 +3748,7 @@ def _present_answered_clarification_evidence(
 
 
 def _configured_target_frame(workcell: Any) -> str:
-    """Derive and validate the common target frame without task-label flags."""
+    """Derive the common controller frame without static simulation geometry."""
     frames: set[str] = set()
     for resource in workcell._profile.resources:
         record = _read_json(resource.manifest_path)
@@ -2892,16 +3758,21 @@ def _configured_target_frame(workcell: Any) -> str:
         environment = (
             entry.get(environment_name) if isinstance(entry, Mapping) and environment_name else None
         )
-        static = (
-            environment.get("static_capabilities") if isinstance(environment, Mapping) else None
-        )
-        reach = static.get("gripper_reach") if isinstance(static, Mapping) else None
-        frame = reach.get("frame") if isinstance(reach, Mapping) else None
+        if mode == "simulation":
+            controller = environment.get("controller") if isinstance(environment, Mapping) else None
+            move_group = controller.get("move_group") if isinstance(controller, Mapping) else None
+            frame = move_group.get("frame_id") if isinstance(move_group, Mapping) else None
+        else:
+            static = (
+                environment.get("static_capabilities") if isinstance(environment, Mapping) else None
+            )
+            reach = static.get("gripper_reach") if isinstance(static, Mapping) else None
+            frame = reach.get("frame") if isinstance(reach, Mapping) else None
         if not isinstance(frame, str) or not frame:
-            raise ProductionGroundingError("A configured resource has no reach frame.")
+            raise ProductionGroundingError("A configured resource has no target frame.")
         frames.add(frame)
     if len(frames) != 1:
-        raise ProductionGroundingError("Configured resources have inconsistent reach frames.")
+        raise ProductionGroundingError("Configured resources have inconsistent target frames.")
     return next(iter(frames))
 
 

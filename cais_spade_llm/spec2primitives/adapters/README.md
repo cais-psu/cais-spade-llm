@@ -16,8 +16,11 @@ live observation through the controlled `retrieve` boundary, while the UI
 polls only compact processing status.
 
 ProductAgent and RobotAgent adapters belong under `../agents/pa/` and
-`../agents/ra/`, respectively. The current RA adapter supports the Phase 5.1
-state/catalog snapshot and Phase 5.2A structural-symbol request for only the
-exact selected RobotAgent. ProductAgent and RobotAgent remain shared, read-only
-implementation authorities. This directory retains only non-agent runtime
-composition, including the Gazebo and UI adapters.
+`../agents/ra/`, respectively. `in_process_robot_agent.py` also provides the
+narrow Phase 4 allocation boundary: it validates the exact PA-requested live
+RobotAgent and delegates simulation `cartesian_pick_place` checks to
+`moveit_plan_only.py` without running the shared static workspace precheck.
+That runtime reads live EE/TCP TF and calls only the configured Cartesian-path
+service; it never creates an execution client. The same RA adapter supports the
+Phase 5.1 state/catalog snapshot and Phase 5.2A structural-symbol request.
+ProductAgent and RobotAgent remain shared, read-only implementation authorities.

@@ -14,12 +14,14 @@ investigation. The PA call receives:
 - an allowed PPR schema projection;
 - the current ABox and required-output projection;
 - approved discovery metadata; and
-- one controlled native `retrieve(evidence_id)` tool.
+- controlled `retrieve(evidence_id)` and
+  `compare_cad_size(cad_evidence_id, observation_evidence_id)` tools.
 
-PA can retrieve zero or more approved documents, CAD files, or fresh live
-observations in any order. Tool results return to the same conversation as
-compact typed evidence. PA then directly returns a proposal candidate, a
-clarification question, or an insufficient-evidence explanation.
+PA retrieves approved documents, CAD files, and one fresh live observation as
+needed. After retrieving both inputs, PA may request neutral CAD-to-candidate
+measurements. Tool results return to the same conversation as compact typed
+evidence. PA then directly returns a proposal candidate, a clarification
+question, or an insufficient-evidence explanation.
 
 The model never supplies paths, provider IDs, hashes, frames, record types, or
 arbitrary source names. Tool calls are resolved and audited by the system. A
@@ -39,20 +41,30 @@ create or accept a separate clarification alias.
 
 ## Evidence processing
 
-`production_grounding.py` exposes only source-level retrieval to PA. The system
-performs document extraction, STL measurement, live capture, segmentation,
-correspondence, calibration, frame conversion, and coarse resource checks.
-Those operations are descriptor-driven services, not additional PA choices.
+`production_grounding.py` exposes source-level retrieval and objective CAD-size
+comparison to PA. The system performs document extraction, STL measurement,
+live capture, segmentation, calibration, frame conversion, and live Cartesian
+resource checks. Those operations are descriptor-driven services, not additional PA
+choices.
 
 Document retrieval yields the complete ordered `DocumentOverviewRecord` v3.
 CAD retrieval yields `CADMeshRecord`. Observation retrieval yields typed RGB-D,
 point-cloud, segmentation, stable crop, and `ObservationCandidateReview`
-records. The review describes visible candidates without assigning state, CAD,
-process, or resource meaning. The PA binds exactly one supplied candidate to
-each state in `state_values`; deterministic CAD-size validation checks the
-unchanged current candidate. During allocation, `check_reachability` accepts
-only the PA-selected `resource_symbol` and derives both locations from those
-already accepted state bindings.
+records. The review describes morphology, dimensions, surfaces, and support
+contacts without assigning a part identity, state, CAD, process, or resource
+meaning. `compare_cad_size` reuses `CADSizeCorrespondenceRecord` and returns
+opaque candidate/value handles, measured dimensions, errors, tolerance results,
+and the comparison ref without selecting a semantic answer. The PA binds exactly
+one supplied current object and one desired destination/support candidate in
+`state_values`, citing its own comparisons. Deterministic validation requires a
+unique current match and accepts any PA-selected desired candidate in the
+size-plausible set; it never substitutes another candidate. During allocation,
+`check_reachability` accepts only the PA-selected `resource_symbol` and derives
+both locations from those already accepted state bindings. In simulation it
+reloads their CAD/support provenance, derives a loose-gear grasp and a final
+gear center on the installed shaft, and asks only that robot's live MoveIt
+model for strict, collision-aware pick and place Cartesian paths. Static
+workspace boxes do not accept or reject this simulation check.
 
 Before retrieval, `EvidencePresentationRecord` maps canonical sources to
 randomized opaque handles. Approved CAD names and exact `context_ref` values are
@@ -83,6 +95,12 @@ increment supports one requirement and one feature. The target contains:
 - zero, one, or multiple `state_values` for each state, each with a unique PA-authored semantic
   name, one accepted typed-record ref, one JSON Pointer, and direct evidence.
 
+The generic proposal schema retains that zero/one/multiple capability. The
+production assembly projection requires exactly one current object candidate
+and exactly one desired destination/support candidate. A desired destination
+identifies where the outcome will be realized; it does not claim the completed
+assembly is already visible.
+
 PA chooses the process, statement text, state-value count and names, record
 refs, field paths, and citations from retrieved evidence. Deterministic code
 does not fill those semantic values. It validates process authority, citations,
@@ -98,8 +116,12 @@ accepted proposal while RDF records the explicit feature-state structure.
 
 If one PA proposal violates these invariants, the runtime preserves the
 rejected audit record and returns the exact deterministic validation failure as
-prompt-only feedback for a bounded correction round. It does not synthesize a
-missing `defines`, `realizes`, or other assertion on PA's behalf.
+prompt-only feedback for a bounded correction round. Distinct feedback remains
+available on later attempts. A single live observation is reused within the run
+and refreshed on clarification resume. At global tool-budget exhaustion, PA
+receives one final no-tools call; exhaustion returns structured `incomplete`
+rather than escaping as a runtime error. The host does not synthesize a missing
+`defines`, `realizes`, or other assertion on PA's behalf.
 
 Structural validity alone does not commit the candidate. A separate model call
 produces `TargetFeatureSemanticReview` v2, containing only `verdict` and `gap`.
@@ -113,7 +135,9 @@ The accepted v8 proposal creates explicit `currentstate_0001` and
 `processExecution` then activates a separate PA allocation call. The call reuses
 the two accepted state bindings; PA chooses one capable resource, invokes
 `check_reachability(resource_symbol)`, and cites the resulting two-state evidence. The exact
-provisional RobotAgent performs plan-only endpoint IK/collision/path validation.
+provisional RobotAgent performs live, no-motion Cartesian pick/place validation
+in simulation. The second phase begins from the first phase's terminal robot
+state, and each path must be complete with collision checking enabled.
 Only its `accepted` verdict allows the runtime to commit the assignment;
 rejection returns evidence for another PA choice without host substitution.
 The PA may revise the resource, but allocation cannot revise either state image.
@@ -128,8 +152,8 @@ derived on demand from the selected evidence and approved calibration.
 
 New interactions write append-only native tool audits, direct PA turns,
 `EvidencePresentationRecord` v1, `AllocationPresentationRecord` v1,
-`ReachabilityCheckRecord` v2, `ResourceSelectionRecord` v4,
-`PlanOnlyFeasibilityValidationRecord` v2, `TargetFeatureSemanticReview` v2,
+simulation `ReachabilityCheckRecord` v3, `ResourceSelectionRecord` v4,
+simulation `PlanOnlyFeasibilityValidationRecord` v3, `TargetFeatureSemanticReview` v2,
 `TypedGroundingContract` v6, and `PAContextGroundingCompletion` v6.
 Clarification resumes the same conversation context using the exact persisted
 question/reply history. Cancellation invokes no PA call.
@@ -137,15 +161,16 @@ question/reply history. Cancellation invokes no PA call.
 The v6 contract and completion pin the selected process, both state IRIs, the
 accepted proposal, semantic review, nested evidence, both presentation records,
 registry/workcell snapshots, referenced typed records, reachability, exact
-RobotAgent endpoint-motion validation, resource selection, assignment delta,
+RobotAgent plan-only validation, resource selection, assignment delta,
 and final ABox.
 They do not copy `target_feature`; downstream consumers reconstruct it from the
 hash-verified accepted proposal.
 
 Read-only validation remains for ontology proposal v3-v7, document overview
 v1, resource selection v1-v3, feasibility validation v1, and completion/session
-v2-v5 records. New Phase 5 handoff requires completion v6. New runs never
-produce or migrate the old records.
+v2-v5 records. New Phase 5 handoff requires completion v6. New simulation runs
+do not produce or migrate the old records; the physical-mode safety path retains
+v2 reachability and validation.
 
 This boundary performs schema-constrained, evidence-backed instance grounding.
 Multi-feature requirements, primitive parameter binding, motion execution,
