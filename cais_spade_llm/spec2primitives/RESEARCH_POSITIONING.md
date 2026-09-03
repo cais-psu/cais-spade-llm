@@ -18,10 +18,14 @@ specification.
 ## Proposed-versus-implemented status
 
 The dynamic PA-to-RA composition workflow in this document is the proposed
-ICRA architecture. The PA context adapter through Phase 3.5 exists, and **Phase
-4 is implemented through Phase 4.4 under the current framework**. Phase 4.4
+ICRA architecture. The PA context adapter through Phase 3.5 exists, and **the
+Phase 4 runtime is implemented through Phase 4.4 under the current framework**.
+The Gate-1 evidence policy intentionally stops the present Medium Gear scene at
+its ambiguous desired state, so no successful baseline is claimed until the
+separately authorized relational-grounding gate is complete. Phase 4.4
 adds a native controlled `retrieve` tool, transient ontology-proposal
-validation, fixed `RGBDSegmentationRecord` typed evidence gating, a
+validation, requirement-neutral controller readiness, deterministic unique-state
+evidence gating, a
 configuration-derived Workcell with explicit per-resource process capabilities,
 PA-authored physical state-evidence and resource choices, two-state coarse
 reach, and exact-resource plan-only endpoint validation before a system-authored
@@ -138,11 +142,12 @@ PA dynamically chooses approved evidence and assigns candidates to
 locations are derived only when reachability or another verifier needs them.
 No fixed evidence or resource order is prescribed.
 
-This PA claim is bounded. The active Phase 4 contract requires an
-`RGBDSegmentationRecord`, and approved observation retrieval automatically runs
-the deterministic preprocessing and segmentation implementation. PA does not
-choose that algorithm, its parameters, or the required record type. It does
-choose the approved evidence handle, the neutral candidate and state
+This PA claim is bounded. The controller prompt does not prescribe an evidence
+modality or record type. Approved observation retrieval automatically runs the
+deterministic preprocessing and segmentation implementation, and the current
+acceptance gate validates candidate state values resolved from
+`RGBDSegmentationRecord` evidence. PA does not choose that algorithm or its
+parameters. It does choose the approved evidence handle, the neutral candidate and state
 assignments, and the provisional resource; deterministic reachability and
 RobotAgent checks can only accept or reject those unchanged choices. The paper
 therefore describes evidence-conditioned bounded PA autonomy within the fixed
@@ -815,13 +820,17 @@ PA authors one evidence-cited target_feature proposal with both states
         ↓
 host generates and validates feature/state types, state links, defines, and realizes
         ↓
-unresolved processExecution activates a free PA provisional resource choice
-        ↓
 PA assigns approved neutral candidates to currentstate and desiredstate
         ↓
-check_reachability derives and evaluates both selected locations ↺
+deterministically validate both assignments, hashes, and unique correspondences ↺
         ↓
-separate PA semantic review accepts or returns a revision gap ↺
+separate scaffold-free PA semantic consistency review accepts or returns a revision gap ↺
+        ↓
+commit the accepted feature-state ABox
+        ↓
+unresolved processExecution activates a free PA provisional resource choice
+        ↓
+check_reachability derives and evaluates both selected locations ↺
         ↓
 send only the PA-chosen resource to its RobotAgent for plan-only validation
         ↓

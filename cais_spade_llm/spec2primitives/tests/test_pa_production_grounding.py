@@ -1010,6 +1010,76 @@ def test_cad_size_projection_is_measurement_only_and_answer_blind() -> None:
         assert forbidden not in serialized
 
 
+def test_ambiguous_cad_projection_exposes_neutral_plausible_order() -> None:
+    comparison_ref = "products/grounding/correspondence_0001.json"
+    investigation = SimpleNamespace(
+        presentation=SimpleNamespace(entries=()),
+        project_canonical_reference=lambda ref: (
+            "typed_record_comparison" if ref == comparison_ref else None
+        ),
+    )
+    candidate_handles = ["candidate_a", "candidate_b", "candidate_c"]
+    observation_result = {
+        "evidence_refs": ["typed_record_observation"],
+        "segmentation": {
+            "views": [
+                {
+                    "observation_handle": "view_opaque",
+                    "candidates": [
+                        {
+                            "candidate_handle": handle,
+                            "candidate_value_ref": {
+                                "record_ref": "typed_record_segmentation",
+                                "field_path": f"/cameras/0/candidates/{index}",
+                            },
+                        }
+                        for index, handle in enumerate(candidate_handles)
+                    ],
+                }
+            ]
+        },
+    }
+    ranked_candidates = [
+        {
+            "rank": rank,
+            "observation_handle": "view_opaque",
+            "candidate_handle": handle,
+            "observed_dimensions_m": [0.020 + rank / 10000, 0.010],
+            "dimension_errors": [rank / 1000, 0.0],
+            "mean_dimension_error": rank / 2000,
+            "within_size_tolerance": True,
+            "candidate_center_m": [float(rank), 0.0, 0.0],
+        }
+        for rank, handle in enumerate(reversed(candidate_handles), start=1)
+    ]
+    record = {
+        "CAD": {"compared_dimensions_m": [0.020, 0.010]},
+        "parameters": {"dimension_error_limit": 0.15},
+        "CAD_correspondence": "ambiguous",
+        "ranked_candidates": ranked_candidates,
+    }
+
+    result = _cad_size_comparison_projection(
+        investigation,
+        record,
+        comparison_ref=comparison_ref,
+        cad_evidence_id="cad_opaque",
+        observation_evidence_id="observation_opaque",
+        cad_result={"evidence_refs": ["typed_record_cad"]},
+        observation_result=observation_result,
+    )
+
+    assert "ranked_candidates" not in result
+    assert [
+        candidate["candidate_handle"] for candidate in result["plausible_candidates"]
+    ] == candidate_handles
+    assert result["plausible_candidate_count"] == 3
+    assert all(
+        {"rank", "dimension_errors", "mean_dimension_error"}.isdisjoint(candidate)
+        for candidate in result["plausible_candidates"]
+    )
+
+
 def test_compare_cad_size_persists_result_and_audits_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1630,7 +1700,7 @@ def test_target_cad_requires_primary_feature_citation(tmp_path: Path) -> None:
     assert _proposal_cad_bindings(tmp_path, view, cited, state_name="current_state") == (binding,)
 
 
-def test_desired_candidate_accepts_any_size_plausible_shaft_and_rejects_pin(
+def test_desired_candidate_rejects_ambiguous_size_correspondence(
     tmp_path: Path,
 ) -> None:
     cad_ref = "products/grounding/cad/shaft.json"
@@ -1747,36 +1817,17 @@ def test_desired_candidate_accepts_any_size_plausible_shaft_and_rejects_pin(
         record_ref=segmentation_ref,
         field_path="/cameras/0/candidates/1",
     )
-    pin_binding = _StateCandidateBinding(
-        state="desired_state",
-        name="supported_destination",
-        record_ref=segmentation_ref,
-        field_path="/cameras/0/candidates/3",
-    )
-
-    assert (
-        _validate_pa_state_cad_comparison(
-            investigation,
-            view,
-            proposal(1),
-            state_name="desired_state",
-            state_binding=plausible_binding,
-            require_unique=False,
-        )
-        is None
-    )
     gap = _validate_pa_state_cad_comparison(
         investigation,
         view,
-        proposal(3),
+        proposal(1),
         state_name="desired_state",
-        state_binding=pin_binding,
-        require_unique=False,
+        state_binding=plausible_binding,
     )
     assert gap is not None
-    assert "outside the size-plausible candidate set" in gap
-    assert "does not choose an alternative" in gap
-    assert all(handle not in gap for handle in candidate_handles[:3])
+    assert "not uniquely supported" in gap
+    assert "Gear_Shaft" not in gap
+    assert all(handle not in gap for handle in candidate_handles)
 
 
 def test_current_candidate_still_requires_unique_size_correspondence(
@@ -1886,7 +1937,6 @@ def test_current_candidate_still_requires_unique_size_correspondence(
             record_ref=segmentation_ref,
             field_path="/cameras/0/candidates/0",
         ),
-        require_unique=True,
     )
     rejected = _validate_pa_state_cad_comparison(
         investigation,
@@ -1899,12 +1949,11 @@ def test_current_candidate_still_requires_unique_size_correspondence(
             record_ref=segmentation_ref,
             field_path="/cameras/0/candidates/1",
         ),
-        require_unique=True,
     )
 
     assert accepted is None
     assert rejected is not None
-    assert "unique candidate" in rejected
+    assert "not uniquely supported" in rejected
 
 
 def test_state_candidate_bindings_and_allocation_ignore_presentation_order() -> None:
@@ -2082,7 +2131,10 @@ def test_cad_correspondence_failure_remains_incomplete(
         del kwargs
         if failure_mode == "malformed":
             raise ValueError("controlled malformed evidence")
-        return "The cited CAD size correspondence is ambiguous."
+        return (
+            "The submitted state assignments are not uniquely supported by complete, "
+            "internally consistent, hash-pinned approved evidence."
+        )
 
     monkeypatch.setattr(runtime, "_validate_pa_state_cad_comparisons", correspondence)
 
@@ -2099,8 +2151,9 @@ def test_cad_correspondence_failure_remains_incomplete(
 
     assert result["grounding_status"] == "incomplete"
     message = str(result["insufficient_evidence"])
-    assert "CAD" in message
-    assert "correspondence" in message
+    assert "not uniquely supported" in message
+    assert "CAD" not in message
+    assert "candidate_" not in message
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
 
 
@@ -2397,6 +2450,86 @@ def test_validation_feedback_history_accumulates_and_deduplicates() -> None:
     assert history == [first, second]
 
 
+def test_ambiguous_state_evidence_stops_before_review_and_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    binding = SimpleNamespace(
+        state="current_state",
+        name="selected_candidate",
+        record_ref="selected_segmentation.json",
+        field_path="/cameras/0/candidates/0",
+    )
+    monkeypatch.setattr(
+        production_grounding,
+        "_proposal_state_candidate_bindings",
+        lambda proposal: (binding, binding),
+    )
+    gap = (
+        "The submitted desired_state assignment is not uniquely supported by complete, "
+        "internally consistent, hash-pinned approved evidence."
+    )
+
+    def reject_ambiguous_evidence(**kwargs: object) -> str:
+        del kwargs
+        return gap
+
+    monkeypatch.setattr(runtime, "_validate_pa_state_cad_comparisons", reject_ambiguous_evidence)
+
+    async def unexpected_allocation(**kwargs: object) -> Mapping[str, object]:
+        del kwargs
+        raise AssertionError("Allocation must not run after ambiguous state evidence.")
+
+    monkeypatch.setattr(runtime, "_complete_resource_assignment", unexpected_allocation)
+    agent = _SequencedProductAgent(
+        (
+            _proposal("requirement_0001"),
+            {"insufficient_evidence": "The approved evidence remains ambiguous."},
+        )
+    )
+
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=2,
+        )
+    )
+
+    assert result["grounding_status"] == "incomplete"
+    assert result["insufficient_evidence"] == "The approved evidence remains ambiguous."
+    assert agent.review_calls == []
+    assert not (root / "products/grounding/target_feature_review").exists()
+    first_input = json.loads(str(agent.calls[0]["prompt"]).split("Grounding input:\n", 1)[1])
+    projection = json.dumps(first_input["required_output_projection"]).casefold()
+    feedback_input = json.loads(str(agent.calls[1]["prompt"]).split("Grounding input:\n", 1)[1])
+    feedback = json.dumps(feedback_input["validation_feedback_history"]).casefold()
+    assert "state_evidence_uniqueness" in feedback
+    for forbidden in (
+        "gear_medium",
+        "gear_shaft",
+        "stl",
+        "rgb-d",
+        "cad",
+        "document",
+        "target_frame",
+        "mounted",
+    ):
+        assert forbidden not in projection
+        assert forbidden not in feedback
+
+
 def test_distinct_validation_feedback_is_preserved_across_pa_attempts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2603,12 +2736,6 @@ def test_semantic_review_accepts_supported_destination_contract(
         compiled_delta={},
         proposal=proposal,
     )
-    required_projection = {
-        "state_evidence": {
-            "current_state": "exactly one current object candidate",
-            "desired_state": "exactly one destination or support candidate",
-        }
-    }
     agent = _ToolUsingProductAgent(retrieve_order=())
 
     review = asyncio.run(
@@ -2618,15 +2745,15 @@ def test_semantic_review_accepts_supported_destination_contract(
             candidate=candidate,
             product_requirement=abox.product_requirement,
             evidence_catalog=[],
-            required_output_projection=required_projection,
         )
     )
 
     assert review.verdict == "complete"
     prompt = str(agent.review_calls[0]["prompt"])
     assert "supported_destination" in prompt
-    assert "exactly one destination or support candidate" in prompt
-    assert "without depicting the completed assembly" in prompt
+    assert "scaffold-free consistency review" in prompt
+    assert "required_output_projection" not in prompt
+    assert "without depicting the completed assembly" not in prompt
 
 
 def test_incomplete_semantic_review_reenters_pa_before_commit(
@@ -2775,7 +2902,7 @@ def test_clarification_requires_successful_approved_evidence(
     revision_prompt = str(agent.calls[1]["prompt"])
     assert "evidence_first_clarification" in revision_prompt
     assert "Do not assume or supply an interpretation" in revision_prompt
-    assert "completed assembly is already visible" in revision_prompt
+    assert "completed assembly is already visible" not in revision_prompt
 
 
 def test_clarification_after_successful_retrieval_is_returned(
@@ -3014,6 +3141,10 @@ def test_production_source_has_no_task_label_or_answer_recipe() -> None:
     assert '"inspect"' not in prompt_source
     assert "target_feature" in prompt_source
     assert "compatible retrieved CAD and live observation evidence" not in source
+    assert "Gear_Medium" not in source
+    assert "Gear_Shaft" not in source
+    assert "required_CAD_size_comparisons" not in source
+    assert "target_frame_if_a_verifier_derives_geometry" not in source
 
 
 async def _unused_tool(

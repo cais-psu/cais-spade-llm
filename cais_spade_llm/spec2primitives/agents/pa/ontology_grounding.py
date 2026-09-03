@@ -166,13 +166,11 @@ async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
         "one process_iri from authorized_processes and cite its direct evidence. "
         "Write complete current and desired product-state statements and cite their "
         "direct evidence. The current_state must describe the evidenced state now; "
-        "the desired_state must describe the requested product outcome. When the "
-        "required_output_projection requires state candidates, select exactly one "
-        "current object candidate and exactly one desired destination or support "
-        "candidate. A desired-state destination value identifies where the requested "
-        "assembly will be realized; it does not assert that the completed assembly is "
-        "already visible. Otherwise, add state_values only when an accepted typed "
-        "record returned by a controlled tool supplies a value belonging to that state. For "
+        "the desired_state must describe the requested product outcome. Follow only "
+        "the generic cardinality and readiness constraints in required_output_projection; "
+        "they do not identify a source, component, candidate, or expected answer. Add "
+        "state_values only when accepted typed records returned by controlled tools "
+        "uniquely support values belonging to those states. For "
         "each state value, author a unique semantic name within that state, exact "
         "record_ref, JSON Pointer field_path, and direct evidence_refs. The same "
         "record may supply multiple values through different paths. Do not invent a "
@@ -269,9 +267,8 @@ async def review_target_feature_semantics(
     product_requirement: str,
     evidence_catalog: Sequence[Mapping[str, object]],
     pa_reference_projector: PAReferenceTranslator | None = None,
-    required_output_projection: Mapping[str, object] | None = None,
 ) -> TargetFeatureSemanticReview:
-    """Run and persist a separate structured semantic-sufficiency review."""
+    """Run and persist a scaffold-free semantic consistency review."""
     root = Path(interaction_root).resolve()
     if (
         candidate.proposal_path
@@ -304,26 +301,18 @@ async def review_target_feature_semantics(
         "target_feature": target_feature_projection,
         "resolved_state_values": state_value_projection,
         "currently_retrieved_evidence": [dict(item) for item in evidence_catalog],
-        "required_output_projection": (
-            {} if required_output_projection is None else dict(required_output_projection)
-        ),
     }
     prompt = (
-        "Review whether the PA-authored target_feature adequately represents the "
-        "exact product requirement using the currently retrieved evidence. Judge "
-        "semantic product-state completeness, not robot execution readiness. Apply "
-        "the same required_output_projection used for the proposal. An empty "
-        "state_values list is valid only when that projection does not require a "
-        "candidate for the state and current evidence supplies no accepted typed "
-        "value. A desired-state destination or support candidate may identify where "
-        "the requested assembly will be realized without depicting the completed "
-        "assembly. Judge whether each included value has the correct semantic role. Do "
-        "not demand target geometry, target_pose, tolerance, primitive parameters, "
-        "resource state, or other information absent from current evidence. Mark "
-        "incomplete only when the current-state or desired-state statement or included "
-        "values omit, contradict, or fail to represent requirement meaning supported by the "
-        "currently retrieved evidence. Return only a verdict and a concise actionable "
-        "gap; do not return reasoning.\n\n"
+        "Perform a scaffold-free consistency review of the PA-authored target_feature "
+        "against the exact product requirement and currently retrieved evidence. The "
+        "candidate bindings and evidence uniqueness belong to deterministic validation; "
+        "do not repeat that gate, infer missing facts, repair the proposal, replace a "
+        "candidate, or apply an expected answer. Judge only whether the "
+        "current-state statement, desired-state statement, process, and included values "
+        "are mutually consistent with the requirement and cited evidence. Do not demand "
+        "target geometry, target_pose, tolerance, primitive parameters, resource state, "
+        "or other execution information. Return only a verdict and a concise actionable "
+        "consistency gap; do not return reasoning.\n\n"
         f"Semantic review input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
     output = await product_agent.ask_llm_structured(

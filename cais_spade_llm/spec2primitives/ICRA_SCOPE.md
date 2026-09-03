@@ -6,13 +6,18 @@
 
 ## Proposed-versus-implemented status
 
-The end-to-end workflow in this document is proposed architecture. **Phase 4 is
-implemented through Phase 4.4 under the current framework.** The package also
+The end-to-end workflow in this document is proposed architecture. **The Phase 4
+runtime is implemented through Phase 4.4 under the current framework.** Under
+the Gate-1 evidence policy, however, the present Medium Gear scene intentionally
+stops at its ambiguous desired-state correspondence; it is not a successful
+baseline until the separately authorized relational-grounding gate is complete.
+The package also
 implements the PA interaction boundary through Phase 3.5. PA uses native
 `retrieve` and `compare_cad_size` tools and returns a direct ontology proposal. Phase 4.4 validates and
 commits one v8 PA-authored, evidence-grounded `target_feature` with explicit
-current and desired states, each with a PA-selected neutral candidate; a separate
-structured PA semantic review must accept the unchanged pair. PA then chooses a
+current and desired states, each with a uniquely supported PA-selected neutral
+candidate; deterministic evidence validation runs before a separate scaffold-free
+semantic consistency review accepts the unchanged pair. PA then chooses a
 provisional resource through `check_reachability(resource_symbol)`, which reuses
 those bindings. The exact selected RobotAgent performs
 live, no-motion Cartesian pick/place validation in simulation, and only
@@ -205,9 +210,9 @@ PA authors one cited target_feature with current and desired states
         ↓
 validate its exact seven-assertion projection without merging
         ↓
-separate PA semantic review accepts or returns a revision gap ↺
+validate both unchanged candidate refs, hashes, and unique CAD size correspondences ↺
         ↓
-validate the unchanged candidate refs, hashes, and CAD size correspondence ↺
+separate PA semantic consistency review accepts or returns a revision gap ↺
         ↓
 commit the accepted feature-state ABox
         ↓
@@ -331,8 +336,10 @@ desired states, and numeric robot-frame locations are derived only when a
 verifier needs them. No fixed document, CAD, RGB-D, or resource order is
 prescribed.
 
-The current successful Phase 4 path explicitly requests an
-`RGBDSegmentationRecord`. Retrieving an approved live observation then invokes
+The controller's grounding-readiness projection prescribes no evidence modality,
+component, CAD choice, or candidate. The current deterministic implementation
+accepts state values resolved from `RGBDSegmentationRecord` evidence only when
+each cited CAD correspondence is unique. Retrieving an approved live observation invokes
 deterministic preprocessing and segmentation; PA does not select the
 segmentation algorithm or author that record. PA authority begins with its
 choice of approved evidence handle and continues through its selection of the
@@ -412,6 +419,10 @@ records copied from an earlier run. Five repetitions provide an initial
 artifact-complete study set; results are reported as counts and traces, not as a
 statistical generality claim.
 
+`interaction_d93d297a1ddc4bdc85cbbe60579a2b57` is excluded from every baseline
+count and retained only as an immutable contaminated-prompt ablation. Fresh study
+runs begin only after the relational-grounding gate and its smoke run pass.
+
 | ID | Condition | Required observation |
 | --- | --- | --- |
 | 1 | Baseline with independently pinned presentation orders | PA authors the evidence retrievals, target feature, state-evidence assignments, and provisional resource. |
@@ -466,9 +477,9 @@ deterministic validation creates a transient provisional ABox
         ↓
 host generates feature_0001, both states, and seven transient assertions
         ↓
-separate PA semantic review accepts or returns a revision gap ↺
+validate both unchanged candidate refs, hashes, and unique CAD size correspondences ↺
         ↓
-validate the unchanged candidate refs, hashes, and CAD size correspondence ↺
+separate scaffold-free PA semantic consistency review accepts or returns a revision gap ↺
         ↓
 commit the accepted feature-state ABox
         ↓

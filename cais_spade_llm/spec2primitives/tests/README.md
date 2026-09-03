@@ -20,8 +20,10 @@ The same suite verifies zero, one, and multiple state values; multiple paths in
 one record; unchanged PA-authored text, names, refs, paths, and evidence; and
 rejection of empty statements, duplicate names, unsupported processes,
 unauthorized evidence, missing or unaccepted records, invalid JSON Pointers,
-empty resolved values, and changed hashes. It verifies that a shallow or
-evidence-omitting semantic review returns a revision gap before ontology commit.
+empty resolved values, and changed hashes. It verifies that deterministic state-
+evidence validation runs before semantic review, ambiguity stops before review
+or allocation, and a scaffold-free semantic consistency gap returns to PA before
+ontology commit.
 It also verifies that PA cannot turn a required-record or approved-evidence
 choice into a user clarification while genuine requirement ambiguity remains
 eligible for clarification.

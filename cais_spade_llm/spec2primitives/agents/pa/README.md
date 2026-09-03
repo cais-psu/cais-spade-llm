@@ -53,12 +53,15 @@ point-cloud, segmentation, stable crop, and `ObservationCandidateReview`
 records. The review describes morphology, dimensions, surfaces, and support
 contacts without assigning a part identity, state, CAD, process, or resource
 meaning. `compare_cad_size` reuses `CADSizeCorrespondenceRecord` and returns
-opaque candidate/value handles, measured dimensions, errors, tolerance results,
-and the comparison ref without selecting a semantic answer. The PA binds exactly
-one supplied current object and one desired destination/support candidate in
-`state_values`, citing its own comparisons. Deterministic validation requires a
-unique current match and accepts any PA-selected desired candidate in the
-size-plausible set; it never substitutes another candidate. During allocation,
+opaque candidate/value handles, measured dimensions, tolerance results, and the
+comparison ref without selecting a semantic answer. An ambiguous comparison is
+projected as a neutrally ordered plausible set without match ranks or numerical
+error ranking; the canonical record retains the full audit ranking. The PA binds
+exactly one supplied current object and one desired destination/support candidate
+in `state_values`, citing its own comparisons. Deterministic validation requires a
+unique correspondence for both states and runs before the scaffold-free semantic
+consistency review. Ambiguity stops before allocation, and validation feedback
+never substitutes or reveals another candidate. During allocation,
 `check_reachability` accepts only the PA-selected `resource_symbol` and derives
 both locations from those already accepted state bindings. In simulation it
 reloads their CAD/support provenance, derives a loose-gear grasp and a final
@@ -75,9 +78,11 @@ one shared neutral candidate pool. The same stored order drives the prompt,
 tool enums, and response schema; it is audit evidence, not selection priority.
 
 After a proposal, the runtime builds a provisional graph without merging it and
-returns deterministic validation feedback without repairing the PA result. The
-active production path supplies a fixed `RGBDSegmentationRecord`
-required-output projection. PA may retrieve another approved source in the same
+returns generic deterministic validation feedback without repairing the PA
+result. The active production path supplies only a requirement-neutral readiness
+rule: completion needs one uniquely supported observed current object and one
+uniquely supported observed destination/support; otherwise PA returns
+`insufficient_evidence`. PA may retrieve another approved source in the same
 logical investigation, but provider-descriptor expansion through
 `_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
 connected to this path and remains deferred.

@@ -15,6 +15,14 @@ target-geometry answer.
 
 ## Phase 4 Medium Gear protocol
 
+`interaction_d93d297a1ddc4bdc85cbbe60579a2b57` is immutable and excluded from
+all baseline results because its controller prompt prescribed the state answer,
+CAD choices, and evidence modalities. It may be reported only as a
+contaminated-prompt ablation. Gate 1 intentionally leaves the present desired
+state ambiguous and must stop before semantic review, allocation, or completion;
+fresh baseline runs begin only after the separately authorized relational-
+grounding gate and its smoke run pass.
+
 Run five fresh interactions for each condition. A fresh interaction has a new
 interaction root and new presentation records; no proposal, tool call,
 selection, completion, or evaluation record is copied between runs. Use the

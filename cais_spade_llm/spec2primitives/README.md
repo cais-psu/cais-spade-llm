@@ -71,8 +71,10 @@ ID, frame, record type, or arbitrary source name. It may retrieve documents,
 approved CAD, and live observations in any order. The system validates the
 handle, processes the source, and returns compact typed evidence in the same PA
 conversation. `compare_cad_size` requires both inputs to have been retrieved and
-returns neutral ranked measurements from a persisted
-`CADSizeCorrespondenceRecord`; it does not select or substitute a candidate.
+returns measurements from a persisted `CADSizeCorrespondenceRecord`; an
+ambiguous PA-facing result contains a neutrally ordered plausible set without
+rank or numerical error ranking, while the canonical record retains its full
+audit data. The tool does not select or substitute a candidate.
 Derived segmentation, calibration, frame conversion, and prerequisite checks
 remain controlled system operations. During allocation, PA receives a separate
 controlled `check_reachability` tool. In simulation, it derives gear pick and
@@ -82,10 +84,12 @@ resource. Physical mode retains its existing safety path.
 
 The proposal is not accepted merely because its RDF vocabulary is valid. The
 system first evaluates it against a provisional graph and returns deterministic
-validation feedback without repairing the proposal. The current production
-path supplies a fixed `RGBDSegmentationRecord` required-output projection, while
-PA may call `retrieve` again in the same logical investigation and may choose
-approved sources in any order. Descriptor-derived record planning through
+validation feedback without repairing the proposal. Both state assignments must
+pass the deterministic uniqueness gate before the scaffold-free semantic
+consistency review. The production prompt supplies only a generic two-state
+readiness rule and does not prescribe a component, evidence modality, CAD choice,
+or candidate. PA may call `retrieve` again in the same logical investigation and
+may choose approved sources in any order. Descriptor-derived record planning through
 `_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
 active in this path and remains deferred.
 

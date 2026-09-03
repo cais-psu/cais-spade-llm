@@ -97,6 +97,26 @@ class ProductionGroundingError(RuntimeError):
     """Raised when native production grounding cannot progress safely."""
 
 
+def _grounding_readiness_projection() -> Mapping[str, object]:
+    """Return requirement-neutral completion constraints for PA grounding."""
+    return {
+        "completion_rule": (
+            "A complete result needs exactly one uniquely supported observed current "
+            "object and exactly one uniquely supported observed destination or support. "
+            "If approved evidence does not uniquely support both state assignments, "
+            "return insufficient_evidence."
+        ),
+        "selection_authority": (
+            "The ProductAgent chooses which approved evidence and controlled tools are "
+            "relevant; the controller does not prescribe a source, component, or candidate."
+        ),
+        "citation_rule": (
+            "Each selected state value cites every retrieved record that directly supports "
+            "its identity and semantic role."
+        ),
+    }
+
+
 class CameraToWorldCalibrationRuntime(Protocol):
     """Provide one approved camera-to-target calibration on explicit demand."""
 
@@ -1186,36 +1206,7 @@ class ProductionProductContextGroundingRuntime:
         )
         validation_feedback_history: list[Mapping[str, object]] = []
         evidence_gap: _GroundingGap | None = None
-        target_frame = _configured_target_frame(self._workcell)
-        required_output_projection: Mapping[str, object] = {
-            "state_evidence": {
-                "current_state": (
-                    "exactly one loose observed Gear_Medium candidate for the object "
-                    "whose state changes"
-                ),
-                "desired_state": (
-                    "exactly one mounted Gear_Shaft destination or support candidate "
-                    "where the requested assembly will be realized"
-                ),
-            },
-            "required_evidence": [
-                "relevant STL evidence",
-                "live observation evidence",
-                "relevant document evidence",
-            ],
-            "required_CAD_size_comparisons": ["Gear_Medium", "Gear_Shaft"],
-            "comparison_citations": (
-                "Each selected state_value must cite its PA-requested compare_cad_size "
-                "record and the relevant CAD evidence."
-            ),
-            "selection_authority": (
-                "The ProductAgent selects candidates using size, support relationships, "
-                "candidate centroids, gear dimensions, and document evidence."
-            ),
-            "approved_candidate_record_type": "RGBDSegmentationRecord",
-            "target_frame_if_a_verifier_derives_geometry": target_frame,
-            "purpose": "later PA-controlled reachability verification",
-        }
+        required_output_projection = _grounding_readiness_projection()
         final_no_tools_pending = False
         last_failure_message: str | None = None
         for pa_round in range(1, max_pa_turns + 2):
@@ -1389,6 +1380,59 @@ class ProductionProductContextGroundingRuntime:
                     "tool_call_refs": list(investigation.tool_call_refs),
                 }
 
+            try:
+                _proposal_state_candidate_bindings(outcome.proposal)
+            except ProductionGroundingError as exc:
+                if can_retry:
+                    feedback = {
+                        "kind": "state_candidate_binding",
+                        "message": str(exc),
+                        "expected_revision": (
+                            "Return exactly one uniquely supported observed candidate in "
+                            "each state's state_values, or return insufficient_evidence if "
+                            "either state assignment cannot be uniquely supported."
+                        ),
+                    }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
+                    evidence_gap = None
+                    continue
+                return {
+                    "grounding_status": "incomplete",
+                    "insufficient_evidence": str(exc),
+                    "tool_call_refs": list(investigation.tool_call_refs),
+                }
+            try:
+                correspondence_gap = self._validate_pa_state_cad_comparisons(
+                    investigation=investigation,
+                    proposal=outcome.proposal,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                correspondence_gap = (
+                    "The submitted state assignments are not uniquely supported by "
+                    "complete, internally consistent, hash-pinned approved evidence."
+                )
+            if correspondence_gap is not None:
+                if can_retry:
+                    feedback = {
+                        "kind": "state_evidence_uniqueness",
+                        "message": correspondence_gap,
+                        "expected_revision": (
+                            "Reconsider each state assignment using only PA-selected "
+                            "approved evidence and preserve complete citations. If either "
+                            "assignment remains non-unique, return insufficient_evidence. "
+                            "The validator does not choose or reveal an alternative."
+                        ),
+                    }
+                    _append_validation_feedback(validation_feedback_history, feedback)
+                    last_failure_message = str(feedback["message"])
+                    evidence_gap = None
+                    continue
+                return {
+                    "grounding_status": "incomplete",
+                    "insufficient_evidence": correspondence_gap,
+                    "tool_call_refs": list(investigation.tool_call_refs),
+                }
             review_catalog = _current_evidence_catalog(handles, investigation)
             review_catalog.extend(clarification_evidence)
             try:
@@ -1399,7 +1443,6 @@ class ProductionProductContextGroundingRuntime:
                     product_requirement=investigation.abox.product_requirement,
                     evidence_catalog=review_catalog,
                     pa_reference_projector=investigation.project_canonical_reference,
-                    required_output_projection=required_output_projection,
                 )
             except OntologyGroundingError as exc:
                 if can_retry:
@@ -1408,7 +1451,7 @@ class ProductionProductContextGroundingRuntime:
                         "message": str(exc),
                         "expected_revision": (
                             "Return a target feature that can receive a valid separate "
-                            "structured semantic review."
+                            "structured semantic consistency review."
                         ),
                     }
                     _append_validation_feedback(validation_feedback_history, feedback)
@@ -1429,15 +1472,15 @@ class ProductionProductContextGroundingRuntime:
                     abox=investigation.abox,
                     semantic_review=semantic_review,
                 )
-                gap = semantic_review.gap or "Target feature is semantically incomplete."
+                gap = semantic_review.gap or "Target feature is semantically inconsistent."
                 if can_retry:
                     feedback = {
                         "kind": "target_feature_semantic_review",
                         "message": gap,
                         "expected_revision": (
-                            "Revise the target feature using currently retrieved "
-                            "evidence, and retrieve additional approved evidence when "
-                            "the stated semantic gap requires it."
+                            "Revise the target feature using only currently retrieved "
+                            "evidence. Any revision will pass through deterministic "
+                            "validation again; do not infer or repair unsupported facts."
                         ),
                     }
                     _append_validation_feedback(validation_feedback_history, feedback)
@@ -1447,60 +1490,6 @@ class ProductionProductContextGroundingRuntime:
                 return {
                     "grounding_status": "incomplete",
                     "insufficient_evidence": gap,
-                    "tool_call_refs": list(investigation.tool_call_refs),
-                }
-            try:
-                _proposal_state_candidate_bindings(outcome.proposal)
-            except ProductionGroundingError as exc:
-                if can_retry:
-                    feedback = {
-                        "kind": "state_candidate_binding",
-                        "message": str(exc),
-                        "expected_revision": (
-                            "Bind exactly one supported neutral RGB-D candidate to each "
-                            "state through state_values. Preserve the selected evidence "
-                            "rather than delegating image selection to allocation."
-                        ),
-                    }
-                    _append_validation_feedback(validation_feedback_history, feedback)
-                    last_failure_message = str(feedback["message"])
-                    evidence_gap = None
-                    continue
-                return {
-                    "grounding_status": "incomplete",
-                    "insufficient_evidence": str(exc),
-                    "tool_call_refs": list(investigation.tool_call_refs),
-                }
-            try:
-                correspondence_gap = self._validate_pa_state_cad_comparisons(
-                    investigation=investigation,
-                    proposal=outcome.proposal,
-                )
-            except (OSError, RuntimeError, TypeError, ValueError):
-                correspondence_gap = (
-                    "The PA-selected state candidates could not be verified against "
-                    "their cited PA-requested CAD size correspondence records."
-                )
-            if correspondence_gap is not None:
-                if can_retry:
-                    feedback = {
-                        "kind": "state_CAD_comparison_evidence",
-                        "message": correspondence_gap,
-                        "expected_revision": (
-                            "Invoke compare_cad_size for Gear_Medium and Gear_Shaft, then "
-                            "reconsider the selected current object and desired destination "
-                            "using the returned measurements and other retrieved evidence. "
-                            "Cite each comparison record in its selected state value. The "
-                            "validator does not select an alternative."
-                        ),
-                    }
-                    _append_validation_feedback(validation_feedback_history, feedback)
-                    last_failure_message = str(feedback["message"])
-                    evidence_gap = None
-                    continue
-                return {
-                    "grounding_status": "incomplete",
-                    "insufficient_evidence": correspondence_gap,
                     "tool_call_refs": list(investigation.tool_call_refs),
                 }
             accepted = commit_ontology_grounding_candidate(
@@ -1637,7 +1626,6 @@ class ProductionProductContextGroundingRuntime:
                 proposal,
                 state_name=state_name,
                 state_binding=state_binding,
-                require_unique=state_name == "current_state",
             )
             if gap is not None:
                 return gap
@@ -2319,19 +2307,12 @@ def _cartesian_phase_pa_projection(value: object) -> Mapping[str, object]:
 
 
 def _allocation_context_feedback(exc: Exception) -> str:
-    """Return actionable PA feedback without canonical evidence identities."""
-    message = str(exc).casefold()
-    if "support-plane" in message or "support plane" in message:
-        return "Required support-plane evidence is unavailable, stale, or inconsistent."
-    if "cad" in message or "correspondence" in message:
-        return (
-            "Required CAD geometry or size correspondence is unavailable, stale, or inconsistent."
-        )
-    if "calibration" in message or "robot-frame" in message:
-        return "Required calibrated robot-frame evidence is unavailable, stale, or inconsistent."
-    if "profile" in message or "manifest" in message:
-        return "The chosen resource has no valid configured Cartesian planning context."
-    return "Cartesian reachability context is unavailable, stale, or inconsistent."
+    """Return generic PA feedback without evidence identities or modalities."""
+    del exc
+    return (
+        "The approved evidence needed to evaluate the submitted resource choice is "
+        "unavailable, stale, or internally inconsistent."
+    )
 
 
 def _pa_allocation_prompt(  # noqa: PLR0913
@@ -2381,8 +2362,8 @@ def _pa_allocation_prompt(  # noqa: PLR0913
         "Presentation order is randomized and is never priority. Use check_reachability "
         "for any resource you consider. In simulation, that tool asks the exact "
         "RobotAgent and live MoveIt model for strict, collision-aware Cartesian "
-        "pick and place paths using the grounded loose object and installed support; "
-        "it never treats the support as the object to move and never chooses a robot. Return a "
+        "paths using only the already-grounded state evidence; it never changes a state "
+        "assignment or chooses a robot. Return a "
         "provisional_resource_symbol only with the exact ref of an accepted check "
         "created during this investigation. RobotAgent feedback is evidence for a "
         "new free choice: do not ask the validator to substitute a resource or "
@@ -2891,6 +2872,94 @@ def _retrieved_record_ref(
     return matches[0]
 
 
+def _comparison_candidate_index(
+    views: Sequence[object],
+) -> tuple[
+    dict[tuple[str, str], Mapping[str, object]],
+    dict[tuple[str, str], int],
+]:
+    """Index PA-facing candidate refs in neutral observation order."""
+    candidate_refs: dict[tuple[str, str], Mapping[str, object]] = {}
+    candidate_order: dict[tuple[str, str], int] = {}
+    for view in views:
+        if not isinstance(view, Mapping):
+            raise ProductionGroundingError("Observation comparison view is invalid.")
+        observation_handle = view.get("observation_handle")
+        candidates = view.get("candidates")
+        if not isinstance(observation_handle, str) or not isinstance(candidates, list):
+            raise ProductionGroundingError("Observation comparison candidates are invalid.")
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise ProductionGroundingError("Observation comparison candidate is invalid.")
+            candidate_handle = candidate.get("candidate_handle")
+            candidate_value_ref = candidate.get("candidate_value_ref")
+            if not isinstance(candidate_handle, str) or not isinstance(
+                candidate_value_ref, Mapping
+            ):
+                raise ProductionGroundingError("Observation candidate reference is invalid.")
+            candidate_key = (observation_handle, candidate_handle)
+            candidate_order[candidate_key] = len(candidate_order)
+            candidate_refs[candidate_key] = candidate_value_ref
+    return candidate_refs, candidate_order
+
+
+def _project_comparison_candidates(
+    ranked: Sequence[object],
+    *,
+    candidate_refs: Mapping[tuple[str, str], Mapping[str, object]],
+    candidate_order: Mapping[tuple[str, str], int],
+    comparison_status: object,
+) -> list[dict[str, object]]:
+    """Project candidates while hiding an ambiguous comparison's audit ranking."""
+    candidates_to_project: list[Mapping[str, object]] = []
+    for candidate in ranked:
+        if not isinstance(candidate, Mapping):
+            raise ProductionGroundingError("Ranked CAD comparison candidate is invalid.")
+        candidate_key = (
+            str(candidate.get("observation_handle")),
+            str(candidate.get("candidate_handle")),
+        )
+        if candidate_key not in candidate_refs:
+            raise ProductionGroundingError(
+                "Ranked CAD comparison candidate is absent from observation evidence."
+            )
+        if comparison_status != "ambiguous" or candidate.get("within_size_tolerance") is True:
+            candidates_to_project.append(candidate)
+    if comparison_status == "ambiguous":
+        candidates_to_project.sort(
+            key=lambda candidate: candidate_order[
+                (
+                    str(candidate.get("observation_handle")),
+                    str(candidate.get("candidate_handle")),
+                )
+            ]
+        )
+
+    projected_candidates: list[dict[str, object]] = []
+    for candidate in candidates_to_project:
+        observation_handle = candidate.get("observation_handle")
+        candidate_handle = candidate.get("candidate_handle")
+        value_ref = candidate_refs[(str(observation_handle), str(candidate_handle))]
+        projected_candidate = {
+            "observation_handle": observation_handle,
+            "candidate_handle": candidate_handle,
+            "candidate_value_ref": dict(value_ref),
+            "observed_dimensions_m": candidate.get("observed_dimensions_m"),
+            "within_size_tolerance": candidate.get("within_size_tolerance"),
+            "candidate_center_m": candidate.get("candidate_center_m"),
+        }
+        if comparison_status != "ambiguous":
+            projected_candidate.update(
+                {
+                    "rank": candidate.get("rank"),
+                    "dimension_errors": candidate.get("dimension_errors"),
+                    "mean_dimension_error": candidate.get("mean_dimension_error"),
+                }
+            )
+        projected_candidates.append(projected_candidate)
+    return projected_candidates
+
+
 def _cad_size_comparison_projection(  # noqa: PLR0913
     investigation: _NativeEvidenceInvestigation,
     record: Mapping[str, object],
@@ -2909,49 +2978,14 @@ def _cad_size_comparison_projection(  # noqa: PLR0913
     if not isinstance(cad, Mapping) or not isinstance(ranked, list) or not isinstance(views, list):
         raise ProductionGroundingError("CAD size comparison projection is invalid.")
 
-    candidate_refs: dict[tuple[str, str], Mapping[str, object]] = {}
-    for view in views:
-        if not isinstance(view, Mapping):
-            raise ProductionGroundingError("Observation comparison view is invalid.")
-        observation_handle = view.get("observation_handle")
-        candidates = view.get("candidates")
-        if not isinstance(observation_handle, str) or not isinstance(candidates, list):
-            raise ProductionGroundingError("Observation comparison candidates are invalid.")
-        for candidate in candidates:
-            if not isinstance(candidate, Mapping):
-                raise ProductionGroundingError("Observation comparison candidate is invalid.")
-            candidate_handle = candidate.get("candidate_handle")
-            candidate_value_ref = candidate.get("candidate_value_ref")
-            if not isinstance(candidate_handle, str) or not isinstance(
-                candidate_value_ref, Mapping
-            ):
-                raise ProductionGroundingError("Observation candidate reference is invalid.")
-            candidate_refs[(observation_handle, candidate_handle)] = candidate_value_ref
-
-    projected_candidates: list[dict[str, object]] = []
-    for candidate in ranked:
-        if not isinstance(candidate, Mapping):
-            raise ProductionGroundingError("Ranked CAD comparison candidate is invalid.")
-        observation_handle = candidate.get("observation_handle")
-        candidate_handle = candidate.get("candidate_handle")
-        value_ref = candidate_refs.get((str(observation_handle), str(candidate_handle)))
-        if value_ref is None:
-            raise ProductionGroundingError(
-                "Ranked CAD comparison candidate is absent from observation evidence."
-            )
-        projected_candidates.append(
-            {
-                "rank": candidate.get("rank"),
-                "observation_handle": observation_handle,
-                "candidate_handle": candidate_handle,
-                "candidate_value_ref": dict(value_ref),
-                "observed_dimensions_m": candidate.get("observed_dimensions_m"),
-                "dimension_errors": candidate.get("dimension_errors"),
-                "mean_dimension_error": candidate.get("mean_dimension_error"),
-                "within_size_tolerance": candidate.get("within_size_tolerance"),
-                "candidate_center_m": candidate.get("candidate_center_m"),
-            }
-        )
+    candidate_refs, candidate_order = _comparison_candidate_index(views)
+    comparison_status = record.get("CAD_correspondence")
+    projected_candidates = _project_comparison_candidates(
+        ranked,
+        candidate_refs=candidate_refs,
+        candidate_order=candidate_order,
+        comparison_status=comparison_status,
+    )
 
     comparison_pa_ref = investigation.project_canonical_reference(comparison_ref)
     evidence_refs: list[str] = []
@@ -2972,13 +3006,15 @@ def _cad_size_comparison_projection(  # noqa: PLR0913
         "dimension_error_limit": (
             parameters.get("dimension_error_limit") if isinstance(parameters, Mapping) else None
         ),
-        "CAD_correspondence": record.get("CAD_correspondence"),
-        "ranked_candidates": projected_candidates,
+        "CAD_correspondence": comparison_status,
         "plausible_candidate_count": sum(
             candidate.get("within_size_tolerance") is True for candidate in projected_candidates
         ),
         "selection_made_by_tool": False,
     }
+    result["plausible_candidates" if comparison_status == "ambiguous" else "ranked_candidates"] = (
+        projected_candidates
+    )
     _assert_blinded_pa_projection(result, investigation.presentation)
     return result
 
@@ -3233,9 +3269,12 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
     *,
     state_name: str,
     state_binding: _StateCandidateBinding,
-    require_unique: bool,
 ) -> str | None:
-    """Validate one state against its own PA-requested size comparison."""
+    """Require one uniquely supported candidate without revealing failure details."""
+    uniqueness_gap = (
+        f"The submitted {state_name} assignment is not uniquely supported by complete, "
+        "internally consistent, hash-pinned approved evidence."
+    )
     cad_bindings = _proposal_cad_bindings(
         investigation.root,
         view,
@@ -3243,7 +3282,7 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
         state_name=state_name,
     )
     if len(cad_bindings) != 1:
-        return f"{state_name} must cite exactly one approved CAD record."
+        return uniqueness_gap
 
     value_refs = _proposal_state_value_evidence_refs(proposal, state_name)
     comparisons = [
@@ -3252,17 +3291,12 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
         if record_ref in value_refs
     ]
     if len(comparisons) != 1:
-        return (
-            f"{state_name} must cite exactly one compare_cad_size record requested "
-            "by the PA during this grounding run in its selected state value."
-        )
+        return uniqueness_gap
     comparison = comparisons[0]
     if comparison.cad_record_ref != cad_bindings[0].record_ref:
-        return f"{state_name} cites CAD evidence different from its size comparison input."
+        return uniqueness_gap
     if comparison.segmentation_record_ref != state_binding.record_ref:
-        return (
-            f"{state_name} selects a candidate outside the observation used by its size comparison."
-        )
+        return uniqueness_gap
 
     typed_bindings = [
         binding
@@ -3271,10 +3305,10 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
         and binding.record_type == "CADSizeCorrespondenceRecord"
     ]
     if len(typed_bindings) != 1:
-        return f"{state_name} size comparison is not one pinned typed record."
+        return uniqueness_gap
     record_path = investigation.root / comparison.record_ref
     if _sha256_path(record_path) != typed_bindings[0].record_sha256:
-        return f"{state_name} size comparison changed after it was produced."
+        return uniqueness_gap
     record = _read_json(record_path)
     cad = record.get("CAD")
     cad_record = cad.get("record") if isinstance(cad, Mapping) else None
@@ -3288,7 +3322,7 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
         or segmentation_record.get("ref") != comparison.segmentation_record_ref
         or typed_bindings[0].status != record.get("CAD_correspondence")
     ):
-        return f"{state_name} size comparison inputs or status are inconsistent."
+        return uniqueness_gap
 
     observation_handle = _candidate_observation_handle(
         investigation.root / state_binding.record_ref,
@@ -3298,41 +3332,14 @@ def _validate_pa_state_cad_comparison(  # noqa: PLR0911
         investigation.root / state_binding.record_ref,
         state_binding.field_path,
     )
-    if require_unique:
-        selected = record.get("selected_candidate")
-        if (
-            record.get("CAD_correspondence") != "accepted"
-            or not isinstance(selected, Mapping)
-            or selected.get("observation_handle") != observation_handle
-            or selected.get("candidate_handle") != candidate_handle
-        ):
-            return (
-                "The PA-selected current_state candidate is not the unique candidate "
-                "supported by its cited compare_cad_size record."
-            )
-        return None
-
-    plausible = record.get("plausible_candidates")
-    matches = (
-        [
-            candidate
-            for candidate in plausible
-            if isinstance(candidate, Mapping)
-            and candidate.get("observation_handle") == observation_handle
-            and candidate.get("candidate_handle") == candidate_handle
-            and candidate.get("within_size_tolerance") is True
-        ]
-        if isinstance(plausible, list)
-        else []
-    )
-    if len(matches) != 1:
-        return (
-            "The PA-selected desired_state destination is outside the size-plausible "
-            "candidate set in its cited compare_cad_size record. Reconsider the "
-            "selection using the reported dimensions, support relationships, "
-            "candidate centroids, gear dimensions, and document evidence; the "
-            "validator does not choose an alternative."
-        )
+    selected = record.get("selected_candidate")
+    if (
+        record.get("CAD_correspondence") != "accepted"
+        or not isinstance(selected, Mapping)
+        or selected.get("observation_handle") != observation_handle
+        or selected.get("candidate_handle") != candidate_handle
+    ):
+        return uniqueness_gap
     return None
 
 
